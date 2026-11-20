@@ -185,10 +185,18 @@ def RocMlirPrepareQuantPass
     blocked dequantize and a transposed hip.matmul, so the fusion treats it
     as a matmul anchor. Then moves each per-tensor quantize backward through
     the element-move ops that feed it, so those ops run on 8- or 16-bit
-    values, and then rebiases each unsigned 8-bit tree that ends in a planned
-    integer anchor to signed 8-bit. The order matters: the sinking fixes the
-    final shape of each tree, and the rebias then plans the QLinear and
-    dequantized convolutions on i8 inputs. Only main_graph is changed.
+    values. Then replaces each QLinearConv and QLinearMatMul whose requantize
+    multiplier is below 2^-33 on every channel with a constant of its output
+    zero point, and rewrites each QLinearConv and QLinearMatMul with ui8
+    weights or a non-zero weight zero point into hip.quant_conv /
+    hip.quant_matmul on i8 weights w - offset, a second integer op over a
+    filter of the shifted weight zero points zw' (the zw' * window-sum term of
+    the zero-point correction), their difference, and the requantize
+    epilogue; the constant correction terms go into the i32 bias. Last,
+    rebiases each unsigned 8-bit tree that ends in a planned integer anchor
+    to signed 8-bit. The order matters: the sinking fixes the final shape of
+    each tree, and the rebias then plans the QLinear and dequantized
+    convolutions on i8 inputs. Only main_graph is changed.
   }];
   let dependentDialects = ["mlir::tensor::TensorDialect"];
 }
@@ -264,7 +272,14 @@ def FuseRocMlirAnchorPass
                "Gemm element types (as printed, e.g. f16) that have matrix "
                "acceleration on the target. Both gemms of a "
                "gemm-elementwise-gemm kernel must read a listed type; an "
-               "empty list merges no pair.">
+               "empty list merges no pair.">,
+    Option<"int4Weights", "int4-weights", "bool", /*default=*/"false",
+           "Take the packed-int4 weight dequantize of a 1x1 convolution, or "
+           "of the B operand of a matmul or gemm (per column or blocked along "
+           "K, signed or unsigned), into its kernel, which then reads the "
+           "4-bit weights. rocMLIR packs an i4 operand under only some "
+           "perfConfigs, so this needs autotuning, which skips the ones that "
+           "fail.">
   ];
   let dependentDialects = [
     "mlir::arith::ArithDialect",
@@ -367,6 +382,40 @@ def FoldBatchNormPass
     Inline and file-backed carriers are read; memory-address carriers are
     not, so a batch norm over memory-backed weights is left in place.
   }];
+}
+
+def ForwardConcatSlotsPass : Pass<"hip-forward-concat-slots", "mlir::func::FuncOp"> {
+  let summary = "Write a packed concat slot in place and share it with its readers";
+  let description = [{
+    A bufferized concat is one `memref.copy` per input into a `memref.subview`
+    of the concat buffer. When the slot is a packed row-major span (    batch-1
+    channel concat, or any concat whose slice has no gaps) and the source is
+    a private alloc that something writes, the pass builds an identity
+    `hip.packed_view` of that span, retargets the writer and every other reader
+    at it, and erases the copy and the private alloc. A skip connection then
+    reads the concat buffer instead of keeping its own copy. A buffer copied
+    into two concats is aliased into the first one; the second copy stays.
+
+    A concat buffer whose only uses are those slot writes plus one copy of the
+    whole buffer into a packed prefix of another buffer is replaced by that
+    prefix, so a chain of concats does not copy the growing tensor.
+
+    A concat buffer filled entirely by slot copies, whose inputs a later
+    concat copies again at the same offsets (a dense block), becomes a
+    `hip.packed_view` prefix of the later buffer and the repeated copies go
+    away. Chained, a dense block shares one buffer and each input lands in it
+    once.
+
+    A strided slot (batch greater than 1 on a middle axis, or a concat of
+    rows) is left on `memref.copy`: a dense store from the slot pointer would
+    write the wrong addresses. So is a slot whose byte offset is not a
+    multiple of 16: rocMLIR kernels declare their pointers 16-byte aligned.
+  }];
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::hip::HipDialect",
+    "mlir::memref::MemRefDialect"
+  ];
 }
 
 def PromoteStridedHipOperandsPass

@@ -13,12 +13,16 @@ onnxruntime;https://github.com/microsoft/onnxruntime/releases/download;1.31.0
 ##
 ## LLVM/MLIR/LLD from-source fallback. find_package still wins when a prefix
 ## exists. Both ENABLE_ROCMLIRTRITON settings clone this repo; rocmlirTriton's
-## vendored external/llvm-project is not built. The hash column is a branch
-## name, so the checkout follows that branch's tip rather than a frozen commit.
-llvm_project;https://github.com/ROCm/llvm-project.git;rmt-core-2026-10-19
+## vendored external/llvm-project is not built. The hash column is a full
+## commit on the rmt-core-2026-10-19 branch; bump it to move LLVM.
+llvm_project;https://github.com/ROCm/llvm-project.git;369242a12bb081e4aab85e63013b38b9162b21b2
 ## rocmlirTriton pin. Used only when ENABLE_ROCMLIRTRITON=ON, and only for the
 ## Rock/Triton sources. LLVM still comes from llvm_project above.
 rocmlirtriton;https://github.com/ROCm/rocmlirTriton.git;fc54715a1babd18bd8cef5bd9b2e372b6089dfa0
+## LLVM that rocmlirTriton builds for triton_amd_codegen (AMDGPU only). Used
+## only when ENABLE_ROCMLIRTRITON=ON. The hash column is a full commit on the
+## rmt-amd-2026-10-19 branch.
+amd_codegen_llvm;https://github.com/ROCm/llvm-project;6bc4aaf6641c56ee104f6200c96a6a571bc77052
 protobuf;https://github.com/protocolbuffers/protobuf.git;v34.0
 flatbuffers;https://github.com/google/flatbuffers.git;v25.12.19
 ##
