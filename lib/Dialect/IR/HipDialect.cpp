@@ -3299,8 +3299,8 @@ void MatMulNBitsGroupOp::getEffects(
 
 LogicalResult MatMulNBitsGroupOp::verify() {
   size_t numWeights = getWeights().size();
-  if (numWeights < 1 || numWeights > 3)
-    return emitOpError("expected 1 to 3 weights, got ") << numWeights;
+  if (numWeights < 1 || numWeights > 4)
+    return emitOpError("expected 1 to 4 weights, got ") << numWeights;
   if (getScales().size() != numWeights)
     return emitOpError("expected one scales operand per weight");
   if (!getZeroPoints().empty() && getZeroPoints().size() != numWeights)

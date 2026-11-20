@@ -1055,12 +1055,12 @@ def Hip_DequantBnb4Op : Hip_DpsOp_AutoReifyInfer<"dequant_bnb4"> {
   let hasVerifier = 1;
 }
 
-def Hip_MatMulNBitsGroupOp : Hip_DpsOp<"matmul_nbits_group",
+def Hip_MatMulNBitsGroupOp : Hip_DpsOp_AutoReify<"matmul_nbits_group",
                                        /*traits=*/[AttrSizedOperandSegments,
                                                    OpStateOpInterface]> {
   let summary = "MatMulNBits projections that read the same activation";
   let description = [{
-    Formed by fusion from 1-3 hip.matmul_nbits ops that share `A`, have no
+    Formed by fusion from 1-4 hip.matmul_nbits ops that share `A`, have no
     g_idx and no bias, and the same K, bits and block_size. `weights[i]` /
     `scales[i]` are the B / scales operands of the i-th original op and
     `N[i]` its output width. `zero_points` is empty for symmetric weights,

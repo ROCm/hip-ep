@@ -2933,7 +2933,7 @@ HIP_KERNEL_API int hip_matmul_nbits_quant_act_i8(
     void* stream, const void* A, int64_t M, int64_t K, int64_t block_size,
     void* a_qb_scratch, void* a_scale_scratch);
 
-#define HIP_MATMUL_GROUP_MAX_SEGMENTS 3
+#define HIP_MATMUL_GROUP_MAX_SEGMENTS 4
 /* out[s] = A @ W_s^T for every segment. */
 #define HIP_MATMUL_GROUP_EPI_CONCAT 0
 /* Two equal-N segments (gate, up): out[0] = silu(A @ W_0^T) * (A @ W_1^T). */

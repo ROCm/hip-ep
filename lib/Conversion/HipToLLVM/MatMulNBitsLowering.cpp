@@ -126,7 +126,7 @@ struct MatMulNBitsGroupOpLowering
     : public ConvertOpToLLVMPattern<MatMulNBitsGroupOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
-  static constexpr int kMaxSegments = 3;
+  static constexpr int kMaxSegments = 4;
 
   LogicalResult
   matchAndRewrite(MatMulNBitsGroupOp op, OpAdaptor adaptor,
