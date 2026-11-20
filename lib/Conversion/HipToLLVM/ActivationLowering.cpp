@@ -555,7 +555,7 @@ struct SiluOpLowering : public ConvertOpToLLVMPattern<SiluOp> {
 };
 
 // hip.miopen.softmax(%handle) ins(%input) outs(%output)
-//   -> hip_miopen_softmax(handle, input, output, rows, cols, data_type)
+//   -> hip_softmax_typed(handle, input, output, rows, cols, data_type)
 // Rank-generic: softmax over last dim. For 3D [B,S,D], rows = B*S, cols = D;
 // a rank-1 input is a single row. data_type is the HIPDNN_EP_DATATYPE_* code
 // of the element type: f16 and bf16 have the same size but need different
@@ -576,7 +576,7 @@ struct MiopenSoftmaxOpLowering
     SmallVector<Type> paramTypes = {ptrType,   ptrType,   ptrType,
                                     indexType, indexType, indexType};
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kMiopenSoftmax, paramTypes, voidType);
+        rewriter, module, kSoftmaxTyped, paramTypes, voidType);
     if (failed(funcOp))
       return failure();
 
@@ -586,10 +586,10 @@ struct MiopenSoftmaxOpLowering
 
     Type elemType = inputMemrefType.getElementType();
     if (!elemType.isF16() && !elemType.isBF16() && !elemType.isF32())
-      return op.emitOpError("hip_miopen_softmax: unsupported element type; "
+      return op.emitOpError("hip_softmax_typed: unsupported element type; "
                             "only fp16/bf16/fp32 are supported");
     if (rank < 1)
-      return op.emitOpError("hip_miopen_softmax: expected rank >= 1");
+      return op.emitOpError("hip_softmax_typed: expected rank >= 1");
 
     // cols = last dim; rows = product of all other dims (1 for rank 1).
     Value cols = inputDesc.size(rewriter, loc, rank - 1);

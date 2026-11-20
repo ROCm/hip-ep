@@ -88,7 +88,7 @@ inline constexpr const char *kWrapHyperConnectionPostMixNorm =
     "wrap_hyper_connection_post_mix_norm";
 inline constexpr const char *kMiopenAdd = "hip_miopen_add";
 inline constexpr const char *kMiopenMul = "hip_miopen_mul";
-inline constexpr const char *kMiopenSoftmax = "hip_miopen_softmax";
+inline constexpr const char *kSoftmaxTyped = "hip_softmax_typed";
 inline constexpr const char *kWrapTranspose = "wrap_transpose";
 inline constexpr const char *kWrapGather = "wrap_gather";
 inline constexpr const char *kWrapGatherFromFile = "wrap_gather_from_file";

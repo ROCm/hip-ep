@@ -1208,13 +1208,13 @@ HIP_KERNEL_API int hip_gqa_softmax_inplace(
 /* Row-wise softmax over a flattened [rows, cols] row-major fp16 buffer,
  * reading `input` and writing normalized probabilities to `output`. Matches
  * ONNX Softmax semantics for axis = -1 on the flattened input. `input` may
- * equal `output`. Used by the standalone `hip_miopen_softmax` runtime entry
+ * equal `output`. Used by the standalone `hip_softmax_typed` runtime entry
  * point, which is destination-passing and would otherwise have to copy its
  * input over its output before running an in-place kernel. */
 HIP_KERNEL_API int hip_softmax_row_2d(void* stream, const void* input, void* output, int rows, int cols);
 
 /* fp32 and bf16 variants of the above, with the same contract. All three
- * compute in fp32; hip_miopen_softmax selects one from its data_type. */
+ * compute in fp32; hip_softmax_typed selects one from its data_type. */
 HIP_KERNEL_API int hip_softmax_row_2d_fp32(void* stream, const void* input, void* output, int rows, int cols);
 HIP_KERNEL_API int hip_softmax_row_2d_bf16(void* stream, const void* input, void* output, int rows, int cols);
 

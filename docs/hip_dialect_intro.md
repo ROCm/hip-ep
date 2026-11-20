@@ -94,7 +94,7 @@ shapes -- broadcasting is resolved before conversion.
 
 | Op | DPS Syntax | Runtime entry |
 |---|---|---|
-| `hip.miopen.softmax` | `(%ctx) ins(%input : ...) outs(%output : ...)` | `hip_miopen_softmax` |
+| `hip.miopen.softmax` | `(%ctx) ins(%input : ...) outs(%output : ...)` | `hip_softmax_typed` |
 
 Row-wise softmax over the last dimension. Rank-generic: for 3D `[B,S,D]`, the
 lowering flattens `rows = B*S, cols = D` (a rank-1 input is one row) and
