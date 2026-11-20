@@ -3064,6 +3064,123 @@ static int getOrTuneDp4aMConfig(
 //   a_qb_scratch/a_scale_scratch : per-session scratch, caller-sized to
 //       >= M*K bytes and >= M*k_blocks floats respectively.
 // Returns hip status (hipSuccess on success). K must be a multiple of 32.
+// Short-K dp4a GEMV (M == 1, K <= 512): a row's K/32 chunks go to that many
+// consecutive lanes, so one wave computes 32 / (K/32) columns. The general
+// kernel gives every column a whole wave and a chunk per lane, which at K=320
+// leaves 22 of 32 lanes idle; widening TILE_N only gives the 10 busy lanes more
+// loads. Cold, back-to-back on gfx1151, against the best general config:
+// K=320 N=10240 9.8 vs 11.5 us, K=256 N=2560 2.9 vs 4.2, K=160 N=8192 4.7 vs
+// 8.0, K=512 N=2048 4.0 vs 4.3. Untuned: every shape it accepts measured
+// faster with one 32-thread block per COLS columns.
+template <int LPR>
+__global__ __attribute__((amdgpu_waves_per_eu(1, 16)))
+void matmul_nbits_gemv_dp4a_shortk_kernel(
+    const int8_t*  __restrict__ a_qb,
+    const float*   __restrict__ a_scale,
+    const uint8_t* __restrict__ B,
+    const __half*  __restrict__ scales,
+    const uint8_t* __restrict__ zp,
+    const __half*  __restrict__ bias,
+    __half*        __restrict__ output,
+    int64_t N, int64_t K, int64_t block_size)
+{
+    constexpr int COLS = 32 / LPR;
+    const int lane = static_cast<int>(threadIdx.x);
+    const int col  = lane / LPR;
+    const int idx  = lane - col * LPR;
+    const int64_t n = static_cast<int64_t>(blockIdx.x) * COLS + col;
+    const bool active = col < COLS && n < N;
+    const int64_t k_blocks = (K + block_size - 1) / block_size;
+    const int grp =
+        (idx * 32) >> __builtin_ctzll(static_cast<unsigned long long>(block_size));
+
+    float partial = 0.0f;
+    if (active) {
+        const int8_t* aq = a_qb + idx * 32;
+        int a_lo[4], a_hi[4], a_sum = 0;
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+            a_lo[j] = *reinterpret_cast<const int*>(aq + j * 8);
+            a_hi[j] = *reinterpret_cast<const int*>(aq + j * 8 + 4);
+            a_sum = hipdnn_sudot4(a_lo[j], 0x01010101, a_sum);
+            a_sum = hipdnn_sudot4(a_hi[j], 0x01010101, a_sum);
+        }
+        const uint4 b =
+            *reinterpret_cast<const uint4*>(B + n * (K / 2) + idx * 16);
+        const unsigned comp[4] = {b.x, b.y, b.z, b.w};
+        int dot = 0;
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+            dot = hipdnn_sudot4(a_lo[j], static_cast<int>(comp[j] & 0x0F0F0F0Fu), dot);
+            dot = hipdnn_sudot4(a_hi[j],
+                                static_cast<int>((comp[j] >> 4) & 0x0F0F0F0Fu), dot);
+        }
+        const int zv = zp ? static_cast<int>(zp[n * k_blocks + grp]) : 8;
+        partial = a_scale[grp] * static_cast<float>(scales[n * k_blocks + grp]) *
+                  static_cast<float>(dot - a_sum * zv);
+    }
+
+    // A column's lanes are not a power-of-two group, so its sum is gathered
+    // rather than folded with a shuffle tree.
+    const int base = col * LPR;
+    float sum = 0.0f;
+#pragma unroll
+    for (int j = 0; j < LPR; j++)
+        sum += __shfl(partial, base + j < 32 ? base + j : 31);
+    if (active && idx == 0) {
+        if (bias)
+            sum += static_cast<float>(bias[n]);
+        output[n] = static_cast<__half>(sum);
+    }
+}
+
+static bool dp4aShortKEnabled() {
+    static const bool enabled = [] {
+#ifdef _WIN32
+        char buf[8];
+        unsigned long n = GetEnvironmentVariableA(
+            "HIPDNN_EP_MATMUL_DP4A_SHORTK", buf, sizeof(buf));
+        return !(n > 0 && buf[0] == '0');
+#else
+        const char* v = getenv("HIPDNN_EP_MATMUL_DP4A_SHORTK");
+        return !(v && v[0] == '0');
+#endif
+    }();
+    return enabled;
+}
+
+// Launches the short-K kernel when it applies; false leaves the call to the
+// tuned general kernel. HIPDNN_EP_MATMUL_DP4A_SHORTK=0 disables it.
+static bool launchDp4aShortK(hipStream_t stream, const int8_t* a_qb,
+                             const float* a_sc, const uint8_t* B,
+                             const __half* sc, const uint8_t* zp,
+                             const __half* bi, __half* out, int64_t N,
+                             int64_t K, int64_t block_size)
+{
+    if (K < 32 || K > 512 || hipdnn_device_is_wave64() || !dp4aShortKEnabled())
+        return false;
+    const int chunks = static_cast<int>(K / 32);
+    const unsigned grid =
+        static_cast<unsigned>((N + (32 / chunks) - 1) / (32 / chunks));
+    switch (chunks) {
+#define DP4A_SHORTK_CASE(C)                                                     \
+    case C:                                                                     \
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(matmul_nbits_gemv_dp4a_shortk_kernel<C>), \
+                           dim3(grid), dim3(32), 0, stream, a_qb, a_sc, B, sc,  \
+                           zp, bi, out, N, K, block_size);                      \
+        return true;
+    DP4A_SHORTK_CASE(1)  DP4A_SHORTK_CASE(2)  DP4A_SHORTK_CASE(3)
+    DP4A_SHORTK_CASE(4)  DP4A_SHORTK_CASE(5)  DP4A_SHORTK_CASE(6)
+    DP4A_SHORTK_CASE(7)  DP4A_SHORTK_CASE(8)  DP4A_SHORTK_CASE(9)
+    DP4A_SHORTK_CASE(10) DP4A_SHORTK_CASE(11) DP4A_SHORTK_CASE(12)
+    DP4A_SHORTK_CASE(13) DP4A_SHORTK_CASE(14) DP4A_SHORTK_CASE(15)
+    DP4A_SHORTK_CASE(16)
+#undef DP4A_SHORTK_CASE
+    default:
+        return false;
+    }
+}
+
 extern "C" int hip_matmul_nbits_dp4a(
     void* stream_v,
     const void* A, const void* B, const void* scales, const void* zp_u8,
@@ -3098,10 +3215,13 @@ extern "C" int hip_matmul_nbits_dp4a(
     // Step 2: dp4a GEMV (autotuned config). M == 1 keeps the single-row
     // launcher and its own tune cache, which has more history behind it.
     if (M == 1) {
-        int cfg = getOrTuneDp4aConfig(stream, a_qb, a_sc, Bp, sc, zp, bi, outp,
-                                      N, K, block_size);
-        launchDp4aConfig(cfg, stream, a_qb, a_sc, Bp, sc, zp, bi, outp,
-                         N, K, block_size);
+        if (!launchDp4aShortK(stream, a_qb, a_sc, Bp, sc, zp, bi, outp, N, K,
+                              block_size)) {
+            int cfg = getOrTuneDp4aConfig(stream, a_qb, a_sc, Bp, sc, zp, bi,
+                                          outp, N, K, block_size);
+            launchDp4aConfig(cfg, stream, a_qb, a_sc, Bp, sc, zp, bi, outp,
+                             N, K, block_size);
+        }
     } else {
         int cfg = getOrTuneDp4aMConfig(stream, a_qb, a_sc, Bp, sc, zp, bi, outp,
                                        M, N, K, block_size);
