@@ -21,8 +21,10 @@
 // One block per row position r. The mask for that position is the same for
 // every o, so each thread decodes its slice of it once into a bit set and then
 // walks the `outer` rows sharing it, holding its slice of each row in
-// registers: one read and one write per element. Rows wider than the register
-// form fall back to a strided three-pass kernel that tests the ids per element.
+// registers: one read and one write per element. fp16 rows that are 16-byte
+// aligned move in 16-byte vectors; other rows use 2- or 4-byte elements. Rows
+// wider than the register form fall back to a strided three-pass kernel that
+// tests the ids per element.
 //
 //===----------------------------------------------------------------------===//
 
@@ -30,6 +32,7 @@
 #include <hip/hip_runtime.h>
 
 #include <cstdint>
+#include <type_traits>
 
 #include "hip_custom_kernels.h"
 
@@ -161,6 +164,88 @@ __global__ void __launch_bounds__(kThreads)
   }
 }
 
+// fp16 rows in 16-byte vectors (8 halves per lane, lane vectors strided by
+// the block so each load stays coalesced). A vector whose 8 columns are all
+// masked is not read at all. One 7296-wide image (every id equal): 16.3 vs
+// 18.0 ms per 16x7296x7296 call against the per-element form above; two
+// frames: 13.0 vs 13.6 ms.
+template <int NV>
+__global__ void __launch_bounds__(kThreads)
+    scaled_masked_softmax_vec_kernel(const __half *in, __half *out,
+                                     const int64_t *row_ids, int row_ids_len,
+                                     const int64_t *col_ids, int col_ids_len,
+                                     int outer, int R, int C, float scale,
+                                     float fill) {
+  __shared__ float smem[kThreads / WAVE_SIZE + 2];
+  const int r = blockIdx.x;
+  const int tid = threadIdx.x;
+  const int waves = kThreads / WAVE_SIZE;
+  const int nvec = C / 8;
+
+  const int64_t row_id = row_ids[row_ids_len == 1 ? 0 : r];
+  uint32_t keep[NV];
+#pragma unroll
+  for (int k = 0; k < NV; k++) {
+    keep[k] = 0;
+    const int v = tid + k * kThreads;
+    if (v < nvec)
+#pragma unroll
+      for (int e = 0; e < 8; e++)
+        if (col_ids[col_ids_len == 1 ? 0 : v * 8 + e] == row_id)
+          keep[k] |= 1u << e;
+  }
+
+  for (int o = 0; o < outer; o++) {
+    const size_t base = ((size_t)o * R + r) * (size_t)C;
+    const uint4 *src = reinterpret_cast<const uint4 *>(in + base);
+    uint4 *dst = reinterpret_cast<uint4 *>(out + base);
+    float x[NV][8];
+    float local_max = -INFINITY;
+#pragma unroll
+    for (int k = 0; k < NV; k++) {
+      const int v = tid + k * kThreads;
+      if (v < nvec && keep[k]) {
+        const uint4 u = src[v];
+        const __half *h = reinterpret_cast<const __half *>(&u);
+#pragma unroll
+        for (int e = 0; e < 8; e++)
+          x[k][e] = (keep[k] >> e) & 1u ? scaled(h[e], scale) : fill;
+      } else {
+#pragma unroll
+        for (int e = 0; e < 8; e++)
+          x[k][e] = v < nvec ? fill : -INFINITY;
+      }
+#pragma unroll
+      for (int e = 0; e < 8; e++)
+        local_max = fmaxf(local_max, x[k][e]);
+    }
+    const float row_max = block_max(local_max, smem, tid, waves, waves);
+
+    float local_sum = 0.0f;
+#pragma unroll
+    for (int k = 0; k < NV; k++)
+#pragma unroll
+      for (int e = 0; e < 8; e++) {
+        x[k][e] = exp2f((x[k][e] - row_max) * LOG2E);
+        local_sum += x[k][e];
+      }
+    const float inv = 1.0f / block_sum(local_sum, smem, tid, waves, waves + 1);
+
+#pragma unroll
+    for (int k = 0; k < NV; k++) {
+      const int v = tid + k * kThreads;
+      if (v < nvec) {
+        uint4 u;
+        __half *h = reinterpret_cast<__half *>(&u);
+#pragma unroll
+        for (int e = 0; e < 8; e++)
+          h[e] = __float2half(x[k][e] * inv);
+        dst[v] = u;
+      }
+    }
+  }
+}
+
 // Rows too wide for the register form: one block per row, three strided
 // passes. Pass 2 parks exp(v - max) in `out`, which is the buffer pass 3
 // normalizes; a thread only ever re-reads the elements it wrote itself, so
@@ -209,6 +294,28 @@ template <typename T>
 int launch(hipStream_t stream, const T *in, T *out, const int64_t *row_ids,
            int row_ids_len, const int64_t *col_ids, int col_ids_len, int outer,
            int R, int C, float scale, float fill) {
+  if constexpr (std::is_same_v<T, __half>) {
+    const int nvec = C / 8;
+    const bool vec_ok =
+        C % 8 == 0 && nvec <= 4 * kThreads &&
+        reinterpret_cast<uintptr_t>(in) % 16 == 0 &&
+        reinterpret_cast<uintptr_t>(out) % 16 == 0;
+    if (vec_ok) {
+      const int nv = (nvec + kThreads - 1) / kThreads;
+#define HIP_SMS_VEC(NV)                                                        \
+  scaled_masked_softmax_vec_kernel<NV><<<R, kThreads, 0, stream>>>(            \
+      in, out, row_ids, row_ids_len, col_ids, col_ids_len, outer, R, C, scale, \
+      fill)
+      if (nv <= 1)
+        HIP_SMS_VEC(1);
+      else if (nv <= 2)
+        HIP_SMS_VEC(2);
+      else
+        HIP_SMS_VEC(4);
+#undef HIP_SMS_VEC
+      return hipGetLastError() == hipSuccess ? 0 : -1;
+    }
+  }
   const int elems = (C + kThreads - 1) / kThreads;
 #define HIP_SMS_REGS(E)                                                        \
   scaled_masked_softmax_regs_kernel<T, E><<<R, kThreads, 0, stream>>>(         \
