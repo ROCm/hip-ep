@@ -42,17 +42,18 @@ static int hipdnn_ep_to_hip_dtype_elementwise_unary(int64_t data_type) {
 // error rather than a guess from the element size, because f16 and bf16 have
 // the same size and different bit layouts.
 //
-// Symbol name is `hip_miopen_softmax` (not `hip_softmax`) to match the
-// lowering side's `kMiopenSoftmax` constant. The kernel-level dispatch
-// is unrelated to MIOpen.
+// The symbol was `hip_miopen_softmax` while its last argument was the element
+// size. It was renamed with the switch to a dtype code, so a cached artifact
+// built against the old ABI fails to resolve the call instead of reading an
+// element size as a dtype.
 //
 // Reusing `hip_gqa_softmax_inplace` (from gqa_kernel.hip) would not work:
 // that kernel is column-wise over a GQA-specific layout AND its launcher
 // only spawns `total_head_queries` blocks, not `total_head_queries * cols`.
 // A standalone softmax wired to that path produces NaN downstream.
-extern "C" int hip_miopen_softmax(RuntimeState *state, const void *input,
-                                  void *output, int64_t rows, int64_t cols,
-                                  int64_t data_type) {
+extern "C" int hip_softmax_typed(RuntimeState *state, const void *input,
+                                 void *output, int64_t rows, int64_t cols,
+                                 int64_t data_type) {
   RuntimeState *st = state;
   OP_PROFILE(
       "softmax",
@@ -63,12 +64,12 @@ extern "C" int hip_miopen_softmax(RuntimeState *state, const void *input,
       },
       st);
   if (!state || !input || !output) {
-    fprintf(stderr, "[REAL] hip_miopen_softmax: null argument\n");
+    fprintf(stderr, "[REAL] hip_softmax_typed: null argument\n");
     return -1;
   }
   if (rows <= 0 || cols <= 0 || rows > INT_MAX || cols > INT_MAX) {
     fprintf(stderr,
-            "[REAL] hip_miopen_softmax: invalid dims rows=%lld cols=%lld\n",
+            "[REAL] hip_softmax_typed: invalid dims rows=%lld cols=%lld\n",
             (long long)rows, (long long)cols);
     return -1;
   }
@@ -76,7 +77,7 @@ extern "C" int hip_miopen_softmax(RuntimeState *state, const void *input,
   void *stream = hipdnn_ep_state_get_stream(st);
 
   RUNTIME_DEBUG_LOG(
-      "[REAL] hip_miopen_softmax: rows=%lld cols=%lld data_type=%s\n",
+      "[REAL] hip_softmax_typed: rows=%lld cols=%lld data_type=%s\n",
       (long long)rows, (long long)cols, hipdnn_ep_datatype_name(data_type));
 
   // The kernel reads `input` and writes `output` directly, and tolerates the
@@ -95,7 +96,7 @@ extern "C" int hip_miopen_softmax(RuntimeState *state, const void *input,
     return hip_softmax_row_2d_bf16(stream, input, output, r, c);
   default:
     fprintf(stderr,
-            "[REAL] hip_miopen_softmax: unsupported data_type=%s(%lld)\n",
+            "[REAL] hip_softmax_typed: unsupported data_type=%s(%lld)\n",
             hipdnn_ep_datatype_name(data_type), (long long)data_type);
     return -1;
   }

@@ -3,11 +3,11 @@
 
 // ============================================================================
 // TEST PURPOSE:
-// Verify hip.miopen.softmax lowers to a hip_miopen_softmax call whose last
+// Verify hip.miopen.softmax lowers to a hip_softmax_typed call whose last
 // argument is the HIPDNN_EP_DATATYPE_* code of the element type, not its byte
 // size: f16 and bf16 have the same size and need different kernels.
 //
-// Expected: hip_miopen_softmax(state, input_ptr, output_ptr,
+// Expected: hip_softmax_typed(state, input_ptr, output_ptr,
 //                              rows, cols, data_type)
 // with rows = product of all but the last dim (1 for rank 1) and
 // cols = the last dim. Codes: FLOAT = 0, HALF = 1, BFLOAT16 = 2.
@@ -15,7 +15,7 @@
 
 // RUN: hip-mlir-opt %s --convert-hip-to-llvm | FileCheck %s
 
-// CHECK: llvm.func @hip_miopen_softmax(!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64)
+// CHECK: llvm.func @hip_softmax_typed(!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64)
 
 module {
   // CHECK-LABEL: llvm.func @softmax_f16
@@ -26,7 +26,7 @@ module {
   // CHECK: %[[D1:.*]] = llvm.extractvalue %{{.*}}[3, 1]
   // CHECK: %[[ROWS:.*]] = llvm.mul %[[R0]], %[[D1]] : i64
   // CHECK: %[[DT:.*]] = llvm.mlir.constant(1 : i64) : i64
-  // CHECK: llvm.call @hip_miopen_softmax(%{{.*}}, %{{.*}}, %{{.*}}, %[[ROWS]], %[[COLS]], %[[DT]])
+  // CHECK: llvm.call @hip_softmax_typed(%{{.*}}, %{{.*}}, %{{.*}}, %[[ROWS]], %[[COLS]], %[[DT]])
   func.func @softmax_f16(%ctx: !hip.context,
                          %input: memref<2x8x64xf16, 1>,
                          %output: memref<2x8x64xf16, 1>) {
@@ -38,7 +38,7 @@ module {
   // CHECK-LABEL: llvm.func @softmax_bf16
   // CHECK: llvm.mul
   // CHECK: %[[DT:.*]] = llvm.mlir.constant(2 : i64) : i64
-  // CHECK: llvm.call @hip_miopen_softmax(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[DT]])
+  // CHECK: llvm.call @hip_softmax_typed(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[DT]])
   func.func @softmax_bf16(%ctx: !hip.context,
                           %input: memref<16x1500xbf16, 1>,
                           %output: memref<16x1500xbf16, 1>) {
@@ -50,7 +50,7 @@ module {
   // CHECK-LABEL: llvm.func @softmax_f32
   // CHECK: llvm.mul
   // CHECK: %[[DT:.*]] = llvm.mlir.constant(0 : i64) : i64
-  // CHECK: llvm.call @hip_miopen_softmax(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[DT]])
+  // CHECK: llvm.call @hip_softmax_typed(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[DT]])
   func.func @softmax_f32(%ctx: !hip.context,
                          %input: memref<4x4096xf32, 1>,
                          %output: memref<4x4096xf32, 1>) {
@@ -65,7 +65,7 @@ module {
   // CHECK: %[[COLS:.*]] = llvm.extractvalue %{{.*}}[3, 0]
   // CHECK: %[[ROWS:.*]] = llvm.mlir.constant(1 : i64) : i64
   // CHECK-NOT: llvm.mul
-  // CHECK: llvm.call @hip_miopen_softmax(%{{.*}}, %{{.*}}, %{{.*}}, %[[ROWS]], %[[COLS]], %{{.*}})
+  // CHECK: llvm.call @hip_softmax_typed(%{{.*}}, %{{.*}}, %{{.*}}, %[[ROWS]], %[[COLS]], %{{.*}})
   func.func @softmax_rank1(%ctx: !hip.context,
                            %input: memref<?xf32, 1>,
                            %output: memref<?xf32, 1>) {

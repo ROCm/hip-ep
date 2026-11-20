@@ -17,7 +17,7 @@
 // to copy input over output first, and that copy moves exactly as many bytes
 // as the softmax does -- doubling the op's traffic however good the kernel is.
 //
-// Used by the `hip_miopen_softmax` runtime entry point (lib/Runtime/real/
+// Used by the `hip_softmax_typed` runtime entry point (lib/Runtime/real/
 // activation.cpp) for `onnx.Softmax` outside fused attention paths. The
 // pre-existing `softmax_inplace_kernel` in `gqa_kernel.hip` is column-wise
 // over an internal layout convention specific to the GQA pipeline; using
