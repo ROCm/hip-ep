@@ -1523,6 +1523,10 @@ private:
       int64_t last = static_cast<int64_t>(perm.size()) - 1;
       if (last <= 0 || cast<IntegerAttr>(perm[last]).getInt() == last)
         return false;
+      // hip_transpose handles at most eight dimensions; a longer permutation
+      // stays in the kernel.
+      if (static_cast<int64_t>(perm.size()) > 8)
+        return false;
       // The HIP transpose copies whole bytes, so a sub-byte element (an i1
       // mask) stays in the kernel.
       if (getElementTypeOrSelf(transpose.getInput().getType())
@@ -1606,12 +1610,14 @@ private:
       return module;
 
     // A remainder that saves no launch is inlined and runs as HIP ops. The
-    // HIP elementwise kernels cover f16 and f32; other types (an i8 Max, for
-    // one) may have none, so such a module keeps its transposes instead.
+    // HIP elementwise kernels cover f16 and f32 up to rank 4 (the broadcast
+    // ABI); other types (an i8 Max, for one) or higher ranks may have none,
+    // so such a module keeps its transposes instead.
     auto hipElementType = [](Type type) {
       auto shaped = dyn_cast<ShapedType>(type);
-      return !shaped || shaped.getElementType().isF16() ||
-             shaped.getElementType().isF32();
+      return !shaped || ((shaped.getElementType().isF16() ||
+                          shaped.getElementType().isF32()) &&
+                         shaped.hasRank() && shaped.getRank() <= 4);
     };
     SmallVector<Operation *> kept;
     bool computes = false;
@@ -1675,9 +1681,16 @@ private:
         return where && where.getCondition() == argument;
       });
     };
+    // A chain whose uncropped source is also passed as a Where condition would
+    // merge with that input, which outlining narrows to i8 while the absorbed
+    // view still yields ui8.
+    DenseSet<Value> conditionInputs;
+    for (auto [index, input] : llvm::enumerate(module.getInputs()))
+      if (feedsCondition(index))
+        conditionInputs.insert(input);
     SmallVector<std::pair<Value, SmallVector<Operation *>>> chains;
     for (auto [index, input] : llvm::enumerate(module.getInputs())) {
-      if (feedsCondition(index))
+      if (conditionInputs.contains(input))
         continue;
       SmallVector<Operation *> chain;
       bool slices = false;
@@ -1690,7 +1703,7 @@ private:
         chain.push_back(def);
         source = def->getOperand(0);
       }
-      if (slices && loadable(source))
+      if (slices && loadable(source) && !conditionInputs.contains(source))
         chains.push_back({input, std::move(chain)});
     }
     if (chains.empty())
