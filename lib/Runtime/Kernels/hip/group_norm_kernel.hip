@@ -133,17 +133,34 @@ __device__ inline void chanMerge(int64_t &n, Mean &mean, A &m2, int64_t nb,
   n = total;
 }
 
+// sum += step, and the addition's rounding error into comp (two-sum). The
+// kernels build with -ffp-contract=fast; contraction stays off here so the
+// additions are not fused with the multiply that produced `step`, which would
+// make comp miss part of the error.
+template <typename A>
+__device__ inline void twoSumInto(A &sum, A &comp, A step) {
+#pragma clang fp contract(off)
+  const A s = sum + step;
+  const A back = s - sum;
+  comp += (sum - (s - back)) + (step - back);
+  sum = s;
+}
+
 // Per-thread Welford statistics, one update per loaded vector: the vector's
 // own mean and M2 are exact (two passes over registers), then merged. M2 is
 // a sum of squared deviations throughout, so no step subtracts two large
 // sums and the variance stays accurate for any |mean| / stddev, even when
 // the shift is an outlier. Values are taken relative to the thread's first
-// value so the running mean stays small and its per-update rounding does not
-// accumulate at the scale of |mean|.
+// value so the running mean stays small. The running mean carries a
+// compensation term (two-sum), so an outlier shift does not lose the mean
+// to cancellation; it costs a few adds per vector, where a double running
+// mean costs FP64 work per vector at a small fraction of the FP32 rate. Only
+// absoluteMean(), once per thread, adds the shift back in double.
 template <typename A> struct WelfordAcc {
   int64_t count = 0;
   A shift = A(0);
-  double mean = 0; // relative to shift
+  A mean = A(0);      // relative to shift
+  A meanComp = A(0);  // rounding error of `mean`
   A m2 = A(0);
 
   template <int V> __device__ inline void add(const A (&v)[V]) {
@@ -163,10 +180,23 @@ template <typename A> struct WelfordAcc {
       const A e = d[k] - vm;
       q += e * e;
     }
-    chanMerge(count, mean, m2, int64_t(V), static_cast<double>(vm), q);
+    if (count == 0) {
+      count = V;
+      mean = vm;
+      m2 = q;
+      return;
+    }
+    const int64_t total = count + V;
+    const A delta = vm - (mean + meanComp);
+    const A fb = A(V) / A(total);
+    twoSumInto(mean, meanComp, delta * fb);
+    m2 += q + delta * delta * A(count) * fb;
+    count = total;
   }
   __device__ inline A absoluteMean() const {
-    return static_cast<A>(static_cast<double>(shift) + mean);
+    return static_cast<A>(static_cast<double>(shift) +
+                          static_cast<double>(mean) +
+                          static_cast<double>(meanComp));
   }
 };
 
