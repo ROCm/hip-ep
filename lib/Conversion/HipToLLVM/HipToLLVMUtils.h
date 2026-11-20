@@ -212,6 +212,11 @@ inline constexpr const char *kHipReadbackI32 = "hipdnn_ep_readback_i32";
 // such as the i64/f32/f16 operands of a data-dependent onnx.Range).
 inline constexpr const char *kHipReadbackScalar = "hipdnn_ep_readback_scalar";
 
+// Look up the session stream and wait for it (used by hip.stream_wait).
+inline constexpr const char *kHipStateGetStream = "hipdnn_ep_state_get_stream";
+inline constexpr const char *kHipStreamSynchronize =
+    "wrap_hipStreamSynchronize";
+
 // LLVM memref descriptor struct field indices.
 // Layout: { allocatedPtr, alignedPtr, offset, sizes[rank], strides[rank] }
 inline constexpr int64_t kAllocPtrIdx = 0;
@@ -603,6 +608,7 @@ void populateReadbackDimLoweringPatterns(
     const DenseMap<Operation *, Value> &hostScalars);
 // hip.readback_scalar: generic synchronized host-readback of a single device
 // scalar of arbitrary element type (the i64/f32/f16 sibling of readback_dim).
+// Also lowers hip.stream_wait, the same synchronization without a readback.
 void populateReadbackScalarLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns,
     const DenseMap<Operation *, Value> &hostScalars);

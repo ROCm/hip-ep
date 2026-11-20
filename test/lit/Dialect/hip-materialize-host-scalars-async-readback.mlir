@@ -105,3 +105,50 @@ func.func @load_in_successor(%ctx: !hip.context, %src: memref<1xi64>) -> i64 {
   %v = memref.load %a[%c0] : memref<1xi64>
   return %v : i64
 }
+
+// -----
+
+// A loop-local slot is reused by the next iteration while this iteration's
+// kernel may still be pending. Wait before the host initializes it again.
+// The load precedes the kernel in its iteration, so it stays a plain load.
+// CHECK-LABEL: func.func @loop_local_load_before_kernel
+// CHECK: scf.for
+// CHECK: hip.stream_wait(%{{.*}})
+// CHECK: %[[A:.*]] = memref.view {{.*}} to memref<1xi64>
+// CHECK: memref.store %{{.*}}, %[[A]]
+// CHECK: memref.load %[[A]]
+// CHECK: hip.add{{.*}}outs(%[[A]]
+func.func @loop_local_load_before_kernel(%ctx: !hip.context,
+    %x: memref<1xi64>, %out: memref<4xi64>) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c4 = arith.constant 4 : index
+  %n = arith.constant 7 : i64
+  scf.for %i = %c0 to %c4 step %c1 {
+    %a = memref.alloc() : memref<1xi64>
+    memref.store %n, %a[%c0] : memref<1xi64>
+    %v = memref.load %a[%c0] : memref<1xi64>
+    memref.store %v, %out[%i] : memref<4xi64>
+    hip.add(%ctx) ins(%x, %x : memref<1xi64>, memref<1xi64>)
+        outs(%a : memref<1xi64>)
+  }
+  return
+}
+
+// -----
+
+// A slot that is not loop-local needs no wait.
+// CHECK-LABEL: func.func @no_wait_outside_loop
+// CHECK-NOT: hip.stream_wait
+// CHECK: return
+func.func @no_wait_outside_loop(%ctx: !hip.context, %x: memref<1xi64>)
+    -> i64 {
+  %c0 = arith.constant 0 : index
+  %n = arith.constant 7 : i64
+  %a = memref.alloc() : memref<1xi64>
+  memref.store %n, %a[%c0] : memref<1xi64>
+  %v = memref.load %a[%c0] : memref<1xi64>
+  hip.add(%ctx) ins(%x, %x : memref<1xi64>, memref<1xi64>)
+      outs(%a : memref<1xi64>)
+  return %v : i64
+}

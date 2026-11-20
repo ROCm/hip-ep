@@ -117,12 +117,41 @@ struct ReadbackScalarOpLowering
   }
 };
 
+// hip.stream_wait(ctx)
+//   -> %stream = llvm.call @hipdnn_ep_state_get_stream(state)
+//      llvm.call @wrap_hipStreamSynchronize(%stream)
+struct StreamWaitOpLowering : public ConvertOpToLLVMPattern<StreamWaitOp> {
+  using ConvertOpToLLVMPattern<StreamWaitOp>::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(StreamWaitOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    FailureOr<LLVM::LLVMFuncOp> getStream = LLVM::lookupOrCreateFn(
+        rewriter, module, kHipStateGetStream, {ptrType}, ptrType);
+    FailureOr<LLVM::LLVMFuncOp> sync =
+        LLVM::lookupOrCreateFn(rewriter, module, kHipStreamSynchronize,
+                               {ptrType}, rewriter.getI32Type());
+    if (failed(getStream) || failed(sync))
+      return failure();
+    Value stream = LLVM::CallOp::create(rewriter, loc, *getStream,
+                                        ValueRange{adaptor.getCtx()})
+                       .getResult();
+    LLVM::CallOp::create(rewriter, loc, *sync, ValueRange{stream});
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 } // namespace
 
 void populateReadbackScalarLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns,
     const DenseMap<Operation *, Value> &hostScalars) {
   patterns.add<ReadbackScalarOpLowering>(converter, hostScalars);
+  patterns.add<StreamWaitOpLowering>(converter);
 }
 
 } // namespace hip

@@ -6059,6 +6059,28 @@ def Hip_ReadbackScalarOp : Hip_Op<"readback_scalar",
   }];
 }
 
+// hip.stream_wait : block the host until all work queued on the stream has
+// completed. Use it when the host reuses storage that queued work may still
+// access and there is no value to read back.
+//
+//   hip.stream_wait(%ctx)
+//   memref.store %n, %slot[%c0] : memref<1xi64>
+def Hip_StreamWaitOp : Hip_Op<"stream_wait",
+    [MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "Wait for all queued work on the stream to complete";
+  let description = [{
+    Synchronizes the GPU stream. Host accesses after this op observe every
+    effect of the work queued before it.
+
+    It has side effects on all memory: it must not be removed, reordered, or
+    hoisted across queued work or host accesses.
+  }];
+
+  let arguments = (ins Hip_ContextType:$ctx);
+
+  let assemblyFormat = "`(` $ctx `)` attr-dict";
+}
+
 def Hip_QuantizeLinearOp : Hip_DpsOp_AutoReifyInfer<"quantize_linear"> {
   let summary = "ONNX QuantizeLinear";
   let description = [{
