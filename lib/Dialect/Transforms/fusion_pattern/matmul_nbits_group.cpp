@@ -71,7 +71,7 @@ namespace hip {
 namespace fusion_transform {
 namespace {
 
-constexpr size_t kMaxGroupSize = 3;
+constexpr size_t kMaxGroupSize = 4;
 constexpr int64_t kEpilogueConcat = 0;
 constexpr int64_t kEpilogueSiluMul = 1;
 
@@ -219,6 +219,24 @@ std::optional<SiluMulChain> matchSiluMul(mlir::hip::MatMulNBitsOp gate,
   return SiluMulChain{gate, up, sigmoid, gateMul, upMul};
 }
 
+/// The hip.swiglu that SwigluFusion makes of the same chain when it reaches the
+/// sigmoid and multiplies first. The promoted form keeps f32 intermediates the
+/// grouped epilogue does not promise, so it stays as it is.
+mlir::hip::SwigluOp matchSwiglu(mlir::hip::MatMulNBitsOp gate,
+                                mlir::hip::MatMulNBitsOp up) {
+  mlir::Value g = gate->getResult(0);
+  mlir::Value u = up->getResult(0);
+  if (g.getType() != u.getType())
+    return nullptr;
+  auto swiglu = soleUserOf<mlir::hip::SwigluOp>(g);
+  if (!swiglu || soleUserOf<mlir::hip::SwigluOp>(u) != swiglu ||
+      swiglu.getGate() != g || swiglu.getUp() != u ||
+      swiglu.getPromoteActivation() || swiglu->getNumResults() != 1 ||
+      swiglu->getResult(0).getType() != g.getType())
+    return nullptr;
+  return swiglu;
+}
+
 struct MatMulNBitsGroup final
     : public mlir::OpRewritePattern<mlir::hip::MatMulNBitsOp> {
   using mlir::OpRewritePattern<mlir::hip::MatMulNBitsOp>::OpRewritePattern;
@@ -233,10 +251,17 @@ struct MatMulNBitsGroup final
       return rewriter.notifyMatchFailure(root, "no sibling projections");
 
     std::optional<SiluMulChain> silu;
+    mlir::hip::SwigluOp swiglu;
     if (group.size() == 2) {
       silu = matchSiluMul(group[0], group[1]);
       if (!silu)
         silu = matchSiluMul(group[1], group[0]);
+      if (!silu) {
+        if ((swiglu = matchSwiglu(group[0], group[1])))
+          silu = SiluMulChain{group[0], group[1], {}, {}, {}};
+        else if ((swiglu = matchSwiglu(group[1], group[0])))
+          silu = SiluMulChain{group[1], group[0], {}, {}, {}};
+      }
     }
 
     // collectGroup admitted only members whose operands can be made available
@@ -279,15 +304,23 @@ struct MatMulNBitsGroup final
       return mlir::success();
     }
     mlir::Value fused = groupOp->getResult(0);
-    for (mlir::Value v :
-         {silu->gate->getResult(0), silu->up->getResult(0),
-          silu->sigmoid->getResult(0), silu->gateMul->getResult(0)})
+    llvm::SmallVector<mlir::Value, 4> shapeSources{silu->gate->getResult(0),
+                                                   silu->up->getResult(0)};
+    if (!swiglu) {
+      shapeSources.push_back(silu->sigmoid->getResult(0));
+      shapeSources.push_back(silu->gateMul->getResult(0));
+    }
+    for (mlir::Value v : shapeSources)
       for (mlir::OpOperand &use : llvm::make_early_inc_range(v.getUses()))
         if (auto dim = mlir::dyn_cast<mlir::tensor::DimOp>(use.getOwner()))
           rewriter.modifyOpInPlace(dim, [&] { use.set(fused); });
-    rewriter.replaceOp(silu->upMul, fused);
-    rewriter.eraseOp(silu->gateMul);
-    rewriter.eraseOp(silu->sigmoid);
+    if (swiglu) {
+      rewriter.replaceOp(swiglu, fused);
+    } else {
+      rewriter.replaceOp(silu->upMul, fused);
+      rewriter.eraseOp(silu->gateMul);
+      rewriter.eraseOp(silu->sigmoid);
+    }
     rewriter.eraseOp(silu->up);
     rewriter.eraseOp(silu->gate);
     return mlir::success();

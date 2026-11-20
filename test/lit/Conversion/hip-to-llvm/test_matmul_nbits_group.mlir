@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 // hip.matmul_nbits_group lowers to one call of wrap_matmul_nbits_group with a
-// fixed three-segment signature: segments the op does not have are passed as
+// fixed four-segment signature: segments the op does not have are passed as
 // null pointers with N = 0, and so are absent zero points and an absent
 // quantized(...) operand pair.
 
@@ -39,8 +39,9 @@ module {
   // CHECK:       llvm.call @wrap_matmul_nbits_group({{.*}}) :
   // CHECK-SAME:  (!llvm.ptr, i32, !llvm.ptr, i64, !llvm.ptr, !llvm.ptr, !llvm.ptr,
   // CHECK-SAME:  !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
-  // CHECK-SAME:  !llvm.ptr, !llvm.ptr, !llvm.ptr,
-  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64,
+  // CHECK-SAME:  !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
+  // CHECK-SAME:  !llvm.ptr,
+  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64,
   // CHECK-SAME:  !llvm.ptr, !llvm.ptr) -> i32
 
   func.func @group_silu(%ctx: !hip.context,
@@ -60,7 +61,7 @@ module {
     return
   }
 
-  // The missing third segment is a null weight, scales and output.
+  // The missing segments are null weights, scales and outputs.
   // CHECK-LABEL: llvm.func @group_silu
   // CHECK:       %[[NULL:.*]] = llvm.mlir.zero : !llvm.ptr
   // CHECK:       llvm.call @wrap_matmul_nbits_group(
@@ -87,10 +88,10 @@ module {
   }
 
   // The quantized row's pointers are the last two arguments. The only null
-  // pointers are the absent third segment's weight, scale and output, and the
-  // three absent zero points.
+  // pointers are the absent third and fourth segments' weight, scale and
+  // output, and the four absent zero points.
   // CHECK-LABEL: llvm.func @group_quantized
-  // CHECK-COUNT-6: llvm.mlir.zero : !llvm.ptr
+  // CHECK-COUNT-10: llvm.mlir.zero : !llvm.ptr
   // CHECK-NOT:   llvm.mlir.zero
   // CHECK:       %[[AQ:.*]] = llvm.addrspacecast %{{.*}} : !llvm.ptr<1> to !llvm.ptr
   // CHECK-NEXT:  llvm.extractvalue
@@ -116,10 +117,11 @@ module {
     return
   }
 
-  // Both segments' zero points are passed; the nulls are the absent third
-  // segment (weight, scale, zero points, two outputs) and quantized(...).
+  // Both segments' zero points are passed; the nulls are the absent third and
+  // fourth segments (weights, scales, zero points), the three unused outputs
+  // and quantized(...).
   // CHECK-LABEL: llvm.func @group_zero_points
-  // CHECK-COUNT-7: llvm.mlir.zero : !llvm.ptr
+  // CHECK-COUNT-11: llvm.mlir.zero : !llvm.ptr
   // CHECK-NOT:   llvm.mlir.zero
   // CHECK:       llvm.call @wrap_matmul_nbits_group(
 }
