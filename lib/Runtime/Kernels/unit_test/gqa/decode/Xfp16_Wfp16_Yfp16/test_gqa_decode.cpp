@@ -1084,6 +1084,9 @@ int main(int argc, char** argv) {
       // variant ships a 2047-key sliding window.
       full_cases.push_back({"phi-3-mini",          1, 32, 32,  96, L, L,   0, 0, 0});
       full_cases.push_back({"phi-3-mini sliding",  1, 32, 32,  96, L, L, 2047, 0, 0});
+      // step-3.5-flash: sliding layers H96 G8 (hpg12, d128 only) with a
+      // 512-key window; its full layers are H64 G8 (GQA hpg8 D128 below).
+      full_cases.push_back({"step-3.5-flash sliding", 1, 96, 8, 128, L, L, 512, 0, 0});
       // ---- Geometry sweep: MHA (hpg1) x head_dim ----
       full_cases.push_back({"MHA hpg1 D64",        1, 16, 16,  64, L, L,   0, 0, 0});
       full_cases.push_back({"MHA hpg1 D128",       1, 16, 16, 128, L, L,   0, 0, 0});
