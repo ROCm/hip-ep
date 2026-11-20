@@ -1,7 +1,8 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// RUN: hip-mlir-opt %s --hip-materialize-host-scalars --convert-hip-to-llvm | FileCheck %s
+// RUN: hip-mlir-opt %s --hip-materialize-host-scalars \
+// RUN:   --expand-strided-metadata --lower-affine --convert-hip-to-llvm | FileCheck %s
 
 // The readback slot of a padded element is aligned to a power of two, not to
 // its 6-byte payload.
@@ -16,4 +17,13 @@ func.func @padded_load_after_copy(%ctx: !hip.context, %src: memref<1xi48>)
   memref.copy %src, %a : memref<1xi48> to memref<1xi48>
   %v = memref.load %a[%c0] : memref<1xi48>
   return %v : i48
+}
+
+// hip.stream_wait waits for the session stream.
+// CHECK-LABEL: llvm.func @stream_wait(
+// CHECK: %[[STREAM:.*]] = llvm.call @hipdnn_ep_state_get_stream(
+// CHECK: llvm.call @wrap_hipStreamSynchronize(%[[STREAM]])
+func.func @stream_wait(%ctx: !hip.context) {
+  hip.stream_wait(%ctx)
+  return
 }
