@@ -2,12 +2,11 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-//===- softmax_kernel.hip - Row-wise 2D softmax (fp16) --------------------===//
+//===- softmax_kernel.hip - Row-wise 2D softmax (fp16, fp32) --------------===//
 //
-// Standalone Softmax over the last dim of a flattened [rows, cols] fp16
-// row-major buffer. One block per row, cooperative warp-shuffle reductions
-// for max + sum, then an inverse-multiply pass. Matches ONNX Softmax
-// semantics (`axis = -1` along the last dim).
+// Standalone Softmax over the last dim of a flattened [rows, cols] fp16 or
+// fp32 row-major buffer, with warp-shuffle reductions for max + sum. Matches
+// ONNX Softmax semantics (`axis = -1` along the last dim).
 //
 // Every kernel here reads a source and writes a distinct destination, and
 // tolerates the two being the same buffer. That matters more than it looks:
@@ -29,11 +28,15 @@
 // Numerics: exp2f(x * LOG2E) instead of expf(x) for the native HW
 // instruction, fp32 accumulators, single max + single sum sweep per row.
 //
-// Three launch shapes, picked by width in the entry points at the bottom:
-// one wavefront per row holding the row in registers (no LDS, no barrier),
-// one thread per element with the element in a register, and the general
-// strided form for rows too wide to cache. LDS use for the latter two is
-// `softmax_smem_floats(num_waves) * sizeof(float)` per block.
+// Launch shapes, picked by width in the entry points at the bottom:
+//   - rows of exactly 1, 2 or 4 vectors per lane: one wavefront per row,
+//     16-byte loads, no LDS and no barrier;
+//   - rows up to WAVE_SIZE * 16: one masked wavefront per row, several rows
+//     per block, still shuffle-only;
+//   - rows up to 32768: one block per row, 256 threads up to 8192 columns and
+//     1024 past that, the row held in registers so it is read once and
+//     written once (16-byte loads when the buffers and the row stride allow);
+//   - wider rows: the three-pass general kernel.
 //
 //===----------------------------------------------------------------------===//
 
@@ -62,6 +65,20 @@
 // Wavefronts per block for the wave-per-row kernels: one row each, sized so a
 // block stays at the 256-thread shape the other launches use.
 static constexpr int kWavesPerBlock = 8;
+
+// Largest elements-per-lane of the masked wave kernel; wider rows go to a
+// block per row.
+static constexpr int kMaxWaveElems = 16;
+
+// Block per row: 256 threads up to kRowCols, 1024 up to kWideRowCols. Each
+// thread keeps at most kMaxRowElems values in registers at either size. The
+// block reductions fold one wave of per-wave partials, so a block may hold at
+// most WAVE_SIZE waves; 1024 threads is 32 waves on a 32-lane wave.
+static constexpr int kRowThreads = 256;
+static constexpr int kWideRowThreads = 1024;
+static constexpr int kMaxRowElems = 32;
+static constexpr int kRowCols = kRowThreads * kMaxRowElems;
+static constexpr int kWideRowCols = kWideRowThreads * kMaxRowElems;
 
 namespace {
 
@@ -122,45 +139,27 @@ __device__ inline float block_reduce_sum_f(float v, float* smem, int tid,
 
 // LDS cells a block-per-row kernel needs: one partial per wave, plus a
 // dedicated broadcast cell for each of the two reductions.
-__device__ __host__ inline int softmax_smem_floats(int num_waves) {
+__device__ __host__ constexpr int softmax_smem_floats(int num_waves) {
   return num_waves + 2;
 }
 
-// --- Register-cached variants ------------------------------------------
-//
-// The general kernel below re-reads the row from memory in each of its three
-// passes because the value it needs is not kept anywhere. When a thread owns a
-// fixed slice of the row, that value fits in a register and the row only has
-// to be read once and written once. Both variants below exploit that; they
-// differ in how a row is divided among threads.
+__device__ inline float softmax_as_float(__half v) { return __half2float(v); }
+__device__ inline float softmax_as_float(float v) { return v; }
 
-// One element per thread, block per row. Valid when `cols <= blockDim.x`, so
-// the general kernel's strided loop would run exactly one iteration anyway.
-// Reductions still cross the whole block, so the barriers remain.
-__global__ void softmax_row_2d_regcache_kernel(const __half* in, __half* out,
-                                                 int rows, int cols) {
-  const int row = blockIdx.x;
-  if (row >= rows)
-    return;
-  const __half* in_row = in + (size_t)row * cols;
-  __half* out_row = out + (size_t)row * cols;
-
-  const int tid = threadIdx.x;
-  const int num_waves = blockDim.x / WAVE_SIZE;
-  const bool active = tid < cols;
-
-  extern __shared__ float smem[];
-
-  const float x = active ? __half2float(in_row[tid]) : -INFINITY;
-  const float row_max =
-      block_reduce_max_f(x, smem, tid, num_waves, num_waves);
-  const float e = active ? exp2f((x - row_max) * LOG2E) : 0.0f;
-  const float inv =
-      1.0f / block_reduce_sum_f(e, smem, tid, num_waves, num_waves + 1);
-
-  if (active)
-    out_row[tid] = __float2half(e * inv);
+__device__ inline void softmax_store(__half* dst, float v) {
+  *dst = __float2half(v);
 }
+__device__ inline void softmax_store(float* dst, float v) { *dst = v; }
+
+// Smallest power of two >= n, for picking a register-array bucket.
+__host__ inline int softmax_pow2_ceil(int n) {
+  int p = 1;
+  while (p < n)
+    p *= 2;
+  return p;
+}
+
+// --- Wave-per-row kernels ----------------------------------------------
 
 // One wavefront per row, `ELEMS` elements per lane held in registers. Valid
 // when `cols == WAVE_SIZE * ELEMS` and ELEMS is a multiple of the 16-byte
@@ -224,74 +223,8 @@ __global__ void softmax_row_2d_wave_kernel(const __half* in, __half* out,
   }
 }
 
-// The fallback for rows too long to cache in registers. Three passes over the
-// row, so the only pass that may read what an earlier pass wrote is the third,
-// and a thread there re-reads exactly the elements it wrote itself under the
-// same `tid`-strided loop. No thread ever reads another thread's slice, which
-// is what makes the source-aliases-destination case correct without a barrier
-// beyond the ones the reductions already impose.
-__global__ void softmax_row_2d_general_kernel(const __half* in, __half* out,
-                                                int rows, int cols) {
-  const int row = blockIdx.x;
-  if (row >= rows)
-    return;
-  const __half* in_row = in + (size_t)row * cols;
-  __half* out_row = out + (size_t)row * cols;
-
-  const int tid = threadIdx.x;
-  const int num_waves = blockDim.x / WAVE_SIZE;
-
-  extern __shared__ float smem[];
-
-  // Pass 1: row max.
-  float local_max = -INFINITY;
-  for (int j = tid; j < cols; j += blockDim.x)
-    local_max = fmaxf(local_max, __half2float(in_row[j]));
-  const float row_max =
-      block_reduce_max_f(local_max, smem, tid, num_waves, num_waves);
-
-  // Pass 2: exp2f + sum.
-  float local_sum = 0.0f;
-  for (int j = tid; j < cols; j += blockDim.x) {
-    float e = exp2f((__half2float(in_row[j]) - row_max) * LOG2E);
-    out_row[j] = __float2half(e);
-    local_sum += e;
-  }
-  const float inv =
-      1.0f / block_reduce_sum_f(local_sum, smem, tid, num_waves, num_waves + 1);
-
-  // Pass 3: normalize.
-  for (int j = tid; j < cols; j += blockDim.x)
-    out_row[j] = __float2half(__half2float(out_row[j]) * inv);
-}
-
-// fp32 counterparts of the two register-cached variants above. Only the
-// element type and the 16-byte vector width differ.
-__global__ void softmax_row_2d_regcache_fp32_kernel(const float* in, float* out,
-                                                      int rows, int cols) {
-  const int row = blockIdx.x;
-  if (row >= rows)
-    return;
-  const float* in_row = in + (size_t)row * cols;
-  float* out_row = out + (size_t)row * cols;
-
-  const int tid = threadIdx.x;
-  const int num_waves = blockDim.x / WAVE_SIZE;
-  const bool active = tid < cols;
-
-  extern __shared__ float smem[];
-
-  const float x = active ? in_row[tid] : -INFINITY;
-  const float row_max =
-      block_reduce_max_f(x, smem, tid, num_waves, num_waves);
-  const float e = active ? exp2f((x - row_max) * LOG2E) : 0.0f;
-  const float inv =
-      1.0f / block_reduce_sum_f(e, smem, tid, num_waves, num_waves + 1);
-
-  if (active)
-    out_row[tid] = e * inv;
-}
-
+// fp32 counterpart of the kernel above. Only the element type and the 16-byte
+// vector width differ.
 template <int ELEMS>
 __global__ void softmax_row_2d_wave_fp32_kernel(const float* in, float* out,
                                                   int rows, int cols) {
@@ -340,41 +273,333 @@ __global__ void softmax_row_2d_wave_fp32_kernel(const float* in, float* out,
   }
 }
 
-// fp32 variant — same algorithm, reads float instead of __half.
-// Used by Qwen VLM and other models where Softmax input is fp32.
-__global__ void softmax_row_2d_general_fp32_kernel(const float* in, float* out,
-                                                     int rows, int cols) {
+// One wavefront per row of any width up to WAVE_SIZE * ELEMS, several rows
+// per block. Element `lane + i * WAVE_SIZE` lives in lane `lane`, so every
+// load stays coalesced; lanes past `cols` are masked. Both reductions are
+// shuffles, so a short row never pays for LDS or a barrier.
+template <typename T, int ELEMS>
+__global__ __launch_bounds__(kWavesPerBlock * WAVE_SIZE) void
+softmax_row_2d_masked_wave_kernel(const T* in, T* out, int rows, int cols) {
+  const int lane = threadIdx.x % WAVE_SIZE;
+  const int row = blockIdx.x * kWavesPerBlock + threadIdx.x / WAVE_SIZE;
+  if (row >= rows)
+    return;
+  const T* in_row = in + (size_t)row * cols;
+  T* out_row = out + (size_t)row * cols;
+
+  float x[ELEMS];
+  float local_max = -INFINITY;
+#pragma unroll
+  for (int i = 0; i < ELEMS; ++i) {
+    const int j = lane + i * WAVE_SIZE;
+    x[i] = (j < cols) ? softmax_as_float(in_row[j]) : -INFINITY;
+    local_max = fmaxf(local_max, x[i]);
+  }
+  const float row_max = warp_reduce_max_f(local_max);
+
+  float local_sum = 0.0f;
+#pragma unroll
+  for (int i = 0; i < ELEMS; ++i) {
+    const int j = lane + i * WAVE_SIZE;
+    x[i] = (j < cols) ? exp2f((x[i] - row_max) * LOG2E) : 0.0f;
+    local_sum += x[i];
+  }
+  const float inv = 1.0f / warp_reduce_sum_f(local_sum);
+
+#pragma unroll
+  for (int i = 0; i < ELEMS; ++i) {
+    const int j = lane + i * WAVE_SIZE;
+    if (j < cols)
+      softmax_store(out_row + j, x[i] * inv);
+  }
+}
+
+// --- Block-per-row register kernels --------------------------------------
+//
+// The general kernel below re-reads the row from memory in each of its three
+// passes because the value it needs is not kept anywhere. When a thread owns a
+// fixed slice of the row, that slice fits in registers and the row only has
+// to be read once and written once. Every thread reads its whole slice before
+// the first barrier and writes only that slice after the last one, which is
+// what keeps the source-aliases-destination case correct.
+
+// THREADS threads per row, CHUNKS 16-byte vectors per thread. Valid when both
+// buffers are 16-byte aligned and `cols` is a multiple of the vector width, so
+// every row starts on a 16-byte boundary.
+template <typename T, int THREADS, int CHUNKS>
+__global__ __launch_bounds__(THREADS) void softmax_row_2d_regvec_kernel(
+    const T* in, T* out, int rows, int cols) {
+  constexpr int kVec = 16 / sizeof(T);
+  constexpr int kElems = CHUNKS * kVec;
+  constexpr int kWaves = THREADS / WAVE_SIZE;
+  __shared__ float smem[softmax_smem_floats(kWaves)];
+
   const int row = blockIdx.x;
   if (row >= rows)
     return;
-  const float* in_row = in + (size_t)row * cols;
-  float* out_row = out + (size_t)row * cols;
-
   const int tid = threadIdx.x;
-  const int num_waves = blockDim.x / WAVE_SIZE;
+  const int nvec = cols / kVec;
+  const uint4* in_vec = reinterpret_cast<const uint4*>(in + (size_t)row * cols);
+  uint4* out_vec = reinterpret_cast<uint4*>(out + (size_t)row * cols);
 
-  extern __shared__ float smem[];
+  float x[kElems];
+  float local_max = -INFINITY;
+#pragma unroll
+  for (int c = 0; c < CHUNKS; ++c) {
+    const int v = tid + c * THREADS;
+    const bool active = v < nvec;
+    uint4 raw = active ? in_vec[v] : uint4{0, 0, 0, 0};
+    const T* e = reinterpret_cast<const T*>(&raw);
+#pragma unroll
+    for (int k = 0; k < kVec; ++k) {
+      const float val = active ? softmax_as_float(e[k]) : -INFINITY;
+      x[c * kVec + k] = val;
+      local_max = fmaxf(local_max, val);
+    }
+  }
+  const float row_max =
+      block_reduce_max_f(local_max, smem, tid, kWaves, kWaves);
+
+  float local_sum = 0.0f;
+#pragma unroll
+  for (int c = 0; c < CHUNKS; ++c) {
+    const bool active = tid + c * THREADS < nvec;
+#pragma unroll
+    for (int k = 0; k < kVec; ++k) {
+      const int i = c * kVec + k;
+      x[i] = active ? exp2f((x[i] - row_max) * LOG2E) : 0.0f;
+      local_sum += x[i];
+    }
+  }
+  const float inv =
+      1.0f / block_reduce_sum_f(local_sum, smem, tid, kWaves, kWaves + 1);
+
+#pragma unroll
+  for (int c = 0; c < CHUNKS; ++c) {
+    const int v = tid + c * THREADS;
+    if (v < nvec) {
+      uint4 raw;
+      T* e = reinterpret_cast<T*>(&raw);
+#pragma unroll
+      for (int k = 0; k < kVec; ++k)
+        softmax_store(e + k, x[c * kVec + k] * inv);
+      out_vec[v] = raw;
+    }
+  }
+}
+
+// Scalar form of the kernel above for rows that are misaligned or not a
+// multiple of the vector width: THREADS threads per row, ELEMS elements per
+// thread strided by THREADS.
+template <typename T, int THREADS, int ELEMS>
+__global__ __launch_bounds__(THREADS) void softmax_row_2d_regstride_kernel(
+    const T* in, T* out, int rows, int cols) {
+  constexpr int kWaves = THREADS / WAVE_SIZE;
+  __shared__ float smem[softmax_smem_floats(kWaves)];
+
+  const int row = blockIdx.x;
+  if (row >= rows)
+    return;
+  const int tid = threadIdx.x;
+  const T* in_row = in + (size_t)row * cols;
+  T* out_row = out + (size_t)row * cols;
+
+  float x[ELEMS];
+  float local_max = -INFINITY;
+#pragma unroll
+  for (int i = 0; i < ELEMS; ++i) {
+    const int j = tid + i * THREADS;
+    x[i] = (j < cols) ? softmax_as_float(in_row[j]) : -INFINITY;
+    local_max = fmaxf(local_max, x[i]);
+  }
+  const float row_max =
+      block_reduce_max_f(local_max, smem, tid, kWaves, kWaves);
+
+  float local_sum = 0.0f;
+#pragma unroll
+  for (int i = 0; i < ELEMS; ++i) {
+    const int j = tid + i * THREADS;
+    x[i] = (j < cols) ? exp2f((x[i] - row_max) * LOG2E) : 0.0f;
+    local_sum += x[i];
+  }
+  const float inv =
+      1.0f / block_reduce_sum_f(local_sum, smem, tid, kWaves, kWaves + 1);
+
+#pragma unroll
+  for (int i = 0; i < ELEMS; ++i) {
+    const int j = tid + i * THREADS;
+    if (j < cols)
+      softmax_store(out_row + j, x[i] * inv);
+  }
+}
+
+// --- Three-pass fallback -------------------------------------------------
+//
+// The fallback for rows too long to cache in registers. Three passes over the
+// row, so the only pass that may read what an earlier pass wrote is the third,
+// and a thread there re-reads exactly the elements it wrote itself under the
+// same `tid`-strided loop. No thread ever reads another thread's slice, which
+// is what makes the source-aliases-destination case correct without a barrier
+// beyond the ones the reductions already impose.
+template <typename T>
+__global__ __launch_bounds__(kRowThreads) void softmax_row_2d_general_kernel(
+    const T* in, T* out, int rows, int cols) {
+  constexpr int kWaves = kRowThreads / WAVE_SIZE;
+  __shared__ float smem[softmax_smem_floats(kWaves)];
+
+  const int row = blockIdx.x;
+  if (row >= rows)
+    return;
+  const T* in_row = in + (size_t)row * cols;
+  T* out_row = out + (size_t)row * cols;
+  const int tid = threadIdx.x;
 
   // Pass 1: row max.
   float local_max = -INFINITY;
-  for (int j = tid; j < cols; j += blockDim.x)
-    local_max = fmaxf(local_max, in_row[j]);
+  for (int j = tid; j < cols; j += kRowThreads)
+    local_max = fmaxf(local_max, softmax_as_float(in_row[j]));
   const float row_max =
-      block_reduce_max_f(local_max, smem, tid, num_waves, num_waves);
+      block_reduce_max_f(local_max, smem, tid, kWaves, kWaves);
 
   // Pass 2: exp2f + sum.
   float local_sum = 0.0f;
-  for (int j = tid; j < cols; j += blockDim.x) {
-    float e = exp2f((in_row[j] - row_max) * LOG2E);
-    out_row[j] = e;
+  for (int j = tid; j < cols; j += kRowThreads) {
+    const float e = exp2f((softmax_as_float(in_row[j]) - row_max) * LOG2E);
+    softmax_store(out_row + j, e);
     local_sum += e;
   }
   const float inv =
-      1.0f / block_reduce_sum_f(local_sum, smem, tid, num_waves, num_waves + 1);
+      1.0f / block_reduce_sum_f(local_sum, smem, tid, kWaves, kWaves + 1);
 
   // Pass 3: normalize.
-  for (int j = tid; j < cols; j += blockDim.x)
-    out_row[j] = out_row[j] * inv;
+  for (int j = tid; j < cols; j += kRowThreads)
+    softmax_store(out_row + j, softmax_as_float(out_row[j]) * inv);
+}
+
+// --- Launchers -------------------------------------------------------------
+
+template <typename T>
+__host__ void launch_masked_wave(const T* in, T* out, int rows, int cols,
+                                 hipStream_t stream) {
+  const int grid = (rows + kWavesPerBlock - 1) / kWavesPerBlock;
+  const int block = kWavesPerBlock * WAVE_SIZE;
+  switch (softmax_pow2_ceil((cols + WAVE_SIZE - 1) / WAVE_SIZE)) {
+  case 1:
+    softmax_row_2d_masked_wave_kernel<T, 1>
+        <<<grid, block, 0, stream>>>(in, out, rows, cols);
+    break;
+  case 2:
+    softmax_row_2d_masked_wave_kernel<T, 2>
+        <<<grid, block, 0, stream>>>(in, out, rows, cols);
+    break;
+  case 4:
+    softmax_row_2d_masked_wave_kernel<T, 4>
+        <<<grid, block, 0, stream>>>(in, out, rows, cols);
+    break;
+  case 8:
+    softmax_row_2d_masked_wave_kernel<T, 8>
+        <<<grid, block, 0, stream>>>(in, out, rows, cols);
+    break;
+  default:
+    softmax_row_2d_masked_wave_kernel<T, kMaxWaveElems>
+        <<<grid, block, 0, stream>>>(in, out, rows, cols);
+    break;
+  }
+}
+
+// Register bucket for a block of THREADS threads: the smallest power-of-two
+// number of 16-byte vectors per thread that covers the row.
+template <typename T, int THREADS>
+__host__ void launch_row_vec_at(const T* in, T* out, int rows, int cols,
+                                hipStream_t stream) {
+  constexpr int kVec = 16 / sizeof(T);
+  constexpr int kMaxChunks = kMaxRowElems / kVec;
+  const int nvec = cols / kVec;
+  switch (softmax_pow2_ceil((nvec + THREADS - 1) / THREADS)) {
+  case 1:
+    softmax_row_2d_regvec_kernel<T, THREADS, 1>
+        <<<rows, THREADS, 0, stream>>>(in, out, rows, cols);
+    break;
+  case 2:
+    softmax_row_2d_regvec_kernel<T, THREADS, 2>
+        <<<rows, THREADS, 0, stream>>>(in, out, rows, cols);
+    break;
+  case 4:
+    softmax_row_2d_regvec_kernel<T, THREADS, 4>
+        <<<rows, THREADS, 0, stream>>>(in, out, rows, cols);
+    break;
+  default:
+    softmax_row_2d_regvec_kernel<T, THREADS, kMaxChunks>
+        <<<rows, THREADS, 0, stream>>>(in, out, rows, cols);
+    break;
+  }
+}
+
+template <typename T, int THREADS>
+__host__ void launch_row_scalar_at(const T* in, T* out, int rows, int cols,
+                                   hipStream_t stream) {
+  switch (softmax_pow2_ceil((cols + THREADS - 1) / THREADS)) {
+  case 1:
+  case 2:
+  case 4:
+    softmax_row_2d_regstride_kernel<T, THREADS, 4>
+        <<<rows, THREADS, 0, stream>>>(in, out, rows, cols);
+    break;
+  case 8:
+    softmax_row_2d_regstride_kernel<T, THREADS, 8>
+        <<<rows, THREADS, 0, stream>>>(in, out, rows, cols);
+    break;
+  case 16:
+    softmax_row_2d_regstride_kernel<T, THREADS, 16>
+        <<<rows, THREADS, 0, stream>>>(in, out, rows, cols);
+    break;
+  default:
+    softmax_row_2d_regstride_kernel<T, THREADS, kMaxRowElems>
+        <<<rows, THREADS, 0, stream>>>(in, out, rows, cols);
+    break;
+  }
+}
+
+// Rows up to kRowCols take kRowThreads threads, wider rows kWideRowThreads.
+template <typename T>
+__host__ void launch_row_vec(const T* in, T* out, int rows, int cols,
+                             hipStream_t stream) {
+  if (cols > kRowCols)
+    launch_row_vec_at<T, kWideRowThreads>(in, out, rows, cols, stream);
+  else
+    launch_row_vec_at<T, kRowThreads>(in, out, rows, cols, stream);
+}
+
+template <typename T>
+__host__ void launch_row_scalar(const T* in, T* out, int rows, int cols,
+                                hipStream_t stream) {
+  if (cols > kRowCols)
+    launch_row_scalar_at<T, kWideRowThreads>(in, out, rows, cols, stream);
+  else
+    launch_row_scalar_at<T, kRowThreads>(in, out, rows, cols, stream);
+}
+
+// Launch order shared by both element types, after the exact-width wave
+// kernels: masked wave, block-per-row in registers, three passes.
+template <typename T>
+__host__ int launch_softmax_rows(const T* in, T* out, int rows, int cols,
+                                 hipStream_t stream) {
+  constexpr int kVec = 16 / sizeof(T);
+  if (cols <= WAVE_SIZE * kMaxWaveElems) {
+    launch_masked_wave(in, out, rows, cols, stream);
+  } else if (cols <= kWideRowCols) {
+    const bool aligned = (reinterpret_cast<uintptr_t>(in) % 16) == 0 &&
+                         (reinterpret_cast<uintptr_t>(out) % 16) == 0 &&
+                         cols % kVec == 0;
+    if (aligned)
+      launch_row_vec(in, out, rows, cols, stream);
+    else
+      launch_row_scalar(in, out, rows, cols, stream);
+  } else {
+    softmax_row_2d_general_kernel<T>
+        <<<rows, kRowThreads, 0, stream>>>(in, out, rows, cols);
+  }
+  return hipGetLastError();
 }
 
 } // namespace
@@ -414,25 +639,7 @@ extern "C" int hip_softmax_row_2d(void* stream_ptr, const void* input,
     }
   }
 
-  // Block per row. Pick block size: power of two up to min(cols, 256). 32
-  // minimum for one wave on RDNA / 64 on CDNA. SoftMax for vision attention
-  // has cols up to ~4096, well-served by 256 threads × 16 iters.
-  int threads = 32;
-  while (threads < cols && threads < 256)
-    threads *= 2;
-  if (threads > 256)
-    threads = 256;
-  int num_waves = (threads + WAVE_SIZE - 1) / WAVE_SIZE;
-  size_t smem_bytes =
-      static_cast<size_t>(softmax_smem_floats(num_waves)) * sizeof(float);
-  if (cols <= threads) {
-    softmax_row_2d_regcache_kernel<<<rows, threads, smem_bytes, stream>>>(
-        in, out, rows, cols);
-    return hipGetLastError();
-  }
-  softmax_row_2d_general_kernel<<<rows, threads, smem_bytes, stream>>>(
-      in, out, rows, cols);
-  return hipGetLastError();
+  return launch_softmax_rows(in, out, rows, cols, stream);
 }
 
 // fp32 variant — for models where Softmax input is fp32 (e.g. Qwen VLM).
@@ -467,25 +674,7 @@ extern "C" int hip_softmax_row_2d_fp32(void* stream_ptr, const void* input,
     }
   }
 
-  // Block per row. Pick block size: power of two up to min(cols, 256). 32
-  // minimum for one wave on RDNA / 64 on CDNA. SoftMax for vision attention
-  // has cols up to ~4096, well-served by 256 threads × 16 iters.
-  int threads = 32;
-  while (threads < cols && threads < 256)
-    threads *= 2;
-  if (threads > 256)
-    threads = 256;
-  int num_waves = (threads + WAVE_SIZE - 1) / WAVE_SIZE;
-  size_t smem_bytes =
-      static_cast<size_t>(softmax_smem_floats(num_waves)) * sizeof(float);
-  if (cols <= threads) {
-    softmax_row_2d_regcache_fp32_kernel<<<rows, threads, smem_bytes, stream>>>(
-        in, out, rows, cols);
-    return hipGetLastError();
-  }
-  softmax_row_2d_general_fp32_kernel<<<rows, threads, smem_bytes, stream>>>(
-      in, out, rows, cols);
-  return hipGetLastError();
+  return launch_softmax_rows(in, out, rows, cols, stream);
 }
 
 // Kept for callers that hold a single buffer. Every kernel above tolerates
