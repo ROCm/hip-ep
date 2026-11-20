@@ -93,6 +93,11 @@ struct AutotuneOptions {
   // and logs through it long after the constructor returns, so a StringRef
   // here would dangle for any caller that did not pass a literal.
   std::string logPrefix = "[rocmlir-autotune]";
+  // True when the user chose the search space explicitly: --autotune=<space>
+  // on hip-rocmlir-compiler, or a non-empty HIPDNN_EP_ROCMLIR_AUTOTUNE in the
+  // EP. A provided tuning type skips the shipped LUT. With it false (the
+  // default), the shipped LUT is consulted before the search.
+  bool tuningTypeProvided = false;
   // Also print a line per candidate and the winning perfConfig. Separate from
   // `log` because the per-candidate lines are one per config per kernel --
   // useful when tuning by hand, far too much for a normal compile.
@@ -100,7 +105,7 @@ struct AutotuneOptions {
   // External rocMLIR LUT FlatBuffer (.fb). hip-rocmlir-compiler sets this
   // from --problem-cache or HIP_ROCMLIR_PROBLEM_CACHE. When set, this file
   // takes priority over the search and the shipped table is not consulted.
-  // When empty, a tuning type skips the shipped LUT.
+  // When empty, the shipped LUT is consulted unless tuningTypeProvided.
   std::string problemCachePath;
   // Where to write this compile's winners. Empty skips the dump. The autotuner
   // does not write the file itself; hip-rocmlir-compiler calls

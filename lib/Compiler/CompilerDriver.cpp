@@ -136,8 +136,8 @@ std::string rocMlirArtifactTarget() {
     std::string target = mlir::hip::resolveRocMlirArch();
     // Which perfConfig each kernel was tuned to is baked into the embedded
     // HSACO. Autotune runs unless HIP_ROCMLIR_SKIP_BENCHMARKING is set, so
-    // the target string records the space. A tuning type skips the shipped
-    // LUT, so there is no +lut= suffix. An artifact
+    // the target string records the space. There is no +lut= suffix. An
+    // artifact
     // built with another space must not be reused: the cache is keyed on the
     // graph alone.
     mlir::hip::AutotuneSpace space;
@@ -528,10 +528,10 @@ bool CompilerDriver::runMLIRPasses(
       mlir::hip::rocMlirAutotuneBenchmarkFromEnv(autotuneOpts.benchmark);
       autotuneOpts.log = embedOpts.log;
       autotuneOpts.logPrefix = "[CompilerDriver/rocmlir-autotune]";
-      // problemCachePath stays empty here, so a tuning type skips the shipped
-      // LUT. hip-rocmlir-compiler still passes --problem-cache /
-      // HIP_ROCMLIR_PROBLEM_CACHE, and that file takes priority over the
-      // search.
+      // problemCachePath stays empty here. The shipped LUT is skipped only
+      // when HIPDNN_EP_ROCMLIR_AUTOTUNE is set explicitly.
+      autotuneOpts.tuningTypeProvided =
+          !hip_get_env("HIPDNN_EP_ROCMLIR_AUTOTUNE").empty();
       autotuner.emplace(embedOpts.arch, autotuneOpts);
       // Refuse rather than fall back to the default perfConfig. By this point
       // rocMlirArtifactTarget() has already stamped +autotune=<space> into the
