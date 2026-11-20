@@ -174,6 +174,12 @@ class TestTile:
             (np.float32, [1, 4], [3, 2]),
             (np.int32, [1, 4], [4, 1]),
             (np.int64, [1, 1, 4], [1, 2, 3]),
+            # Repeats on a unit extent only: a plain broadcast.
+            (np.float32, [1, 8, 1, 4, 4], [1, 1, 2, 1, 1]),
+            # Repeated and kept extents mixed.
+            (np.float16, [2, 3, 4], [3, 1, 2]),
+            # Too many repeated extents for the broadcast form; stays hip.tile.
+            (np.float32, [2, 2, 2, 2, 2], [2, 2, 2, 2, 2]),
         ],
     )
     def test_tile(self, model_runner, dtype, shape, repeats):
