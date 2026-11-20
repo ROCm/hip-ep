@@ -55,6 +55,9 @@ class TestScaledMaskedSoftmax:
             (16, 96, 2),  # two frames: block-diagonal mask
             (4, 300, 2),  # cols not a multiple of the block
             (2, 1024, 3),  # several elements per thread, uneven frames
+            (2, 7296, 1),  # the vision encoder's row width, one image
+            (1, 7296, 2),
+            (2, 1500, 2),  # not a multiple of 8: per-element form
         ],
     )
     def test_fp16(self, model_runner, heads, seq, frames):
