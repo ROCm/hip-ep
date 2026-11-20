@@ -51,11 +51,13 @@ namespace hip {
 
 // Breadth of the perfConfig search. Mirrors rock::TuningParamSetKind without
 // pulling a rocMLIR header into this interface; `Full` and `Exhaustive` are
-// supersets of `Quick` by rocMLIR's own contract.
-enum class AutotuneSpace { Quick, Full, Exhaustive };
+// supersets of `Quick` by rocMLIR's own contract. `QuickTuning` searches the
+// same rocMLIR quick list as `Quick` and does not consult the problem-cache
+// LUT.
+enum class AutotuneSpace { Quick, QuickTuning, Full, Exhaustive };
 
-// Parses "quick", "full", or "exhaustive". Returns false and leaves \p out
-// alone on anything else.
+// Parses "quick", "quicktuning", "full", or "exhaustive". Returns false and
+// leaves \p out alone on anything else. "quicktuning" selects QuickTuning.
 bool parseAutotuneSpace(StringRef name, AutotuneSpace &out);
 
 const char *autotuneSpaceName(AutotuneSpace space);
@@ -97,13 +99,15 @@ struct AutotuneOptions {
   // useful when tuning by hand, far too much for a normal compile.
   bool verbose = false;
   // External rocMLIR LUT FlatBuffer (.fb). hip-rocmlir-compiler sets this
-  // from --problem-cache or HIP_ROCMLIR_PROBLEM_CACHE. When set, the shipped
-  // tools/problem-cache/lut/<gpu_arch>.fb is not consulted. The in-process
-  // Execution Provider leaves this empty and uses the shipped table. An
-  // identical problem string is compiled as stored. A miss takes the nearest
-  // legal tile of the same kernel kind (conv, gemm, attention, or
-  // gemm-elementwise-gemm). A tile that fails to compile is skipped for the
-  // next nearest row.
+  // from --problem-cache or HIP_ROCMLIR_PROBLEM_CACHE. Consulted only when
+  // `space` is quick. quicktuning, full, and exhaustive ignore this path and
+  // the shipped table and search their own space. When set for a quick
+  // search, the shipped tools/problem-cache/lut/<gpu_arch>.fb is not
+  // consulted. The in-process Execution Provider leaves this empty and uses
+  // the shipped table for quick. An identical problem string is compiled as
+  // stored. A miss takes the nearest legal tile of the same kernel kind
+  // (conv, gemm, attention, or gemm-elementwise-gemm). A tile that fails to
+  // compile is skipped for the next nearest row.
   std::string problemCachePath;
   // Where to write this compile's winners. Empty skips the dump. The autotuner
   // does not write the file itself; hip-rocmlir-compiler calls
@@ -162,10 +166,13 @@ private:
 bool rocMlirSkipBenchmarking();
 
 // Reads HIPDNN_EP_ROCMLIR_AUTOTUNE for the search space only. Unset or empty
-// selects quick. "quick", "full", and "exhaustive" are the only accepted
-// values. Anything else warns and selects quick. Skipping the search is
-// rocMlirSkipBenchmarking(), not a value of this variable. Returns false,
-// leaving \p out alone, only when that skip flag is set.
+// selects quick. "quick", "quicktuning", "full", and "exhaustive" are the
+// only accepted values. Anything else warns and selects quick. The
+// problem-cache LUT is consulted only for quick. quicktuning searches the
+// same rocMLIR quick list and, like full and exhaustive, does not read the
+// LUT. Skipping the search is rocMlirSkipBenchmarking(), not a value of this
+// variable.
+// Returns false, leaving \p out alone, only when that skip flag is set.
 //
 // Env-only on purpose for now. The custom-kernel autotuners also accept a
 // provider option, but those are read in the Runtime, which already has the

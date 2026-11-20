@@ -179,7 +179,8 @@ int main(int argc, char **argv) {
       llvm::StringRef kind = llvm::StringRef(arg).drop_front(11);
       if (!mlir::hip::parseAutotuneSpace(kind, autotune.space)) {
         llvm::errs() << "error: unknown autotune space '" << kind
-                     << "' (expected quick, full, or exhaustive)\n";
+                     << "' (expected quick, quicktuning, full, or "
+                        "exhaustive)\n";
         return 1;
       }
     } else if (llvm::StringRef(arg).starts_with("--autotune-bench=")) {
@@ -243,10 +244,18 @@ int main(int argc, char **argv) {
         << "  <output>.\n"
         << "\n"
         << "Options:\n"
-        << "  --autotune[=quick|full|exhaustive]\n"
+        << "  --autotune[=quick|quicktuning|full|exhaustive]\n"
         << "                       Override the default quick autotune space "
            "and\n"
-        << "                       embed the fastest GPU candidate.\n"
+        << "                       embed the fastest GPU candidate. quick "
+           "(the\n"
+        << "                       default) consults the problem-cache LUT "
+           "first.\n"
+        << "                       quicktuning searches the same quick list "
+           "and\n"
+        << "                       bypasses that LUT. full and exhaustive "
+           "bypass\n"
+        << "                       it and search their own space.\n"
         << "  --autotune-bench=adaptive|simple\n"
         << "                       How candidates are timed (default: "
            "adaptive, or\n"
@@ -269,8 +278,10 @@ int main(int argc, char **argv) {
            "the\n"
         << "                       differences being searched for.\n"
         << "  --problem-cache <file.fb>\n"
-        << "                       Before searching, use this LUT FlatBuffer\n"
-        << "                       instead of the shipped table.\n"
+        << "                       quick only: before searching, use this LUT\n"
+        << "                       FlatBuffer instead of the shipped table.\n"
+        << "                       Ignored for quicktuning, full, and "
+           "exhaustive.\n"
         << "                       An identical problem string is\n"
         << "                       compiled as stored. HIP_ROCMLIR_PROBLEM_"
            "CACHE\n"
