@@ -60,6 +60,7 @@ BOUNDARY_COLS = [
     16384,
     16385,
     32768,
+    32769,
     40000,
 ]
 
@@ -153,12 +154,14 @@ class TestSoftmax:
         x = _random_input([rows, cols], dtype, seed=rows * 1000 + cols)
         _run_and_compare(model_runner, x)
 
-    @pytest.mark.parametrize("cols", [8193, 30000])
+    # 8193 and 30000 stay on the block kernel (cutoff 32768). 32769 and 40000
+    # are past it, so they take the three-pass fallback. Both paths keep the
+    # exponents in fp32; the bound below is what checks that.
+    @pytest.mark.parametrize("cols", [8193, 30000, 32769, 40000])
     def test_fp16_fallback_rounds_once(self, model_runner, cols):
-        # The three-pass fallback keeps its exponents in fp32, so each fp16
-        # output is the exact softmax rounded once: within half an fp16 step,
-        # 2^-11 relative, or 2^-25 among the subnormals. A stored fp16
-        # exponent would round twice and miss this bound on many elements.
+        # Each fp16 output is the exact softmax rounded once: within half an
+        # fp16 step, 2^-11 relative, or 2^-25 among the subnormals. A stored
+        # fp16 exponent would round twice and miss this bound on many elements.
         x = _random_input([5, cols], np.float16, seed=cols)
         model = _make_softmax_model(list(x.shape), np.float16, -1)
         actual = model_runner.backend.run(_persist(model_runner, model), [x])
