@@ -2345,7 +2345,16 @@ HIP_KERNEL_API int hip_batch_norm(
  * hip_group_norm_workspace_bytes for the current device. A null or smaller
  * workspace is valid: the kernel shrinks the split or uses a slower
  * one-block-per-group path.
+ *
+ * hip_group_norm_ex adds an epilogue:
+ *   y = act(scale[c] * (x - mean) * rsqrt(var + epsilon) + bias[c] + r)
+ * where r is `residual` (same shape and layout as input; null for none) and
+ * act is HIP_GROUP_NORM_ACT_*; `alpha` is the LeakyReLU slope.
  */
+#define HIP_GROUP_NORM_ACT_NONE 0
+#define HIP_GROUP_NORM_ACT_SILU 1
+#define HIP_GROUP_NORM_ACT_RELU 2
+#define HIP_GROUP_NORM_ACT_LEAKY_RELU 3
 HIP_KERNEL_API size_t hip_group_norm_workspace_bytes(
     int64_t n,
     int64_t c,
@@ -2366,6 +2375,25 @@ HIP_KERNEL_API int hip_group_norm(
     int64_t groups,
     int channels_last,
     int activation,
+    float epsilon,
+    void* workspace,
+    size_t workspace_bytes,
+    int hip_dtype);
+
+HIP_KERNEL_API int hip_group_norm_ex(
+    void* stream,
+    const void* input,
+    const void* scale,
+    const void* bias,
+    const void* residual,
+    void* output,
+    int64_t n,
+    int64_t c,
+    int64_t spatial,
+    int64_t groups,
+    int channels_last,
+    int activation,
+    float alpha,
     float epsilon,
     void* workspace,
     size_t workspace_bytes,

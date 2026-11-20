@@ -70,6 +70,7 @@ existing `--convert-hip-to-llvm` pipeline.
 | `BatchNormalization` | `hip.batch_norm` | custom HIP kernel; inference only |
 | `GroupNorm` (`com.microsoft`) | `hip.group_norm` | `group_norm_kernel.hip` |
 | `GroupNormalization` (opset 21) | `hip.group_norm` | `group_norm_kernel.hip`; NCHW, per-channel scale and bias only |
+| `Relu` / `LeakyRelu` / `Add` over a single-use `InstanceNormalization` or GroupNorm (fused) | `hip.group_norm` with `activation`, `alpha`, `residual` | `group_norm_kernel.hip`; InstanceNormalization needs a static C |
 | `RMSNormalization` | `hip.rms_norm` | `rms_norm_kernel.hip` |
 | `SimplifiedLayerNormalization` | `hip.rms_norm` | `rms_norm_kernel.hip` |
 | `GridSample` | `hip.grid_sample` | custom HIP kernel |
@@ -82,6 +83,17 @@ existing `--convert-hip-to-llvm` pipeline.
 | `HyperConnectionPostMix` (`com.microsoft`) | `hip.hyper_connection_post_mix` | `hyper_connection_kernel.hip` |
 | `HyperConnectionPostMix` + `BranchwiseRMSNorm` | `hip.hyper_connection_post_mix_norm` | `hyper_connection_kernel.hip` |
 | LpNorm+Mul pattern (fused) | `hip.rms_norm` | `rms_norm_kernel.hip` |
+
+The norm epilogue fusion folds the consumer of an InstanceNormalization or
+GroupNorm into the norm's output pass:
+`y = act(scale * (x - mean) * inv_std + bias + residual)`, with `act` one of
+none, SiLU, ReLU or LeakyReLU. It matches `Relu(norm)`, `LeakyRelu(norm)`,
+`Add(norm, r)` in either operand order, and `Relu(Add(norm, r))`. The norm, and
+the Add when folded, must have no other user, the norm must not already apply
+an activation, and `r` must have exactly the norm's type (no broadcasting).
+The pattern outranks the plain Relu, LeakyRelu and Add conversions, so the
+consumer never becomes a separate elementwise kernel. A fused
+InstanceNormalization becomes `hip.group_norm` with `groups = C`.
 
 `SkipSimplifiedLayerNormalization` fuses Add + RMSNorm into one kernel:
 `residual = x + skip [+ bias]; output = RMSNorm(residual) * weight`.

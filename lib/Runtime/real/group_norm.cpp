@@ -3,9 +3,9 @@
  * Licensed under the MIT License.
  */
 
-// com.microsoft GroupNorm:
-//   y = gamma * (x - mean) / sqrt(var + epsilon) + beta
-// Mean/var are per (N, group). activation 1 applies SiLU afterwards.
+// GroupNorm with a fused epilogue:
+//   y = act(gamma * (x - mean) / sqrt(var + epsilon) + beta + residual)
+// Mean/var are per (N, group). act is none, SiLU, ReLU or LeakyReLU(alpha).
 
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
@@ -32,17 +32,19 @@ static int hipdnn_ep_to_hip_dtype_group_norm(int64_t data_type) {
 }
 
 HIPDNN_EP_RT_EXPORT int wrap_group_norm(RuntimeState *state, void *input,
-                                        void *scale, void *bias, void *output,
-                                        int64_t n, int64_t c, int64_t spatial,
-                                        int64_t groups, int64_t channels_last,
+                                        void *scale, void *bias, void *residual,
+                                        void *output, int64_t n, int64_t c,
+                                        int64_t spatial, int64_t groups,
+                                        int64_t channels_last,
                                         int64_t activation, int64_t data_type,
-                                        float epsilon) {
+                                        float alpha, float epsilon) {
   OP_PROFILE(
       "groupnorm",
       [&] {
-        char b[96];
-        snprintf(b, sizeof(b), "%lldx%lldx%lld g=%lld", (long long)n,
-                 (long long)c, (long long)spatial, (long long)groups);
+        char b[128];
+        snprintf(b, sizeof(b), "%lldx%lldx%lld g=%lld act=%lld%s", (long long)n,
+                 (long long)c, (long long)spatial, (long long)groups,
+                 (long long)activation, residual ? " +res" : "");
         return std::string(b);
       },
       state);
@@ -59,7 +61,8 @@ HIPDNN_EP_RT_EXPORT int wrap_group_norm(RuntimeState *state, void *input,
   }
   if (groups <= 0 || c % groups != 0 ||
       (channels_last != 0 && channels_last != 1) ||
-      (activation != 0 && activation != 1)) {
+      activation < HIP_GROUP_NORM_ACT_NONE ||
+      activation > HIP_GROUP_NORM_ACT_LEAKY_RELU) {
     fprintf(stderr,
             "[REAL] wrap_group_norm: invalid groups=%lld channels_last=%lld "
             "activation=%lld c=%lld\n",
@@ -78,10 +81,11 @@ HIPDNN_EP_RT_EXPORT int wrap_group_norm(RuntimeState *state, void *input,
   void *stream = hipdnn_ep_state_get_stream(state);
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_group_norm: n=%lld c=%lld spatial=%lld groups=%lld "
-      "channels_last=%lld activation=%lld dtype=%lld eps=%e\n",
+      "channels_last=%lld activation=%lld alpha=%f residual=%d dtype=%lld "
+      "eps=%e\n",
       (long long)n, (long long)c, (long long)spatial, (long long)groups,
-      (long long)channels_last, (long long)activation, (long long)data_type,
-      (double)epsilon);
+      (long long)channels_last, (long long)activation, (double)alpha,
+      residual ? 1 : 0, (long long)data_type, (double)epsilon);
 
   // A failed workspace grow is not fatal: the kernel falls back to its
   // one-block-per-group path.
@@ -94,8 +98,8 @@ HIPDNN_EP_RT_EXPORT int wrap_group_norm(RuntimeState *state, void *input,
   else
     workspace_bytes = 0;
 
-  return hip_group_norm(stream, input, scale, bias, output, n, c, spatial,
-                        groups, static_cast<int>(channels_last),
-                        static_cast<int>(activation), epsilon, workspace,
-                        workspace_bytes, hip_dtype);
+  return hip_group_norm_ex(stream, input, scale, bias, residual, output, n, c,
+                           spatial, groups, static_cast<int>(channels_last),
+                           static_cast<int>(activation), alpha, epsilon,
+                           workspace, workspace_bytes, hip_dtype);
 }

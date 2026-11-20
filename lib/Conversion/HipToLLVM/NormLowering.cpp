@@ -515,8 +515,9 @@ struct BatchNormOpLowering : public ConvertOpToLLVMPattern<BatchNormOp> {
   }
 };
 
-// hip.group_norm -> wrap_group_norm(state, input, scale, bias, output,
-//   n, c, spatial, groups, channels_last, activation, data_type, epsilon)
+// hip.group_norm -> wrap_group_norm(state, input, scale, bias, residual,
+//   output, n, c, spatial, groups, channels_last, activation, data_type,
+//   alpha, epsilon). residual is null when the op has none.
 struct GroupNormOpLowering : public ConvertOpToLLVMPattern<GroupNormOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -536,6 +537,10 @@ struct GroupNormOpLowering : public ConvertOpToLLVMPattern<GroupNormOp> {
         extractContiguousMemRefPtr(adaptor.getScale(), rewriter, loc);
     Value biasPtr =
         extractContiguousMemRefPtr(adaptor.getBias(), rewriter, loc);
+    Value residualPtr =
+        adaptor.getResidual()
+            ? extractContiguousMemRefPtr(adaptor.getResidual(), rewriter, loc)
+            : LLVM::ZeroOp::create(rewriter, loc, ptrType).getResult();
     Value outputPtr =
         extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
@@ -573,16 +578,18 @@ struct GroupNormOpLowering : public ConvertOpToLLVMPattern<GroupNormOp> {
     Value groupsVal = i64Const(op.getGroups());
     Value channelsLastVal = i64Const(op.getChannelsLast());
     Value activationVal = i64Const(op.getActivation());
+    Value alphaVal =
+        LLVM::ConstantOp::create(rewriter, loc, f32Type, op.getAlphaAttr());
     Value epsilonVal =
         LLVM::ConstantOp::create(rewriter, loc, f32Type, op.getEpsilonAttr());
 
     SmallVector<Type> paramTypes = {
         ptrType,                   // state
         ptrType, ptrType, ptrType, // input, scale, bias
-        ptrType,                   // output
+        ptrType, ptrType,          // residual, output
         i64Type, i64Type, i64Type, // n, c, spatial
         i64Type, i64Type, i64Type, // groups, channels_last, activation
-        i64Type, f32Type           // data_type, epsilon
+        i64Type, f32Type, f32Type  // data_type, alpha, epsilon
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
@@ -594,6 +601,7 @@ struct GroupNormOpLowering : public ConvertOpToLLVMPattern<GroupNormOp> {
                                inputPtr,
                                scalePtr,
                                biasPtr,
+                               residualPtr,
                                outputPtr,
                                n,
                                c,
@@ -602,6 +610,7 @@ struct GroupNormOpLowering : public ConvertOpToLLVMPattern<GroupNormOp> {
                                channelsLastVal,
                                activationVal,
                                dataTypeVal,
+                               alphaVal,
                                epsilonVal};
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
