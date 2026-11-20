@@ -595,3 +595,59 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x10x10xf16>,
       outs(%le : tensor<1x8x8x8xf16>) {alpha = 1.000000e-01 : f64} : tensor<1x8x8x8xf16>
   return %l : tensor<1x8x8x8xf16>
 }
+
+// -----
+
+// hip_transpose handles at most eight dimensions, so a rank-nine result
+// transpose stays in the kernel.
+
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
+// CHECK-SAME: -> tensor<1x1x1x1x1x1x1x32x32xf16>
+// CHECK: hip.transpose
+// CHECK: return
+// CHECK-LABEL: func.func @main_graph
+// CHECK: hip.rocmlir
+// CHECK-NOT: hip.transpose
+// CHECK: return
+
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x1x1x1x1x1x1x32x32xf16>,
+                      %y: tensor<1x1x1x1x1x1x1x32x32xf16>)
+    -> tensor<1x1x1x1x1x1x1x32x32xf16> {
+  %ae = tensor.empty() : tensor<1x1x1x1x1x1x1x32x32xf16>
+  %a = hip.add(%ctx) ins(%x, %y : tensor<1x1x1x1x1x1x1x32x32xf16>, tensor<1x1x1x1x1x1x1x32x32xf16>)
+      outs(%ae : tensor<1x1x1x1x1x1x1x32x32xf16>) -> tensor<1x1x1x1x1x1x1x32x32xf16>
+  %me = tensor.empty() : tensor<1x1x1x1x1x1x1x32x32xf16>
+  %m = hip.mul(%ctx) ins(%a, %a : tensor<1x1x1x1x1x1x1x32x32xf16>, tensor<1x1x1x1x1x1x1x32x32xf16>)
+      outs(%me : tensor<1x1x1x1x1x1x1x32x32xf16>) -> tensor<1x1x1x1x1x1x1x32x32xf16>
+  %te = tensor.empty() : tensor<1x1x1x1x1x1x1x32x32xf16>
+  %t = hip.transpose(%ctx) ins(%m : tensor<1x1x1x1x1x1x1x32x32xf16>)
+      outs(%te : tensor<1x1x1x1x1x1x1x32x32xf16>) {perm = [0, 1, 2, 3, 4, 5, 6, 8, 7]} : tensor<1x1x1x1x1x1x1x32x32xf16>
+  return %t : tensor<1x1x1x1x1x1x1x32x32xf16>
+}
+
+// -----
+
+// The HIP elementwise ops take at most four axes, so a rank-five f32 remainder
+// that saves no launch keeps its transpose in the kernel instead of running as
+// HIP ops.
+
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
+// CHECK-SAME: -> tensor<2x2x2x64x32xf32>
+// CHECK: hip.mul
+// CHECK: hip.transpose
+// CHECK: return
+// CHECK-LABEL: func.func @main_graph
+// CHECK: hip.rocmlir
+// CHECK-NOT: hip.transpose
+// CHECK: return
+
+func.func @main_graph(%ctx: !hip.context, %x: tensor<2x1x2x1x64xf32>,
+                      %y: tensor<1x2x1x32x1xf32>) -> tensor<2x2x2x64x32xf32> {
+  %me = tensor.empty() : tensor<2x2x2x32x64xf32>
+  %m = hip.mul(%ctx) ins(%x, %y : tensor<2x1x2x1x64xf32>, tensor<1x2x1x32x1xf32>)
+      outs(%me : tensor<2x2x2x32x64xf32>) -> tensor<2x2x2x32x64xf32>
+  %te = tensor.empty() : tensor<2x2x2x64x32xf32>
+  %t = hip.transpose(%ctx) ins(%m : tensor<2x2x2x32x64xf32>)
+      outs(%te : tensor<2x2x2x64x32xf32>) {perm = [0, 1, 2, 4, 3]} : tensor<2x2x2x64x32xf32>
+  return %t : tensor<2x2x2x64x32xf32>
+}
