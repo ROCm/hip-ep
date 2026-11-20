@@ -1640,12 +1640,16 @@ int wrap_batch_normalization(RuntimeState *state, void *input, void *scale,
                              void *output, int64_t n, int64_t c,
                              int64_t spatial, int64_t data_type, float epsilon);
 
-// com.microsoft GroupNorm. channels_last 0 is NCHW, 1 is NHWC.
-// activation 0 is none, 1 is SiLU after the affine transform.
+// GroupNorm (also InstanceNorm with groups == c) with a fused epilogue:
+//   y = act(scale * (x - mean) * inv_std + bias + residual)
+// channels_last 0 is NCHW, 1 is NHWC. residual has the layout of output and
+// may be null. activation 0 is none, 1 SiLU, 2 ReLU, 3 LeakyReLU with slope
+// alpha.
 int wrap_group_norm(RuntimeState *state, void *input, void *scale, void *bias,
-                    void *output, int64_t n, int64_t c, int64_t spatial,
-                    int64_t groups, int64_t channels_last, int64_t activation,
-                    int64_t data_type, float epsilon);
+                    void *residual, void *output, int64_t n, int64_t c,
+                    int64_t spatial, int64_t groups, int64_t channels_last,
+                    int64_t activation, int64_t data_type, float alpha,
+                    float epsilon);
 
 // com.microsoft GatedRMSNorm:
 //   y = x * rsqrt(mean(x^2) + epsilon) * scale * act(gate)
