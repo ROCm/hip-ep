@@ -2284,6 +2284,28 @@ HIP_KERNEL_API int hip_layer_norm(
     int hip_dtype,
     int mean_dtype);
 
+/* Residual add fused with LayerNormalization over the last axis:
+ *
+ *   sum = input + skip [+ bias]       (rounded to hip_dtype)
+ *   y   = (sum - mean) * rsqrt(var + epsilon) * gamma [+ beta]
+ *
+ * `beta`, `bias` and `input_skip_bias_sum` may be null. All tensors share
+ * `hip_dtype` (FLOAT16 or FLOAT32).
+ */
+HIP_KERNEL_API int hip_skip_layer_norm(
+    void* stream,
+    const void* input,
+    const void* skip,
+    const void* gamma,
+    const void* beta,                 // optional
+    const void* bias,                 // optional
+    void* output,
+    void* input_skip_bias_sum,        // optional
+    int64_t outer,
+    int64_t norm_size,
+    float epsilon,
+    int hip_dtype);
+
 /* =========================================================================
  * InstanceNormalization
  * =========================================================================
