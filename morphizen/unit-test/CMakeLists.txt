@@ -38,6 +38,7 @@ add_executable(${TEST_EXE_NAME}
   morphizen/test_mlir_ssa_dominance.cpp
   morphizen/test_onnx_return.cpp
   morphizen/test_onnx_custom.cpp
+  morphizen/test_onnx_cast_enum.cpp
   ${MORPHIZEN_E2E_TESTS_PROTO_SRCS}
   ${MORPHIZEN_E2E_TESTS_PROTO_HDRS}
   morphizen-e2e-test/config.cpp
