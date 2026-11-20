@@ -35,6 +35,7 @@
 #include "linear_attention_group_fold.hpp"
 #include "patch_embed_conv_to_gemm.hpp"
 #include "swiglu_fusion.hpp"
+#include "transpose_removal/transpose_removal.hpp"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/PDL/IR/PDL.h"
@@ -830,6 +831,8 @@ inline void registerNativeHelpers(mlir::PDLPatternModule &pdlPatterns) {
                                          canRequantizeLayoutOp);
   pdlPatterns.registerRewriteFunction("CreateRequantizedLayoutOp",
                                       createRequantizedLayoutOp);
+
+  registerTransposeRemovalHelpers(pdlPatterns);
 }
 
 /// Benefit of the native patterns added alongside the PDLL ones.

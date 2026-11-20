@@ -129,9 +129,9 @@ function(hip_add_pdll_patterns)
     # The entry point #includes every pattern file, so mlir-pdll runs once and
     # emits one PDL module — collecting the patterns into a single
     # RewritePatternSet also makes them share a fixpoint. Every .pdll is still
-    # globbed as a dependency, otherwise editing an included pattern would not
-    # rebuild it.
-    file(GLOB _pdll_sources CONFIGURE_DEPENDS "${ARG_SOURCE_DIR}/*.pdll")
+    # globbed (including subfolders) as a dependency, otherwise editing an
+    # included pattern would not rebuild it.
+    file(GLOB_RECURSE _pdll_sources CONFIGURE_DEPENDS "${ARG_SOURCE_DIR}/*.pdll")
     get_filename_component(_entry_stem "${ARG_ENTRY}" NAME_WE)
     set(_pdl_text "${CMAKE_CURRENT_BINARY_DIR}/${_entry_stem}.pdl.mlir")
 

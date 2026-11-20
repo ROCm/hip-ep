@@ -71,3 +71,4 @@ Rewrite CreateRequantizedLayoutOp(dq: Op, layout: Op, q: Op) -> Value;
 #include "QSigmoidFusion.pdll"
 #include "QLpNormalizationFusion.pdll"
 #include "QdqRoundTrip.pdll"
+#include "transpose_removal/TransposeRemoval.pdll"
