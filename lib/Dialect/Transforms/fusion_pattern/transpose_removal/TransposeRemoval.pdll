@@ -1,0 +1,38 @@
+//===- TransposeRemoval.pdll ----------------------------------------------===//
+//
+// Remove two inverse `hip.transpose` ops around a per-element op:
+//
+//   transpose(P) -> per-element op -> transpose(inverse(P))  ==>  op
+//
+// This is a stopgap, not transpose propagation: it only handles that exact
+// sandwich and is meant to be replaced as a whole by a proper transpose
+// propagation. Hence everything transpose-specific lives in this directory.
+//
+// Included once by HipFusionTransformPatterns.pdll, which declares the shared
+// helpers used below. Not compilable on its own.
+//===----------------------------------------------------------------------===//
+
+Constraint IsInverseTransposePair(first: Op, second: Op);
+Constraint IsPerElementOp(op: Op);
+// A copy of op reading newInput where it read oldInput and writing into
+// newInit, with the type of newInit.
+Rewrite RebuildOnInput(op: Op, oldInput: Value, newInput: Value,
+                       newInit: Value) -> Value;
+
+Pattern HipInverseTransposesAroundPerElementOp {
+  let first = op<hip.transpose>(ctx: Value, input: Value, firstInit: Value);
+  // Unnamed: IsPerElementOp decides which ops qualify.
+  let perElement = op<>(ctx, first.0, perElementInit: Value);
+  let second = op<hip.transpose>(ctx, perElement.0, secondInit: Value);
+
+  IsInverseTransposePair(first, second);
+  IsPerElementOp(perElement);
+  HasSingleUseResult(first);
+  HasSingleUseResult(perElement);
+
+  rewrite second with {
+    // second's init already has the type the rebuilt op has to produce.
+    let rebuilt = RebuildOnInput(perElement, first.0, input, secondInit);
+    replace second with rebuilt;
+  };
+}
