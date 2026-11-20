@@ -1,0 +1,135 @@
+<!--
+-- Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+-- Licensed under the MIT License.
+-->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HIP Tensor Constant Folding: Proposal in Brief</title>
+<style>
+:root { color-scheme: light; }
+body { margin: 0; background: #f3f5f8; color: #172332; font: 1rem/1.6 system-ui, sans-serif; }
+main { max-width: 62rem; margin: 2rem auto; padding: 2.5rem clamp(1rem, 5vw, 3.5rem); background: white; border: 1px solid #d5dce5; }
+h1, h2, h3 { line-height: 1.24; }
+h1 { margin-top: 0; font-size: clamp(1.8rem, 5vw, 2.5rem); }
+h2 { margin-top: 2.2rem; padding-top: 1rem; border-top: 1px solid #d5dce5; }
+a { color: #164b93; overflow-wrap: anywhere; }
+code { font: .9em Consolas, monospace; background: #edf2f7; border-radius: .2rem; padding: .08rem .25rem; overflow-wrap: anywhere; }
+pre { overflow: auto; padding: 1rem; background: #edf2f7; border-radius: .35rem; }
+pre code { padding: 0; overflow-wrap: normal; }
+table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+th, td { padding: .45rem .65rem; border: 1px solid #d5dce5; text-align: left; vertical-align: top; }
+th { background: #e8f0fa; }
+li + li { margin-top: .32rem; }
+@media (max-width: 45rem) { main { margin: 0; border: 0; } ul, ol { padding-left: 1.45rem; } }
+@media print { body { background: white; } main { margin: 0; padding: 0; max-width: none; border: 0; } h2, h3 { break-after: avoid; } tr, pre { break-inside: avoid; } pre { white-space: pre-wrap; } }
+</style>
+</head>
+<body>
+<main>
+<!--
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+-->
+<h1>HIP Tensor Constant Folding: Proposal in Brief</h1>
+<p><strong>Decision requested:</strong> Approve an opt-in compiler pass for exact, inline-only tensor folding. Default enablement is a separate decision after validation. The pass is not yet implemented.</p>
+<h2>What exists today vs. what changes</h2>
+<p>HIP operations with constant-only inputs can still launch GPU kernels on every inference.</p>
+<table>
+<thead>
+<tr>
+<th>Where it runs</th>
+<th>What exists today</th>
+<th>Why it does not cover this</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Before hip-ep, on the source graph</td>
+<td>Exporters or upstream optimizers may fold constants.</td>
+<td>Coverage varies with the frontend and settings; constant-only work can still reach HIP.</td>
+</tr>
+<tr>
+<td>During ONNX-to-HIP conversion</td>
+<td>Targeted ONNX rewrites handle cases such as <code>Gather(Shape(x), k)</code> and <code>ConstantOfShape</code>.</td>
+<td>These recognize specific source ops, not arbitrary HIP tensor branches. Extending this stage would not cover the Torch-to-HIP path.</td>
+</tr>
+<tr>
+<td>Shared tensor HIP, before externalization</td>
+<td><code>FoldConstantExtracts</code> exposes scalar values and <code>InferShapes</code> refines result dimensions.</td>
+<td>A known shape or scalar does not imply that a tensor's elements are known. Keep these passes early so shape inference can use the scalar facts.</td>
+</tr>
+<tr>
+<td>ONNX pipeline head and shared tensor HIP tail</td>
+<td>The ONNX head runs <code>FoldBatchNorm</code> to absorb normalization into Conv weights and bias. The shared tail runs HIP fusion.</td>
+<td>Conv still runs on runtime activations. Reuse the constant reader, not the Conv-specific rewrite, to evaluate constant-only branches.</td>
+</tr>
+<tr>
+<td>MLIR cleanup, including shared HIP after externalization</td>
+<td>Canonicalization applies local folds and patterns; CSE merges eligible equivalent ops.</td>
+<td>CSE does not compute tensor values. HIP compute ops lack payload folders and HIP has no constant materializer; adding local folders alone would not decide what to store across a branch or enforce storage budgets.</td>
+</tr>
+<tr>
+<td>LLVM backend, after HIP-to-LLVM lowering</td>
+<td>LLVM folds visible scalar arithmetic and eliminates redundant work it can prove equivalent.</td>
+<td>The relevant HIP ops are now runtime calls that write destination buffers. LLVM does not evaluate the GPU computation behind those calls.</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Evidence:</strong> In one saved optimized bitcode artifact, 16 runtime call sites still prepare a fixed attention mask from constant inputs: one each for <code>Range</code>, <code>Less</code>, <code>Not</code>, and <code>Expand</code>, plus 12 for <code>Where</code>. These are static call sites from an earlier build, not a measured speedup or a guarantee for the current pipeline.</p>
+<p>The <a href="../../test/lit/Inputs/hip-tensor-constant-folding-capture.hip.mlir">full compiler-generated HIP IR capture</a> shows the preparation chain feeding attention. This is the saved import-stage IR, not a dump at the proposed pass insertion point. It references external weight data that is not included, and the installed <code>hip-mlir-opt</code> rejects its <code>hip.gqa</code> syntax. It lives under LIT <code>Inputs</code> as a reference, not a runnable test.</p>
+<h2>Proposal</h2>
+<p>Evaluate supported tensor ops once at compile time when all inputs that determine their result are known. Emit or reuse a <code>hip.constant</code> only for results that surviving consumers need. Intermediate tensors stay in compiler memory and are not serialized unless another use still needs them. This is not a fusion rule: the runtime consumer's computation stays the same.</p>
+<p><strong>Why a dedicated pass?</strong> A local fold can compute one op's result. The pass can look across a chain or branches before deciding what to store, what to keep live, and whether removing the runtime work is worth the added constant storage. The graph algorithm is shared across frontends; new coverage comes from adding validated per-op evaluators, not matching model-specific patterns.</p>
+<h2>Compiler workflow</h2>
+<p>Add <code>hip-fold-tensor-constants</code> to the shared tensor HIP tail used by the ONNX and Torch entry points, after HIP fusion and before constant externalization:</p>
+<pre><code class="language-text">ONNX or Torch -&gt; shared tensor HIP tail
+  -&gt; shape inference -&gt; HIP fusion
+  -&gt; NEW: evaluate constants -&gt; plan replacements -&gt; commit safe groups
+  -&gt; externalize constants -&gt; existing cleanup -&gt; bufferize -&gt; LLVM
+</code></pre>
+<p>This slot keeps existing fusion opportunities intact and lets the pass read inline payloads and retire dead constants before storage is assigned.</p>
+<p><strong>Related work and ordering:</strong></p>
+<ul>
+<li><a href="https://github.com/ROCm/hip-ep/pull/1553">#1553</a> proposes BatchNorm folding in the shared tail. If it lands, keep that fold before tensor constant folding. Phase 1 does not depend on it.</li>
+<li><a href="https://github.com/ROCm/hip-ep/pull/1324">#1324</a> proposes device placement for existing constants before externalization. If it lands, test the combined ordering and verify that surviving consumers get device-readable folded constants.</li>
+<li><a href="https://github.com/ROCm/hip-ep/pull/1588">#1588</a> evaluates constant dequantized filters inside ConvTranspose decomposition. It is the closest overlap, but serves an earlier, specific rewrite; the proposed shared pass does not replace it.</li>
+</ul>
+<p>The pass owns graph traversal, rewrite planning, and budgets. Per-op evaluators own value semantics; reuse <code>HipConstantData</code> and HIP shape helpers rather than duplicating shape rules. The existing externalizer owns storage and serialization. Keep canonicalization, CSE, and destination repair in their current order. No runtime, kernel, or ABI changes.</p>
+<h2>Phase 1 scope</h2>
+<ul>
+<li>Start with validated static views and exact cases of <code>Range</code>, <code>Less</code>, <code>Not</code>, <code>Expand</code>, and <code>Where</code> from inline constants. For example, <code>Where</code> can copy the selected floating-point bits without performing floating-point arithmetic. Check types, layout, shapes, bounds, and any destination values the op reads. Preserve existing validation and error behavior.</li>
+<li>Work within single-block functions. Support shared producers and joins. Skip unknown inputs or unproven semantics. No propagation across control flow.</li>
+<li>Defer file-backed constants, graph-output replacement, and floating-point arithmetic (<code>Mul</code>, <code>Div</code>, <code>Sqrt</code>, reductions) until storage or numerical behavior has been validated separately.</li>
+</ul>
+<h2>Algorithm</h2>
+<ol>
+<li><strong>Evaluate forward without changing IR.</strong> Visit ops in block order. Evaluate each supported op once when its required inputs are known, and memoize results by SSA value. A blocked op stops propagation through that op, not through sibling branches.</li>
+<li><strong>Plan rewrites backward.</strong> Group evaluated ops and views connected by SSA dependencies; sharing a literal alone does not join groups. Keep <em>known value</em>, <em>replaceable operand use</em>, and <em>removable op</em> separate. A surviving use must accept the replacement's immutable storage, layout, and placement, including through aliases. A blocked use keeps its producer live. Erase an op only if removal preserves behavior and every use of every result is replaced or belongs to an op already planned dead.</li>
+<li><strong>Choose carriers, check budgets, then commit.</strong> Emit only live boundary values. Reuse exact-type, bit-identical dominating carriers when legal. Charge compile-time work and memory before evaluation, and price serialized and resident storage separately before committing. Count only proven retirements; do not credit shared sources across groups. Require removal of at least one runtime compute op. Leave rejected groups unchanged, and do not erase a carrier if doing so could hide a storage validation error.</li>
+</ol>
+<h3>Before and after: one constant branch, one runtime input</h3>
+<pre><code class="language-text">Before
+constants -&gt; A --+
+                 +-&gt; Join --+
+constants -&gt; B --+          +-&gt; Consumer
+runtime input --------------+
+
+After
+folded hip.constant --+
+                      +-&gt; Consumer
+runtime input --------+
+</code></pre>
+<p><code>A</code>, <code>B</code>, and <code>Join</code> disappear only if they have no remaining uses. A blocked side use keeps its producer and required dependencies alive; it doesn't prevent folding the join for a compatible consumer.</p>
+<h2>Implementation and acceptance</h2>
+<ol>
+<li><strong>Capture a pass-off baseline</strong> at the proposed insertion point. Confirm operand types, constant storage, and consumer roles before setting call-removal expectations.</li>
+<li><strong>Land the standalone pass and focused LIT tests.</strong> Cover exact values, wide fan-out, a diamond join with a blocked side use, return/view exclusions, carrier reuse, budget refusal, and preserved validation errors.</li>
+<li><strong>Wire the default-off option through both frontend entry points.</strong> With the same build and fresh artifacts, compare optimized bitcode call sites and constant payloads. If the fixed-mask chain is present and eligible in the new baseline, verify that its preparation calls disappear, attention still runs, and dead payloads are not serialized.</li>
+<li><strong>Gate default enablement on GPU parity and cost.</strong> Prove execution without CPU fallback, then compare warmed-up inference latency, compile time, initialization, and persistent/transient memory with tracing off. No speedup is claimed before measurement.</li>
+</ol>
+</main>
+</body>
+</html>
