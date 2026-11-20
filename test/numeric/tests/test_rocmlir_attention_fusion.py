@@ -142,8 +142,14 @@ def _run(model_runner, model, feeds):
 def _check(model_runner, dtype, b, h, s, d, **kw):
     model = _make_model(dtype, b, h, s, d, **kw)
     feeds, (q, k, v, mask) = _inputs(
-        dtype, b, h, s, d, bias=kw.get("bias", False),
-        k_layout=kw.get("k_layout", "bhds"), seed=s * 1000 + d,
+        dtype,
+        b,
+        h,
+        s,
+        d,
+        bias=kw.get("bias", False),
+        k_layout=kw.get("k_layout", "bhds"),
+        seed=s * 1000 + d,
     )
     actual = _run(model_runner, model, feeds)
     y, p = _reference(q, k, v, mask)
@@ -154,7 +160,9 @@ def _check(model_runner, dtype, b, h, s, d, **kw):
 class TestAttentionFusionF16:
     """f16 has matrix acceleration, so these all merge into one kernel."""
 
-    @pytest.mark.parametrize("s,d", [(64, 32), (128, 64), (256, 64), (128, 128), (64, 256)])
+    @pytest.mark.parametrize(
+        "s,d", [(64, 32), (128, 64), (256, 64), (128, 128), (64, 256)]
+    )
     def test_scaled(self, model_runner, s, d):
         _check(model_runner, np.float16, 1, 4, s, d)
 
@@ -201,7 +209,9 @@ class TestAttentionFusionRepeatedBlocks:
         tp = np_to_onnx_type(dtype)
         names = ("q0", "k0", "v0", "q1", "k1", "v1")
         shapes = ([b, h, s, d], [b, h, d, s], [b, h, s, d]) * 2
-        inputs = [helper.make_tensor_value_info(n, tp, sh) for n, sh in zip(names, shapes)]
+        inputs = [
+            helper.make_tensor_value_info(n, tp, sh) for n, sh in zip(names, shapes)
+        ]
         outputs = [
             helper.make_tensor_value_info(n, tp, [b, h, s, d]) for n in ("y0", "y1")
         ]
@@ -247,5 +257,7 @@ class TestAttentionFusionRepeatedBlocks:
         q2 = np.random.default_rng(4).standard_normal((b, h, s, d)).astype(dtype)
         actual = _run(model_runner, model, feeds + [q2])
         y, _ = _reference(q, k, v, None)
-        s2 = (q2.astype(np.float64) @ k.astype(np.float64).transpose(0, 1, 3, 2)) / np.sqrt(d)
+        s2 = (
+            q2.astype(np.float64) @ k.astype(np.float64).transpose(0, 1, 3, 2)
+        ) / np.sqrt(d)
         compare_outputs(actual, [y, s2], **_TOL[dtype])
