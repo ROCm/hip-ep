@@ -1,2 +1,0 @@
-pyelftools>=0.29
-zstandard>=0.21
