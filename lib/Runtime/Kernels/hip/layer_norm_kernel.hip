@@ -12,9 +12,11 @@
  *         (outer = input_num_elements / scale_num_elements,
  *          norm_size = scale_num_elements).
  *
- * Algorithm: two-pass with shared-memory block reduction.
- *   Pass A: each block sums x and x^2 over `norm_size`, all in FP32.
- *   After block sync: thread 0 derives mean, inv_std.
+ * Algorithm: shifted two-pass statistics with shared-memory block reductions.
+ *   Pass A1: each block sums x - x[0] over `norm_size`, in FP32, to get the
+ *            mean.
+ *   Pass A2: each block sums (x - mean)^2, in FP32, to get the variance;
+ *            thread 0 derives inv_std.
  *   Pass B: each thread writes y in input dtype, using FP32 math.
  *
  * Rejected alternative: Welford online algorithm. Welford is numerically
@@ -76,20 +78,16 @@ __global__ void hip_layer_norm_kernel(const T_IN *__restrict__ input,
   const T_IN *x_row = input + row * norm_size;
   T_IN *y_row = output + row * norm_size;
 
-  __shared__ float s_sum;
-  __shared__ float s_sumsq;
   __shared__ float s_mean;
   __shared__ float s_inv_std;
   __shared__ float s_reduce[kLayerNormBlockSize];
 
-  // Pass A: per-thread partial sums.
+  // Pass A1: per-thread partial sums of x - shift. Shifting by a sample of the
+  // row keeps the mean precise when |mean| >> stddev (e.g. x = [8192, 8193]).
+  const float shift = load_as_float<T_IN, T_SCALE>(x_row);
   float local_sum = 0.0f;
-  float local_sumsq = 0.0f;
-  for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
-    float v = load_as_float<T_IN, T_SCALE>(x_row + i);
-    local_sum += v;
-    local_sumsq += v * v;
-  }
+  for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x)
+    local_sum += load_as_float<T_IN, T_SCALE>(x_row + i) - shift;
 
   // Block reduce sum.
   s_reduce[threadIdx.x] = local_sum;
@@ -100,9 +98,20 @@ __global__ void hip_layer_norm_kernel(const T_IN *__restrict__ input,
     __syncthreads();
   }
   if (threadIdx.x == 0)
-    s_sum = s_reduce[0];
-
+    s_mean = s_reduce[0] / static_cast<float>(norm_size);
   __syncthreads();
+
+  // Pass A2: per-thread partial sums of squared deviations from the mean.
+  // Centering avoids the E[x^2] - E[x]^2 cancellation, and since
+  // sum((x - mean)^2) <= sum(x^2) it cannot overflow for rows whose plain sum
+  // of squares is finite (e.g. x = [1e19, -1e19], where squaring x - x[0]
+  // would overflow).
+  const float shifted_mean = s_mean;
+  float local_sumsq = 0.0f;
+  for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
+    float d = (load_as_float<T_IN, T_SCALE>(x_row + i) - shift) - shifted_mean;
+    local_sumsq += d * d;
+  }
 
   // Block reduce sumsq.
   s_reduce[threadIdx.x] = local_sumsq;
@@ -113,29 +122,24 @@ __global__ void hip_layer_norm_kernel(const T_IN *__restrict__ input,
     __syncthreads();
   }
   if (threadIdx.x == 0) {
-    s_sumsq = s_reduce[0];
-    float mean = s_sum / static_cast<float>(norm_size);
-    float var = s_sumsq / static_cast<float>(norm_size) - mean * mean;
-    if (var < 0.0f)
-      var = 0.0f; // Cancellation-induced negative -> clamp.
+    float var = s_reduce[0] / static_cast<float>(norm_size);
     float inv_std = rsqrtf(var + epsilon);
-    s_mean = mean;
     s_inv_std = inv_std;
     if (mean_out)
-      mean_out[row] = store_from_float<MEAN_OUT_T>(mean);
+      mean_out[row] = store_from_float<MEAN_OUT_T>(shift + shifted_mean);
     if (inv_std_out)
       inv_std_out[row] = store_from_float<MEAN_OUT_T>(inv_std);
   }
   __syncthreads();
 
-  // Pass B: per-element normalize + affine.
-  float mean = s_mean;
+  // Pass B: per-element normalize + affine. (x - shift) - shifted_mean keeps
+  // the precision that x - (shift + shifted_mean) loses when |mean| is large.
   float inv_std = s_inv_std;
   for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
-    float v = load_as_float<T_IN, T_SCALE>(x_row + i);
+    float v = load_as_float<T_IN, T_SCALE>(x_row + i) - shift;
     float s = load_as_float<T_SCALE, T_SCALE>(scale + i);
     float b = bias ? load_as_float<T_SCALE, T_SCALE>(bias + i) : 0.0f;
-    float n = (v - mean) * inv_std * s + b;
+    float n = (v - shifted_mean) * inv_std * s + b;
     y_row[i] = store_from_float<T_IN>(n);
   }
 }
