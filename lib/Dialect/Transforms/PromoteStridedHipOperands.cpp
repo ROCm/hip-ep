@@ -21,6 +21,12 @@
 // consumer's operand. This mirrors upstream linalg::promoteSubViews and
 // establishes that DPS-input memrefs have identity layout after this pass.
 //
+// Ops that read strided inputs
+// ----------------------------
+// hip.reverse lowers to a strided copy that reads its input through the memref
+// descriptor, so its input keeps its layout. Promoting it would add the very
+// copy the op exists to avoid.
+//
 // DPS-init (output) operands
 // --------------------------
 // Inits are intentionally left untouched: promoting a write target requires
@@ -38,6 +44,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -146,6 +153,8 @@ void PromoteStridedHipOperandsPass::runOnOperation() {
 
   for (DestinationStyleOpInterface dpsOp : consumers) {
     Operation *consumer = dpsOp.getOperation();
+    if (isa<ReverseOp>(consumer))
+      continue;
     SmallVector<Value> temporaries;
     for (OpOperand *input : dpsOp.getDpsInputOperands()) {
       auto type = dyn_cast<MemRefType>(input->get().getType());

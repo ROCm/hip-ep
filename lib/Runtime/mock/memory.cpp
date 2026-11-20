@@ -110,3 +110,77 @@ int wrap_strided_copy(RuntimeState *state, void *dst_ptr, const void *src_ptr,
   }
   return 0;
 }
+
+// Mock N-D strided copy: walks every index on the host. Source strides may be
+// negative.
+int wrap_strided_copy_nd(RuntimeState *state, void *dst_ptr,
+                         const void *src_ptr, int64_t elem_bytes, int64_t rank,
+                         const int64_t *sizes, const int64_t *src_strides,
+                         const int64_t *dst_strides) {
+  if (!state || rank < 0 ||
+      (rank > 0 && (!sizes || !src_strides || !dst_strides))) {
+    fprintf(stderr, "wrap_strided_copy_nd: invalid argument\n");
+    return -1;
+  }
+  int64_t total = 1;
+  for (int64_t i = 0; i < rank; ++i)
+    total *= sizes[i];
+  MOCK_PRINT("[MOCK] wrap_strided_copy_nd(dst=%p elem=%lld rank=%lld "
+             "total=%lld)\n",
+             dst_ptr, (long long)elem_bytes, (long long)rank, (long long)total);
+  if (total == 0)
+    return 0;
+  if (!dst_ptr || !src_ptr) {
+    fprintf(stderr, "wrap_strided_copy_nd: null pointer\n");
+    return -1;
+  }
+  const char *s = static_cast<const char *>(src_ptr);
+  char *d = static_cast<char *>(dst_ptr);
+  for (int64_t t = 0; t < total; ++t) {
+    int64_t r = t, srcOff = 0, dstOff = 0;
+    for (int64_t i = rank - 1; i >= 0; --i) {
+      const int64_t idx = r % sizes[i];
+      r /= sizes[i];
+      srcOff += idx * src_strides[i];
+      dstOff += idx * dst_strides[i];
+    }
+    memcpy(d + dstOff * elem_bytes, s + srcOff * elem_bytes, elem_bytes);
+  }
+  return 0;
+}
+
+// Mock concat: one pitched host copy per input.
+int wrap_concat(RuntimeState *state, void *dst_ptr, int64_t num_inputs,
+                void *const *src_ptrs, const int64_t *src_widths, int64_t outer,
+                int64_t elem_bytes) {
+  if (!state || num_inputs <= 0 || !src_ptrs || !src_widths) {
+    fprintf(stderr, "wrap_concat: invalid argument\n");
+    return -1;
+  }
+  int64_t dst_width = 0;
+  for (int64_t i = 0; i < num_inputs; ++i)
+    dst_width += src_widths[i];
+  MOCK_PRINT("[MOCK] wrap_concat(dst=%p n=%lld outer=%lld width=%lld "
+             "elem=%lld)\n",
+             dst_ptr, (long long)num_inputs, (long long)outer,
+             (long long)dst_width, (long long)elem_bytes);
+  if (outer == 0 || dst_width == 0)
+    return 0;
+  if (!dst_ptr) {
+    fprintf(stderr, "wrap_concat: null output\n");
+    return -1;
+  }
+  char *d = static_cast<char *>(dst_ptr);
+  int64_t col = 0;
+  for (int64_t i = 0; i < num_inputs; ++i) {
+    const int64_t width = src_widths[i];
+    if (width == 0)
+      continue;
+    const char *s = static_cast<const char *>(src_ptrs[i]);
+    for (int64_t row = 0; row < outer; ++row)
+      memcpy(d + (row * dst_width + col) * elem_bytes,
+             s + row * width * elem_bytes, width * elem_bytes);
+    col += width;
+  }
+  return 0;
+}
