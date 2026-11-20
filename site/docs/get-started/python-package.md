@@ -1,9 +1,9 @@
 ---
 title: Run models from Python
-description: Install the four wheels bundled with HIP EP v0.5.1, select AMDGPU in an existing model directory, and run the Python text or vision-language benchmark.
+description: Install the four wheels bundled with HIP EP v0.5.3, select AMDGPU in an existing model directory, and run the Python text or vision-language benchmark.
 ---
 
-The v0.5.1 Python archive contains four local wheels for running HIP EP through
+The v0.5.3 Python archive contains four local wheels for running HIP EP through
 ONNX Runtime and OGA, together with the benchmark scripts used below. Installing
 the wheels places the EP's native files where the packaged runtime expects them;
 no Visual Studio installation or manual DLL copy is part of this procedure.
@@ -14,7 +14,7 @@ helpers installed later.
 This guide covers Strix Halo, Strix Point, Krackan Point, and GPT2 on Windows.
 It assumes that the graphics driver is already installed. The commands use
 PowerShell syntax, but HIP EP itself does not depend on PowerShell.
-The v0.5.1 procedure uses `GPT2` as its fourth target label. Because that is not
+The v0.5.3 procedure uses `GPT2` as its fourth target label. Because that is not
 a retail adapter name, confirm the matching product with the release owner
 before using that target.
 
@@ -38,7 +38,7 @@ names and configurations, but it does not distribute the ready-to-run directorie
 ## 2. Download the Python package
 
 Download
-[`hipep_0.5.1_windows_python.zip`](https://github.com/ROCm/hip-ep/releases/download/v0.5.1/hipep_0.5.1_windows_python.zip).
+[`hipep_0.5.3_windows_python.zip`](https://github.com/ROCm/hip-ep/releases/download/v0.5.3/hipep_0.5.3_windows_python.zip).
 The published archive contains four benchmark scripts and four wheels. It does
 not contain a source distribution or any models.
 
@@ -61,7 +61,7 @@ virtual environment. Keep that environment activated for the rest of the guide.
 
 ```powershell
 mkdir hipep-wheels
-Expand-Archive -Path .\hipep_0.5.1_windows_python.zip -DestinationPath .\hipep-wheels -Force
+Expand-Archive -Path .\hipep_0.5.3_windows_python.zip -DestinationPath .\hipep-wheels -Force
 
 py -3.14 --version   # should print 3.14.x
 # If that command fails, install Python 3.14, then run the version check again:

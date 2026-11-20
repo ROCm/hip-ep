@@ -31,6 +31,8 @@
 #include "ut_timing_policy.h"
 #include "ut_timing_device_profiles.h"
 #include "ut_timing_context.h"
+#include "ut_rank.h"
+#include "ut_gpu_frequency.h"
 
 namespace hipdnn_ep_test {
 namespace timing {
@@ -88,6 +90,14 @@ class Events {
     (void)hipEventDestroy(stop);
     (void)hipEventDestroy(start);
   }
+  // Do not keep reusing an event pair after an invalid elapsed time.
+  // Allocate its replacement while the old handles are
+  // still live, so the runtime cannot immediately recycle the same pair.
+  void renew() {
+    Events replacement;
+    std::swap(start, replacement.start);
+    std::swap(stop, replacement.stop);
+  }
   Events(const Events&) = delete;
   Events& operator=(const Events&) = delete;
   hipEvent_t start{}, stop{};
@@ -106,8 +116,20 @@ double adaptiveRotatedMeanMs(hipStream_t stream, const Copies& copies,
                             bool requested_warm, size_t settle_bytes,
                             const char* entry = "unqualified_entry",
                             const char* complete_entry = nullptr,
-                            Prepare prepare = {}) {
+                            Prepare prepare = {}, const RankOptions* ranking = nullptr) {
   EntryScope entry_scope(complete_entry);
+  if (ranking && (ranking->configs.empty() || !ranking->select || !ranking->validate))
+    throw std::invalid_argument("UT rank: incomplete candidate request");
+  std::vector<double> correctness;
+  if (ranking) {
+    for (size_t candidate = 0; candidate < ranking->configs.size(); ++candidate) {
+      const double rel_l2 = ranking->validate(candidate);
+      if (!(rel_l2 >= 0.0) || !std::isfinite(rel_l2))
+        throw std::runtime_error("UT rank: invalid CPU correctness result");
+      correctness.push_back(rel_l2);
+    }
+    ranking->select(0);
+  }
   Policy policy = environmentPolicy();
   int device = 0, runtime = 0, driver = 0;
   hipDeviceProp_t props{};
@@ -172,6 +194,8 @@ double adaptiveRotatedMeanMs(hipStream_t stream, const Copies& copies,
   const double prep_wall_ms = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - wall_start).count();
   Events events;
+  GpuFrequency frequency;
+  bool observe_frequency = false;
   auto runner = [&](uint32_t count) {
     // Reuse events only after the previous stop has completed. Reading every
     // bounded batch avoids retaining a start timestamp across a long command
@@ -188,6 +212,19 @@ double adaptiveRotatedMeanMs(hipStream_t stream, const Copies& copies,
       checkHip(hipEventSynchronize(events.stop), "wait stop");
       float ms = 0.0f;
       checkHip(hipEventElapsedTime(&ms, events.start, events.stop), "elapsed time");
+      if (!(ms > 0.0f) || !std::isfinite(ms)) {
+        // Return the invalid sample to the policy unchanged: it counts
+        // against the warm-up or measurement allowance. Repair only the event
+        // resources before the policy decides whether another batch is legal.
+        std::fprintf(stderr,
+            "UT_TIMING_INVALID leaf=%s shape=%s batch_calls=%u elapsed_ms=%.9g action=renew_events\n",
+            currentCase.leaf.c_str(), currentCase.shape.c_str(), count,
+            static_cast<double>(ms));
+        std::fflush(stderr);
+        checkHip(hipStreamSynchronize(stream), "drain invalid timing batch");
+        events.renew();
+      }
+      if (observe_frequency) frequency.sample();
       return static_cast<double>(ms);
     } catch (...) {
       *flag = 1;
@@ -195,12 +232,14 @@ double adaptiveRotatedMeanMs(hipStream_t stream, const Copies& copies,
       throw;
     }
   };
-  const Result result = measure(policy, runner);
+  auto emitTiming = [&](const Result& result, double wall_ms) {
   const uint64_t record_id = rememberResult(result.mean_ms);
-  const double wall_ms = std::chrono::duration<double, std::milli>(
-      std::chrono::steady_clock::now() - wall_start).count();
-  // Spread is diagnostic, not a thermal/clock rejection rule. Every valid
-  // batch contributes, including slow batches. The soft limit never drops data.
+  // Spread only decides whether the first round may end the measurement; it
+  // never rejects data. Every valid batch contributes, including slow batches.
+  // The soft limit never drops data.
+  char max_spread[32] = "null";
+  if (std::isfinite(policy.max_spread))
+    std::snprintf(max_spread, sizeof(max_spread), "%.17g", policy.max_spread);
   std::printf("UT_TIMING {\"policy\":\"%s\",\"preset\":\"%s\","
               "\"record_id\":%llu,\"leaf\":%s,\"shape\":%s,\"op_entry\":%s,"
               "\"evidence_binding\":%s,\"host\":%s,\"device_name\":%s,"
@@ -210,9 +249,10 @@ double adaptiveRotatedMeanMs(hipStream_t stream, const Copies& copies,
               "\"device\":%d,\"arch\":\"%s\",\"runtime\":%d,\"driver\":%d,"
               "\"cache\":\"%s\",\"copies\":%d,\"bytes_per_copy\":%llu,"
               "\"rotation_bytes\":%llu,\"requested_warm\":%s,"
-              "\"target_ms\":%.17g,\"soft_limit_ms\":%.17g,"
-              "\"min_calls_per_group\":%u,\"invalid_retry_limit\":%u,"
-              "\"invalid_batch_fraction\":%.17g,"
+              "\"target_ms\":%.17g,\"soft_limit_ms\":%.17g,\"warmup_ms\":%.17g,"
+              "\"min_calls_per_group\":%u,\"call_goal\":%llu,\"floor_ms\":%.17g,"
+              "\"max_spread\":%s,\"invalid_retry_limit\":%u,"
+              "\"invalid_batch_fraction\":%.17g,\"warmup_invalid_limit\":%u,"
               "\"events_per_batch\":2,\"batch_call_cap\":%u,"
               "\"largest_batch_calls\":%u,\"pilot_ms\":%.17g,"
               "\"pilot_calls\":%llu,\"pilot_batches\":%llu,\"prep_calls\":%llu,"
@@ -221,7 +261,9 @@ double adaptiveRotatedMeanMs(hipStream_t stream, const Copies& copies,
               "\"batches\":%llu,\"gpu_ms\":%.17g,\"wall_ms\":%.17g,"
               "\"median_ms\":%.17g,\"spread_fraction\":%.17g,"
               "\"invalid_batches\":%llu,\"invalid_calls\":%llu,"
-              "\"soft_limit_exceeded\":%s,\"group_means_ms\":[",
+              "\"warmup_invalid_batches\":%llu,"
+              "\"soft_limit_exceeded\":%s,\"early_stop\":%s,\"converged\":%s,"
+              "\"group_means_ms\":[",
               kPolicyVersion, policy.name(), static_cast<unsigned long long>(record_id),
               jsonString(currentCase.leaf).c_str(), jsonString(currentCase.shape).c_str(),
               jsonString(currentCase.op_entry).c_str(),
@@ -235,7 +277,10 @@ double adaptiveRotatedMeanMs(hipStream_t stream, const Copies& copies,
               copies_count, static_cast<unsigned long long>(copies.bytes()),
               static_cast<unsigned long long>(copies.bytes()) * copies_count,
               requested_warm ? "true" : "false", policy.target_ms, policy.soft_limit_ms,
-              policy.min_calls_per_group, policy.invalid_retries, policy.invalid_fraction,
+              policy.warmup_ms,
+              policy.min_calls_per_group, static_cast<unsigned long long>(policy.call_goal),
+              policy.floor_ms, max_spread, policy.invalid_retries, policy.invalid_fraction,
+              policy.warmup_invalid_limit,
               policy.max_calls_per_batch,
               result.largest_batch_calls, result.pilot_ms,
               static_cast<unsigned long long>(result.pilot_calls),
@@ -247,7 +292,10 @@ double adaptiveRotatedMeanMs(hipStream_t stream, const Copies& copies,
               result.mean_ms, result.spread_fraction,
               static_cast<unsigned long long>(result.invalid_batches),
               static_cast<unsigned long long>(result.invalid_calls),
-              result.exceeded_soft_limit ? "true" : "false");
+              static_cast<unsigned long long>(result.warmup_invalid_batches),
+              result.exceeded_soft_limit ? "true" : "false",
+              result.early_stop ? "true" : "false",
+              result.converged ? "true" : "false");
   for (size_t i = 0; i < kGroups; ++i)
     std::printf("%s%.17g", i ? "," : "", result.groups[i].meanMs());
   std::printf("],\"group_calls\":[");
@@ -261,9 +309,153 @@ double adaptiveRotatedMeanMs(hipStream_t stream, const Copies& copies,
   for (size_t i = 0; i < kGroups; ++i)
     std::printf("%s%llu", i ? "," : "",
                 static_cast<unsigned long long>(result.groups[i].batches));
-  std::printf("]}\n");
+  std::printf("],\"frequency\":%s,\"frequency_status\":%s}\n",
+              frequency.json().c_str(), jsonString(frequency.status()).c_str());
   std::fflush(stdout);
-  return result.mean_ms;
+  };
+  auto elapsed = [](const auto& start) {
+    return std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - start).count();
+  };
+  if (!ranking) {
+    const Result result = measureInterleaved(policy, 1,
+        [&](size_t, uint32_t count) { return runner(count); },
+        [&] { observe_frequency = true; }).front();
+    emitTiming(result, elapsed(wall_start));
+    return result.mean_ms;
+  }
+  const Policy base_policy = policy;
+  std::vector<RankPhase> phases;
+  const std::string diagnostic = envOr("HIPDNN_UT_RANK_DIAGNOSTIC");
+  if (!diagnostic.empty() && diagnostic != "interleaved_standard" && diagnostic != "sequential_standard" &&
+      diagnostic != "grouped_standard")
+    throw std::invalid_argument("unknown UT rank diagnostic schedule");
+  const bool switch_settle = std::strcmp(envOr("HIPDNN_UT_RANK_SETTLE"), "1") == 0;
+  auto runPhase = [&](const char* name, Policy selected_policy,
+                      const std::vector<size_t>& candidates, bool interleaved) {
+    selected_policy.max_calls_per_batch = base_policy.max_calls_per_batch;
+    if (selected_policy.preset == Preset::Screen) {
+      selected_policy.target_ms = profile.screen_target_ms;
+      selected_policy.soft_limit_ms = profile.screen_soft_limit_ms;
+    }
+    policy = selected_policy;
+    frequency = GpuFrequency{};
+    RankPhase phase;
+    phase.name = name; phase.candidates = candidates;
+    const bool grouped = diagnostic == "grouped_standard" ||
+        (diagnostic.empty() && std::strcmp(envOr("HIPDNN_UT_RANK_GROUPED", "1"), "0") != 0);
+    phase.schedule = !interleaved ? "sequential" : grouped ? "group_interleaved" : "batch_interleaved";
+    const auto stage_start = std::chrono::steady_clock::now();
+    std::vector<double> candidate_wall(candidates.size(), 0.0);
+    size_t previous = std::numeric_limits<size_t>::max();
+    auto candidateRunner = [&](size_t candidate, uint32_t count) {
+      ranking->select(candidates[candidate]);
+      const auto batch_start = std::chrono::steady_clock::now();
+      if (switch_settle && candidate != previous && !requested_warm && copies_count > 1 && copies.bytes() > 0) {
+        const auto settle_start = std::chrono::steady_clock::now();
+        const size_t settle = std::min<size_t>(copies_count,
+            settle_bytes / copies.bytes() + (settle_bytes % copies.bytes() != 0));
+        for (size_t done = 0; done < settle;) {
+          const uint32_t n = static_cast<uint32_t>(std::min<size_t>(settle - done, policy.max_calls_per_batch));
+          prepareBatch(n);
+          for (uint32_t i = 0; i < n; ++i) call();
+          done += n;
+        }
+        checkHip(hipStreamSynchronize(stream), "drain candidate rotation settle");
+        phase.switch_settle_calls += settle;
+        phase.switch_settle_wall_ms += elapsed(settle_start);
+      }
+      previous = candidate;
+      const double ms = runner(count);
+      candidate_wall[candidate] += elapsed(batch_start);
+      return ms;
+    };
+    // An invalid-timing failure is repeated once. A repeated failure of a
+    // non-default sequential candidate drops it; the default must measure.
+    std::vector<size_t> positions;
+    if (interleaved) {
+      for (int attempt = 0;; ++attempt) {
+        try {
+          observe_frequency = false;
+          std::fill(candidate_wall.begin(), candidate_wall.end(), 0.0);
+          phase.results = measureInterleaved(policy, candidates.size(), candidateRunner,
+              [&] { observe_frequency = true; }, grouped);
+          break;
+        } catch (const InvalidTimingShare&) {
+          if (attempt) throw;
+        }
+      }
+      for (size_t i = 0; i < candidates.size(); ++i) positions.push_back(i);
+    } else {
+      phase.candidates.clear();
+      for (size_t i = 0; i < candidates.size(); ++i) {
+        for (int attempt = 0;; ++attempt) {
+          try {
+            observe_frequency = false;
+            candidate_wall[i] = 0.0;
+            phase.results.push_back(measureInterleaved(policy, 1, [&](size_t, uint32_t count) {
+              return candidateRunner(i, count);
+            }, [&] { observe_frequency = true; }).front());
+            phase.candidates.push_back(candidates[i]);
+            positions.push_back(i);
+            break;
+          } catch (const InvalidTimingShare&) {
+            if (!attempt) continue;
+            if (candidates[i] == 0) throw;
+            phase.excluded.push_back(candidates[i]);
+            break;
+          }
+        }
+      }
+    }
+    phase.wall_ms = elapsed(stage_start);
+    phase.frequency = frequency.json();
+    for (size_t i = 0; i < phase.results.size(); ++i) {
+      emitTiming(phase.results[i], candidate_wall[positions[i]]);
+      emitCsvBinding(currentCase.shape, ranking->configs[phase.candidates[i]], "PASS",
+                     correctness[phase.candidates[i]], phase.results[i].mean_ms);
+    }
+    phases.push_back(std::move(phase));
+  };
+  std::vector<size_t> all;
+  for (size_t i = 0; i < ranking->configs.size(); ++i) all.push_back(i);
+  std::vector<size_t> selected;
+  bool retested = false;
+  std::string trigger = "none";
+  if (!diagnostic.empty()) {
+    selected = all;
+    runPhase(diagnostic.c_str(), Policy::standard(), selected, diagnostic != "sequential_standard");
+  } else if (ranking->sequential_confirm) {
+    selected = all;
+    runPhase("sequential_confirm", Policy{}, selected, false);
+  } else {
+    runPhase("screen", Policy::screen(), all, false);
+    for (size_t index : finalists(phases.back().results, 0))
+      selected.push_back(phases.back().candidates[index]);
+    runPhase("standard", Policy::standard(), selected, true);
+    const size_t default_index = static_cast<size_t>(
+        std::find(selected.begin(), selected.end(), 0) - selected.begin());
+    const auto first_decision = decideRank(phases.back().results, default_index, ranking->priority);
+    if (first_decision.needs_confirm) {
+      trigger.clear();
+      auto reason = [&](bool enabled, const char* name) {
+        if (enabled) { if (!trigger.empty()) trigger += ";"; trigger += name; }
+      };
+      reason(ranking->priority, "priority");
+      reason(first_decision.entry_boundary, "entry_boundary");
+      reason(first_decision.winner_overlap, "winner_range_crosses_1");
+      reason(first_decision.winner_nonconverged, "winner_or_second_nonconverged");
+      reason(first_decision.inconsistent_pair, "pair_score_disagreement");
+      runPhase("confirm", Policy{}, selected, true);
+      retested = true;
+    }
+  }
+  const size_t default_index = static_cast<size_t>(
+      std::find(selected.begin(), selected.end(), 0) - selected.begin());
+  const auto decision = decideRank(phases.back().results, default_index, false,
+      ranking->sequential_confirm || diagnostic == "sequential_standard");
+  printRank(*ranking, correctness, phases, decision, retested, elapsed(wall_start), trigger);
+  return phases.back().results[decision.selected].mean_ms;
 }
 
 }  // namespace timing
