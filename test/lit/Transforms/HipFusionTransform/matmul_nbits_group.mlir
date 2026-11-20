@@ -49,6 +49,51 @@ func.func @qkv(%ctx: !hip.context, %x: tensor<1x?x64xf16>,
 
 // -----
 
+// Four projections of one activation (Qwen3.8-Flash-Next's N = 1, 512, 640,
+// 640 attention inputs, scaled down) form a single group.
+// CHECK-LABEL: func.func @four_way
+// CHECK:         %[[G:.*]]:4 = hip.matmul_nbits_group(
+// CHECK-SAME:      weights(%arg2, %arg4, %arg6, %arg8 :
+// CHECK-SAME:      N = [8, 32, 64, 64]
+// CHECK-NOT:     hip.matmul_nbits(
+// CHECK:         return %[[G]]#0, %[[G]]#1, %[[G]]#2, %[[G]]#3
+func.func @four_way(%ctx: !hip.context, %x: tensor<1x1x64xf16>,
+                    %b0: tensor<8x2x16xui8>, %s0: tensor<8x2xf16>,
+                    %b1: tensor<32x2x16xui8>, %s1: tensor<32x2xf16>,
+                    %b2: tensor<64x2x16xui8>, %s2: tensor<64x2xf16>,
+                    %b3: tensor<64x2x16xui8>, %s3: tensor<64x2xf16>)
+    -> (tensor<1x1x8xf16>, tensor<1x1x32xf16>, tensor<1x1x64xf16>,
+        tensor<1x1x64xf16>) {
+  %e0 = tensor.empty() : tensor<1x1x8xf16>
+  %y0 = hip.matmul_nbits(%ctx) ins(%x, %b0, %s0 :
+      tensor<1x1x64xf16>, tensor<8x2x16xui8>, tensor<8x2xf16>)
+      outs(%e0 : tensor<1x1x8xf16>)
+      {K = 64 : i64, N = 8 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x1x8xf16>
+  %e1 = tensor.empty() : tensor<1x1x32xf16>
+  %y1 = hip.matmul_nbits(%ctx) ins(%x, %b1, %s1 :
+      tensor<1x1x64xf16>, tensor<32x2x16xui8>, tensor<32x2xf16>)
+      outs(%e1 : tensor<1x1x32xf16>)
+      {K = 64 : i64, N = 32 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x1x32xf16>
+  %e2 = tensor.empty() : tensor<1x1x64xf16>
+  %y2 = hip.matmul_nbits(%ctx) ins(%x, %b2, %s2 :
+      tensor<1x1x64xf16>, tensor<64x2x16xui8>, tensor<64x2xf16>)
+      outs(%e2 : tensor<1x1x64xf16>)
+      {K = 64 : i64, N = 64 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x1x64xf16>
+  %e3 = tensor.empty() : tensor<1x1x64xf16>
+  %y3 = hip.matmul_nbits(%ctx) ins(%x, %b3, %s3 :
+      tensor<1x1x64xf16>, tensor<64x2x16xui8>, tensor<64x2xf16>)
+      outs(%e3 : tensor<1x1x64xf16>)
+      {K = 64 : i64, N = 64 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x1x64xf16>
+  return %y0, %y1, %y2, %y3 : tensor<1x1x8xf16>, tensor<1x1x32xf16>,
+      tensor<1x1x64xf16>, tensor<1x1x64xf16>
+}
+
+// -----
+
 // A later projection whose init is sized from the first projection's result
 // cannot move above it, so it is left out; the remaining members still group.
 // CHECK-LABEL: func.func @member_depends_on_first
@@ -179,13 +224,11 @@ func.func @gate_up_silu_dynamic(%ctx: !hip.context, %x: tensor<1x?x64xf16>,
 
 // The gate projection has a second consumer, so it has to reach memory: the
 // pair is still grouped, but with the concat epilogue, and the SiLU chain
-// stays.
+// stays (as the hip.swiglu SwigluFusion makes of it).
 // CHECK-LABEL: func.func @gate_escapes
-// CHECK:         hip.matmul_nbits_group
+// CHECK:         %[[G:.*]]:2 = hip.matmul_nbits_group
 // CHECK-NOT:       epilogue
-// CHECK:         hip.sigmoid
-// CHECK:         hip.mul
-// CHECK:         hip.mul
+// CHECK:         hip.swiglu(%{{.*}}) ins(%[[G]]#0, %[[G]]#1 :
 func.func @gate_escapes(%ctx: !hip.context, %x: tensor<1x1x64xf16>,
                         %bg: tensor<128x2x16xui8>, %sg: tensor<128x2xf16>,
                         %bu: tensor<128x2x16xui8>, %su: tensor<128x2xf16>)

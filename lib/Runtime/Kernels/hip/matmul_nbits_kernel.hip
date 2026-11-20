@@ -3190,7 +3190,8 @@ struct Dp4aGroupArgs {
 template <typename T>
 __device__ __forceinline__ T dp4aGroupPick(const T (&arr)[HIP_MATMUL_GROUP_MAX_SEGMENTS],
                                            int s) {
-    return s == 0 ? arr[0] : (s == 1 ? arr[1] : arr[2]);
+    static_assert(HIP_MATMUL_GROUP_MAX_SEGMENTS == 4, "extend the select chain");
+    return s == 0 ? arr[0] : (s == 1 ? arr[1] : (s == 2 ? arr[2] : arr[3]));
 }
 
 template <int BLOCK_SIZE, int TILE_N, int EPI, bool HAS_ZP>
@@ -3406,7 +3407,7 @@ static void launchDp4aGroup(int config_id, int epilogue, hipStream_t stream,
 // {epilogue, has_zp, N0, N1, N2 (0 when absent), K, block_size}. A model has a
 // few group shapes, and the lookup runs on every grouped launch, so this is a
 // linear scan over trivially comparable keys rather than a string-keyed map.
-using Dp4aGroupKey = std::array<int64_t, 7>;
+using Dp4aGroupKey = std::array<int64_t, 8>;
 static std::vector<std::pair<Dp4aGroupKey, int>> dp4a_group_cache;
 static std::mutex dp4a_group_tune_mutex;
 
@@ -3441,7 +3442,8 @@ static int getOrTuneDp4aGroupConfig(hipStream_t stream, const int8_t* a_qb,
                                     int64_t K, int64_t bs, int epilogue)
 {
     const Dp4aGroupKey key{epilogue, g.zp[0] != nullptr, g.N[0], g.N[1],
-                           g.nseg > 2 ? g.N[2] : 0, K, bs};
+                           g.nseg > 2 ? g.N[2] : 0, g.nseg > 3 ? g.N[3] : 0,
+                           K, bs};
     {
         std::lock_guard<std::mutex> lock(dp4a_group_tune_mutex);
         if (const int* hit = findDp4aGroupConfig(key))
@@ -3551,11 +3553,11 @@ static int getOrTuneDp4aGroupConfig(hipStream_t stream, const int8_t* a_qb,
     hipEventDestroy(ev1);
 
     MATMUL_NBITS_AUTOTUNE_LOG(
-        "[custom_kernels] dp4a group autotune: epi=%d zp=%d N=%lld+%lld+%lld "
-        "K=%lld bs=%lld seed config[%d] %.4f ms -> config[%d] threads=%d "
-        "tile_n=%d %.4f ms\n",
+        "[custom_kernels] dp4a group autotune: epi=%d zp=%d "
+        "N=%lld+%lld+%lld+%lld K=%lld bs=%lld seed config[%d] %.4f ms -> "
+        "config[%d] threads=%d tile_n=%d %.4f ms\n",
         epilogue, static_cast<int>(key[1]), (long long)key[2],
-        (long long)key[3], (long long)key[4],
+        (long long)key[3], (long long)key[4], (long long)key[5],
         (long long)K, (long long)bs, seed, seed_ms, best_id,
         kGemvConfigs[best_id].threads, kGemvConfigs[best_id].tile_n,
         best_id == seed ? seed_ms : best_ms);

@@ -968,6 +968,52 @@ class TestMatMulNBitsGroup:
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)
 
+    @pytest.mark.parametrize(
+        "seq_len,ns",
+        [
+            pytest.param(1, (1, 512, 640, 640), id="four-1"),
+            pytest.param(
+                7,
+                (1, 512, 640, 640),
+                id="four-7",
+                marks=pytest.mark.xfail(
+                    strict=True,
+                    reason="hip.matmul_nbits itself is wrong for N=1 at M=5..7, "
+                    "grouped or not",
+                ),
+            ),
+            pytest.param(1, (640, 6144, 7168), id="three-1"),
+            pytest.param(7, (640, 6144, 7168), id="three-7"),
+            pytest.param(1, (96, 16384), id="two-1"),
+            pytest.param(7, (96, 16384), id="two-7"),
+        ],
+    )
+    def test_shared_input_flash_next(self, model_runner, seq_len, ns):
+        """Qwen3.8-Flash-Next's projections sharing one K=2560 activation,
+        including a four-member group and an N=1 member."""
+        K = 2560
+        rng = np.random.default_rng(5)
+        x_info = helper.make_tensor_value_info("X", TensorProto.FLOAT16, [1, seq_len, K])
+        nodes, inits, outs = [], [], []
+        for i, n in enumerate(ns):
+            inits += _q4_initializers(rng, f"p{i}", K, n)
+            nodes.append(_q4_node(f"p{i}", "X", f"Y{i}", K, n))
+            outs.append(
+                helper.make_tensor_value_info(f"Y{i}", TensorProto.FLOAT16, [1, seq_len, n])
+            )
+        model = make_model_from_nodes(
+            nodes,
+            [x_info],
+            outs,
+            initializers=inits,
+            opset=21,
+            extra_opsets=[helper.make_opsetid("com.microsoft", 1)],
+        )
+        x = rng.uniform(-1, 1, [1, seq_len, K]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)
+
 
 def _make_norm_fed_model(seq_len: int, K: int, kind: str, n_q=0, n_kv=0, N=0):
     """SkipSimplifiedLayerNormalization feeding q/k/v (kind="qkv") or the

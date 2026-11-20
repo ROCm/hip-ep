@@ -877,11 +877,13 @@ cleanup:
 // before the grouping.
 int wrap_matmul_nbits_group(RuntimeState *state, int op_state_slot,
                             const void *A, int64_t nseg, const void *B0,
-                            const void *B1, const void *B2, const void *scales0,
-                            const void *scales1, const void *scales2,
+                            const void *B1, const void *B2, const void *B3,
+                            const void *scales0, const void *scales1,
+                            const void *scales2, const void *scales3,
                             const void *zero_points0, const void *zero_points1,
-                            const void *zero_points2, void *out0, void *out1,
-                            void *out2, int64_t N0, int64_t N1, int64_t N2,
+                            const void *zero_points2, const void *zero_points3,
+                            void *out0, void *out1, void *out2, void *out3,
+                            int64_t N0, int64_t N1, int64_t N2, int64_t N3,
                             int64_t M, int64_t K, int64_t batch_count,
                             int64_t bits, int64_t block_size, int64_t elem_size,
                             int64_t scale_elem_size, int64_t epilogue,
@@ -889,10 +891,10 @@ int wrap_matmul_nbits_group(RuntimeState *state, int op_state_slot,
   OP_PROFILE(
       "matmul_nbits_group",
       [&] {
-        char b[96];
-        snprintf(b, sizeof(b), "m=%lld,n=%lld+%lld+%lld,k=%lld,epi=%lld",
+        char b[112];
+        snprintf(b, sizeof(b), "m=%lld,n=%lld+%lld+%lld+%lld,k=%lld,epi=%lld",
                  (long long)M, (long long)N0, (long long)N1, (long long)N2,
-                 (long long)K, (long long)epilogue);
+                 (long long)N3, (long long)K, (long long)epilogue);
         return std::string(b);
       },
       state);
@@ -907,12 +909,13 @@ int wrap_matmul_nbits_group(RuntimeState *state, int op_state_slot,
             (long long)nseg, (long long)epilogue, (long long)elem_size);
     return -1;
   }
-  const void *Bs[HIP_MATMUL_GROUP_MAX_SEGMENTS] = {B0, B1, B2};
-  const void *Ss[HIP_MATMUL_GROUP_MAX_SEGMENTS] = {scales0, scales1, scales2};
+  const void *Bs[HIP_MATMUL_GROUP_MAX_SEGMENTS] = {B0, B1, B2, B3};
+  const void *Ss[HIP_MATMUL_GROUP_MAX_SEGMENTS] = {scales0, scales1, scales2,
+                                                   scales3};
   const void *Zs[HIP_MATMUL_GROUP_MAX_SEGMENTS] = {zero_points0, zero_points1,
-                                                   zero_points2};
-  void *Os[HIP_MATMUL_GROUP_MAX_SEGMENTS] = {out0, out1, out2};
-  const int64_t Ns[HIP_MATMUL_GROUP_MAX_SEGMENTS] = {N0, N1, N2};
+                                                   zero_points2, zero_points3};
+  void *Os[HIP_MATMUL_GROUP_MAX_SEGMENTS] = {out0, out1, out2, out3};
+  const int64_t Ns[HIP_MATMUL_GROUP_MAX_SEGMENTS] = {N0, N1, N2, N3};
   const bool has_zp = zero_points0 != nullptr;
   for (int64_t s = 0; s < nseg; ++s) {
     if (!Bs[s] || !Ss[s] || (!Zs[s] && has_zp) ||
