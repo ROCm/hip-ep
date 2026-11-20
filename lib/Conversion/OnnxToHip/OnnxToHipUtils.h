@@ -861,11 +861,6 @@ void populateHardSigmoidConversionPatterns(RewritePatternSet &patterns,
 void populateLpNormalizationConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx);
 
-/// Fold a primitive LayerNorm chain (ReduceMean / Sub / Pow / ReduceMean /
-/// Add / Sqrt / Div / Mul / Add) over the last axis into
-/// onnx.LayerNormalization. See LayerNormFusion.cpp.
-void populateLayerNormFusionPatterns(RewritePatternSet &patterns,
-                                     MLIRContext *ctx);
 } // namespace hip
 } // namespace mlir
 

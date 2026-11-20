@@ -2,13 +2,14 @@
 // Licensed under the MIT License.
 
 // EmbedLayerNormalization must bufferize. The composed gather, add, and
-// layer-norm ops lower through the production pipeline.
+// layer-norm ops lower through the production pipeline; hip-fusion-transform
+// folds the last embedding add into the norm as hip.skip_layer_norm.
 
 // RUN: hip-mlir-opt %s --hipdnn-pipeline | FileCheck %s
 
 // CHECK-NOT: onnx.Custom
 // CHECK-DAG: llvm.func @wrap_gather
-// CHECK-DAG: llvm.func @wrap_layer_normalization
+// CHECK-DAG: llvm.func @wrap_skip_layer_norm
 // CHECK-DAG: llvm.func @wrap_reduce_sum
 // CHECK: llvm.func @inference_compute
 module {

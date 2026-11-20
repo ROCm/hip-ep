@@ -1,14 +1,15 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// A primitive LayerNorm chain over the last axis folds into one
-// hip.layer_norm (fp32 accumulation): Pow(d, 2) or Mul(d, d) for the square;
-// Div by Sqrt / Pow(., 0.5) or Mul by Reciprocal(Sqrt) / Pow(., -0.5) /
-// Div(1, Sqrt) for the normalization; with or without the affine tail. A
-// residual Add feeding the norm folds into hip.skip_layer_norm. Chains over a
-// non-last axis or with a non-constant epsilon are left alone.
+// A primitive LayerNorm chain over the last axis lowers to HIP ops, then
+// hip-fusion-transform folds it into one hip.layer_norm (fp32 accumulation):
+// Pow(d, 2) or Mul(d, d) for the square; Div by Sqrt / Pow(., 0.5) or Mul by
+// Reciprocal(Sqrt) / Pow(., -0.5) / Div(1, Sqrt) for the normalization; with
+// or without the affine tail. A residual Add feeding the norm folds into
+// hip.skip_layer_norm. Chains over a non-last axis or with a non-constant
+// epsilon are left alone.
 
-// RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
+// RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip --hip-fusion-transform %s | FileCheck %s
 
 module {
   func.func @main_graph(%arg0: tensor<4xf32>) -> tensor<4xf32> {
@@ -399,4 +400,26 @@ module {
   // CHECK-NOT: hip.skip_layer_norm
   // CHECK: hip.layer_norm
   // CHECK: return
+
+  // Rank 5 is packed to rank 4 before fusion. The match looks through one
+  // collapse/expand pair and still produces one norm.
+  func.func @ln_rank5(%x: tensor<2x3x4x5x8xf32>, %g: tensor<8xf32>) -> tensor<2x3x4x5x8xf32> {
+    %eps = "onnx.Constant"() {value = dense<1.0E-5> : tensor<f32>} : () -> tensor<f32>
+    %mean = "onnx.ReduceMean"(%x) {axes = [-1], keepdims = 1 : si64} : (tensor<2x3x4x5x8xf32>) -> tensor<2x3x4x5x1xf32>
+    %d = "onnx.Sub"(%x, %mean) : (tensor<2x3x4x5x8xf32>, tensor<2x3x4x5x1xf32>) -> tensor<2x3x4x5x8xf32>
+    %sq = "onnx.Mul"(%d, %d) : (tensor<2x3x4x5x8xf32>, tensor<2x3x4x5x8xf32>) -> tensor<2x3x4x5x8xf32>
+    %var = "onnx.ReduceMean"(%sq) {axes = [-1], keepdims = 1 : si64} : (tensor<2x3x4x5x8xf32>) -> tensor<2x3x4x5x1xf32>
+    %ve = "onnx.Add"(%var, %eps) : (tensor<2x3x4x5x1xf32>, tensor<f32>) -> tensor<2x3x4x5x1xf32>
+    %s = "onnx.Sqrt"(%ve) : (tensor<2x3x4x5x1xf32>) -> tensor<2x3x4x5x1xf32>
+    %n = "onnx.Div"(%d, %s) : (tensor<2x3x4x5x8xf32>, tensor<2x3x4x5x1xf32>) -> tensor<2x3x4x5x8xf32>
+    %y = "onnx.Mul"(%n, %g) : (tensor<2x3x4x5x8xf32>, tensor<8xf32>) -> tensor<2x3x4x5x8xf32>
+    return %y : tensor<2x3x4x5x8xf32>
+  }
+
+  // CHECK-LABEL: func.func @ln_rank5
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[X:.*]]: tensor<2x3x4x5x8xf32>, %[[G:.*]]: tensor<8xf32>)
+  // CHECK-NOT: hip.reduce_mean
+  // CHECK: %[[Y:.*]] = hip.layer_norm(%[[CTX]])
+  // CHECK-SAME: ins(%[[X]], %[[G]] :
+  // CHECK: return %[[Y]]
 }
