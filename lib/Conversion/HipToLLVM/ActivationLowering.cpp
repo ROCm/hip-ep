@@ -525,6 +525,62 @@ struct SwigluOpLowering : public ConvertOpToLLVMPattern<SwigluOp> {
   }
 };
 
+// hip.geglu(ctx, input [.., 2F], output [.., F])
+//   -> wrap_geglu(state, input, output, rows, half_cols, data_type)
+struct GegluOpLowering : public ConvertOpToLLVMPattern<GegluOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(GegluOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
+    Type i32Type = rewriter.getI32Type();
+    Type i64Type = rewriter.getI64Type();
+    auto createI64Const = [&](int64_t value) -> Value {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(value));
+    };
+
+    auto outputType = cast<MemRefType>(op.getOutput().getType());
+    Type elemType = outputType.getElementType();
+    if (!elemType.isF16() && !elemType.isF32())
+      return rewriter.notifyMatchFailure(op, "GEGLU supports f16 and f32");
+
+    Value inputPtr =
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
+    Value outputPtr =
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
+
+    // rows = product of the leading extents, half_cols = the last extent.
+    MemRefDescriptor outputDesc(adaptor.getOutput());
+    auto dimSize = [&](int64_t d) -> Value {
+      return outputType.isDynamicDim(d)
+                 ? outputDesc.size(rewriter, loc, d)
+                 : createI64Const(outputType.getDimSize(d));
+    };
+    const int64_t rank = outputType.getRank();
+    Value rows = createI64Const(1);
+    for (int64_t d : llvm::seq<int64_t>(0, rank - 1))
+      rows = LLVM::MulOp::create(rewriter, loc, rows, dimSize(d));
+    Value halfCols = dimSize(rank - 1);
+    Value dataType = createI64Const(getHipdnnDataType(elemType));
+
+    SmallVector<Type, 6> paramTypes = {ptrType, ptrType, ptrType,
+                                       i64Type, i64Type, i64Type};
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapGeglu, paramTypes, i32Type);
+    if (failed(funcOp))
+      return failure();
+    SmallVector<Value, 6> args = {adaptor.getCtx(), inputPtr, outputPtr, rows,
+                                  halfCols,         dataType};
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 // hip.silu(handle, input, output)
 struct SiluOpLowering : public ConvertOpToLLVMPattern<SiluOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -719,8 +775,8 @@ void populateActivationLoweringPatterns(const LLVMTypeConverter &converter,
                                         RewritePatternSet &patterns) {
   patterns.add<SoftplusOpLowering, GeluOpLowering, LeakyReluOpLowering,
                PReluOpLowering, LRNOpLowering, SwishOpLowering, PowOpLowering,
-               SwigluOpLowering, SiluOpLowering, MiopenSoftmaxOpLowering>(
-      converter);
+               SwigluOpLowering, GegluOpLowering, SiluOpLowering,
+               MiopenSoftmaxOpLowering>(converter);
 }
 
 } // namespace hip
