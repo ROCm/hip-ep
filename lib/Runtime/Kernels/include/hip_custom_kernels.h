@@ -1838,8 +1838,9 @@ HIP_KERNEL_API int hip_pool(
  * codes in float and truncates toward zero on the store. Nearest copies
  * one sample.
  * Linear rounds each product and sum to f32 (no FMA contraction).
- * Returns: 0 on success, non-zero on failure, including an extent or an
- * output row count (N * C * all output axes but the last) above INT32_MAX.
+ * Returns: 0 on success, non-zero on failure, including a window extent
+ * above 2^24 (a float coordinate cannot address every index beyond it) or
+ * an output row count (N * C * all output axes but the last) above INT32_MAX.
  */
 HIP_KERNEL_API int hip_resize(
     void* stream,
