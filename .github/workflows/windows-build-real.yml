@@ -269,6 +269,8 @@ jobs:
           cp "${{ runner.workspace }}/oga-artifacts/onnxruntime-genai.dll" staging/bin/
           cp "${{ runner.workspace }}/oga-artifacts/model_mm.exe" staging/bin/
           cp "${{ runner.workspace }}/oga-artifacts/benchmark_multimodal.py" staging/bin/
+          cp "${{ runner.workspace }}/oga-artifacts/engine_benchmark.exe" staging/bin/
+          cp "${{ runner.workspace }}/oga-artifacts/versions.json" staging/bin/
 
           # ---------------------------------------------------------------
           # Python wheels (ORT + OGA cp314) bundled into the artifact under

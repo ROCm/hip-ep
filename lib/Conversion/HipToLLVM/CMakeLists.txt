@@ -34,6 +34,7 @@ add_library(HipToLLVM STATIC
   RopeLowering.cpp
   GqaLowering.cpp
   MultiHeadAttentionLowering.cpp
+  PagedAttentionLowering.cpp
   MatMulNBitsLowering.cpp
   DequantBnb4Lowering.cpp
   QMoELowering.cpp

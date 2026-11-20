@@ -3336,6 +3336,75 @@ LogicalResult CausalConvWithStateOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// VarlenCausalConvWithStateOp
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange VarlenCausalConvWithStateOp::getDpsInitsMutable() {
+  unsigned numInputs = 4; // ctx, input, weight, cumulative
+  if (getBias())
+    ++numInputs;
+  if (getInitialState())
+    ++numInputs;
+  return MutableOperandRange(*this, /*start=*/numInputs, /*length=*/2);
+}
+
+void VarlenCausalConvWithStateOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult VarlenCausalConvWithStateOp::verify() {
+  auto dilation = static_cast<int64_t>(getDilation());
+  if (dilation < 1)
+    return emitOpError("dilation must be at least 1, got ") << dilation;
+  auto activation = getActivation();
+  if (activation != "none" && activation != "silu" && activation != "swish")
+    return emitOpError("activation must be none, silu, or swish");
+
+  auto inputType = cast<ShapedType>(getInput().getType());
+  auto weightType = cast<ShapedType>(getWeight().getType());
+  auto cuType = cast<ShapedType>(getCumulativeSequenceLength().getType());
+  if (!getInitialState())
+    return emitOpError("initial_state is required");
+  auto stateType = cast<ShapedType>(getInitialState().getType());
+  auto presentType = cast<ShapedType>(getPresentState().getType());
+  if (inputType.getRank() != 2 || weightType.getRank() != 3 ||
+      cuType.getRank() != 1 || stateType.getRank() != 3 ||
+      presentType.getRank() != 3)
+    return emitOpError("input rank 2, weight rank 3, cumulative rank 1, "
+                       "state rank 3");
+  if (!cuType.getElementType().isInteger(32))
+    return emitOpError("cumulative_sequence_length must be i32");
+
+  if (!weightType.isDynamicDim(1) && weightType.getDimSize(1) != 1)
+    return emitOpError("weight dim 1 must be 1");
+  if (!weightType.isDynamicDim(2) && weightType.getDimSize(2) < 1)
+    return emitOpError("kernel_size must be at least 1");
+
+  int64_t channels = inputType.getDimSize(1);
+  if (!ShapedType::isDynamic(channels) && !weightType.isDynamicDim(0) &&
+      weightType.getDimSize(0) != channels)
+    return emitOpError("weight channels must match the input");
+  if (!weightType.isDynamicDim(2)) {
+    int64_t stateLen = (weightType.getDimSize(2) - 1) * dilation;
+    auto checkState = [&](ShapedType type, StringRef name) -> LogicalResult {
+      if (!type.isDynamicDim(2) && type.getDimSize(2) != stateLen)
+        return emitOpError(name)
+               << " dim 2 must be (kernel_size - 1) * dilation = " << stateLen;
+      if (!ShapedType::isDynamic(channels) && !type.isDynamicDim(1) &&
+          type.getDimSize(1) != channels)
+        return emitOpError(name) << " dim 1 must match the input channels";
+      return success();
+    };
+    if (failed(checkState(stateType, "initial_state")) ||
+        failed(checkState(presentType, "present_state")))
+      return failure();
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // NGramHashMappingOp: ins(input_ids, multipliers, vocab_sizes, [past_ids],
 //                         [head_offsets], [eos_token_id], [segment_ids])
 //                     outs(hash_ids, [present_ids])
@@ -3610,6 +3679,134 @@ LogicalResult GatedDeltaNetOp::verify() {
       failed(
           check(getFinalState(), "final_state", f32,
                 {stateType.getDimSize(0), numHeadsV, headSizeV, headSizeQk}))) {
+    return failure();
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// VarlenGatedDeltaNetOp: ins(qkv, decay, beta, cu, initial_state, a_log,
+//                            dt_bias) outs(output, final_state)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange VarlenGatedDeltaNetOp::getDpsInitsMutable() {
+  return MutableOperandRange(
+      *this, /*start=*/getOutputMutable().getOperandNumber(), /*length=*/2);
+}
+
+void VarlenGatedDeltaNetOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult VarlenGatedDeltaNetOp::verify() {
+  SmallVector<Value> data = {
+      getQkv(),          getDecay(), getBeta(),   getCumulativeSequenceLength(),
+      getInitialState(), getALog(),  getDtBias(), getOutput(),
+      getFinalState()};
+  if (failed(verifyDpsComputeOp(*this, data, 2))) {
+    return failure();
+  }
+
+  constexpr int64_t kAny = ShapedType::kDynamic;
+  Type f32 = Float32Type::get(getContext());
+
+  auto qkvType = cast<ShapedType>(getQkv().getType());
+  Type elem = qkvType.getElementType();
+  if (!elem.isF16() && !elem.isF32()) {
+    return emitOpError("qkv must be f16 or f32, got ") << elem;
+  }
+  if (qkvType.getRank() != 2) {
+    return emitOpError("qkv must be rank 2, got rank ") << qkvType.getRank();
+  }
+  if (qkvType.isDynamicDim(1)) {
+    return emitOpError("qkv dim 1 must be static");
+  }
+
+  auto stateType = cast<ShapedType>(getInitialState().getType());
+  if (stateType.getElementType() != f32) {
+    return emitOpError("initial_state must be f32, got ")
+           << stateType.getElementType();
+  }
+  if (stateType.getRank() != 4) {
+    return emitOpError("initial_state must be rank 4, got rank ")
+           << stateType.getRank();
+  }
+  for (int64_t i = 1; i < 4; ++i) {
+    if (stateType.isDynamicDim(i)) {
+      return emitOpError("initial_state dim ") << i << " must be static";
+    }
+  }
+
+  auto cuType = cast<ShapedType>(getCumulativeSequenceLength().getType());
+  if (!cuType.getElementType().isInteger(32)) {
+    return emitOpError("cumulative_sequence_length must be i32, got ")
+           << cuType.getElementType();
+  }
+  if (cuType.getRank() != 1) {
+    return emitOpError("cumulative_sequence_length must be rank 1, got rank ")
+           << cuType.getRank();
+  }
+
+  const int64_t tokens = qkvType.getDimSize(0);
+  const int64_t packed = qkvType.getDimSize(1);
+  const int64_t batch = stateType.getDimSize(0);
+  const int64_t numHeadsV = stateType.getDimSize(1);
+  const int64_t headSizeV = stateType.getDimSize(2);
+  const int64_t headSizeQk = stateType.getDimSize(3);
+  if (headSizeQk != 32 && headSizeQk != 64 && headSizeQk != 128 &&
+      headSizeQk != 256) {
+    return emitOpError("head size dk must be 32, 64, 128 or 256, got ")
+           << headSizeQk;
+  }
+  const int64_t qkWidth = packed - numHeadsV * headSizeV;
+  if (qkWidth <= 0 || qkWidth % (2 * headSizeQk) != 0) {
+    return emitOpError("qkv dim 1 (")
+           << packed << ") minus Hv*dv (" << numHeadsV * headSizeV
+           << ") must be a positive multiple of 2*dk (" << 2 * headSizeQk
+           << ")";
+  }
+  const int64_t numHeadsQk = qkWidth / (2 * headSizeQk);
+  if (numHeadsV % numHeadsQk != 0) {
+    return emitOpError("Hv (")
+           << numHeadsV << ") must be a multiple of Hqk (" << numHeadsQk << ")";
+  }
+  if (batch != kAny && cuType.getDimSize(0) != kAny &&
+      cuType.getDimSize(0) != batch + 1) {
+    return emitOpError("cumulative_sequence_length must have batch + 1 = ")
+           << batch + 1 << " entries, got " << cuType.getDimSize(0);
+  }
+
+  auto check = [&](Value v, StringRef name, Type expectedElem,
+                   ArrayRef<int64_t> expected) -> LogicalResult {
+    auto type = cast<ShapedType>(v.getType());
+    if (type.getElementType() != expectedElem) {
+      return emitOpError() << name << " must have element type " << expectedElem
+                           << ", got " << type.getElementType();
+    }
+    if (type.getRank() != static_cast<int64_t>(expected.size())) {
+      return emitOpError() << name << " must be rank " << expected.size()
+                           << ", got rank " << type.getRank();
+    }
+    for (auto [i, want] : llvm::enumerate(expected)) {
+      int64_t got = type.getDimSize(i);
+      if (want != kAny && got != ShapedType::kDynamic && got != want) {
+        return emitOpError() << name << " dim " << i << " must be " << want
+                             << ", got " << got;
+      }
+    }
+    return success();
+  };
+
+  if (failed(check(getDecay(), "decay", f32, {tokens, numHeadsV})) ||
+      failed(check(getBeta(), "beta", f32, {tokens, numHeadsV})) ||
+      failed(check(getALog(), "a_log", f32, {numHeadsV})) ||
+      failed(check(getDtBias(), "dt_bias", f32, {numHeadsV})) ||
+      failed(
+          check(getOutput(), "output", elem, {tokens, numHeadsV, headSizeV})) ||
+      failed(check(getFinalState(), "final_state", f32,
+                   {batch, numHeadsV, headSizeV, headSizeQk}))) {
     return failure();
   }
   return success();
@@ -4196,6 +4393,50 @@ LogicalResult GqaOp::verify() {
   }
 
   return success();
+}
+
+//===----------------------------------------------------------------------===//
+// PagedAttentionOp: com.microsoft.PagedAttention (stub runtime)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange PagedAttentionOp::getDpsInitsMutable() {
+  unsigned numInputs = 1; // ctx
+  if (getQuery())
+    ++numInputs;
+  if (getKey())
+    ++numInputs;
+  if (getValue())
+    ++numInputs;
+  if (getKeyCache())
+    ++numInputs;
+  if (getValueCache())
+    ++numInputs;
+  if (getCumulativeSequenceLength())
+    ++numInputs;
+  if (getPastSeqlens())
+    ++numInputs;
+  if (getBlockTable())
+    ++numInputs;
+  if (getCosCache())
+    ++numInputs;
+  if (getSinCache())
+    ++numInputs;
+  if (getAttentionMetadata())
+    ++numInputs;
+
+  unsigned numInits = 1;
+  if (getKeyCacheOut())
+    ++numInits;
+  if (getValueCacheOut())
+    ++numInits;
+
+  return MutableOperandRange(*this, /*start=*/numInputs, /*length=*/numInits);
+}
+
+void PagedAttentionOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
 //===----------------------------------------------------------------------===//

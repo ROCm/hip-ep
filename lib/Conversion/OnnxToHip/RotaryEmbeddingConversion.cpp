@@ -186,9 +186,9 @@ MRotaryEmbeddingToHip::matchAndRewrite(mlir::Operation *op,
   if (readInt("interleaved", 0) != 0) {
     return rewriter.notifyMatchFailure(op, "interleaved must be 0");
   }
-  if (readInt("is_packed_batching", 0) != 0) {
-    return rewriter.notifyMatchFailure(op, "is_packed_batching must be 0");
-  }
+  // is_packed_batching only lifts the sequence_length <= max_position check
+  // in the reference implementations. Positions are looked up per token from
+  // position_ids, so both values lower identically.
   const int64_t layout = readInt("mrope_layout", 0);
   if (layout != 0 && layout != 1) {
     return rewriter.notifyMatchFailure(op, "mrope_layout must be 0 or 1");
