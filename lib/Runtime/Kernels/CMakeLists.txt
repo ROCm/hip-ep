@@ -38,6 +38,7 @@ message(STATUS "[custom_kernels] Using HIP_ARCHITECTURES: ${HIP_ARCHITECTURES}")
 set(_kernel_sources
     hip/rope_kernel.hip
     hip/gqa_kernel.hip
+    hip/qsa/qsa_gqa_projection.hip
     hip/multi_head_attention_kernel.hip
     hip/gemm_wmma_kernel.hip
     hip/elementwise_sub_kernel.hip
@@ -229,6 +230,16 @@ function(_gqa_lut_data_source arch out_var)
     _emit_lut_registry(${arch} ${_gqa_autotune_dir} kGqaLut _gen)
     set(${out_var} ${_gen} PARENT_SCOPE)
 endfunction()
+
+# Preserve QSA's validated FP contraction contract without changing flags for
+# any existing kernel. Track the included implementation explicitly: Windows
+# HIP custom commands do not emit compiler include-dependency files.
+set(QSA_PORT_PATH "${CMAKE_CURRENT_SOURCE_DIR}/hip/qsa/qsa_port.hip")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${QSA_PORT_PATH}")
+file(SHA256 "${QSA_PORT_PATH}" QSA_PORT_SHA)
+configure_file(hip/qsa/qsa_gqa_kernels.hip.in
+    ${CMAKE_CURRENT_BINARY_DIR}/qsa_gqa_kernels.hip @ONLY)
+list(APPEND _kernel_sources ${CMAKE_CURRENT_BINARY_DIR}/qsa_gqa_kernels.hip)
 
 # One SHARED target per arch. Each builds a fatbin with that single slice;
 # OFFLOAD_ARCHS narrows the global list to one element so the resulting

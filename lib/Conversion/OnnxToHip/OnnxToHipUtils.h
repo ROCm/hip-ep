@@ -349,6 +349,8 @@ void populateRotaryEmbeddingConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx);
 void populateOnnxRotaryEmbeddingConversionPatterns(RewritePatternSet &patterns,
                                                    MLIRContext *ctx);
+void populateQsaGqaConversionPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx);
 void populateGqaConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateMultiHeadAttentionConversionPatterns(RewritePatternSet &patterns,

@@ -2305,6 +2305,53 @@ void MultiHeadAttentionOp::getEffects(
 //        outs(output, present_key, present_value, [output_qk])
 //===----------------------------------------------------------------------===//
 
+MutableOperandRange QsaGqaOp::getDpsInitsMutable() {
+  return MutableOperandRange(*this, 14, 3);
+}
+
+void QsaGqaOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult QsaGqaOp::verify() {
+  auto check = [&](Value v, ArrayRef<int64_t> shape, Type elem) {
+    auto t = dyn_cast<ShapedType>(v.getType());
+    if (!t || !t.hasRank() || t.getRank() != int64_t(shape.size()) ||
+        t.getElementType() != elem)
+      return false;
+    for (auto [actual, required] : llvm::zip(t.getShape(), shape))
+      if (required >= 0 && actual != required)
+        return false;
+    return true;
+  };
+  auto f16 = Float16Type::get(getContext());
+  auto bf16 = BFloat16Type::get(getContext());
+  auto f32 = Float32Type::get(getContext());
+  auto i32 = IntegerType::get(getContext(), 32);
+  for (Value v : {getQuery(), getKey(), getValue(), getHidden(), getOutput()})
+    if (!check(v, {1, -1, 4096}, f16) ||
+        cast<ShapedType>(v.getType()).getShape() !=
+            cast<ShapedType>(getQuery().getType()).getShape())
+      return emitOpError(
+          "requires matching FP16 [1,S,4096] Q/K/V/hidden/output");
+  for (Value v :
+       {getPastKey(), getPastValue(), getPresentKey(), getPresentValue()})
+    if (!check(v, {1, 32, -1, 128}, f16) ||
+        cast<ShapedType>(v.getType()).getShape() !=
+            cast<ShapedType>(getPastKey().getType()).getShape())
+      return emitOpError("requires matching FP16 [1,32,C,128] KV caches");
+  if (!check(getProjection(), {640, 4096}, bf16) ||
+      !check(getQNorm(), {128}, bf16) || !check(getKNorm(), {128}, bf16) ||
+      !check(getCosCache(), {65536, 64}, f32) ||
+      !check(getSinCache(), {65536, 64}, f32) ||
+      !check(getSeqlensK(), {1}, i32) || !check(getTotalSeqLen(), {}, i32))
+    return emitOpError(
+        "requires frozen BF16 selectors, FP32 64K RoPE and int32 lengths");
+  return success();
+}
+
 MutableOperandRange GqaOp::getDpsInitsMutable() {
   // DPS inits start after all inputs
   // Required inputs: ctx(0), query(1), seqlens_k(6), total_seq_len(7)

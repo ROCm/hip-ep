@@ -795,7 +795,9 @@ void MlirCustomOp::compute_with_output_allocator(
   inference_state_->set_output_allocator(nullptr);
 
   if (ret != 0) {
-    LOG(ERROR) << "inference_compute (allocator) failed with code: " << ret;
+    ORT_CXX_API_THROW("inference_compute (allocator) failed with code: " +
+                          std::to_string(ret),
+                      ORT_RUNTIME_EXCEPTION);
   }
 
   // Output-completeness guard. Every declared output must be produced in-graph

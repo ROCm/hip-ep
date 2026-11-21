@@ -9,6 +9,15 @@
 #include <cstdlib>
 #include <cstring>
 
+int wrap_qsa_group_query_attention(RuntimeState *, int, void *, void *, void *,
+                                   void *, void *, void *, void *, void *,
+                                   void *, void *, void *, void *, void *,
+                                   void *, void *, void *, int64_t, int64_t,
+                                   int64_t) {
+  fprintf(stderr, "QsaGroupQueryAttention requires the real HIP runtime\n");
+  return -1;
+}
+
 #ifdef _WIN32
 #include <windows.h>
 // On Windows with static CRT, each DLL has its own stdout

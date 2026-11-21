@@ -3889,6 +3889,30 @@ def Hip_GqaOp : Hip_DpsOp<"gqa",
   let hasVerifier = 1;
 }
 
+// Frozen OLMo QSA specialization. Q/K already have the backbone's external
+// normalization and RoPE. Selector weights remain BF16. Native per-node state
+// owns pooled selector history and persistent scratch on the EP stream.
+def Hip_QsaGqaOp : Hip_DpsOp<"qsa_gqa", [OpStateOpInterface]> {
+  let summary = "Frozen batch-one QSA specialization of GQA";
+  let arguments = (ins Hip_ContextType:$ctx,
+      Hip_TensorOrMemRef:$query, Hip_TensorOrMemRef:$key,
+      Hip_TensorOrMemRef:$value, Hip_TensorOrMemRef:$past_key,
+      Hip_TensorOrMemRef:$past_value, Hip_TensorOrMemRef:$seqlens_k,
+      Hip_TensorOrMemRef:$total_seq_len, Hip_TensorOrMemRef:$hidden,
+      Hip_TensorOrMemRef:$projection, Hip_TensorOrMemRef:$q_norm,
+      Hip_TensorOrMemRef:$k_norm, Hip_TensorOrMemRef:$cos_cache,
+      Hip_TensorOrMemRef:$sin_cache, Hip_TensorOrMemRef:$output,
+      Hip_TensorOrMemRef:$present_key, Hip_TensorOrMemRef:$present_value);
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+        ::mlir::Location loc, ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(builder, loc, statePtr, slot,
+          "hipdnn_ep_op_state_construct_qsa_gqa", {});
+    }
+  }];
+  let hasVerifier = 1;
+}
+
 // ===== hipDNN Graph Outlining + Execution ====================================
 
 def Hip_YieldOp : Hip_Op<"yield", [Pure, Terminator,
