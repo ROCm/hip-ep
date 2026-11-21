@@ -5,7 +5,7 @@
 //===- SimplifyOnnx.cpp - Pre-lowering ONNX graph simplifications --------===//
 //
 // Implements the simplify-onnx pass. See SimplifyOnnxPass in
-// include/hip/Dialect/Transforms/Passes.td for the contract.
+// include/hip/Dialect/Hip/Transforms/Passes.td for the contract.
 //
 // The pass is pure ONNX-dialect: no HIP-dialect dependency. It is positioned
 // at the head of the pipeline (before hip-add-context-arg) so it operates in
@@ -25,7 +25,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "hip/Dialect/Transforms/Passes.h"
+#include "hip/Dialect/Hip/Transforms/Passes.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Builders.h"
@@ -45,7 +45,7 @@ namespace mlir {
 namespace hip {
 
 #define GEN_PASS_DEF_SIMPLIFYONNXPASS
-#include "hip/Dialect/Transforms/Passes.h.inc"
+#include "hip/Dialect/Hip/Transforms/Passes.h.inc"
 
 namespace {
 

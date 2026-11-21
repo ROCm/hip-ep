@@ -30,7 +30,7 @@
 // call below passes null zero_points/bias and skips the ZpUnpackCache
 // machinery that com.microsoft::QMoE needs.
 //
-// Pipeline (Hip_QMoEAmdOp in include/hip/Dialect/IR/HipOps.td carries the
+// Pipeline (Hip_QMoEAmdOp in include/hip/Dialect/Hip/IR/HipOps.td carries the
 // full math):
 //   1. hip_qmoe_amd_route            : sigmoid+correction-bias routing
 //   2. fc1_latent_proj (matmul_nbits): hidden_states -> h        [latent]

@@ -4,7 +4,7 @@
  */
 
 #include "HipToLLVMUtils.h"
-#include "hip/Dialect/Transforms/BufferUtils.h"
+#include "hip/Dialect/Hip/Transforms/BufferUtils.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"

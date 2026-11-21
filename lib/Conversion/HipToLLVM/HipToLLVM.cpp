@@ -5,7 +5,7 @@
 
 #include "HipToLLVMUtils.h"
 #include "hip/Conversion/HipToLLVM/Passes.h"
-#include "hip/Dialect/IR/RuntimeAccessOpInterface.h"
+#include "hip/Dialect/Hip/IR/RuntimeAccessOpInterface.h"
 
 #include "mlir/Conversion/ConvertToLLVM/ToLLVMInterface.h"
 #include "mlir/Dialect/Bufferization/Transforms/BufferViewFlowAnalysis.h"
@@ -18,7 +18,7 @@ namespace mlir {
 namespace hip {
 
 #define GEN_PASS_DEF_CONVERTHIPTOLLVMPASS
-#include "hip/Dialect/Transforms/Passes.h.inc"
+#include "hip/Dialect/Hip/Transforms/Passes.h.inc"
 
 namespace {
 

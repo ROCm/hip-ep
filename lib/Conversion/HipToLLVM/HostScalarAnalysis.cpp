@@ -18,7 +18,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "HipToLLVMUtils.h"
-#include "hip/Dialect/IR/RuntimeAccessOpInterface.h"
+#include "hip/Dialect/Hip/IR/RuntimeAccessOpInterface.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Interfaces/CallInterfaces.h"

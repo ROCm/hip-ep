@@ -5,7 +5,7 @@
 
 // What this file tests
 // --------------------
-// The `--hip-infer-shapes` production pass (lib/Dialect/Transforms/
+// The `--hip-infer-shapes` production pass (lib/Dialect/Hip/Transforms/
 // InferShapesPass.cpp) — i.e. the CONSUMER side of
 // `ReifyRankedShapedTypeOpInterface` for HIP ops. Specifically:
 //
@@ -784,7 +784,7 @@ func.func @refine_range_tier1_constant_args(%ctx: !hip.context,
 // `hip.gqa` is multi-result (3 required outs: output, present_key,
 // present_value, plus one optional debug out `output_qk` -- omitted
 // here). Reify routes through `Hip_DpsOp`'s default `reifyResultShapes`
-// body in `lib/Dialect/IR/HipDpsOpInterface.cpp`, which walks
+// body in `lib/Dialect/Hip/IR/HipDpsOpInterface.cpp`, which walks
 // `getDpsInits()` and lifts each init's runtime shape via
 // `tensor::getMixedSizes` -- one entry of `reified` per result. The
 // LIT case uses matching dynamic outs/result triples and guards the

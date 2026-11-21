@@ -22,7 +22,7 @@ expansion an exporter emits for this block -- the subgraph the op is
 there to replace -- rather than inventing an equivalent formulation, so
 its agreement is evidence about the op and not about the transcription.
 The op's math is specified on Hip_QMoEAmdOp in
-include/hip/Dialect/IR/HipOps.td.
+include/hip/Dialect/Hip/IR/HipOps.td.
 
 The parametrization straddles the runtime's dispatch boundaries so the
 suite covers every path rather than whichever one a single shape

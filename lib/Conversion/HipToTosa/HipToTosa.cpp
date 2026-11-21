@@ -4,8 +4,8 @@
  */
 
 #include "hip/Conversion/HipToTosa/HipToTosaLegality.h"
-#include "hip/Dialect/IR/HipDialect.h"
-#include "hip/Dialect/Transforms/Passes.h"
+#include "hip/Dialect/Hip/IR/HipDialect.h"
+#include "hip/Dialect/Hip/Transforms/Passes.h"
 #include "hip/debug_log.h"
 
 #include <llvm/ADT/STLFunctionalExtras.h>
@@ -44,7 +44,7 @@
 namespace mlir::hip {
 
 #define GEN_PASS_DEF_CONVERTHIPTOTOSAPASS
-#include "hip/Dialect/Transforms/Passes.h.inc"
+#include "hip/Dialect/Hip/Transforms/Passes.h.inc"
 
 namespace {
 

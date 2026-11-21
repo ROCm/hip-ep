@@ -6,8 +6,8 @@
 #include "hip/Dialect/Hipsr/Pipelines/Pipelines.h"
 
 #include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"
+#include "hip/Dialect/Hip/Transforms/Passes.h"
 #include "hip/Dialect/Hipsr/Transforms/Passes.h"
-#include "hip/Dialect/Transforms/Passes.h"
 
 #include "mlir/Conversion/AffineToStandard/AffineToStandard.h"
 #include "mlir/Conversion/ConvertToLLVM/ToLLVMPass.h"

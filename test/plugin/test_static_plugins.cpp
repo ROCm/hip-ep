@@ -15,9 +15,9 @@
 // Either way dispatch must be safe + idempotent. Plain main() (no GTest).
 
 #include "hip/Compiler/PluginRegistry.h"
-#include "hip/Dialect/IR/HipDialect.h"
-#include "hip/Dialect/Transforms/Passes.h"
-#include "hip/Dialect/Transforms/Pipelines.h"
+#include "hip/Dialect/Hip/IR/HipDialect.h"
+#include "hip/Dialect/Hip/Transforms/Passes.h"
+#include "hip/Dialect/Hip/Transforms/Pipelines.h"
 #include "hip/InitAllPasses.h"
 
 #include "morphizen-foundation/file_io.hpp"
@@ -43,7 +43,20 @@
 #include <cstring>
 #include <map>
 #include <string>
+#include <type_traits>
 #include <vector>
+
+// A source plugin may include the old fragment once per selected pass.
+namespace legacy_pass_includes {
+#define GEN_PASS_DECL_INFERSHAPESPASS
+#include "hip/Dialect/Transforms/Passes.h.inc"
+#define GEN_PASS_DECL_LOWERALLOCSPASS
+#include "hip/Dialect/Transforms/Passes.h.inc"
+static_assert(std::is_same_v<decltype(&createInferShapesPass),
+                             decltype(&mlir::hip::createInferShapesPass)>);
+static_assert(std::is_same_v<decltype(&createLowerAllocsPass),
+                             decltype(&mlir::hip::createLowerAllocsPass)>);
+} // namespace legacy_pass_includes
 
 #ifndef HIP_EP_EXPECT_SAMPLE
 #define HIP_EP_EXPECT_SAMPLE 0

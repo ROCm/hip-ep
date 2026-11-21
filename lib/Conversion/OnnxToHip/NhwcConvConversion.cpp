@@ -5,7 +5,7 @@
 
 #include "OnnxToHipUtils.h"
 
-#include "hip/Dialect/IR/HipConstantData.h"
+#include "hip/Dialect/Hip/IR/HipConstantData.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 

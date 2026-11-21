@@ -333,11 +333,22 @@ foreach(_hip_target hip::host hip::device)
     PROPERTY INTERFACE_LINK_LIBRARIES "${_hip_kept_libs}")
 endforeach()
 
-# Public C API headers (compiler_api.h, compiler_types.h, ...).
+# Public C++ headers and canonical C API.
 install(DIRECTORY ${CMAKE_SOURCE_DIR}/include/hip
   DESTINATION include
   FILES_MATCHING PATTERN "*.h"
 )
+install(DIRECTORY ${CMAKE_SOURCE_DIR}/include/hip-c
+  DESTINATION include
+  FILES_MATCHING PATTERN "*.h"
+)
+
+# Preserve both <hip/compiler_api.h> and <compiler_api.h> with -Iinclude/hip.
+foreach(header IN ITEMS compiler_api.h compiler_types.h)
+  set(canonical "${CMAKE_CURRENT_SOURCE_DIR}/include/hip-c/${header}")
+  configure_file("${canonical}" "${CMAKE_CURRENT_BINARY_DIR}/include/hip/${header}" COPYONLY)
+  install(FILES "${canonical}" DESTINATION include/hip)
+endforeach()
 
 # Python wheel packaging (opt-in; defines the 'wheel' target). Added last so the
 # EP target (morphizen_CORE_DYNAMIC_UNIQUE_ID, from deps.cmake) exists. The JIT
