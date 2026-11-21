@@ -139,6 +139,27 @@ def main():
     reference = load(WORK / "default-4-reference.json")
     assert all(x["status"] == "passed" for x in [verified, support, probe, reference])
     quality = audit_quality()
+    trained_path = SOURCE / "docs/reproducibility/qwen-trained-performance.json"
+    trained = load(trained_path)
+    assert trained["state"] == "passed" and trained["job"] == "303195"
+    assert trained["training_job"] == "303042" and trained["selected_step"] == 128
+    assert (
+        trained["selector_sha256"]
+        == "2d2672cf7108d233bc4ff1f7259a4aff4f674434199165d966b493817a1d5edd"
+    )
+    assert sha(SOURCE / "runs/303195/performance.jsonl") == trained["raw_sha256"]
+    assert all(r["before"] == r["measured"] for r in trained["runtime"].values())
+    long_manifest_path = WORK / "long-quality-v1/manifest.json"
+    long_manifest = load(long_manifest_path)
+    assert long_manifest["state"] == "locked"
+    assert (
+        sha(WORK / "long-quality-v1/documents.json")
+        == long_manifest["documents_sha256"]
+    )
+    timing_path = WORK / "timing-v1/manifest.json"
+    timing = load(timing_path)
+    assert timing["state"] == "locked"
+    assert sha(WORK / "timing-v1/streams.json") == timing["streams_sha256"]
     lines = [
         "<!--",
         "Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.",
@@ -226,21 +247,60 @@ def main():
             "",
             f"All rows pass protocol/data identity and score/count audits. {quality['gsm_caps']} default GSM generations reached the cap. Raw completions and capped cases are retained. No native QSA quality result is implied.",
         ]
+    elif quality["ppl_documents"] == 64:
+        lines += [
+            "| Metric | Native default | Native trained QSA |",
+            "|---|---:|---|",
+            f"| PPL, 64 × 4K windows | {quality['ppl']:.6f} | Pending |",
+            "| GSM8K, 128 questions | In progress | Pending |",
+            "",
+            "All 64 native default PPL windows are complete and pass the frozen protocol/count audit. The 128-question default GSM campaign is still in progress. No native QSA quality result is established yet.",
+        ]
     else:
         lines += [
-            f"Default quality is **{quality['state'].replace('_', ' ')}**: {quality['ppl_documents']}/64 PPL windows and {quality['gsm_questions']}/128 GSM questions are recorded. No completed native Qwen default or QSA accuracy score is reported yet."
+            "The default quality campaign is in progress. Completed native scores will be reported after the frozen 64-window/128-question campaign and independent audit finish. Local progress and partial rows are under `_local/qwen-qsa/quality/Original/`; no completed native Qwen QSA score is established yet."
         ]
+    lines += [
+        "",
+        "## Separate locked long-context inputs",
+        "",
+        "Before native QSA integration or kernel tuning, four natural documents from the pinned Dolma PDF subcorpus were selected with seed 20261124, one per new shard. Prior Qwen selector-data shards and all train/validation/test document hashes are excluded. The bounded selection also rejects shared 16-token fingerprints with the 128 GSM questions. This is not a semantic contamination guarantee or a corpus-representative sample.",
+        "",
+        f"Each document supplies nested 16K and 32K prefix trials, scoring the final 1,023 next-token targets at each length. The four locked windows contain 32,896 tokens each, including a 128-token reserve. The document file SHA256 is `{long_manifest['documents_sha256']}`. These inputs have no native long-context accuracy result yet; they will be reported separately from the 4K and GSM diagnostics.",
+        "",
+        f"The timing inputs are separately frozen under `_local/qwen-qsa/timing-v1/`, SHA256 `{timing['streams_sha256']}`. Eight common 65,600-token streams concatenate the earlier locked 4K test windows. They support candidate prefix lengths 4K/16K/32K/64K with 64 teacher-forced decode calls, and candidate batches 1/4/8. The protocol declares two warmup pairs and six measured alternating pairs. These are candidate shapes rather than claims of memory/support, and these concatenations are timing inputs rather than natural long-document quality evidence.",
+    ]
+    lines += [
+        "",
+        "## Updated MI355X trained reference",
+        "",
+        "Source job 303195 now times the exact trained step-128 export used for source accuracy, with an unchanged backbone and six unchanged inference/kernel sources. Source packet commit is `3b0c30ea4976085798a36d22cefa4089bbef6543`. This evidence update does not change the transferred selector or native quality protocol. Selected batch-one median paired changes are:",
+        "",
+        "| Source prefix | Source decode TPS change | Source prefill TPS change |",
+        "|---|---:|---:|",
+    ]
+    for row in trained["rows"]:
+        if row["batch"] == 1:
+            lines.append(
+                f"| {row['context'] // 1024}K | {row['decode']['paired_throughput_gain_pct']:+.2f}% | {row['prefill']['paired_throughput_gain_pct']:+.2f}% |"
+            )
+    lines += [
+        "",
+        "These are BF16 MI355X results, not hip-ep measurements or a forecast. The source has two warmup pairs and six measured alternating pairs per shape. Its independent wall phase timers include per-step greedy argmax in decode, and variants can follow different token streams. That protocol remains distinct from the planned native fixed-token timing. Full source tables, raw-trial linkage and ranges are in the read-only `../sparse-attn/QWEN_PERFORMANCE.md` and `docs/reproducibility/qwen-trained-performance.json`. Historical untrained timing remains separate.",
+    ]
     lines += [
         "",
         "## QSA and performance work still required",
         "",
         "After default quality is established, integrate only layers 27/31/35/39 using the frozen Qwen-specific projection, three zero-centered norms, token-key normalization before four-token FP32 pooling, partial 64-coordinate RoPE, stable 512 historical-block selection and one causal current block. Preserve full KV storage with selected-address reads and all Gated DeltaNet/default work. The MI355X wave64 implementation needs a faithful wave32 port and dedicated feature/index/cache/numerical controls.",
         "",
-        "Prefill and decode will be measured independently with a fixed common teacher-forced decode stream, identical session/head/cache work, exact-shape warmups, balanced paired trials and uncertainty. Start with feasible batch-one shapes, expanding only after actual support/memory tests. No native Qwen speedup, slowdown or feasible long-context/batch limit has been measured yet. Source timing with untrained selectors is not trained-export performance evidence.",
+        "Prefill and decode will be measured independently with a fixed common teacher-forced decode stream, identical session/head/cache work, exact-shape warmups, balanced paired trials and uncertainty. Start with feasible batch-one shapes, expanding only after actual support/memory tests. No native Qwen speedup, slowdown or feasible long-context/batch limit has been measured yet.",
         "",
         "## Evidence and reproduction",
         "",
         "Scripts are under `scripts/qwen_qsa/`. CPU identities/support receipts and export/conversion manifests are under `_local/qwen-qsa/`. Bounded stages use the same serial GPU lock as OLMo, with retained command/status logs under `_local/qsa/stages/qwen-*`. Four-block support and numerical receipts retain binary, graph, validator and runtime identities. `report_results.py` audits complete quality rows before reporting a full default score.",
+        "",
+        "The [native Qwen GQA design contract](../design/qwen-qsa-native-gqa.md) records the replacement boundary, precision, cache ownership, selection semantics and validation/timing requirements before implementation.",
         "",
         "See the preserved [OLMo native accuracy report](olmo-qsa-agent-accuracy.md) and [OLMo native performance report](olmo-qsa-native-gqa-results.md). GSM/BFCL pilots are complete; SWE-bench remains blocked by the missing container host.",
         "",
@@ -252,6 +312,11 @@ def main():
             {
                 "default_quality": quality,
                 "native_qsa_results": False,
+                "baseline_established": quality["state"] == "complete",
+                "long_quality_manifest_sha256": sha(long_manifest_path),
+                "timing_manifest_sha256": sha(timing_path),
+                "trained_source_evidence_sha256": sha(trained_path),
+                "trained_source_raw_sha256": trained["raw_sha256"],
                 "report_sha256": sha(output),
             },
             indent=2,

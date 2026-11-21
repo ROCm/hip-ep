@@ -60,16 +60,43 @@ These are architecture/export diagnostics, not a full-model accuracy score or pe
 
 The locked Qwen protocol uses 64 test windows of 4,096 tokens and 128 zero-shot, thinking-disabled GSM questions, greedy generation with a 512-token reserve and both official EOS IDs. The parser takes the last #### number, falls back to the last number, and applies Decimal normalization. It does not use OLMo's five-shot prompt/strict parser. Qwen gates remain PPL increase ≤5% and GSM drop ≤2 percentage points against the fresh default. The earlier OLMo nongating decision is not transferred to Qwen.
 
-Default quality is **not started**: 0/64 PPL windows and 0/128 GSM questions are recorded. No completed native Qwen default or QSA accuracy score is reported yet.
+| Metric | Native default | Native trained QSA |
+|---|---:|---|
+| PPL, 64 × 4K windows | 5.968688 | Pending |
+| GSM8K, 128 questions | In progress | Pending |
+
+All 64 native default PPL windows are complete and pass the frozen protocol/count audit. The 128-question default GSM campaign is still in progress. No native QSA quality result is established yet.
+
+## Separate locked long-context inputs
+
+Before native QSA integration or kernel tuning, four natural documents from the pinned Dolma PDF subcorpus were selected with seed 20261124, one per new shard. Prior Qwen selector-data shards and all train/validation/test document hashes are excluded. The bounded selection also rejects shared 16-token fingerprints with the 128 GSM questions. This is not a semantic contamination guarantee or a corpus-representative sample.
+
+Each document supplies nested 16K and 32K prefix trials, scoring the final 1,023 next-token targets at each length. The four locked windows contain 32,896 tokens each, including a 128-token reserve. The document file SHA256 is `a91f55b001e2e345072ee9da3f329e90486739e4d405e21d3cf889345889b3a4`. These inputs have no native long-context accuracy result yet; they will be reported separately from the 4K and GSM diagnostics.
+
+The timing inputs are separately frozen under `_local/qwen-qsa/timing-v1/`, SHA256 `5c8ac2934c8f90d049337e50ea89b95a0c427c1b9b21291cc9d18de1827e567b`. Eight common 65,600-token streams concatenate the earlier locked 4K test windows. They support candidate prefix lengths 4K/16K/32K/64K with 64 teacher-forced decode calls, and candidate batches 1/4/8. The protocol declares two warmup pairs and six measured alternating pairs. These are candidate shapes rather than claims of memory/support, and these concatenations are timing inputs rather than natural long-document quality evidence.
+
+## Updated MI355X trained reference
+
+Source job 303195 now times the exact trained step-128 export used for source accuracy, with an unchanged backbone and six unchanged inference/kernel sources. Source packet commit is `3b0c30ea4976085798a36d22cefa4089bbef6543`. This evidence update does not change the transferred selector or native quality protocol. Selected batch-one median paired changes are:
+
+| Source prefix | Source decode TPS change | Source prefill TPS change |
+|---|---:|---:|
+| 16K | -1.24% | -1.64% |
+| 32K | +11.93% | +0.00% |
+| 64K | +17.73% | +2.26% |
+
+These are BF16 MI355X results, not hip-ep measurements or a forecast. The source has two warmup pairs and six measured alternating pairs per shape. Its independent wall phase timers include per-step greedy argmax in decode, and variants can follow different token streams. That protocol remains distinct from the planned native fixed-token timing. Full source tables, raw-trial linkage and ranges are in the read-only `../sparse-attn/QWEN_PERFORMANCE.md` and `docs/reproducibility/qwen-trained-performance.json`. Historical untrained timing remains separate.
 
 ## QSA and performance work still required
 
 After default quality is established, integrate only layers 27/31/35/39 using the frozen Qwen-specific projection, three zero-centered norms, token-key normalization before four-token FP32 pooling, partial 64-coordinate RoPE, stable 512 historical-block selection and one causal current block. Preserve full KV storage with selected-address reads and all Gated DeltaNet/default work. The MI355X wave64 implementation needs a faithful wave32 port and dedicated feature/index/cache/numerical controls.
 
-Prefill and decode will be measured independently with a fixed common teacher-forced decode stream, identical session/head/cache work, exact-shape warmups, balanced paired trials and uncertainty. Start with feasible batch-one shapes, expanding only after actual support/memory tests. No native Qwen speedup, slowdown or feasible long-context/batch limit has been measured yet. Source timing with untrained selectors is not trained-export performance evidence.
+Prefill and decode will be measured independently with a fixed common teacher-forced decode stream, identical session/head/cache work, exact-shape warmups, balanced paired trials and uncertainty. Start with feasible batch-one shapes, expanding only after actual support/memory tests. No native Qwen speedup, slowdown or feasible long-context/batch limit has been measured yet.
 
 ## Evidence and reproduction
 
 Scripts are under `scripts/qwen_qsa/`. CPU identities/support receipts and export/conversion manifests are under `_local/qwen-qsa/`. Bounded stages use the same serial GPU lock as OLMo, with retained command/status logs under `_local/qsa/stages/qwen-*`. Four-block support and numerical receipts retain binary, graph, validator and runtime identities. `report_results.py` audits complete quality rows before reporting a full default score.
+
+The [native Qwen GQA design contract](../design/qwen-qsa-native-gqa.md) records the replacement boundary, precision, cache ownership, selection semantics and validation/timing requirements before implementation.
 
 See the preserved [OLMo native accuracy report](olmo-qsa-agent-accuracy.md) and [OLMo native performance report](olmo-qsa-native-gqa-results.md). GSM/BFCL pilots are complete; SWE-bench remains blocked by the missing container host.
