@@ -3160,7 +3160,8 @@ extern "C" int hip_matmul_nbits_dp4a(
  * HIP_MATMUL_GROUP_EPI_SILU_MUL: two segments of equal N, gate and up. A block
  *   computes the same columns of both and writes silu(gate) * up, so neither
  *   projection reaches memory. Each half is rounded to fp16 first, the value
- *   the unfused graph hands its Sigmoid and Mul.
+ *   the unfused graph hands its Sigmoid and Mul, and groupSiluMul rounds the
+ *   rest as that graph does.
  *
  * No bias. Zero points (AWQ-style asymmetric weights) are pre-unpacked uint8
  * [N[s], k_blocks] per segment, as for hip_matmul_nbits_dp4a; HAS_ZP is a
@@ -3184,6 +3185,16 @@ struct Dp4aGroupArgs {
     int            tile_end[HIP_MATMUL_GROUP_MAX_SEGMENTS];
     int            nseg;
 };
+
+// SiLU(gate) * up as the Sigmoid -> Mul -> Mul graph it replaces computes it
+// (and as the non-promoted hip.swiglu does): every node's result is an fp16
+// tensor, so the sigmoid and gate * sigmoid are rounded before the next step.
+__device__ __forceinline__ __half groupSiluMul(float gate, float up)
+{
+    const float s = __half2float(__float2half(1.0f / (1.0f + expf(-gate))));
+    const float gs = __half2float(__float2half(gate * s));
+    return __float2half(gs * up);
+}
 
 // Selects a segment's field without indexing the kernarg array by a runtime
 // value, which would copy the struct to scratch.
@@ -3320,7 +3331,7 @@ void matmul_nbits_gemv_dp4a_group_kernel(
                 static_cast<float>(static_cast<__half>(partial[c]));
             const float up =
                 static_cast<float>(static_cast<__half>(partial[c + TILE_N]));
-            out[n] = static_cast<__half>(gate / (1.0f + __expf(-gate)) * up);
+            out[n] = groupSiluMul(gate, up);
         } else {
             out[n] = static_cast<__half>(partial[c]);
         }
@@ -3636,9 +3647,7 @@ __global__ void matmul_nbits_silu_mul_kernel(const __half* gate,
 {
     const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= n) return;
-    const float gv = static_cast<float>(gate[i]);
-    out[i] = static_cast<__half>(gv / (1.0f + __expf(-gv)) *
-                                 static_cast<float>(up[i]));
+    out[i] = groupSiluMul(static_cast<float>(gate[i]), static_cast<float>(up[i]));
 }
 
 extern "C" int hip_matmul_nbits_silu_mul(void* stream_v, const void* gate,

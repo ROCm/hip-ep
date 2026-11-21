@@ -868,7 +868,10 @@ def _make_gate_up_silu_model(
     seed: int = 11,
     block_size: int = BLOCK_SIZE,
     asym: bool = False,
+    split_input: bool = False,
 ):
+    """split_input feeds up from a second input X2, so the projections share
+    no activation and stay ungrouped."""
     rng = np.random.default_rng(seed)
     x = helper.make_tensor_value_info("X", TensorProto.FLOAT16, [1, seq_len, K])
     y = helper.make_tensor_value_info("Y", TensorProto.FLOAT16, [1, seq_len, N])
@@ -876,16 +879,22 @@ def _make_gate_up_silu_model(
     inits = _q4_initializers(rng, "gate", K, N, **q4) + _q4_initializers(
         rng, "up", K, N, **q4
     )
+    up_in = "X2" if split_input else "X"
     nodes = [
         _q4_node("gate", "X", "G", K, N, **q4),
-        _q4_node("up", "X", "U", K, N, **q4),
+        _q4_node("up", up_in, "U", K, N, **q4),
         helper.make_node("Sigmoid", ["G"], ["S"]),
         helper.make_node("Mul", ["G", "S"], ["GS"]),
         helper.make_node("Mul", ["GS", "U"], ["Y"]),
     ]
+    inputs = [x]
+    if split_input:
+        inputs.append(
+            helper.make_tensor_value_info("X2", TensorProto.FLOAT16, [1, seq_len, K])
+        )
     return make_model_from_nodes(
         nodes,
-        [x],
+        inputs,
         [y],
         initializers=inits,
         opset=21,
@@ -931,6 +940,24 @@ class TestMatMulNBitsGroup:
 
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)
+
+    @pytest.mark.parametrize("seq_len", [7, 128])
+    @pytest.mark.parametrize("asym", [False, True], ids=["sym", "asym"])
+    def test_gate_up_silu_matches_ungrouped(self, model_runner, seq_len, asym):
+        """Above one row the group runs each projection as the ungrouped graph
+        does, so its SiLU * mul has to round as the graph does too: the output
+        is bit-identical to the same weights with the activation split in two."""
+        K, N = PHI35_HIDDEN, PHI35_INTERMEDIATE
+        rng = np.random.default_rng(99)
+        x = rng.uniform(-1, 1, [1, seq_len, K]).astype(np.float16)
+        grouped, _ = model_runner.run_sample(
+            _make_gate_up_silu_model(seq_len, K, N, asym=asym), [x]
+        )
+        ungrouped, _ = model_runner.run_sample(
+            _make_gate_up_silu_model(seq_len, K, N, asym=asym, split_input=True),
+            [x, x.copy()],
+        )
+        np.testing.assert_array_equal(grouped[0], ungrouped[0])
 
     @pytest.mark.parametrize("seq_len", [1, 7])
     @pytest.mark.parametrize(
