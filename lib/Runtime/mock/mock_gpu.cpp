@@ -1660,16 +1660,17 @@ int wrap_pow(RuntimeState *state, void *input, void *output,
 }
 
 int wrap_swish(RuntimeState *state, void *input, void *output,
-               int64_t num_elements, int64_t data_type, double alpha) {
+               int64_t num_elements, int64_t data_type, double alpha,
+               double input_scale) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_swish\n");
     return -1;
   }
 
   MOCK_PRINT("[MOCK] wrap_swish(num_elements=%lld, data_type=%s(%lld), "
-             "alpha=%f)\n",
+             "alpha=%f, input_scale=%f)\n",
              (long long)num_elements, hipdnn_ep_datatype_name(data_type),
-             (long long)data_type, alpha);
+             (long long)data_type, alpha, input_scale);
   return 0;
 }
 

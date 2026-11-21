@@ -238,6 +238,22 @@ func.func @swish_alpha(%ctx: !hip.context, %x: tensor<2x3xf16>,
   return %r : tensor<2x3xf16>
 }
 
+// input_scale multiplies x first; that product is both the sigmoid input and
+// the left factor: z * sigmoid(z).
+// CHECK-LABEL: func.func @swish_input_scale
+// CHECK: %[[Z:.*]] = tosa.mul %{{.*}}, %{{.*}}
+// CHECK: %[[S:.*]] = tosa.sigmoid %[[Z]]
+// CHECK: tosa.mul %[[Z]], %[[S]]
+// CHECK-NOT: hip.swish
+func.func @swish_input_scale(%ctx: !hip.context, %x: tensor<1x320xf16>,
+                             %init: tensor<1x320xf16>) -> tensor<1x320xf16>
+    attributes {rock.kernel} {
+  %r = hip.swish(%ctx) ins(%x : tensor<1x320xf16>)
+                       outs(%init : tensor<1x320xf16>)
+                       {input_scale = 2.500000e-01 : f64} : tensor<1x320xf16>
+  return %r : tensor<1x320xf16>
+}
+
 // CHECK-LABEL: func.func @swish_outlined_kernel
 // CHECK: tosa.sigmoid
 // CHECK-NOT: hip.swish

@@ -1652,6 +1652,12 @@ struct SwishConverter final : public OpConversionPattern<SwishOp> {
       return failure();
     Location loc = op.getLoc();
     Value x = adaptor.getInput();
+    double inputScale = op.getInputScale().convertToDouble();
+    if (inputScale != 1.0)
+      x = tosa::MulOp::create(
+          rewriter, loc, resultType, x,
+          createSplatFloat(rewriter, loc, resultType, inputScale),
+          createZeroMulShift(rewriter, loc));
     double alphaVal = op.getAlpha().convertToDouble();
     Value preSigmoid = x;
     if (alphaVal != 1.0)

@@ -50,8 +50,15 @@ __device__ __forceinline__ float softplus(float x) {
 // lanes is what makes a token step cheap: the two row dot products reduce over
 // TPR lanes instead of a full wave. Each row is read before it is written by
 // the threads that own it, so an initial_state aliasing final_state is safe.
+//
+// Blocks are small so that a decode step, which is one pass over the fp32
+// state, spreads over every CU: at 256 threads Qwen3.8-Flash-Next's 48 heads
+// (dk = dv = 128) were 48 blocks on 40 CUs. 64 threads (192 blocks): 44.3 vs
+// 40.7 us per call with the state cold; every row's arithmetic is unchanged.
+constexpr int kRecurrentBlockSize = 64;
+
 template <typename T, int DK>
-__global__ void __launch_bounds__(kBlockSize) gatedDeltaNetRecurrentKernel(
+__global__ void __launch_bounds__(kRecurrentBlockSize) gatedDeltaNetRecurrentKernel(
     const T *__restrict__ qkv, const float *__restrict__ decay,
     const float *__restrict__ beta, const float *initialState,
     const float *__restrict__ aLog, const float *__restrict__ dtBias,
@@ -59,7 +66,7 @@ __global__ void __launch_bounds__(kBlockSize) gatedDeltaNetRecurrentKernel(
     int numHeadsV, int headSizeV, float scale) {
   constexpr int kTpr = DK >= 64 ? DK / 64 : 1;
   constexpr int kE = DK / kTpr;
-  constexpr int kRowsPerBlock = kBlockSize / kTpr;
+  constexpr int kRowsPerBlock = kRecurrentBlockSize / kTpr;
   constexpr int kQkPerLane = DK / kLanes;
   const int rowGroups = (headSizeV + kRowsPerBlock - 1) / kRowsPerBlock;
   const int rowGroup = static_cast<int>(blockIdx.x) % rowGroups;
@@ -619,12 +626,13 @@ hipError_t launchRecurrent(hipStream_t stream, const void *qkv,
                            int batch, int seqLen, int numHeadsQk,
                            int numHeadsV, int headSizeV, float scale) {
   constexpr int kTpr = DK >= 64 ? DK / 64 : 1;
-  constexpr int kRowsPerBlock = kBlockSize / kTpr;
+  constexpr int kRowsPerBlock = kRecurrentBlockSize / kTpr;
   const int rowGroups = (headSizeV + kRowsPerBlock - 1) / kRowsPerBlock;
   const dim3 grid(static_cast<unsigned>(batch * numHeadsV * rowGroups));
   (void)hipGetLastError();
   hipLaunchKernelGGL((gatedDeltaNetRecurrentKernel<T, DK>), grid,
-                     dim3(kBlockSize), 0, stream, static_cast<const T *>(qkv),
+                     dim3(kRecurrentBlockSize), 0, stream,
+                     static_cast<const T *>(qkv),
                      decay, beta, initialState, aLog, dtBias,
                      static_cast<T *>(output), finalState, seqLen, numHeadsQk,
                      numHeadsV, headSizeV, scale);
