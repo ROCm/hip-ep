@@ -101,6 +101,13 @@ prefixes and a 4095+1 continuation against frozen dequantized HF weights. The
 native port needs additional QSA-specific controls and full-model default/Changed
 checks; those existing default diagnostics are not QSA validation.
 
+CPU fixtures now match the canonical frozen source features bit-for-bit for all
+four selector layers, using target FP16 hidden inputs cast to BF16 and actual
+native FP32 RoPE tables. Stable ties, the first pruning query and causal support
+counts are checked. `prepare_selector_fixtures.py` writes their tensors and hash
+receipt under `_local/qwen-qsa/selector-fixtures-v1/`. They are CPU oracles for
+later native tests; no native QSA qualification is implied.
+
 Use the locked 64-window 4K test and 128-question zero-shot, thinking-disabled GSM
 protocol. Source gates are PPL increase at most 5% and GSM drop at most 2 points
 against the fresh default. OLMo's accepted nongating GSM decision is separate.
