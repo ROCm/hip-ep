@@ -2981,6 +2981,10 @@ def Hip_SwishOp : Hip_DpsOp_AutoReify<"swish"> {
     Applies the ONNX Swish activation element-wise. com.microsoft QuickGelu
     is the same formula; its alpha defaults to 1.702 rather than 1.
 
+    `input_scale` first replaces x with z = input_scale * x, rounded to the
+    element type, then computes z * sigmoid(alpha * z). That is
+    com.microsoft ScaledSiLU with alpha = 1; the default of 1 leaves x as is.
+
     Uses destination-passing style: the output buffer is provided as an
     argument. The fused runtime kernel supports f16, f32, bf16, and f64.
 
@@ -2996,7 +3000,8 @@ def Hip_SwishOp : Hip_DpsOp_AutoReify<"swish"> {
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$input,
     Hip_TensorOrMemRef:$output,
-    DefaultValuedAttr<F64Attr, "1.0">:$alpha
+    DefaultValuedAttr<F64Attr, "1.0">:$alpha,
+    DefaultValuedAttr<F64Attr, "1.0">:$input_scale
   );
 
   let assemblyFormat = [{

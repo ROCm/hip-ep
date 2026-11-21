@@ -871,14 +871,16 @@ HIP_KERNEL_API int hip_lrn(void *stream, const void *input, void *output,
  * Swish Activation
  * =========================================================================
  *
- * Applies Swish element-wise: y = x * sigmoid(alpha * x).
+ * Applies Swish element-wise: y = z * sigmoid(alpha * z), z = input_scale * x
+ * rounded to the element type (z = x when input_scale is 1).
  * Supports HIP_DTYPE_FLOAT16, HIP_DTYPE_FLOAT32, HIP_DTYPE_BFLOAT16, and
  * HIP_DTYPE_FLOAT64.
  *
  * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure.
  */
 HIP_KERNEL_API int hip_swish(void *stream, const void *input, void *output,
-                             int64_t num_elements, int hip_dtype, double alpha);
+                             int64_t num_elements, int hip_dtype, double alpha,
+                             double input_scale);
 
 /* =========================================================================
  * Element-wise power
