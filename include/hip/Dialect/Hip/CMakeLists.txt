@@ -3,8 +3,14 @@
 # ** Licensed under the MIT License.
 ##
 
-# Keep the old plugin include paths in the build and install trees. Only
-# headers that existed before the dialect moved need these aliases.
+# Keep existing plugin include paths in the build and install trees.
+function(add_hip_dialect_header_alias header canonical)
+  set(alias "${CMAKE_CURRENT_BINARY_DIR}/../${header}")
+  file(GENERATE OUTPUT "${alias}" CONTENT "#include \"${canonical}\"\n")
+  cmake_path(GET header PARENT_PATH component)
+  install(FILES "${alias}" DESTINATION "include/hip/Dialect/${component}")
+endfunction()
+
 foreach(header IN ITEMS
     IR/HipBufferize.h
     IR/HipConstantData.h
@@ -12,13 +18,11 @@ foreach(header IN ITEMS
     IR/HipShapeUtils.h
     IR/RuntimeAccessOpInterface.h
     Transforms/BufferUtils.h
-    Transforms/Passes.h
-    Transforms/Pipelines.h)
-  set(alias "${CMAKE_CURRENT_BINARY_DIR}/../${header}")
-  file(GENERATE OUTPUT "${alias}" CONTENT "#include \"hip/Dialect/Hip/${header}\"\n")
-  cmake_path(GET header PARENT_PATH component)
-  install(FILES "${alias}" DESTINATION "include/hip/Dialect/${component}")
+    Transforms/Passes.h)
+  add_hip_dialect_header_alias("${header}" "hip/Dialect/Hip/${header}")
 endforeach()
+add_hip_dialect_header_alias(Transforms/Pipelines.h hip/Compiler/Pipelines.h)
+add_hip_dialect_header_alias(Hip/Transforms/Pipelines.h hip/Compiler/Pipelines.h)
 
 # Some TableGen backends select definitions from the main input file only.
 # Give those invocations the canonical file contents at the legacy path.

@@ -8,7 +8,6 @@
 #include "hip/Dialect/Hip/IR/HipBufferize.h"
 #include "hip/Dialect/Hip/IR/HipDialect.h"
 #include "hip/Dialect/Hip/Transforms/Passes.h"
-#include "hip/Dialect/Hip/Transforms/Pipelines.h"
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
 #include "hip/Dialect/Hipsr/Transforms/BufferizableOpInterfaceImpl.h"
 #include "hip/Dialect/Onnx/IR/OnnxDialect.h"

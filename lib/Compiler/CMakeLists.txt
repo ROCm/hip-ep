@@ -8,6 +8,7 @@ message(STATUS "Building Compiler Library")
 # Create compiler library
 add_library(LibHipCompiler STATIC
   CompilerDriver.cpp
+  Pipelines.cpp
   PluginRegistry.cpp
   # Static compiler-plugin dispatch. Includes the CMake-generated
   # ${CMAKE_BINARY_DIR}/include/hip/Compiler/StaticLinkedPlugins.inc (see
@@ -44,15 +45,10 @@ if(ENABLE_ROCMLIRTRITON)
   set(HIPDNN_EP_ROCMLIR_AUTOTUNE_AVAILABLE OFF CACHE INTERNAL
       "RocMlirAutotune.cpp compiled its real implementation, not its stub")
   target_link_libraries(LibHipCompiler PUBLIC
-    HipToTosa
     # rocMLIR/Triton reference this MLIR extension (registerInlinerExtension)
     # but it is a leaf target not pulled in transitively by the rock/triton
     # closure.
     MLIRFuncInlinerExtension
-    # CompilerDriver's rocMLIR arm calls createDuplicateFunctionEliminationPass.
-    # It resolves transitively today, but through the rocMLIR closure -- name
-    # it so a standard MLIR dependency does not hinge on that.
-    MLIRFuncTransforms
   )
   # Triton libraries are OBJECT libraries whose interface publishes
   # $<TARGET_OBJECTS>. Putting those objects into this STATIC library makes
@@ -220,7 +216,7 @@ endif()
 
 # Link against required libraries
 target_link_libraries(LibHipCompiler PUBLIC
-  HipConversion
+  HipConversion  # Conversion passes used and registered by the compiler.
   HipDialectIR
   HipsrDialectIR
   HipsrDialectTransforms
@@ -232,11 +228,18 @@ target_link_libraries(LibHipCompiler PUBLIC
   MLIRSupport
   MLIRTransforms
   MLIRFuncDialect
+  MLIRFuncTransforms
   MLIRArithDialect
   MLIRMemRefDialect
   MLIRLLVMDialect
   MLIRBufferizationDialect
+  MLIRBufferizationPipelines
+  MLIRBufferizationToMemRef
   MLIRBufferizationTransforms
+  MLIRAffineToStandard
+  MLIRLinalgTransforms
+  MLIRMemRefTransforms
+  MLIRReconcileUnrealizedCasts
   MLIRTensorInferTypeOpInterfaceImpl
   MLIRSCFDialect
   MLIRSCFTransforms
@@ -244,6 +247,9 @@ target_link_libraries(LibHipCompiler PUBLIC
   MLIRParser
   MLIRLLVMToLLVMIRTranslation
   MLIRTargetLLVMIRExport
+  MLIRArithToLLVM
+  MLIRFuncToLLVM
+  MLIRMemRefToLLVM
   MLIRIndexToLLVM
   MLIRControlFlowToLLVM
   MLIRUBToLLVM
@@ -307,16 +313,13 @@ if(TARGET hipdnn-ep-tls)
     )
 endif()
 
-# OnnxToHipDNN provides the OutlineOnnxToHipDNN / CompileHipDNNGraphs passes,
-# which CompilerDriver uses when a hipDNN handle is set. Gated on the runtime
-# target so a hipDNN-less build (no TheRock SDK) still configures.
-# The native path also links hipdnn_graph_runtime into the model DLL; pass its
-# import-library path via a generator expression.
+# The native path links hipdnn_graph_runtime into the model DLL when the
+# runtime is available. HipConversion supplies the compilation passes in
+# both configurations, using a stub when hipDNN is unavailable.
 if(TARGET hipdnn_graph_runtime)
     target_compile_definitions(LibHipCompiler PRIVATE
         "HIPDNN_GRAPH_RUNTIME_LIB_PATH=\"$<TARGET_LINKER_FILE:hipdnn_graph_runtime>\""
     )
-    target_link_libraries(LibHipCompiler PUBLIC OnnxToHipDNN)
 endif()
 
 # Final binaries take the Triton objects and the non-object closure. Static

@@ -54,7 +54,6 @@ add_library(HipDialectTransforms STATIC
   LowerAllocs.cpp
   MaterializeHostScalars.cpp
   OptimizeMemRefs.cpp
-  Pipelines.cpp
   PoolAllocs.cpp
   PromoteStridedHipOperands.cpp
   QLinearPlan.cpp
@@ -87,33 +86,24 @@ endif()
 target_link_libraries(HipDialectTransforms PUBLIC
   HipDialectIR
   HipConstantsIO
-  HipToLLVM
+  # The rocMLIR fusion passes use the legality predicates from HipToTosa.
   HipToTosa
-  OnnxToHip
-  OnnxToHipDNN
   HipSchemasLib
   MLIRPass
   MLIRTransforms
   MLIRFuncDialect
   MLIRMemRefDialect
+  MLIRMemRefTransforms
   MLIRArithDialect
+  MLIRArithTransforms
   MLIRSCFDialect
   MLIRAffineDialect
   MLIRLLVMDialect
   MLIRBufferizationDialect
   MLIRBufferizationTransforms
-  MLIRBufferizationPipelines
-  MLIRBufferizationToMemRef
-  MLIRAffineToStandard
-  MLIRArithToLLVM
-  MLIRMemRefToLLVM
-  MLIRFuncToLLVM
-  MLIRReconcileUnrealizedCasts
-  MLIRLinalgDialect
-  MLIRLinalgTransforms
-  MLIRSCFToControlFlow
   MLIRInferTypeOpInterface
   MLIRTensorDialect
+  MLIRUBDialect
   MLIRPDLDialect
   MLIRPDLInterpDialect
   MLIRParser

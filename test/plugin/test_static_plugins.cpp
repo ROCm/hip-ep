@@ -14,10 +14,10 @@
 //   * 0 (no plugins): dispatch is a clean no-op; the registry stays empty.
 // Either way dispatch must be safe + idempotent. Plain main() (no GTest).
 
+#include "hip/Compiler/Pipelines.h"
 #include "hip/Compiler/PluginRegistry.h"
 #include "hip/Dialect/Hip/IR/HipDialect.h"
 #include "hip/Dialect/Hip/Transforms/Passes.h"
-#include "hip/Dialect/Hip/Transforms/Pipelines.h"
 #include "hip/InitAllPasses.h"
 
 #include "morphizen-foundation/file_io.hpp"

@@ -68,7 +68,7 @@ generate-interface               ← 2-arg inference_compute ABI
 - `main_graph(state, inputs_array) -> i32`
 - Outputs allocated in-graph via `hip.alloc_output`, no `outputs_array`
 
-**Pipeline ordering is load-bearing.** `hip-use-output-allocator` runs *before* `hip-pool-allocs` (the "slot 4.5" placement) so the EP-owned output stays out of the GPU pool. Note this pipeline does **not** run ownership-based buffer deallocation at all — every transient is packed into session-owned pool(s) by `hip-pool-allocs` (as `memref.view` over `hip.get_pool`) rather than freed per-`memref.alloc`, so there is nothing to deallocate (see the pipeline-tail comment in `lib/Dialect/Hip/Transforms/Pipelines.cpp`). The historical constraint of running the output-allocator *after* deallocation (to stop the deallocator cloning the unowned `hip.alloc_output` at the `return`) is therefore moot.
+**Pipeline ordering is load-bearing.** `hip-use-output-allocator` runs *before* `hip-pool-allocs` (the "slot 4.5" placement) so the EP-owned output stays out of the GPU pool. Note this pipeline does **not** run ownership-based buffer deallocation at all — every transient is packed into session-owned pool(s) by `hip-pool-allocs` (as `memref.view` over `hip.get_pool`) rather than freed per-`memref.alloc`, so there is nothing to deallocate (see the pipeline-tail comment in `lib/Compiler/Pipelines.cpp`). The historical constraint of running the output-allocator *after* deallocation (to stop the deallocator cloning the unowned `hip.alloc_output` at the `return`) is therefore moot.
 
 ---
 
@@ -289,7 +289,7 @@ Note the `main_graph` / `main_graph_internal` split (from `convert-hip-to-llvm`)
 
 | Concern | Where |
 |---|---|
-| Pipeline | [lib/Dialect/Hip/Transforms/Pipelines.cpp](../../lib/Dialect/Hip/Transforms/Pipelines.cpp): the slot-4.5 `hip-use-output-allocator` pass rewrites the returned allocs; `generate-interface` emits the 2-arg ABI |
+| Pipeline | [lib/Compiler/Pipelines.cpp](../../lib/Compiler/Pipelines.cpp): the slot-4.5 `hip-use-output-allocator` pass rewrites the returned allocs; `generate-interface` emits the 2-arg ABI |
 | EP front-end | [backend-mlir-compiler/level-1-pass/src/pass_main.cpp](../../backend-mlir-compiler/level-1-pass/src/pass_main.cpp), [MlirCompiler.cpp](../../backend-mlir-compiler/level-1-pass/src/MlirCompiler.cpp) |
 | EP-local ABI mirror | `output_allocator_t` in [custom_op_mlir.hpp](../../backend-mlir-compiler/custom-op-mlir/src/custom_op_mlir.hpp) (same `static_assert`s as the runtime struct) |
 | 2-arg dispatch + setter | [InferenceState.cpp](../../backend-mlir-compiler/custom-op-mlir/src/InferenceState.cpp) (`compute`, `set_output_allocator`) |

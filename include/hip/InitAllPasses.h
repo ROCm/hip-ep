@@ -7,6 +7,7 @@
 
 #include <mutex>
 
+#include "hip/Compiler/Pipelines.h"
 #include "hip/Compiler/PluginRegistry.h"
 #include "hip/Conversion/HipToLLVM/Passes.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
@@ -14,7 +15,6 @@
 #include "hip/Dialect/Hip/IR/HipBufferize.h"
 #include "hip/Dialect/Hip/IR/HipDialect.h"
 #include "hip/Dialect/Hip/Transforms/Passes.h"
-#include "hip/Dialect/Hip/Transforms/Pipelines.h"
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
 #include "hip/Dialect/Hipsr/Pipelines/Pipelines.h"
 #include "hip/Dialect/Hipsr/Transforms/BufferizableOpInterfaceImpl.h"

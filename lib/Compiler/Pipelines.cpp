@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 
-#include "hip/Dialect/Hip/Transforms/Pipelines.h"
+#include "hip/Compiler/Pipelines.h"
 #include "hip/Compiler/PluginRegistry.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Conversion/OnnxToHipDNN/Passes.h"

@@ -17,7 +17,7 @@ through the `HIPDNN_EP_PIPELINE` override or when deciding which
 > release and re-check this table when you upgrade. The single source of truth
 > for *which* names are registered is
 > `include/hip/InitAllPasses.h::registerAllPasses()`; the order is
-> `lib/Dialect/Hip/Transforms/Pipelines.cpp`.
+> `lib/Compiler/Pipelines.cpp`.
 
 ---
 
@@ -279,7 +279,7 @@ override (so a hand-listed pipeline omitting them will trip the
 ## Canonical built-in order (reference)
 
 What the default pipeline runs, with the plugin slots interleaved. Source of
-truth: `lib/Dialect/Hip/Transforms/Pipelines.cpp`.
+truth: `lib/Compiler/Pipelines.cpp`.
 
 ```
 ONNX → HIP  (buildOnnxToHipPipeline)

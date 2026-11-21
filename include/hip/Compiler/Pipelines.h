@@ -2,9 +2,11 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-#ifndef HIP_DIALECT_TRANSFORMS_PIPELINES_H
-#define HIP_DIALECT_TRANSFORMS_PIPELINES_H
+#ifndef HIP_COMPILER_PIPELINES_H
+#define HIP_COMPILER_PIPELINES_H
 
+// Link LibHipCompiler for these pipeline builders. Individual HIP transform
+// factories are available separately through HipDialectTransforms.
 #include "hip/Conversion/OnnxToHipDNN/Passes.h"
 #include "hip/Dialect/Hip/Transforms/Passes.h"
 #include "mlir/Pass/PassManager.h"
@@ -207,4 +209,4 @@ void registerHipPipelines();
 } // namespace hip
 } // namespace mlir
 
-#endif // HIP_DIALECT_TRANSFORMS_PIPELINES_H
+#endif // HIP_COMPILER_PIPELINES_H

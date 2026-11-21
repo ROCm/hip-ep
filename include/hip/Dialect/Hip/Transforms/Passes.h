@@ -43,6 +43,9 @@ createExternalizeConstantsPass(morphizen::FileSystem *fs,
                                int64_t minNumElements,
                                bool skipConstantData = false);
 
+// registerHipPasses() also registers conversion passes. Link HipConversion
+// when using that aggregate; individual HIP transform factories and
+// registration functions can be used with HipDialectTransforms alone.
 #define GEN_PASS_REGISTRATION
 #include "hip/Dialect/Hip/Transforms/Passes.h.inc"
 

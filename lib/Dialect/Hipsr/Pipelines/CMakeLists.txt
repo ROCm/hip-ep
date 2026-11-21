@@ -16,6 +16,7 @@ target_link_libraries(HipsrDialectPipelines PUBLIC
   MLIRSupport
   MLIRShapeOpsTransforms
   MLIRShapeToStandard
+  MLIRBufferizationPipelines
   MLIRBufferizationTransforms
   MLIRLinalgTransforms
   MLIRMemRefTransforms
