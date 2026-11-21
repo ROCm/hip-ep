@@ -3,6 +3,6 @@
  * Licensed under the MIT License.
  */
 
-#include "hip/Dialect/IR/RuntimeAccessOpInterface.h"
+#include "hip/Dialect/Hip/IR/RuntimeAccessOpInterface.h"
 
-#include "hip/Dialect/IR/RuntimeAccessOpInterface.cpp.inc"
+#include "hip/Dialect/Hip/IR/RuntimeAccessOpInterface.cpp.inc"

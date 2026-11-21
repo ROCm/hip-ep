@@ -22,11 +22,11 @@
 // module containing ONLY the `rock.kernel` funcs (main_graph and its hip.* ops
 // are dropped from the clone we compile).
 
+#include "hip/Compiler/Pipelines.h"
 #include "hip/Compiler/RocMlirAutotune.h"
 #include "hip/Compiler/RocMlirKernelCompiler.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Dialect/Hip/Transforms/Passes.h"
-#include "hip/Dialect/Hip/Transforms/Pipelines.h"
 #include "hip/InitAllPasses.h"
 #include "hip/Support/DiskFileSystem.h"
 #include "hip/Target/LLVM/LLVMBackend.h"

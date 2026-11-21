@@ -41,6 +41,23 @@ foreach(interface IN ITEMS
   endforeach()
 endforeach()
 
+# Exercise the libraries a client of one HIP pass actually builds and links.
+add_executable(test-hip-transforms test_hip_transforms.cpp)
+target_link_libraries(test-hip-transforms PRIVATE HipDialectTransforms MLIRParser)
+add_test(NAME HipTransformsStandalone COMMAND test-hip-transforms)
+
+# A successful link alone cannot catch unused frontend archives on the link line.
+# CMake 3.27+ can request the resolved target graph during configuration.
+if(COMMAND cmake_file_api)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  cmake_file_api(QUERY API_VERSION 1 CODEMODEL 2)
+  add_test(NAME HipTransformsDependencies
+    COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/check_target_dependencies.py"
+      "${CMAKE_BINARY_DIR}/.cmake/api/v1/reply" "$<CONFIG>"
+      test-hip-transforms LibHipCompiler OnnxDialectIR OnnxToHip OnnxToHipDNN OnnxToHipsr
+  )
+endif()
+
 add_executable(test-runtime-lowering-contracts
   test_runtime_lowering_contracts.cpp
 )

@@ -12,7 +12,7 @@ This is the cross-repo contract referenced from PR
 [ROCm/MorphiZen #228](https://github.com/ROCm/MorphiZen/pull/228) and
 from comments in `lib/Conversion/OnnxToHip/LoopOutline.cpp`,
 `include/hip/InitAllPasses.h`, and
-`lib/Dialect/Hip/Transforms/Pipelines.cpp`.
+`lib/Compiler/Pipelines.cpp`.
 
 > **TODO (in-flight)**: the importer-side half of this contract ships
 > in [MorphiZen PR #228](https://github.com/ROCm/MorphiZen/pull/228).
