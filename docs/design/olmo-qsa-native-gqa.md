@@ -78,10 +78,19 @@ that a subsequent full prefill clears the error and rebuilds valid node state.
 
 ## Reproduction and evidence
 
-Use `scripts/qsa/build_native_gqa.py` for the isolated local installation and
-`export_native_gqa.py` for matched B1 Original/Changed graphs. Local artifacts
-live in `_local/qsa/native-gqa/`; the source model and selector hashes retain the
-contracts in the [original port audit](olmo-qsa-port.md).
+Use `scripts/qsa/build_native_gqa.py` for the isolated local Windows installation.
+It reuses an installed ROCm SDK and prebuilt LLVM/MLIR/LLD dependencies; use
+`--toolchain-root`, `--ort-sdk` and `--lit` to supply their locations. `--plan`
+prints the dependency recipe without building. The repository's `build.py`
+remains the general build entry point on other hosts.
+
+`export_native_gqa.py` produces matched B1 Original/Changed graphs from the
+accepted packed Original export and its CPU-generated `partitioned/manifest.json`.
+The manifest supplies attention boundary names; production inference uses the
+complete graph. The frozen source checkpoint and held-out data must also be
+available at the paths in `prepare_baseline.py`. Local artifacts live in
+`_local/qsa/native-gqa/`; source model and selector hashes retain the contracts
+in the [original port audit](olmo-qsa-port.md).
 
 `validate_native_gqa.py` compares complete dense Original with its partitioned
 control and complete native QSA with the frozen boundary reference. It checks
@@ -91,7 +100,15 @@ dispatch per forward. `benchmark_native_gqa.py` independently times prefill and
 Its `--dolma` mode rechecks the retained 5% PPL gate on the same 64 held-out
 document windows. GSM8K remains diagnostic, as accepted by the user.
 
+`run_native_gqa.py` serializes error recovery, numerical/dispatch validation,
+4K timing, Dolma, then 16K/32K/64K timing. `run_stage.py` records immutable
+commands, script snapshots and selector hashes, and stops its own process tree
+on a timeout or sustained low host memory. Existing failed stages require
+investigation and a fresh label. `report_native_gqa.py` checks raw rows and the
+exact built source/binary hashes before rendering the
+[native results](../experiments/olmo-qsa-native-gqa-results.md).
+
 The [boundary prototype results](../experiments/olmo-qsa-results.md) describe
 the earlier multi-session implementation and must not be presented as native
-GQA measurements. Native validation and measurements are required before making
-performance claims for this path.
+GQA measurements. Only completed native measurements support performance claims
+for this path; long-context timing alone does not establish long-context quality.

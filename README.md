@@ -103,6 +103,10 @@ Tool availability depends on the build configuration; see the platform quick-sta
 
 ### Extending and operating
 
+- [OLMo native QSA/GQA integration](docs/design/olmo-qsa-native-gqa.md)
+- [OLMo native QSA/GQA results](docs/experiments/olmo-qsa-native-gqa-results.md)
+- [OLMo QSA boundary prototype audit](docs/design/olmo-qsa-port.md)
+- [OLMo QSA boundary prototype results](docs/experiments/olmo-qsa-results.md)
 - [Plugin authoring](docs/plugin_authoring.md)
 - [Plugin interface design](docs/design/plugin-interface.md)
 - [Custom kernel design](docs/design/custom_kernel_design.md)
