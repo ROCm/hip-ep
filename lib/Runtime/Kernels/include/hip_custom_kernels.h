@@ -2852,6 +2852,19 @@ HIP_KERNEL_API int hip_matmul_nbits_dp4a(
     int64_t M, int64_t N, int64_t K, int64_t block_size,
     void* a_qb_scratch, void* a_scale_scratch);
 
+/* W8A8 sibling of hip_matmul_nbits_dp4a for 8-bit weights and one row:
+ *   A : fp16 [K];  B : uint8 [N, K];  scales : fp16 [N, ceil(K/block_size)]
+ *   zp_u8 : uint8 [N, ceil(K/block_size)] or nullptr (default zp=128)
+ *   a_qb_scratch : >= K bytes, 16-byte aligned; a_scale_scratch : >= ceil(K/block_size) floats
+ * Returns hipErrorInvalidValue unless K%32 == 0, block_size is a power of two
+ * >= 32 and B is 16-byte aligned. */
+HIP_KERNEL_API int hip_matmul_nbits_dp4a_u8(
+    void* stream,
+    const void* A, const void* B, const void* scales, const void* zp_u8,
+    const void* bias, void* out,
+    int64_t N, int64_t K, int64_t block_size,
+    void* a_qb_scratch, void* a_scale_scratch);
+
 /* Stand-alone launchers for the zero_points unpack/convert kernels, used by
  * the asym matmul_nbits cache in lib/Runtime/real/matmul_nbits.cpp.
  *
@@ -3329,7 +3342,9 @@ HIP_KERNEL_API int hip_qmoe_build_row_tile_classes(
 /* One-launch ragged quantized MatMulNBits over every row group/expert.
  * input_row_ids may be null for already-sorted input rows; otherwise it maps
  * each sorted output row to a source input row (FC1 fused gather).
- * zero_points_u8 is already unpacked [E,N,ceil(K/block_size)] or null.
+ * zero_points_u8 is null, or for bits=4 unpacked to one byte per group
+ * [E,N,ceil(K/block_size)], for bits=2 the ONNX packing (four per byte,
+ * [E,N,ceil(ceil(K/block_size)/4)]).
  * block_size must be a power of two and at least 32.
  */
 HIP_KERNEL_API int hip_qmoe_ragged_matmul_nbits(
@@ -3475,6 +3490,22 @@ HIP_KERNEL_API int hip_qmoe_decode_fused_dp4a(
     int64_t k, int64_t block_size,
     float swiglu_alpha, float swiglu_beta, float swiglu_limit,
     int64_t element_size_bytes, int64_t num_tokens);
+
+// W2A8 dp4a decode for 2-bit experts (fp16, packed 2-bit zero points or
+// none). Same buffers as hip_qmoe_decode_fused_dp4a plus a_sum_in
+// ([num_tokens, hidden/64] int32) and a_sum_mid ([num_tokens*k, inter/64]
+// int32). Returns -1 without launching unless block_size is a power of two in
+// [64, 512] dividing hidden and inter.
+HIP_KERNEL_API int hip_qmoe_decode_fused_dp4a_u2(
+    void* stream, const void* input, const void* expert_indices,
+    const void* expert_weights, const void* fc1_weights, const void* fc1_scales,
+    const void* fc1_zero_points, const void* fc1_bias, const void* fc2_weights,
+    const void* fc2_scales, const void* fc2_zero_points, const void* fc2_bias,
+    void* slot_buf, void* act_out, void* output, void* a_qb_in,
+    void* a_scale_in, void* a_sum_in, void* a_qb_mid, void* a_scale_mid,
+    void* a_sum_mid, int64_t hidden_size, int64_t inter_size, int64_t k,
+    int64_t block_size, float swiglu_alpha, float swiglu_beta,
+    float swiglu_limit, int64_t num_tokens);
 
 /* =========================================================================
  * com.amd QMoE Sub-Kernels (LatentMoE)
@@ -4297,6 +4328,11 @@ HIP_KERNEL_API int hip_conv_transpose(
 // accumulation. For narrow decode MatMuls such as an MoE router (N=128).
 // N must be a multiple of 8 and B 16-byte aligned; returns -1 otherwise.
 HIP_KERNEL_API int hip_gemv_f16_kn(void* stream, const void* a, const void* B,
+                                   void* out, int64_t K, int64_t N);
+
+// fp32 variant of hip_gemv_f16_kn (fp32 MoE routers). N must be a multiple of
+// 4 and B 16-byte aligned; returns -1 otherwise.
+HIP_KERNEL_API int hip_gemv_f32_kn(void* stream, const void* a, const void* B,
                                    void* out, int64_t K, int64_t N);
 
 /* =========================================================================

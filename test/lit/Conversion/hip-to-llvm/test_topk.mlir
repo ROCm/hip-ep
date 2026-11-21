@@ -17,7 +17,7 @@ module {
         outs(%values, %indices : memref<3x2xf32, 1>, memref<3x2xi64, 1>)
         {axis = 1 : i64, largest = true, sorted = true}
 
-    // CHECK: llvm.call @wrap_top_k({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, !llvm.ptr, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_top_k({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, !llvm.ptr, i64, i64, i64) -> i32
     return
   }
 
@@ -34,10 +34,12 @@ module {
         outs(%values, %indices : memref<?x?xf16, 1>, memref<?x?xi64, 1>)
         {axis = 1 : i64, largest = true, sorted = true}
 
+    // A dynamic axis extent leaves K to the runtime (k_static = -1).
     // CHECK: llvm.extractvalue %{{.*}}[3, 0]
     // CHECK: llvm.extractvalue %{{.*}}[3, 1]
     // CHECK: llvm.mul
-    // CHECK: llvm.call @wrap_top_k({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, !llvm.ptr, i64, i64) -> i32
+    // CHECK: [[KS:%[0-9]+]] = llvm.mlir.constant(-1 : i64) : i64
+    // CHECK: llvm.call @wrap_top_k({{.*}}, [[KS]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, !llvm.ptr, i64, i64, i64) -> i32
     return
   }
 
@@ -55,9 +57,10 @@ module {
         {axis = 0 : i64, largest = true, sorted = true}
 
     // HIPDNN_EP_DATATYPE_BFLOAT16 = 2. The runtime rejects dtypes the kernel
-    // does not implement.
+    // does not implement. The static axis extent of the outputs (4) is K.
     // CHECK: [[DT:%[0-9]+]] = llvm.mlir.constant(2 : i64) : i64
-    // CHECK-NEXT: llvm.call @wrap_top_k({{.*}}, [[DT]]) :
+    // CHECK-NEXT: [[KS:%[0-9]+]] = llvm.mlir.constant(4 : i64) : i64
+    // CHECK-NEXT: llvm.call @wrap_top_k({{.*}}, [[DT]], [[KS]]) :
     return
   }
 }
