@@ -9,9 +9,13 @@
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/MathExtras.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/SymbolTable.h"
 
@@ -104,6 +108,36 @@ void AllocOutputOp::getEffects(
                        SideEffects::DefaultResource::get());
 }
 
+Value PackedViewOp::getViewSource() { return getSource(); }
+
+LogicalResult PackedViewOp::verify() {
+  auto sourceType = dyn_cast<MemRefType>(getSource().getType());
+  auto resultType = dyn_cast<MemRefType>(getResult().getType());
+  if (!sourceType || !resultType)
+    return emitOpError("requires ranked memref source and result");
+  if (!sourceType.getLayout().isIdentity() ||
+      !resultType.getLayout().isIdentity())
+    return emitOpError("requires identity layout on the source and the result");
+  if (sourceType.getElementType() != resultType.getElementType() ||
+      sourceType.getMemorySpace() != resultType.getMemorySpace())
+    return emitOpError(
+        "source and result element type and memory space must match");
+  // No operands carry result extents, so the lowering can only build a
+  // static descriptor.
+  if (!resultType.hasStaticShape())
+    return emitOpError("requires a statically shaped result");
+  if (sourceType.hasStaticShape()) {
+    if (auto offset = getConstantIntValue(getElementOffset())) {
+      int64_t end = *offset + resultType.getNumElements();
+      if (*offset < 0 || end > sourceType.getNumElements())
+        return emitOpError("span [")
+               << *offset << ", " << end << ") is outside the source's "
+               << sourceType.getNumElements() << " elements";
+    }
+  }
+  return success();
+}
+
 LogicalResult AllocOutputOp::verify() {
   // Operand convention matches hip.alloc: exactly one Index per dynamic dim of
   // the result memref (static dims come from the type, dynamic dims from
@@ -114,6 +148,65 @@ LogicalResult AllocOutputOp::verify() {
     return emitOpError("expected ")
            << memrefTy.getNumDynamicDims() << " dynamic size operand(s), got "
            << getDynamicSizes().size();
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// RocMlirElementwiseOp
+//===----------------------------------------------------------------------===//
+
+// rock.blockwise_load and rock.blockwise_store take integers of at most 32
+// bits, so a wider integer tensor cannot cross a kernel boundary, and of the
+// float types only f16, bf16 and f32 can. This is the rule of
+// isKernelIOType in lib/Dialect/Transforms/KernelOutline.cpp; keep the two in
+// step.
+static bool isRocMlirKernelIOType(RankedTensorType type) {
+  if (!type.hasStaticShape())
+    return false;
+  Type element = type.getElementType();
+  if (auto intType = dyn_cast<IntegerType>(element))
+    return intType.getWidth() <= 32;
+  return element.isF16() || element.isBF16() || element.isF32();
+}
+
+LogicalResult RocMlirElementwiseOp::verify() {
+  Block &body = getBody().front();
+  if (body.getNumArguments() != getInputs().size() + 1 ||
+      !isa<ContextType>(body.getArgument(0).getType()))
+    return emitOpError("expects a !hip.context block argument followed by "
+                       "one block argument per input");
+  for (auto [input, arg] :
+       llvm::zip(getInputs(), body.getArguments().drop_front())) {
+    if (input.getType() != arg.getType())
+      return emitOpError("block argument type ")
+             << arg.getType() << " does not match input type "
+             << input.getType();
+    if (!isRocMlirKernelIOType(cast<RankedTensorType>(input.getType())))
+      return emitOpError("input type ")
+             << input.getType()
+             << " is not a kernel type (static, and f16, bf16, f32 or an "
+                "integer of at most 32 bits)";
+  }
+  for (Type type : getResultTypes()) {
+    auto tensorType = cast<RankedTensorType>(type);
+    if (!isRocMlirKernelIOType(tensorType) || tensorType.getRank() == 0)
+      return emitOpError("result type ")
+             << type
+             << " is rank 0 or not a kernel type (static, and f16, bf16, f32 "
+                "or an integer of at most 32 bits)";
+  }
+  auto yield = cast<YieldOp>(body.getTerminator());
+  if (yield.getValues().getTypes() != getResultTypes())
+    return emitOpError("yields types that do not match the results");
+  for (Operation &op : body.without_terminator()) {
+    StringRef dialect = op.getDialect() ? op.getDialect()->getNamespace() : "";
+    bool allowed = op.getNumRegions() == 0 &&
+                   (dialect == HipDialect::getDialectNamespace() ||
+                    isa<tensor::EmptyOp, tensor::ExpandShapeOp,
+                        tensor::CollapseShapeOp, arith::ConstantOp>(op));
+    if (!allowed)
+      return op.emitOpError("is not allowed in a hip.rocmlir_elementwise body");
+  }
   return success();
 }
 
@@ -674,11 +767,123 @@ static void printSingleInitDpsOp(OpAsmPrinter &p, Operation *op, Value ctx,
 }
 
 //===------------
-// RocMlirOp: ins(variadic) outs(output)
+// RocMlirOp: ins(variadic) outs(variadic)
 //===------------
 
 MutableOperandRange RocMlirOp::getDpsInitsMutable() {
-  return getOutputMutable();
+  return getOutputsMutable();
+}
+
+// The buffer that a memref reads, through the views that keep its bytes
+// (subview, cast, reinterpret_cast, expand_shape, collapse_shape). A
+// memref.view stops the walk: it is a pool slice, and PoolAllocs gives
+// buffers that are live at the same time disjoint byte ranges.
+static Value getViewedBuffer(Value value) {
+  while (Operation *def = value.getDefiningOp()) {
+    auto view = dyn_cast<ViewLikeOpInterface>(def);
+    if (!view || isa<memref::ViewOp>(def))
+      break;
+    value = view.getViewSource();
+  }
+  return value;
+}
+
+// A row-major buffer that starts at its base pointer: the form whose
+// alignedPtr and element count cover exactly the buffer.
+static bool isContiguousAtBase(MemRefType type) {
+  if (type.getLayout().isIdentity())
+    return true;
+  SmallVector<int64_t> strides;
+  int64_t offset;
+  if (failed(type.getStridesAndOffset(strides, offset)) || offset != 0)
+    return false;
+  int64_t expected = 1;
+  for (int64_t dim = type.getRank() - 1; dim >= 0; --dim) {
+    if (type.getDimSize(dim) != 1 && strides[dim] != expected)
+      return false;
+    expected *= type.getDimSize(dim);
+  }
+  return true;
+}
+
+LogicalResult RocMlirOp::verify() {
+  if (getOutputs().empty())
+    return emitOpError("requires at least one outs operand");
+  bool tensorOuts = isa<RankedTensorType>(getOutputs().front().getType());
+  if (llvm::any_of(getOutputs(), [&](Value out) {
+        return isa<RankedTensorType>(out.getType()) != tensorOuts;
+      }))
+    return emitOpError("requires all outs operands to be tensors or all to be "
+                       "memrefs");
+  // The lowering reads every input through a contiguous memref pointer, so an
+  // input of the other mode must not survive bufferization.
+  if (llvm::any_of(getInputs(), [&](Value in) {
+        return isa<RankedTensorType>(in.getType()) != tensorOuts;
+      }))
+    return emitOpError("requires ins operands of the same kind as its outs "
+                       "(all tensors or all memrefs)");
+  ArrayRef<int64_t> prefill = getPrefill();
+  if (prefill.size() % 3 != 0)
+    return emitOpError("prefill holds (index, bytes, pattern) triples");
+  int64_t numInputs = getInputs().size();
+  int64_t numArgs = numInputs + getOutputs().size();
+  llvm::SmallDenseSet<int64_t> filled;
+  for (size_t i = 0; i < prefill.size(); i += 3) {
+    int64_t index = prefill[i];
+    if (index < 0 || index >= numArgs)
+      return emitOpError("prefill argument index ")
+             << index << " is out of range";
+    // rocMLIR pre-fills only the output that its kernel accumulates into
+    // atomically. A fill of an input, or of an output that is also an input,
+    // would wipe data that the kernel reads, before every launch.
+    if (index < numInputs)
+      return emitOpError("prefill argument index ")
+             << index << " names an input; only an outs operand is pre-filled";
+    // A view of an input shares its bytes, so the fill would wipe them too.
+    Value arg = getOutputs()[index - numInputs];
+    Value buffer = isa<MemRefType>(arg.getType()) ? getViewedBuffer(arg) : arg;
+    if (llvm::any_of(getInputs(), [&](Value input) {
+          return input == arg || (isa<MemRefType>(input.getType()) &&
+                                  getViewedBuffer(input) == buffer);
+        }))
+      return emitOpError("pre-filled argument ")
+             << index << " is also an input, or a view of one";
+    if (!filled.insert(index).second)
+      return emitOpError("prefill argument index ")
+             << index << " is listed twice";
+    if (prefill[i + 1] != 1 && prefill[i + 1] != 2 && prefill[i + 1] != 4)
+      return emitOpError("prefill element size must be 1, 2 or 4 bytes");
+    // The lowering fills getNumElements() elements of this width from the
+    // buffer's base pointer, so the width must match the element type, the
+    // count must be static, and the buffer must start at its base.
+    auto shaped = cast<ShapedType>(arg.getType());
+    Type element = shaped.getElementType();
+    if (!element.isIntOrFloat() ||
+        element.getIntOrFloatBitWidth() != 8 * prefill[i + 1])
+      return emitOpError("prefill element size ")
+             << prefill[i + 1] << " does not match the element type " << element
+             << " of argument " << index;
+    if (!shaped.hasStaticShape())
+      return emitOpError("pre-filled argument ")
+             << index << " needs a static shape";
+    if (auto memref = dyn_cast<MemRefType>(arg.getType());
+        memref && !isContiguousAtBase(memref))
+      return emitOpError("pre-filled argument ")
+             << index << " needs a contiguous layout with no offset";
+  }
+  if (!tensorOuts) {
+    if (getNumResults() != 0)
+      return emitOpError("on memrefs has no results");
+    return success();
+  }
+  if (getNumResults() != getOutputs().size())
+    return emitOpError("requires one result per outs operand");
+  for (auto [result, init] : llvm::zip(getResults(), getOutputs()))
+    if (result.getType() != init.getType())
+      return emitOpError("result type ")
+             << result.getType() << " differs from its outs type "
+             << init.getType();
+  return success();
 }
 
 void RocMlirOp::getEffects(
@@ -773,14 +978,25 @@ static bool isEightBitInt(Type type) {
   return integer && integer.getWidth() == 8;
 }
 
-static LogicalResult verifyPositivePair(QLinearConvOp op, ArrayAttr attr,
+// The activation types the integer anchors lower: rocMLIR takes signless i8,
+// and HipToTosa rebiases ui8 to it. A signed si8 has no lowering.
+static bool isAnchorByte(Type type) {
+  return type.isSignlessInteger(8) || type.isUnsignedInteger(8);
+}
+
+// Two extents agree when either is dynamic or both are equal.
+static bool extentsAgree(int64_t a, int64_t b) {
+  return ShapedType::isDynamic(a) || ShapedType::isDynamic(b) || a == b;
+}
+
+static LogicalResult verifyPositivePair(Operation *op, ArrayAttr attr,
                                         StringRef name) {
   if (attr.size() != 2)
-    return op.emitOpError() << name << " must have 2 entries";
+    return op->emitOpError() << name << " must have 2 entries";
   for (Attribute entry : attr) {
     auto intAttr = dyn_cast<IntegerAttr>(entry);
     if (!intAttr || intAttr.getInt() <= 0)
-      return op.emitOpError() << name << " entries must be positive";
+      return op->emitOpError() << name << " entries must be positive";
   }
   return success();
 }
@@ -846,6 +1062,83 @@ LogicalResult QLinearConvOp::verify() {
   }
   if (getGroup() < 1)
     return emitOpError("group must be positive");
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// QuantConvOp: i8 x i8 -> i32 grouped 2D convolution
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QuantConvOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void QuantConvOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult QuantConvOp::verify() {
+  if (failed(verifyDpsComputeOp(*this, {getInput(), getWeights(), getOutput()},
+                                /*numInits=*/1)))
+    return failure();
+  auto inputType = dyn_cast<ShapedType>(getInput().getType());
+  auto weightsType = dyn_cast<ShapedType>(getWeights().getType());
+  auto outputType = dyn_cast<ShapedType>(getOutput().getType());
+  if (!inputType || !weightsType || !outputType || !inputType.hasRank() ||
+      !weightsType.hasRank() || !outputType.hasRank() ||
+      inputType.getRank() != 4 || weightsType.getRank() != 4 ||
+      outputType.getRank() != 4)
+    return emitOpError("input, weights, and output must be rank 4");
+  if (!isAnchorByte(inputType.getElementType()))
+    return emitOpError("input must be i8 or ui8");
+  if (!weightsType.getElementType().isSignlessInteger(8))
+    return emitOpError("weights must be i8");
+  if (!outputType.getElementType().isSignlessInteger(32))
+    return emitOpError("output must be i32");
+  if (failed(verifyPositivePair(*this, getKernelShape(), "kernel_shape")) ||
+      failed(verifyPositivePair(*this, getStrides(), "strides")) ||
+      failed(verifyPositivePair(*this, getDilations(), "dilations")))
+    return failure();
+  if (getPads().size() != 4 || llvm::any_of(getPads(), [](Attribute entry) {
+        auto intAttr = dyn_cast<IntegerAttr>(entry);
+        return !intAttr || intAttr.getInt() < 0;
+      }))
+    return emitOpError("pads must have 4 non-negative entries");
+  int64_t group = getGroup();
+  if (group < 1)
+    return emitOpError("group must be positive");
+
+  // The rules of the HipToTosa lowering, for the extents that are static.
+  ArrayRef<int64_t> in = inputType.getShape();
+  ArrayRef<int64_t> w = weightsType.getShape();
+  ArrayRef<int64_t> out = outputType.getShape();
+  auto divides = [&](int64_t extent) {
+    return ShapedType::isDynamic(extent) || extent % group == 0;
+  };
+  if (!divides(in[1]) || !divides(out[1]))
+    return emitOpError("input and output channels must be divisible by group");
+  if (!ShapedType::isDynamic(in[1]) && !extentsAgree(w[1], in[1] / group))
+    return emitOpError("weight input channels must equal C / group");
+  if (!extentsAgree(in[0], out[0]) || !extentsAgree(w[0], out[1]))
+    return emitOpError("batch or output channels disagree");
+  for (int64_t dim : llvm::seq<int64_t>(2)) {
+    int64_t kernel = cast<IntegerAttr>(getKernelShape()[dim]).getInt();
+    if (!extentsAgree(w[dim + 2], kernel))
+      return emitOpError("kernel_shape disagrees with the weight tensor");
+    if (ShapedType::isDynamic(in[dim + 2]) ||
+        ShapedType::isDynamic(out[dim + 2]))
+      continue;
+    int64_t stride = cast<IntegerAttr>(getStrides()[dim]).getInt();
+    int64_t dilation = cast<IntegerAttr>(getDilations()[dim]).getInt();
+    int64_t span = in[dim + 2] - 1 +
+                   cast<IntegerAttr>(getPads()[dim]).getInt() +
+                   cast<IntegerAttr>(getPads()[dim + 2]).getInt() -
+                   (kernel - 1) * dilation;
+    if (span < 0 || span / stride + 1 != out[dim + 2])
+      return emitOpError("output shape disagrees with the convolution window");
+  }
   return success();
 }
 
@@ -931,6 +1224,45 @@ LogicalResult QLinearMatMulOp::verify() {
       failed(verifyQuantParam(*this, getYScale(), getYZeroPoint(),
                               yType.getElementType(), "y", /*axisExtent=*/1)))
     return failure();
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// QuantMatmulOp: i8 x i8 -> i32 rank-2 matrix product
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QuantMatmulOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void QuantMatmulOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult QuantMatmulOp::verify() {
+  if (failed(verifyDpsComputeOp(*this, {getA(), getB(), getOutput()},
+                                /*numInits=*/1)))
+    return failure();
+  auto aType = dyn_cast<ShapedType>(getA().getType());
+  auto bType = dyn_cast<ShapedType>(getB().getType());
+  auto outputType = dyn_cast<ShapedType>(getOutput().getType());
+  if (!aType || !bType || !outputType || !aType.hasRank() || !bType.hasRank() ||
+      !outputType.hasRank() || aType.getRank() != 2 || bType.getRank() != 2 ||
+      outputType.getRank() != 2)
+    return emitOpError("a, b, and output must be rank 2");
+  if (!isAnchorByte(aType.getElementType()))
+    return emitOpError("a must be i8 or ui8");
+  if (!bType.getElementType().isSignlessInteger(8))
+    return emitOpError("b must be i8");
+  if (!outputType.getElementType().isSignlessInteger(32))
+    return emitOpError("output must be i32");
+  if (!extentsAgree(bType.getDimSize(0), aType.getDimSize(1)))
+    return emitOpError("b rows must equal a columns");
+  if (!extentsAgree(outputType.getDimSize(0), aType.getDimSize(0)) ||
+      !extentsAgree(outputType.getDimSize(1), bType.getDimSize(1)))
+    return emitOpError("output shape must be [M, N]");
   return success();
 }
 

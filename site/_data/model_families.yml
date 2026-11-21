@@ -29,15 +29,15 @@
   vendor: Alibaba
   blurb: >-
     The widest family in the matrix, and the one with the most versions in it:
-    two Qwen2.5 text models, and five Qwen3.x vision-language models spanning
-    dense decoders, sparse mixtures of experts and Gated DeltaNet.
+    two Qwen2.5 text models, and seven Qwen3.x vision-language models spanning
+    dense decoders, sparse mixtures of experts, Gated DeltaNet and QSA.
 
 - slug: gemma
   name: Gemma
   vendor: Google
   blurb: >-
-    Vision-language across three sizes, from a 4B dense decoder at the small
-    end of the matrix to a 26B sparse mixture of experts.
+    Vision-language across four sizes, from a 4B dense decoder at the small
+    end of the matrix through E4B and 12B to a 26B sparse mixture of experts.
 
 - slug: gpt-oss
   name: GPT-OSS
@@ -46,6 +46,27 @@
     Two sparse mixture-of-experts text models, and the reason the matrix has a
     120B entry at all: both read a few billion parameters per token whatever
     their total size.
+
+- slug: laguna
+  name: Laguna
+  vendor: Poolside
+  blurb: >-
+    Two sparse MoE coding models — a 33B XS and a 118B S — built for agentic
+    work on a single Strix Halo machine.
+
+- slug: nemotron
+  name: Nemotron
+  vendor: NVIDIA
+  blurb: >-
+    Two hybrid MoE text models from the Nemotron 3 line: a 30B Lightning and a
+    120B Super, both with about a tenth of their parameters active per token.
+
+- slug: mistral
+  name: Mistral
+  vendor: Mistral AI
+  blurb: >-
+    A 7B dense instruction model and a 119B multimodal MoE, covering the small
+    and large ends of the text-plus-vision range.
 
 - slug: llama
   name: Llama
@@ -61,15 +82,16 @@
     A reasoning model distilled into a Llama-shaped 70B decoder — the largest
     dense graph the release is validated on.
 
-- slug: mistral
-  name: Mistral
-  vendor: Mistral AI
-  blurb: >-
-    A 7B dense instruction model, and the smallest text model in the matrix.
-
 - slug: phi
   name: Phi
   vendor: Microsoft
   blurb: >-
     A 14B dense decoder trained for reasoning, at a size that fits alongside
     other work on the same GPU.
+
+- slug: step
+  name: Step
+  vendor: StepFun
+  blurb: >-
+    A 196B sparse MoE that activates about 11B parameters per token, added in
+    v0.5.3.

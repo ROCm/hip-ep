@@ -36,7 +36,7 @@ permissions:
 
 env:
   # LLVM/MLIR/LLD are cloned from deps.txt llvm_project. The hash column is a
-  # branch name, so the cache key is that branch's current tip. Same source as
+  # full commit, and the cache key is that commit. Same source as
   # cmake/deps.cmake's from-source fallback. rocmlirTriton's vendored
   # external/llvm-project is not built.
   ONNXRUNTIME_VERSION: "1.31.0"
@@ -81,9 +81,9 @@ jobs:
           LINE=$(grep -E '^llvm_project;' cmake/deps.txt)
           LLVM_URL=$(echo "$LINE" | cut -d';' -f2)
           LLVM_REF=$(echo "$LINE" | cut -d';' -f3)
-          LLVM_COMMIT=$(git ls-remote "$LLVM_URL" "refs/heads/$LLVM_REF" | awk '{print $1}')
-          if [ -z "$LLVM_COMMIT" ]; then
-            echo "ERROR: no tip for $LLVM_URL refs/heads/$LLVM_REF" >&2
+          LLVM_COMMIT="$LLVM_REF"
+          if ! [[ "$LLVM_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "ERROR: deps.txt llvm_project must pin a full commit, got '$LLVM_REF'" >&2
             exit 1
           fi
           echo "url=$LLVM_URL" >> "$GITHUB_OUTPUT"
@@ -134,7 +134,7 @@ jobs:
         if: steps.cache-llvm.outputs.cache-hit != 'true'
         shell: bash
         run: |
-          # Shallow clone of the deps.txt llvm_project branch tip. The cmake
+          # Shallow fetch of the deps.txt llvm_project commit. The cmake
           # project lives at llvm/, not the repository root. Recipe matches
           # cmake/deps.cmake's from-source fallback; the install holds only
           # LLVM_DISTRIBUTION_COMPONENTS, which also scopes the exported
