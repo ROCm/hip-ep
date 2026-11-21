@@ -206,53 +206,6 @@ int64_t estimateActivationReloads(Operation *anchor) {
 // that a prologue may cost before a separate kernel computing it once wins.
 constexpr int64_t kMaxPrologueLoads = 9;
 
-// A float gemm with a few output columns and a long reduction has too few
-// output tiles to fill the GPU; rocMLIR then splits the reduction across
-// workgroups that atomically add partial sums (split-K). It offers split-K
-// only when every epilogue op is linear and the result is a float type with
-// atomic add, so such an anchor takes no quantize, clamp or other nonlinear
-// epilogue op: one would cost it every split-K configuration.
-constexpr int64_t kSplitKMaxColumns = 64;
-constexpr int64_t kSplitKMinDepthPerColumn = 16;
-
-bool reliesOnSplitK(Operation *anchor) {
-  Value a;
-  bool transA = false;
-  if (auto matmul = dyn_cast<MatmulOp>(anchor)) {
-    a = matmul.getA();
-    transA = matmul.getTransA() != 0;
-  } else if (auto gemm = dyn_cast<GemmOp>(anchor)) {
-    a = gemm.getInputA();
-    transA = gemm.getTransA() != 0;
-  } else {
-    return false;
-  }
-  auto aType = dyn_cast<ShapedType>(a.getType());
-  auto result = dyn_cast<ShapedType>(anchor->getResult(0).getType());
-  if (!aType || !aType.hasStaticShape() || aType.getRank() < 2 || !result ||
-      !result.hasStaticShape() || !isa<FloatType>(result.getElementType()))
-    return false;
-  int64_t depth = aType.getDimSize(aType.getRank() - (transA ? 2 : 1));
-  int64_t columns = result.getShape().back();
-  return columns <= kSplitKMaxColumns &&
-         depth >= kSplitKMinDepthPerColumn * columns;
-}
-
-// The epilogue ops that rocMLIR keeps under split-K, where each split applies
-// them to its partial sum: an add or subtract, a negate, a float-to-float
-// cast, and a multiply or divide that reads the kernel value once.
-bool isSplitKEpilogueOp(Operation &op, const DenseSet<Value> &fromKernel) {
-  if (isa<AddOp, SubOp, NegOp>(op))
-    return true;
-  if (isa<MulOp, DivOp>(op))
-    return llvm::count_if(op.getOperands(),
-                          [&](Value v) { return fromKernel.contains(v); }) == 1;
-  if (auto cast = dyn_cast<CastOp>(op))
-    return isa<FloatType>(getElementTypeOrSelf(cast.getInput().getType())) &&
-           isa<FloatType>(getElementTypeOrSelf(cast->getResult(0).getType()));
-  return false;
-}
-
 // Whether every op of `module` keeps an unsigned value's meaning when
 // HipToTosa relabels the kernel to signless. Otherwise rocMLIR rejects the
 // kernel; an elementwise kernel then runs as HIP ops, but a conv or gemm
