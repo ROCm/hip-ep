@@ -1042,6 +1042,56 @@ class TestMatMulNBitsGroup:
         compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)
 
 
+class TestMatMulNBitsShortK:
+    """Decode (M=1) with K <= 512 takes the short-K dp4a kernel, which spreads
+    each row's K/32 chunks over that many lanes of a shared wave."""
+
+    @pytest.mark.parametrize("asym", [False, True], ids=["sym", "zp"])
+    @pytest.mark.parametrize(
+        "K,N",
+        [(320, 10240), (160, 8192), (512, 2048), (96, 333)],
+        ids=["flash_next_k320", "k160", "k512", "k96_tail"],
+    )
+    def test_decode(self, model_runner, K, N, asym):
+        rng = np.random.default_rng(13)
+        x_info = helper.make_tensor_value_info("X", TensorProto.FLOAT16, [1, 1, K])
+        y_info = helper.make_tensor_value_info("Y", TensorProto.FLOAT16, [1, 1, N])
+        model = make_model_from_nodes(
+            [_q4_node("p", "X", "Y", K, N, asym=asym)],
+            [x_info],
+            [y_info],
+            initializers=_q4_initializers(rng, "p", K, N, asym=asym),
+            opset=21,
+            extra_opsets=[helper.make_opsetid("com.microsoft", 1)],
+        )
+        x = rng.uniform(-1, 1, [1, 1, K]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)
+
+
+@pytest.mark.parametrize(
+    "K,N", [(10240, 324), (6144, 2560), (2560, 6144)], ids=["k10240_n324", "k6144", "n6144"]
+)
+def test_decode_flash_next_lut_shapes(model_runner, K, N):
+    """Decode shapes whose DecodeDp4a LUT row was measured for Qwen3.8-Flash-Next."""
+    rng = np.random.default_rng(31)
+    x_info = helper.make_tensor_value_info("X", TensorProto.FLOAT16, [1, 1, K])
+    y_info = helper.make_tensor_value_info("Y", TensorProto.FLOAT16, [1, 1, N])
+    model = make_model_from_nodes(
+        [_q4_node("p", "X", "Y", K, N)],
+        [x_info],
+        [y_info],
+        initializers=_q4_initializers(rng, "p", K, N),
+        opset=21,
+        extra_opsets=[helper.make_opsetid("com.microsoft", 1)],
+    )
+    x = rng.uniform(-1, 1, [1, 1, K]).astype(np.float16)
+
+    actual, expected = model_runner.run_sample(model, [x])
+    compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)
+
+
 def _make_norm_fed_model(seq_len: int, K: int, kind: str, n_q=0, n_kv=0, N=0):
     """SkipSimplifiedLayerNormalization feeding q/k/v (kind="qkv") or the
     SiLU(gate) * up MLP (kind="gate_up"), as in a decoder layer. The residual

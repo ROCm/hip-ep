@@ -2822,7 +2822,7 @@
   {"bits": "B4", "config": 12, "group_size": "G32", "k": 2560, "m": 1, "n": 1, "phase": "DecodeDp4a", "row_stride": "Any", "zero_point": "Symmetric"},
   {"bits": "B4", "config": 1, "group_size": "G32", "k": 2560, "m": 1, "n": 96, "phase": "DecodeDp4a", "row_stride": "Any", "zero_point": "Symmetric"},
   {"bits": "B4", "config": 5, "group_size": "G32", "k": 10240, "m": 1, "n": 320, "phase": "DecodeDp4a", "row_stride": "Any", "zero_point": "Symmetric"},
-  {"bits": "B4", "config": 5, "group_size": "G32", "k": 10240, "m": 1, "n": 324, "phase": "DecodeDp4a", "row_stride": "Any", "zero_point": "Symmetric"},
+  {"bits": "B4", "config": 20, "group_size": "G32", "k": 10240, "m": 1, "n": 324, "phase": "DecodeDp4a", "row_stride": "Any", "zero_point": "Symmetric"},
   {"bits": "B4", "config": 19, "group_size": "G32", "k": 2560, "m": 1, "n": 512, "phase": "DecodeDp4a", "row_stride": "Any", "zero_point": "Symmetric"},
   {"bits": "B4", "config": 20, "group_size": "G32", "k": 2560, "m": 1, "n": 640, "phase": "DecodeDp4a", "row_stride": "Any", "zero_point": "Symmetric"},
   {"bits": "B4", "config": 2, "group_size": "G32", "k": 640, "m": 1, "n": 2560, "phase": "DecodeDp4a", "row_stride": "Any", "zero_point": "Symmetric"},
@@ -3033,7 +3033,11 @@
   {"bits": "B4", "config": 57, "group_size": "G32", "k": 6144, "m": 8192, "n": 2560, "phase": "Prefill", "row_stride": "Padded", "zero_point": "Symmetric"},
   {"bits": "B4", "config": 58, "group_size": "G32", "k": 10240, "m": 16384, "n": 320, "phase": "Prefill", "row_stride": "Padded", "zero_point": "Symmetric"},
   {"bits": "B4", "config": 78, "group_size": "G32", "k": 10240, "m": 16384, "n": 324, "phase": "Prefill", "row_stride": "Padded", "zero_point": "Symmetric"},
-  {"bits": "B4", "config": 78, "group_size": "G32", "k": 6144, "m": 16384, "n": 2560, "phase": "Prefill", "row_stride": "Padded", "zero_point": "Symmetric"}
+  {"bits": "B4", "config": 78, "group_size": "G32", "k": 6144, "m": 16384, "n": 2560, "phase": "Prefill", "row_stride": "Padded", "zero_point": "Symmetric"},
+  {"bits": "B4", "config": 6, "group_size": "G32", "k": 6144, "m": 1, "n": 2560, "phase": "DecodeDp4a", "row_stride": "Any", "zero_point": "Symmetric"},
+  {"bits": "B4", "config": 2, "group_size": "G32", "k": 2560, "m": 1, "n": 6144, "phase": "DecodeDp4a", "row_stride": "Any", "zero_point": "Symmetric"},
+  {"bits": "B4", "config": 20, "group_size": "G32", "k": 2560, "m": 1, "n": 10240, "phase": "DecodeDp4a", "row_stride": "Any", "zero_point": "Symmetric"},
+  {"bits": "B4", "config": 20, "group_size": "G32", "k": 2560, "m": 1, "n": 16384, "phase": "DecodeDp4a", "row_stride": "Any", "zero_point": "Symmetric"}
  ],
  "extended_configs": [
   {"config": 38, "variant": 129},
