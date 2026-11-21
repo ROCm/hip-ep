@@ -7,7 +7,7 @@
 // the HIP dialect) through the ONNX->HIP head passes and the rocmlir hip->tosa
 // conversion, then run rocMLIR's high-level + backend pipelines on the fused
 // GEMM to produce a GPU binary. HIP-dialect input skips the ONNX->HIP head
-// passes and enters at fuse-rocmlir.
+// passes and enters at the rocMLIR fusion.
 //
 // rocMLIR (rocmlirTriton) is now built in-tree against the SAME LLVM/MLIR as
 // this executable (ENABLE_ROCMLIRTRITON), so its dialects/types share one
@@ -18,9 +18,9 @@
 // ModuleOp -- no serialization, no dlopen, no C-API.
 //
 // The high-level pipeline only rewrites functions marked `rock.kernel` (set by
-// fuse-rocmlir) and asserts on non-kernel funcs, so we still hand it a module
-// containing ONLY the `rock.kernel` funcs (main_graph and its hip.* ops are
-// dropped from the clone we compile).
+// the rocMLIR fusion) and asserts on non-kernel funcs, so we still hand it a
+// module containing ONLY the `rock.kernel` funcs (main_graph and its hip.* ops
+// are dropped from the clone we compile).
 
 #include "hip/Compiler/RocMlirAutotune.h"
 #include "hip/Compiler/RocMlirKernelCompiler.h"
@@ -74,7 +74,6 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
-#include <cstring>
 #include <limits>
 #include <memory>
 #include <numeric>
@@ -82,14 +81,6 @@
 #include <string>
 #include <thread>
 #include <vector>
-
-// Same convention as MIGraphX `enabled(MIGRAPHX_SKIP_BENCHMARKING)`: unset or
-// "0" is off; any other value skips GPU benchmarking and affixes the first
-// enumerated perfConfig.
-static bool skipBenchmarking() {
-  const char *env = std::getenv("HIP_ROCMLIR_SKIP_BENCHMARKING");
-  return env && std::strcmp(env, "0") != 0;
-}
 
 using mlir::hip::CompiledKernel;
 
@@ -203,6 +194,10 @@ int main(int argc, char **argv) {
         llvm::errs() << "error: invalid --autotune-warmup value\n";
         return 1;
       }
+    } else if (arg == "--problem-cache" && i + 1 < argc) {
+      autotune.problemCachePath = argv[++i];
+    } else if (arg == "--dump-problem-cache" && i + 1 < argc) {
+      autotune.problemCacheDumpPath = argv[++i];
     } else if (arg == "--autotune-runs" && i + 1 < argc) {
       if (llvm::StringRef(argv[++i]).getAsInteger(10, autotune.measuredRuns) ||
           autotune.measuredRuns == 0) {
@@ -213,15 +208,29 @@ int main(int argc, char **argv) {
       inputFilename = argv[i];
     }
   }
-  if (skipBenchmarking())
+  if (autotune.problemCachePath.empty()) {
+    if (const char *env = std::getenv("HIP_ROCMLIR_PROBLEM_CACHE"))
+      autotune.problemCachePath = env;
+  }
+  if (mlir::hip::rocMlirSkipBenchmarking())
     autotuneEnabled = false;
 #if !HIP_ROCMLIR_AUTOTUNE
-  if (autotuneFlagSeen && autotuneEnabled) {
+  if ((autotuneFlagSeen && autotuneEnabled) ||
+      !autotune.problemCacheDumpPath.empty()) {
     llvm::errs() << "error: autotune requires a real HIP build\n";
     return 1;
   }
   autotuneEnabled = false;
 #endif
+  // After the stub override. A HIP_ROCMLIR_AUTOTUNE=0 build leaves
+  // autotuneEnabled true until that block, and --problem-cache without
+  // --autotune would otherwise be ignored with no warning.
+  if (!autotune.problemCachePath.empty() && !autotuneEnabled)
+    llvm::errs() << "warning: problem cache ignored because autotune is off\n";
+  if (!autotune.problemCacheDumpPath.empty() && !autotuneEnabled) {
+    llvm::errs() << "error: --dump-problem-cache requires autotune\n";
+    return 1;
+  }
   if (inputFilename.empty() || outputPath.empty()) {
     llvm::errs()
         << "Usage: " << argv[0]
@@ -259,12 +268,28 @@ int main(int argc, char **argv) {
         << "                       measured 4.2e-02 to 7.5e-02 ms, wider than "
            "the\n"
         << "                       differences being searched for.\n"
+        << "  --problem-cache <file.fb>\n"
+        << "                       Before searching, use this LUT FlatBuffer\n"
+        << "                       instead of the shipped table.\n"
+        << "                       An identical problem string is\n"
+        << "                       compiled as stored. HIP_ROCMLIR_PROBLEM_"
+           "CACHE\n"
+        << "                       sets the same path. A conv miss requires\n"
+        << "                       matching arch, dtype, -F, layouts, stride,\n"
+        << "                       dilation, and fusions, then the nearest\n"
+        << "                       M/N/K tile (weights 1) that fits. A tile\n"
+        << "                       that fails to compile is skipped for the\n"
+        << "                       next nearest; otherwise the search runs.\n"
+        << "  --dump-problem-cache <file.json>\n"
+        << "                       After autotune, write the LUT JSON\n"
+        << "                       (configs, points, fallbacks). Compile it\n"
+        << "                       to a .fb with problem_cache_to_fb.py.\n"
         << "  --verbose            Print per-config compile/benchmark lines "
            "and the\n"
         << "                       selected perfConfig.\n"
         << "  --dump-hip <file>    Write the hip MLIR after the ONNX->HIP head "
            "passes\n"
-        << "                       and fuse-rocmlir, then keep going.\n"
+        << "                       and the rocMLIR fusion, then keep going.\n"
         << "  --dump-tosa <file>   Write the TOSA MLIR handed to the rocMLIR "
            "pipeline,\n"
         << "                       then keep going.\n"
@@ -323,8 +348,8 @@ int main(int argc, char **argv) {
   // Detect the input dialect: an `onnx`-dialect module still needs the
   // ONNX->HIP head passes, whereas a module already lowered to the `hip`
   // dialect (e.g. a `--dump-hip` companion or hand-written hip.mlir) skips
-  // straight to fuse-rocmlir. Any op in the `onnx` namespace marks the input as
-  // ONNX; otherwise it is treated as hip.
+  // straight to the rocMLIR fusion. Any op in the `onnx` namespace marks the
+  // input as ONNX; otherwise it is treated as hip.
   bool isOnnxInput = false;
   module->walk([&](mlir::Operation *op) {
     if (op->getName().getDialectNamespace() == "onnx") {
@@ -335,12 +360,12 @@ int main(int argc, char **argv) {
   });
 
   // Stage 1: (ONNX input only) ONNX->HIP head passes, then -- for both input
-  // dialects -- fuse-rocmlir + duplicate-function-elimination. The ONNX head
-  // mirrors buildOnnxToHipPipeline (simplify-onnx, hip-add-context-arg, loop/if
-  // outline, infer-loop-body-shapes, convert-onnx-to-hip; plain path, no hipdnn
-  // handle). fuse-rocmlir outlines the fused GEMM into a `rock.kernel` func and
-  // creates the `hip.rocmlir` dispatch. `module` is LEFT in this hip form: it
-  // is the artifact we mutate at the end.
+  // dialects -- the rocMLIR fusion + duplicate-function-elimination. The ONNX
+  // head mirrors buildOnnxToHipPipeline (simplify-onnx, hip-add-context-arg,
+  // loop/if outline, infer-loop-body-shapes, convert-onnx-to-hip; plain path,
+  // no hipdnn handle). The rocMLIR fusion outlines the fused GEMM into a
+  // `rock.kernel` func and creates the `hip.rocmlir` dispatch. `module` is LEFT
+  // in this hip form: it is the artifact we mutate at the end.
   llvm::errs() << "[hip-rocmlir-compiler] input dialect: "
                << (isOnnxInput ? "onnx" : "hip") << "\n";
   mlir::PassManager pm(module->getContext());
@@ -354,16 +379,27 @@ int main(int argc, char **argv) {
     pm.addPass(mlir::hip::createConvertOnnxToHipPass());
   }
   // rocMLIR has no transposed-convolution anchor, so split conv_transpose into
-  // plain convolutions before fuse-rocmlir outlines a kernel around it.
+  // plain convolutions before the rocMLIR fusion outlines a kernel around it.
   pm.addNestedPass<mlir::func::FuncOp>(
       mlir::hip::createDecomposeConvTransposePass());
   pm.addPass(mlir::createCanonicalizerPass());
-  pm.addNestedPass<mlir::func::FuncOp>(mlir::hip::createFuseROCMlirPass());
-  pm.addPass(mlir::func::createDuplicateFunctionEliminationPass());
+  // The same arch and gemm accelerated types as CompilerDriver, so an offline
+  // compile forms the same kernels (gemm-elementwise-gemm needs the types).
+  const std::string arch = mlir::hip::resolveRocMlirArch();
+  mlir::hip::FuseRocMlirAnchorPassOptions fuseOpts;
+  fuseOpts.arch = arch;
+  std::vector<std::string> accelTypes =
+      mlir::hip::getRocMlirGemmAccelTypes(*module->getContext(), arch);
+  fuseOpts.gemmGemmAccelTypes.assign(accelTypes.begin(), accelTypes.end());
+  // As in CompilerDriver: an i4 filter compiles only under some perfConfigs,
+  // which autotuning finds.
+  fuseOpts.int4Weights = autotuneEnabled && HIP_ROCMLIR_AUTOTUNE;
+  mlir::hip::addRocMlirFusionPasses(pm, fuseOpts);
 
   if (mlir::failed(pm.run(*module))) {
     llvm::errs() << "error: "
-                 << (isOnnxInput ? "ONNX->HIP + fuse-rocmlir" : "fuse-rocmlir")
+                 << (isOnnxInput ? "ONNX->HIP + the rocMLIR fusion"
+                                 : "the rocMLIR fusion")
                  << " passes failed\n";
     return 1;
   }
@@ -386,8 +422,6 @@ int main(int argc, char **argv) {
     }
     dumpModule(*tosaModule, "tosa", dumpTosaPath);
   }
-
-  const std::string arch = mlir::hip::resolveRocMlirArch();
 
   // --dump-high-level: write the rock MLIR (text) and stop, so nothing is
   // embedded. A single kernel writes <output> verbatim so existing tuning
@@ -471,13 +505,18 @@ int main(int argc, char **argv) {
   bool embedOk =
       mlir::hip::compileAndEmbedRocMlirKernels(*module, embedOpts).succeeded();
   // Whether or not the embed succeeded: the pool and benchmark figures explain
-  // where a slow or failed compile spent its time.
+  // where a slow or failed compile spent its time. The LUT is written only
+  // after a successful embed, so a failed compile does not replace a good table
+  // with a partial one.
   if (autotuner) {
     compilePhaseTimes.perfConfigCompileMs +=
         autotuner->phaseTimes().perfConfigCompileMs;
     compilePhaseTimes.benchmarkMs += autotuner->phaseTimes().benchmarkMs;
   }
   if (!embedOk)
+    return 1;
+  if (autotuner && !autotune.problemCacheDumpPath.empty() &&
+      !autotuner->dumpProblemCache(autotune.problemCacheDumpPath))
     return 1;
 
   // Stage 4: run the standard ONNX-to-HIP tail (shape inference, constant

@@ -1,7 +1,7 @@
 # Kernel unit tests: build every leaf, then run them through hipdnn-kernel-ut.exe,
 # the same controller the packaging CI runs.
 #
-#   make test  HIP_SDK=<sdk> [OFFLOAD=--offload-arch=<gfx>] [MODE=lookup|autotune] [COVERAGE=1|2|3]
+#   make test  HIP_SDK=<sdk> [OFFLOAD=--offload-arch=<gfx>] [MODE=lookup|autotune] [COVERAGE=1|2|3] [TIMING=screen|standard|confirm]
 #   make build OFFLOAD=... HIP_SDK=...   (build only)
 #   make clean OFFLOAD=... HIP_SDK=...
 #

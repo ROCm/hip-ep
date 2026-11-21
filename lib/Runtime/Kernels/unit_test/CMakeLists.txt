@@ -225,3 +225,6 @@ set_target_properties(hipdnn-kernel-ut PROPERTIES
   FOLDER "kernel-package-tests"
 )
 install(TARGETS hipdnn-kernel-ut RUNTIME DESTINATION bin)
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/ut_interface.json
+              ${CMAKE_CURRENT_SOURCE_DIR}/common/ut_interface.py
+        DESTINATION bin/kernel-tests)
