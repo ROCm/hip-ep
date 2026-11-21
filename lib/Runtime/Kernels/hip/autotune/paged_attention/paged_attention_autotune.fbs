@@ -1,0 +1,26 @@
+// Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Licensed under the MIT License.
+namespace hipdnn_ep.paged_attention_autotune.fbs;
+struct Config { splits:int; bkv:int; }
+struct ConfigV2 { splits:int; bkv:int; hb:int; qw:int; mt:int; nd:int; }
+table Point { phase:string; shape:string (required); config:uint; }
+table PagedAttentionLut {
+ schema_version:uint;
+ kernel_abi:string;
+ gpu_arch:string;
+ op:string;
+ layout:string;
+ dtype:string;
+ model_key:string;
+ weight_m:float = 1;
+ weight_n:float = 1;
+ weight_k:float = 1;
+ fallbacks:[Config];
+ configs:[Config];
+ points:[Point];
+ configs_v2:[ConfigV2];
+ fallbacks_v2:[ConfigV2];
+}
+root_type PagedAttentionLut;
+file_identifier "PGAL";
+file_extension "fb";

@@ -31,6 +31,8 @@
 
 #include <hip/hip_runtime.h>
 #include "../../../common/hip_adaptive_timing.h"
+#include "../../../common/ut_gpu_execution_scope.h"
+#include <memory>
 #include "../../../common/ut_gqa_rank_input.h"
 #include <hip/hip_fp16.h>
 
@@ -134,6 +136,8 @@ inline std::string besideExe(const std::string& name) {
 inline std::vector<std::string> captureLogLines(
     const char* env_var, const std::string& tmp_name,
     const std::function<void()>& fn) {
+  // Timing callers keep capture disabled after the first config fetch.
+  if (!env_var) { fn(); return {}; }
   const char* leaf_stderr = std::getenv("HIPDNN_KERNEL_UT_STDERR");
   const bool redirect = !leaf_stderr || !leaf_stderr[0];
   const std::string path = redirect ? besideExe(tmp_name) : leaf_stderr;
@@ -600,6 +604,8 @@ static Result run_case(const Case& c, int iters, unsigned seed, const hipdnn_ep_
   __half *dQ, *dKbshd, *dVbshd, *dKf16, *dVf16, *dKbnsd, *dVbnsd, *dO8, *dO16;
   int8_t *dK8, *dV8;
   float *dKsc, *dVsc;
+  auto admission = std::make_unique<hipdnn_ep_test::GpuExecutionScope>(
+      [] { HIP_CHECK(hipDeviceSynchronize()); });
   HIP_CHECK(hipMalloc(&dQ, qn * sizeof(__half)));
   HIP_CHECK(hipMalloc(&dKbshd, kn * sizeof(__half)));
   HIP_CHECK(hipMalloc(&dVbshd, kn * sizeof(__half)));
@@ -635,10 +641,13 @@ static Result run_case(const Case& c, int iters, unsigned seed, const hipdnn_ep_
   std::vector<int8_t> K_i8(kn), V_i8(kn);
   HIP_CHECK(hipMemcpy(K_i8.data(), dK8, kn, hipMemcpyDeviceToHost));
   HIP_CHECK(hipMemcpy(V_i8.data(), dV8, kn, hipMemcpyDeviceToHost));
+  admission->finish();  // quantization/readback is complete; CPU reference has no GPU lease
   const std::vector<float> Kb = make_key_bias(c);
   std::vector<float> ref_i8(qn), ref_fp16(qn);
   cpu_reference_i8(Qf, K_i8, V_i8, kscale, vscale, Kb, ref_i8, B, H, G, D, sq, max_seq, scale);
   cpu_reference_fp16(Qf, Kf_bnsd, Vf_bnsd, Kb, ref_fp16, B, H, G, D, sq, max_seq, scale);
+  admission = std::make_unique<hipdnn_ep_test::GpuExecutionScope>(
+      [] { HIP_CHECK(hipDeviceSynchronize()); });
   __half* dKb = nullptr;
   if (!Kb.empty()) {
     std::vector<__half> Kbh(Kb.size());
@@ -739,12 +748,8 @@ static Result run_case(const Case& c, int iters, unsigned seed, const hipdnn_ep_
 #endif
     return prefill(dKf16, dVf16, dO8, max_seq);
   };
-  // Every launch in this function runs inside a capture window: the op's
-  // [gqa-cfg] diagnostic latches its enable flag on the first read, so it has
-  // to be on from the very first launch or nothing is logged for the whole
-  // process -- and once on it prints per dispatch, which would otherwise reach
-  // the console.
-  hipdnn_ep_test::captureLogLines(
+  // Capture the selected config before timing the complete int8 path.
+  const std::vector<std::string> cfg_lines = hipdnn_ep_test::captureLogLines(
       "HIPDNN_GQA_AUTOTUNE_LOG", "_cfg_capture.tmp", [&]() {
         run_int8_path(dK8, dV8, max_seq);
         HIP_CHECK(hipDeviceSynchronize());
@@ -763,58 +768,64 @@ static Result run_case(const Case& c, int iters, unsigned seed, const hipdnn_ep_
         HIP_CHECK(hipDeviceSynchronize());
       });
 
-  // Each launch reads every key of its cache (no window here). The int8 path
-  // reads the int8 cache cold and the fp16 scratch it dequantized into warm, as
-  // a model step does.
-  const hipdnn_ep_test::ColdKvCopies kv8(dK8, dV8, B * G, max_seq,
-                                         static_cast<size_t>(D), 0, skv);
-  const hipdnn_ep_test::ColdKvCopies kv16(
-      dKbnsd, dVbnsd, B * G, max_seq, static_cast<size_t>(D) * sizeof(__half),
-      0, skv);
-  auto bench = [&](const hipdnn_ep_test::ColdKvCopies& kv,
-                   auto&& fn, const char* complete_entry) -> double {
-    for (int w = 0; w < 5; ++w) fn(0);
-    HIP_CHECK(hipDeviceSynchronize());
-    return hipdnn_ep_test::rotatedMeanMs(nullptr, iters, kv, fn, complete_entry);
-  };
-  // The op names the config it dispatched in its own [gqa-cfg] diagnostic;
-  // capture it so results.csv records what ran instead of a placeholder. The
-  // diagnostic latches on at its first read and then prints per dispatch, so
-  // every bench runs inside a window to keep it off the console.
+  double ms_int8 = 0.0, ms_fp16 = 0.0, ms_deq = 0.0;
   std::string launched_cfg;
-  double ms_int8 = 0.0;
   {
-    const std::vector<std::string> lines = hipdnn_ep_test::captureLogLines(
-        "HIPDNN_GQA_AUTOTUNE_LOG", "_cfg_capture.tmp",
-        [&]() {
-          ms_int8 = bench(kv8, [&](int i) {
-            return run_int8_path(kv8.k(i), kv8.v(i), kv8.rows());
-          }, lookup_config.empty()
-                 ? (dKb ? "dequant_KV+hip_gqa_flash_prefill"
-                        : "dequant_KV+hip_gqa_flash_prefill_v2")
-                 : "dequant_KV+hip_gqa_flash_prefill_v3_configured");
-        });
-    for (const std::string& line : lines) {
-      const size_t knobs = line.find("-> ");
-      if (line.find("[gqa-cfg]") != std::string::npos &&
-          knobs != std::string::npos)
-        launched_cfg = line.substr(knobs + 3);
+    // Each launch reads every key of its cache (no window here). The int8 path
+    // reads the int8 cache cold and the fp16 scratch it dequantized into warm, as
+    // a model step does.
+    const hipdnn_ep_test::ColdKvCopies kv8(dK8, dV8, B * G, max_seq,
+                                           static_cast<size_t>(D), 0, skv);
+    const hipdnn_ep_test::ColdKvCopies kv16(
+        dKbnsd, dVbnsd, B * G, max_seq, static_cast<size_t>(D) * sizeof(__half),
+        0, skv);
+    auto bench = [&](const hipdnn_ep_test::ColdKvCopies& kv,
+                     auto&& fn, const char* complete_entry) -> double {
+      for (int w = 0; w < 5; ++w) fn(0);
+      HIP_CHECK(hipDeviceSynchronize());
+      return hipdnn_ep_test::rotatedMeanMs(nullptr, iters, kv, fn, complete_entry);
+    };
+    // Use the config captured above; neither timed bench enables logging.
+
+    {
+      hipdnn_ep_test::captureLogLines(
+          nullptr, "",
+          [&]() {
+            ms_int8 = bench(kv8, [&](int i) {
+              return run_int8_path(kv8.k(i), kv8.v(i), kv8.rows());
+            }, lookup_config.empty()
+                   ? (dKb ? "dequant_KV+hip_gqa_flash_prefill"
+                          : "dequant_KV+hip_gqa_flash_prefill_v2")
+                   : "dequant_KV+hip_gqa_flash_prefill_v3_configured");
+          });
+      for (const std::string& line : cfg_lines) {
+        const size_t knobs = line.find("-> ");
+        if (line.find("[gqa-cfg]") != std::string::npos &&
+            knobs != std::string::npos)
+          launched_cfg = line.substr(knobs + 3);
+      }
     }
-  }
-  double ms_fp16 = 0.0;
-  hipdnn_ep_test::captureLogLines("HIPDNN_GQA_AUTOTUNE_LOG",
-                                  "_cfg_capture.tmp",
-                                  [&]() {
-                                    ms_fp16 = bench(kv16, [&](int i) {
-                                      return run_fp16(kv16.k(i), kv16.v(i),
-                                                      kv16.rows());
-                                    }, dKb ? "hip_gqa_flash_prefill" : "hip_gqa_flash_prefill_v2");
-                                  });
-  double ms_deq = bench(kv8, [&](int i) {
-    const int status = hip_gqa_dequant_kv_i8_to_fp16(nullptr, kv8.k(i), dKf16, dKsc, B, sq, G, D, kv8.rows(), max_seq);
-    if (status) return status;
-    return hip_gqa_dequant_kv_i8_to_fp16(nullptr, kv8.v(i), dVf16, dVsc, B, sq, G, D, kv8.rows(), max_seq);
-  }, "hip_gqa_dequant_kv_i8_to_fp16(K,V)");
+
+    hipdnn_ep_test::captureLogLines(nullptr,
+                                    "",
+                                    [&]() {
+                                      ms_fp16 = bench(kv16, [&](int i) {
+                                        return run_fp16(kv16.k(i), kv16.v(i),
+                                                        kv16.rows());
+                                      }, dKb ? "hip_gqa_flash_prefill" : "hip_gqa_flash_prefill_v2");
+                                    });
+    ms_deq = bench(kv8, [&](int i) {
+      const int status = hip_gqa_dequant_kv_i8_to_fp16(nullptr, kv8.k(i), dKf16, dKsc, B, sq, G, D, kv8.rows(), max_seq);
+      if (status) return status;
+      return hip_gqa_dequant_kv_i8_to_fp16(nullptr, kv8.v(i), dVf16, dVsc, B, sq, G, D, kv8.rows(), max_seq);
+    }, "hip_gqa_dequant_kv_i8_to_fp16(K,V)");
+
+  }  // rotated buffers are freed before the phase is released
+  hipFree(dQ); hipFree(dKbshd); hipFree(dVbshd); hipFree(dK8); hipFree(dV8);
+  hipFree(dKf16); hipFree(dVf16); hipFree(dKbnsd); hipFree(dVbnsd);
+  hipFree(dKsc); hipFree(dVsc); hipFree(dO8); hipFree(dO16);
+  if (dKb) hipFree(dKb);
+  admission->finish();
 
   // Compare the query rows that have a real key: row i of batch b sees keys
   // 0..i, of which the first b*pad are padding.
@@ -856,10 +867,6 @@ static Result run_case(const Case& c, int iters, unsigned seed, const hipdnn_ep_
     csv.write(row);
   }
 
-  hipFree(dQ); hipFree(dKbshd); hipFree(dVbshd); hipFree(dK8); hipFree(dV8);
-  hipFree(dKf16); hipFree(dVf16); hipFree(dKbnsd); hipFree(dVbnsd);
-  hipFree(dKsc); hipFree(dVsc); hipFree(dO8); hipFree(dO16);
-  if (dKb) hipFree(dKb);
   return r;
 }
 

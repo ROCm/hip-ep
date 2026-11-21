@@ -617,3 +617,5 @@ model shape via `make test_custom ARGS="--tokens 1 --hidden 128 --inter 128
 The existing `qmoe_ragged_mm` leaf remains a separate primitive test; its
 timing does not stand for an entire QMoE model node. See the full-wrapper
 leaf README for supported attributes, coverage tiers and timing presets.
+
+PagedAttention FP16 decode/prefill leaves invoke the complete public entry (RoPE, paged append and causal attention). Their semantic custom parameters are registered in `ut_interface.json`; both MODE values label the fixed configuration. See `paged_attention/decode/Xfp16_Wfp16_Yfp16/README.md` and the prefill counterpart.

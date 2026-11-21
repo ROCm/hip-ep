@@ -48,6 +48,7 @@
 #include <cstring>
 #include <fstream>
 #include <functional>
+#include <memory>
 #include <random>
 #include <vector>
 #include <string>
@@ -139,6 +140,8 @@ inline std::string besideExe(const std::string& name) {
 inline std::vector<std::string> captureLogLines(
     const char* env_var, const std::string& tmp_name,
     const std::function<void()>& fn) {
+  // Timing callers keep capture disabled after the first config fetch.
+  if (!env_var) { fn(); return {}; }
   const char* leaf_stderr = std::getenv("HIPDNN_KERNEL_UT_STDERR");
   const bool redirect = !leaf_stderr || !leaf_stderr[0];
   const std::string path = redirect ? besideExe(tmp_name) : leaf_stderr;
@@ -609,6 +612,8 @@ static double run_kernel(DecodeMode mode, const Case& c, float scale,
     for (size_t i = 0; i < tmp.size(); ++i) host_O[i] = __half2float(tmp[i]);
   }
 
+  // Config capture belongs to the preceding correctness call.
+  _putenv_s("HIPDNN_GQA_AUTOTUNE_LOG", "");
   return hipdnn_ep_test::rotatedMeanMs(nullptr, iters, kv, [&](int i) {
     return launch(kv.k(i), kv.v(i), kv.rows());
   }, use_wmma < 0 ? "hip_gqa_flash_decode" : "hip_gqa_flash_decode_configured");
@@ -664,6 +669,8 @@ static double run_kernel_lut(const Case& c, float scale,
     for (size_t i = 0; i < tmp.size(); ++i) host_O[i] = __half2float(tmp[i]);
   }
 
+  // Config capture belongs to the preceding correctness call.
+  _putenv_s("HIPDNN_GQA_AUTOTUNE_LOG", "");
   return hipdnn_ep_test::rotatedMeanMs(nullptr, iters, kv, [&](int i) {
     return hip_gqa_flash_decode_configured(nullptr, dQ, kv.k(i), kv.v(i), dO, dPart,
                                     B, H, G, D, c.total, kv.rows(), MAX_SPLITS,
@@ -691,6 +698,8 @@ static double run_fused(const Case& c, float scale,
                         hipMemcpyDeviceToHost));
     for (size_t i = 0; i < tmp.size(); ++i) host_O[i] = __half2float(tmp[i]);
   }
+  // Config capture belongs to the preceding correctness call.
+  _putenv_s("HIPDNN_GQA_AUTOTUNE_LOG", "");
   return hipdnn_ep_test::rotatedMeanMs(nullptr, iters, kv, [&](int i) {
     return hip_gqa_fused_decode(nullptr, dQ, kv.k(i), kv.v(i), dO, B, H, G, D,
                          c.total, kv.rows(), scale, dSeq);
@@ -725,6 +734,10 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose, const
   for (auto& x : Vv) x = dist(rng);
   for (auto& x : Sink) x = dist(rng);  // natural-unit sink logits
 
+  const std::vector<float> Kb = make_key_bias(c);
+  std::vector<float> ref;
+  cpu_reference(c, Q, K, Vv, Seq, Sink, Kb, scale, ref);
+
   // fp16 device copies.
   auto to_half = [](const std::vector<float>& f) {
     std::vector<__half> h(f.size());
@@ -749,7 +762,6 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose, const
   HIP_CHECK(hipMemcpy(dV, hV.data(), hV.size() * sizeof(__half), hipMemcpyHostToDevice));
   HIP_CHECK(hipMemcpy(dSink, hSink.data(), hSink.size() * sizeof(__half), hipMemcpyHostToDevice));
   HIP_CHECK(hipMemcpy(dSeq, Seq.data(), Seq.size() * sizeof(int), hipMemcpyHostToDevice));
-  const std::vector<float> Kb = make_key_bias(c);
   __half* dKb = nullptr;
   if (!Kb.empty()) {
     const auto hKb = to_half(Kb);
@@ -758,13 +770,19 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose, const
                         hipMemcpyHostToDevice));
   }
 
-  std::vector<float> ref;
-  cpu_reference(c, Q, K, Vv, Seq, Sink, Kb, scale, ref);
 
   // The rows a launch reads: the window when there is one, else every key.
-  const hipdnn_ep_test::ColdKvCopies kv(
+  auto kv_owner = std::make_unique<hipdnn_ep_test::ColdKvCopies>(
       dK, dV, B * G, max_seq, static_cast<size_t>(D) * sizeof(__half),
       c.window > 0 ? std::max(0, c.total - c.window) : 0, c.total);
+  const auto& kv = *kv_owner;
+  auto finish_device = [&] {
+    kv_owner.reset();
+    hipFree(dQ); hipFree(dK); hipFree(dV); hipFree(dO);
+    hipFree(dSink); hipFree(dSeq); hipFree(dPart);
+    if (dKb) hipFree(dKb);
+    gpu_execution.finish();
+  };
 
   if (rank_row) {
 #ifndef HIPDNN_UT_RANK_GQA_ADAPTER
@@ -793,7 +811,7 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose, const
     hipdnn_ep_test::rotatedMeanMs(nullptr, 0, kv, [&](int i) {
       return rank_launch(kv.k(i), kv.v(i), kv.rows());
     }, "hip_gqa_flash_decode_configured", &options);
-    hipFree(dQ); hipFree(dK); hipFree(dV); hipFree(dO); hipFree(dSink); hipFree(dSeq); hipFree(dPart); hipFree(dKb);
+    finish_device();
     return 0;
 #endif
   }
@@ -802,12 +820,10 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose, const
   // (default impl @ 8 splits). scalar8/wmma8 give per-impl correctness coverage.
   // --prod-only drops all three: when comparing two builds, the extra configs
   // would run between the timed ones and move the clock state under them.
-  std::vector<float> O_auto, O_base, O_wmma, O_scalar;
+  std::vector<float> O_auto, O_base, O_wmma, O_scalar, O_fused;
 
-  // Every launch runs inside a capture window so the config that was actually
-  // dispatched can be recorded. The op's [gqa-cfg] diagnostic latches on at its
-  // first read and then prints once per dispatch, so a launch left outside a
-  // window would spill those lines onto the console.
+  // Capture the config from the first correctness call. run_kernel clears
+  // the capture flag before entering the shared timer.
   std::string launched_cfg;
   auto timed = [&](DecodeMode mode, std::vector<float>& out, std::string* cfg) {
     double ms = 0.0;
@@ -833,13 +849,8 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose, const
     ms_base   = timed(MODE_BASELINE, O_base,   nullptr);
     ms_wmma   = timed(MODE_WMMA8,    O_wmma,   nullptr);
     ms_scalar = timed(MODE_SCALAR8,  O_scalar, nullptr);
-    l2_base   = rel_l2(O_base, ref);
-    l2_wmma   = rel_l2(O_wmma, ref);
-    l2_scalar = rel_l2(O_scalar, ref);
-    l2_ab     = rel_l2(O_wmma, O_scalar);
   }
 
-  double l2_auto   = rel_l2(O_auto, ref);
 
   // One-block-per-head fused decode = the OLDEST baseline (pre-split-K); only
   // valid without window/sink, and very slow at long context, so it is opt-in
@@ -848,12 +859,28 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose, const
       g_do_fused && (c.window <= 0 && !c.sink && !c.smooth && c.pad <= 0);
   double ms_fused = 0.0; double l2_fused = 0.0; bool fused_ran = false;
   if (fused_ok_shape) {
-    std::vector<float> O_fused;
     int fiters = iters < 16 ? iters : 16;
     ms_fused = run_fused(c, scale, dQ, dK, dV, dO, dSeq, fiters, kv, O_fused);
-    l2_fused = rel_l2(O_fused, ref);
     fused_ran = true;
   }
+
+#ifdef HIPDNN_LUT_LINKED_EXTERNALLY
+  const bool use_lut = kernel_ut_lookup_mode() && hip_gqa_autotune_table_loaded();
+#else
+  const bool use_lut = false;
+#endif
+  // Finish the device phase before CPU comparison and CSV emission. A later
+  // lookup measurement reacquires admission while retaining owned input buffers.
+  if (use_lut) gpu_execution.finish();
+  else finish_device();
+  if (!g_prod_only) {
+    l2_base   = rel_l2(O_base, ref);
+    l2_wmma   = rel_l2(O_wmma, ref);
+    l2_scalar = rel_l2(O_scalar, ref);
+    l2_ab     = rel_l2(O_wmma, O_scalar);
+  }
+  double l2_auto = rel_l2(O_auto, ref);
+  if (fused_ran) l2_fused = rel_l2(O_fused, ref);
 
   const double tol = 2e-2;  // fp16 accumulation tolerance
   bool ok = (l2_auto < tol) && (!fused_ran || l2_fused < tol);
@@ -862,16 +889,17 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose, const
 
   const std::string csv_shape = case_shape(c);
 #ifdef HIPDNN_LUT_LINKED_EXTERNALLY
-  if (kernel_ut_lookup_mode() && hip_gqa_autotune_table_loaded()) {
+  if (use_lut) {
+    hipdnn_ep_test::GpuExecutionScope gpu_lut([] { HIP_CHECK(hipDeviceSynchronize()); });
     using namespace hipdnn_ep_test;
     std::vector<float> O_lut;
     double ms_lut = 0.0;
     hipdnn_ep::GqaTuneSource src{};
     hipdnn_ep::GqaDecodeConfig lut_cfg{};
     // The resolver hands back the config and where it came from, so both are
-    // read from it directly. The capture window is only here to keep the op's
-    // per-dispatch diagnostic off the console.
-    captureLogLines("HIPDNN_GQA_AUTOTUNE_LOG", "_cfg_capture.tmp", [&]() {
+    // read from it directly. Configuration logging stays disabled while
+    // the lookup entry is timed.
+    captureLogLines(nullptr, "", [&]() {
       ms_lut = run_kernel_lut(c, scale, dQ, dK, dV, dO, dPart, dSeq, dSink,
                               dKb, iters, kv, O_lut, src, lut_cfg);
     });
@@ -880,6 +908,8 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose, const
                   "lookup:impl=%s splits=%d bkv=%d (%s)",
                   lut_cfg.use_wmma ? "wmma" : "scalar", lut_cfg.splits,
                   lut_cfg.bkv, hipdnn_ep::gqa_tune_source_name(src));
+    finish_device();
+    gpu_lut.finish();
     const double l2_lut = rel_l2(O_lut, ref);
     const bool lut_ok = l2_lut < tol;
     ok = ok && lut_ok;
@@ -955,9 +985,6 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose, const
   g_rows.push_back({std::string(c.name), H, G, D, c.total, c.window, c.sink,
                     c.smooth, ms_scalar, ms_base, ms_auto, l2_auto, ok});
 
-  hipFree(dQ); hipFree(dK); hipFree(dV); hipFree(dO);
-  hipFree(dSink); hipFree(dSeq); hipFree(dPart);
-  if (dKb) hipFree(dKb);
   return ok ? 0 : 1;
 }
 
@@ -1007,6 +1034,7 @@ int main(int argc, char** argv) {
   bool all = false, verbose = false;
   Case single = {"custom", 1, 64, 8, 64, 8192, 8192, 0, 0, 0};
   bool have_single = false;
+  std::string only_shape;
 
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -1017,6 +1045,7 @@ int main(int argc, char** argv) {
     else if (a == "--fused") g_do_fused = true;
     else if (a == "--prod-only") g_prod_only = true;
     else if (a == "--only" && i + 1 < argc) { g_only = argv[++i]; all = true; }
+    else if (a == "--only-shape" && i + 1 < argc) { only_shape = argv[++i]; all = true; }
     else if (a == "--iters") next(iters);
     else if (a == "--seed") { int s; next(s); seed = (unsigned)s; }
     else if (a == "--b") { next(single.B); have_single = true; }
@@ -1119,11 +1148,18 @@ int main(int argc, char** argv) {
            "case(s) = %zu gqa_decode cases\n",
            coverage_tier, n_lens, full_cases.size() / n_lens,
            full_cases.size());
+    size_t selected = 0;
     for (const Case& c : full_cases) {
+      if (!only_shape.empty() && case_shape(c) != only_shape) continue;
       if (!g_only.empty() &&
           std::string(c.name).find(g_only) == std::string::npos)
         continue;
+      ++selected;
       fails += run_case(c, iters, seed, verbose);
+    }
+    if (!only_shape.empty() && selected != 1) {
+      std::fprintf(stderr, "--only-shape matched %zu cases at coverage=%d\n", selected, coverage_tier);
+      return 1;
     }
   } else {
     fails += run_case(single, iters, seed, verbose);

@@ -53,6 +53,79 @@ class TableTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
         return result
 
+    def test_paged_exact_ragged_roundtrip(self):
+        doc=table.read_table(AUTOTUNE/'paged_attention/lut/empty.json')
+        doc.update(schema_version=1,kernel_abi='paged_fp16_pshd_v1');doc.pop('configs_v2',None);doc.pop('fallbacks_v2',None)
+        shapes=[
+          'decode_B3_H8_G2_D128_P64_S17_M8_q1+0+1_past16+17+18_rope0_rD0_inter0_pos4096_scale0_win-1_cap0_mappermuted_shared0_seed1119_errnone',
+          'prefill_B3_H8_G2_D128_P64_S17_M8_q3+0+17_past16+17+18_rope0_rD0_inter0_pos4096_scale0_win-1_cap0_mappermuted_shared0_seed1119_errnone']
+        doc['gpu_arch']='gfx1150';doc['configs']=[dict(splits=16,bkv=0),dict(splits=0,bkv=32),dict(splits=16,bkv=0)]
+        doc['points']=[dict(phase='decode',shape=shapes[0],config=2),dict(phase='prefill',shape=shapes[1],config=1)]
+        doc['model_key']='preserve-existing-order-and-duplicate-index';doc['weight_m']=2.25
+        doc['fallbacks']=[dict(splits=16,bkv=0)]
+        source=self.root/'paged-base.json';source.write_text(json.dumps(doc))
+        seed=self.root/'paged.csv';self.cli('paged_attention','rank-seed','--from-lut',source,'--out',seed)
+        points,skipped=table.inventory('paged_attention',doc);self.assertFalse(skipped)
+        records=[synthetic(p,singleton=True) for p in points]
+        log=self.root/'paged.log';log.write_text(''.join('UT_RANK '+json.dumps(r)+'\n' for r in records))
+        output=self.root/'paged-rebuilt.json';self.cli('paged_attention','rank-build','--base',source,'--rank-log',log,'--out',output)
+        self.assertEqual(json.loads(output.read_text()),doc)
+        self.cli('paged_attention','rank-report','--from-lut',source,'--rank-log',log,'--out',self.root/'paged-report.csv')
+        self.assertEqual(table.paged_shape(shapes[0])['q'],[1,0,1])
+        self.assertEqual(table.paged_shape(shapes[1])['past'],[16,17,18])
+        for invalid in ['splits=65;bkv=0','splits=16;bkv=32','splits=1;bkv=0;extra=1']:
+            with self.assertRaises(ValueError):table.paged_config(shapes[0],invalid)
+        for key,value in [('op','gqa'),('layout','BNSD'),('kernel_abi','stale'),('schema_version',99)]:
+            bad=copy.deepcopy(doc);bad[key]=value
+            with self.assertRaises(ValueError):table.inventory('paged_attention',bad)
+        bad=copy.deepcopy(doc);bad['points'].append(dict(bad['points'][0]))
+        with self.assertRaises(ValueError):table.inventory('paged_attention',bad)
+        bad=copy.deepcopy(doc);bad['points'][0]['shape']=shapes[0].replace('_q1+0+1','_q2+0+1')
+        points,skipped=table.inventory('paged_attention',bad);self.assertEqual(len(skipped),1)
+
+        migrated,receipt=table.migrate_paged_v1(doc)
+        self.assertEqual(migrated['configs'],doc['configs'])
+        self.assertEqual(migrated['points'],doc['points'])
+        self.assertFalse(receipt['remapped'])
+        self.assertEqual(migrated['configs_v2'][0],dict(splits=16,bkv=0,hb=0,qw=0,mt=0,nd=0))
+        points,skipped=table.inventory('paged_attention',migrated);self.assertFalse(skipped)
+        source2=self.root/'paged-v2.json';source2.write_text(json.dumps(migrated))
+        records=[synthetic(p,singleton=True) for p in points]
+        log2=self.root/'paged-v2.log';log2.write_text(''.join('UT_RANK '+json.dumps(r)+'\n' for r in records))
+        output2=self.root/'paged-v2-rebuilt.json';self.cli('paged_attention','rank-build','--base',source2,'--rank-log',log2,'--out',output2)
+        self.assertEqual(json.loads(output2.read_text()),migrated)
+        for text in ['splits=0;bkv=64;hb=4;qw=1;mt=2;nd=0','splits=0;bkv=32;hb=3;qw=1;mt=1;nd=0']:
+            with self.assertRaises(ValueError):table.paged_config(shapes[1],text)
+        self.assertEqual(table.paged_config(shapes[1],'splits=0;bkv=64;hb=4;qw=2;mt=1;nd=0')['qw'],2)
+        # A previously absent v2 winner must enter the versioned pool once,
+        # for both an existing point and a new exact key. Legacy fields survive.
+        inserted=copy.deepcopy(migrated)
+        new_point=copy.deepcopy(points[0])
+        new_point['old_config']='splits=1;bkv=0;hb=0;qw=0;mt=0;nd=0'
+        extra_point=copy.deepcopy(new_point)
+        extra_point['shape']=extra_point['shape'].replace('_seed1119_', '_seed1120_')
+        new_log=self.root/'paged-v2-new-winner.log'
+        new_log.write_text(''.join('UT_RANK '+json.dumps(synthetic(p,singleton=True))+'\n'
+                                   for p in [new_point,extra_point]))
+        new_output=self.root/'paged-v2-new-winner.json'
+        self.cli('paged_attention','rank-build','--base',source2,'--rank-log',new_log,'--out',new_output)
+        inserted=json.loads(new_output.read_text())
+        self.assertEqual(inserted['configs'],migrated['configs'])
+        self.assertEqual(inserted['fallbacks'],migrated['fallbacks'])
+        self.assertEqual(inserted['configs_v2'][:-1],migrated['configs_v2'])
+        self.assertEqual(inserted['configs_v2'][-1],dict(splits=1,bkv=0,hb=0,qw=0,mt=0,nd=0))
+        self.assertEqual(inserted['points'][1],migrated['points'][1])
+        index=len(migrated['configs_v2'])
+        self.assertEqual(inserted['points'][0]['config'],index)
+        self.assertEqual(inserted['points'][-1]['config'],index)
+        self.assertEqual(inserted['model_key'],migrated['model_key'])
+        self.assertEqual(inserted['weight_m'],migrated['weight_m'])
+        self.assertFalse(table.inventory('paged_attention',inserted)[1])
+        again=self.root/'paged-v2-repeat-winner.json'
+        self.cli('paged_attention','rank-build','--base',new_output,'--rank-log',new_log,'--out',again)
+        self.assertEqual(json.loads(again.read_text()),inserted)
+        print('ROUNDTRIP paged_attention: exact ragged keys, duplicate indices, fields/order preserved PASS')
+
     def test_full_existing_tables_roundtrip(self):
         for op in ('matmul_nbits', 'gqa'):
             source = AUTOTUNE / op / 'lut/gfx1151.json'
