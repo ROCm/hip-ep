@@ -27,6 +27,14 @@ GPU validation uses the same new EP build for both complete models and their ref
 
 Same 64 held-out 4096-token windows, 4095 prefill targets and 64 cached targets per document. These windows are reused from the source project. Original/Changed order alternates by document. The gate is relative to native Original in this build. This does not establish broad long-context quality.
 
+## Native GSM8K pilot
+
+| Default | QSA | Change | Paired 95% interval | Acceptance gate |
+|---:|---:|---:|---|---|
+| 94/128 (73.44%) | 91/128 (71.09%) | -2.344 pp | [-6.250, +1.562] pp | Disabled |
+
+Fresh native generations on the retained 128-question five-shot pilot, alternating variant order. Both variants use greedy generation, EOS/Question stopping, a 512-token cap and the same strict #### parser. All 256 prompts were verified against the UTF-8 source, and answers/scores were recomputed from raw completions. Three generations per variant reached the cap. This is a pilot, not the full GSM8K test split; it exactly reproduces the previously accepted 94/128 versus 91/128 scores.
+
 ## Decode, separate timer
 
 | Prefix tokens | Original tokens/s | Changed tokens/s | Throughput change | Paired 95% interval | Pairs |
@@ -47,7 +55,7 @@ Same 64 held-out 4096-token windows, 4095 prefill targets and 64 cached targets 
 
 Rates use balanced repeated Original/Changed pairs on the same physical GPU with identical token inputs, packed backbone weights, head work and persistent KV buffers. Two exact-shape warmups per variant verify finite outputs and exact replay. Timers are HIP-synchronized CPU wall time. Decode covers 64 fixed teacher-forced calls and excludes prefill, sampling, model loading and tensor/binding allocation. Prefill includes the final-position output head and excludes model loading and preallocation. Intervals use 10,000 paired bootstrap resamples with seed 42 and describe within-run variation. Aggregate and per-request rates are equal at batch one.
 
-GSM8K is diagnostic and no longer an acceptance gate, as requested. The accepted 94/128 versus 91/128 pilot and earlier multi-session timings remain in the [boundary prototype report](olmo-qsa-results.md); those are not measurements of this native implementation. Native GSM8K has not been remeasured here. Only completed native timing suites appear above.
+GSM8K remains diagnostic and is not an acceptance gate, as requested. Earlier multi-session timings and the original pilot remain in the [boundary prototype report](olmo-qsa-results.md). Native accuracy and timing results are included here only after their own runs complete.
 
 The ONNX frontend originally lacked BF16 constant type mapping. The native integration adds that mapping and a raw-byte dtype regression check, preserving selector storage instead of converting parameters. Compiler tests also cover native lowering and unsupported dtype/geometry rejection.
 

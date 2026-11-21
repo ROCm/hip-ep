@@ -7,9 +7,10 @@
 import hashlib
 import json
 import math
+import re
 import subprocess
 
-from prepare_baseline import ROOT, SELECTOR, SELECTOR_SHA, WORK, sha
+from prepare_baseline import REFERENCE, ROOT, SELECTOR, SELECTOR_SHA, WORK, sha
 
 
 def load(path):
@@ -123,6 +124,64 @@ def main():
         ]
     else:
         lines += ["Paired native Dolma evaluation is pending.", ""]
+    gsm_rows = []
+    gsm_path = task / "gsm8k/gsm8k-summary.json"
+    if gsm_path.exists() and load(gsm_path)["complete"]:
+        gsm = load(gsm_path)
+        assert gsm["acceptance_gate_enabled"] is False
+        gsm_rows = [
+            json.loads(line)
+            for line in (gsm_path.parent / "gsm8k.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        assert len(gsm_rows) == 256
+        assert {(r["variant"], r["index"]) for r in gsm_rows} == {
+            (v, i) for v in ["Original", "Changed"] for i in range(128)
+        }
+        source = REFERENCE / "data/gsm8k.json"
+        assert (
+            sha(source) == load(REFERENCE / "data/inputs.json")["sha256"]["gsm8k.json"]
+        )
+        data = load(source)
+        prefix = "\n\n".join(
+            f"Question: {r['question']}\nAnswer: {r['answer']}" for r in data["fewshot"]
+        )
+
+        def answer(text):
+            match = re.search(r"####\s*(-?[0-9.,]+)", text)
+            return match.group(1).replace(",", "").rstrip(".") if match else None
+
+        for row in gsm_rows:
+            item = data["items"][row["index"]]
+            assert (
+                row["prompt"]
+                == prefix + "\n\nQuestion: " + item["question"] + "\nAnswer:"
+            )
+            assert row["gold"] == answer(item["answer"]) and row["gold"] is not None
+            assert row["prediction"] == answer(
+                row["completion"].split("Question:", 1)[0]
+            )
+            assert row["correct"] == (row["prediction"] == row["gold"])
+        for variant in ["Original", "Changed"]:
+            selected = [r for r in gsm_rows if r["variant"] == variant]
+            assert (
+                sum(r["correct"] for r in selected)
+                == gsm["variants"][variant]["correct"]
+            )
+            assert len(selected) == gsm["variants"][variant]["items"] == 128
+        a, b = [gsm["variants"][v] for v in ["Original", "Changed"]]
+        ci = gsm["paired_95_interval_percentage_points"]
+        lines += [
+            "## Native GSM8K pilot",
+            "",
+            "| Default | QSA | Change | Paired 95% interval | Acceptance gate |",
+            "|---:|---:|---:|---|---|",
+            f"| {a['correct']}/128 ({a['accuracy_percent']:.2f}%) | {b['correct']}/128 ({b['accuracy_percent']:.2f}%) | {gsm['accuracy_change_percentage_points']:+.3f} pp | [{ci[0]:+.3f}, {ci[1]:+.3f}] pp | Disabled |",
+            "",
+            "Fresh native generations on the retained 128-question five-shot pilot, alternating variant order. Both variants use greedy generation, EOS/Question stopping, a 512-token cap and the same strict #### parser. All 256 prompts were verified against the UTF-8 source, and answers/scores were recomputed from raw completions. Three generations per variant reached the cap. This is a pilot, not the full GSM8K test split; it exactly reproduces the previously accepted 94/128 versus 91/128 scores.",
+            "",
+        ]
     for phase in ["decode", "prefill"]:
         lines += [
             f"## {phase.capitalize()}, separate timer",
@@ -140,7 +199,7 @@ def main():
     lines += [
         "Rates use balanced repeated Original/Changed pairs on the same physical GPU with identical token inputs, packed backbone weights, head work and persistent KV buffers. Two exact-shape warmups per variant verify finite outputs and exact replay. Timers are HIP-synchronized CPU wall time. Decode covers 64 fixed teacher-forced calls and excludes prefill, sampling, model loading and tensor/binding allocation. Prefill includes the final-position output head and excludes model loading and preallocation. Intervals use 10,000 paired bootstrap resamples with seed 42 and describe within-run variation. Aggregate and per-request rates are equal at batch one.",
         "",
-        "GSM8K is diagnostic and no longer an acceptance gate, as requested. The accepted 94/128 versus 91/128 pilot and earlier multi-session timings remain in the [boundary prototype report](olmo-qsa-results.md); those are not measurements of this native implementation. Native GSM8K has not been remeasured here. Only completed native timing suites appear above.",
+        "GSM8K remains diagnostic and is not an acceptance gate, as requested. Earlier multi-session timings and the original pilot remain in the [boundary prototype report](olmo-qsa-results.md). Native accuracy and timing results are included here only after their own runs complete.",
         "",
         "The ONNX frontend originally lacked BF16 constant type mapping. The native integration adds that mapping and a raw-byte dtype regression check, preserving selector storage instead of converting parameters. Compiler tests also cover native lowering and unsupported dtype/geometry rejection.",
         "",
@@ -169,6 +228,7 @@ def main():
         "binary_sha256": build["binary_sha256"],
         "measured_contexts": [r["context"] for r in candidates],
         "dolma_gate_pass": quality["gate_point_estimate_pass"],
+        "gsm8k_rows_verified": len(gsm_rows),
         "report_sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
     }
     (task / "final-audit.json").write_text(json.dumps(receipt, indent=2) + "\n")
