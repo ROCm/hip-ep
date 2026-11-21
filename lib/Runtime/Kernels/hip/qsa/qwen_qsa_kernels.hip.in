@@ -1,0 +1,6 @@
+/* Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License. */
+// Qwen source SHA256: @QWEN_QSA_PORT_SHA@
+// Qwen ABI SHA256: @QWEN_QSA_HEADER_SHA@
+#pragma clang fp contract(off)
+#include "@QWEN_QSA_PORT_PATH@"

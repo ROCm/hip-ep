@@ -1072,12 +1072,13 @@ static GqaGemmCache *get_gemm_cache(RuntimeState *state, int op_state_slot) {
   return gs ? &gs->cache : nullptr;
 }
 
-static const GqaGemmCacheEntry *queryOrCreateGemmState(RuntimeState *state,
-                                                       hipblasLtHandle_t handle,
-                                                       const GqaGemmKey &key,
-                                                       int op_state_slot) {
+static const GqaGemmCacheEntry *
+queryOrCreateGemmState(RuntimeState *state, hipblasLtHandle_t handle,
+                       const GqaGemmKey &key, int op_state_slot,
+                       GqaGemmCache *cache_override = nullptr) {
   assert(handle && "queryOrCreateGemmState: null handle");
-  auto *cache = get_gemm_cache(state, op_state_slot);
+  auto *cache =
+      cache_override ? cache_override : get_gemm_cache(state, op_state_slot);
   if (!cache) {
     fprintf(stderr, "queryOrCreateGemmState: no GqaState at slot %d\n",
             op_state_slot);
@@ -1205,7 +1206,7 @@ static int gqa_forward_hipblaslt(
     int64_t past_buf_seq, int64_t H, int64_t G, int64_t d, float scale,
     int64_t do_rotary, int64_t local_window_size, bool no_causal,
     int64_t element_size_bytes, int op_state_slot, bool kv_bnsd,
-    bool reuse_past_kv = false) {
+    bool reuse_past_kv = false, GqaGemmCache *cache_override = nullptr) {
 
   void *const out_present_key = present_key;
   void *const out_present_value = present_value;
@@ -2118,12 +2119,12 @@ static int gqa_forward_hipblaslt(
                                  /*strideA=*/present_seq * d,
                                  /*strideB=*/HPG * sq * kv_span,
                                  /*strideC=*/HPG * sq * d};
-    const GqaGemmCacheEntry *sSt =
-        queryOrCreateGemmState(state, ltHandle, scoreKey, op_state_slot);
+    const GqaGemmCacheEntry *sSt = queryOrCreateGemmState(
+        state, ltHandle, scoreKey, op_state_slot, cache_override);
     if (!sSt)
       return -1;
-    const GqaGemmCacheEntry *vSt =
-        queryOrCreateGemmState(state, ltHandle, valueKey, op_state_slot);
+    const GqaGemmCacheEntry *vSt = queryOrCreateGemmState(
+        state, ltHandle, valueKey, op_state_slot, cache_override);
     if (!vSt)
       return -1;
     chunks.push_back({0, sq, 0, kv_span, sSt, vSt});
@@ -2136,12 +2137,12 @@ static int gqa_forward_hipblaslt(
 
       GqaGemmKey sKey, vKey;
       makeKeys(c, ext, &sKey, &vKey);
-      const GqaGemmCacheEntry *sSt =
-          queryOrCreateGemmState(state, ltHandle, sKey, op_state_slot);
+      const GqaGemmCacheEntry *sSt = queryOrCreateGemmState(
+          state, ltHandle, sKey, op_state_slot, cache_override);
       if (!sSt)
         return -1;
-      const GqaGemmCacheEntry *vSt =
-          queryOrCreateGemmState(state, ltHandle, vKey, op_state_slot);
+      const GqaGemmCacheEntry *vSt = queryOrCreateGemmState(
+          state, ltHandle, vKey, op_state_slot, cache_override);
       if (!vSt)
         return -1;
       chunks.push_back({q0, c, lo - kv_lo, ext, sSt, vSt});
@@ -2831,6 +2832,37 @@ static int gqa_forward_fused_from_fp32(
 }
 
 //===----------------------------------------------------------------------===//
+// The Qwen specialization owns a normal dense GQA cache as a child state. Its
+// full-support path must use the same dense backend, including H/G=6 decode's
+// decomposed route, without interpreting selector state as a GqaState slot.
+extern "C" OpState *hipdnn_ep_qwen_qsa_create_dense_state() {
+  return GqaState::create().release();
+}
+
+extern "C" int hipdnn_ep_qwen_qsa_dense_attention(
+    RuntimeState *state, OpState *dense_state, void *query, void *key,
+    void *value, void *past_key, void *past_value, void *seqlens_k,
+    void *output, void *present_key, void *present_value, int64_t B, int64_t S,
+    int64_t C) {
+  if (!state || !dense_state)
+    return -1;
+  auto stream = static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+  if (S != 1 || flash_decode_geometry_ok(24, 4, 256))
+    return gqa_forward_fused(state, stream, query, key, value, past_key,
+                             past_value, seqlens_k, nullptr, nullptr, output,
+                             present_key, present_value, B, S, C, C, 24, 4, 256,
+                             0.0625f, 0);
+  auto handle =
+      static_cast<hipblasLtHandle_t>(hipdnn_ep_state_get_hipblas_handle(state));
+  if (!handle)
+    return -1;
+  return gqa_forward_hipblaslt(
+      state, stream, handle, query, key, value, past_key, past_value, seqlens_k,
+      nullptr, nullptr, nullptr, false, nullptr, 0, 0, output, present_key,
+      present_value, B, S, C, C, 24, 4, 256, 0.0625f, 0, -1, false, 2, -1,
+      false, false, &static_cast<GqaState *>(dense_state)->cache);
+}
+
 // Public wrapper called by generated IR. ABI MUST stay identical to the
 // HipToLLVM lowering (kWrapGQA = "wrap_group_query_attention", 43 params).
 //===----------------------------------------------------------------------===//

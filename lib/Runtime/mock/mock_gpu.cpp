@@ -9,6 +9,14 @@
 #include <cstdlib>
 #include <cstring>
 
+extern "C" int wrap_qwen_qsa_group_query_attention(
+    RuntimeState *, int, void *, void *, void *, void *, void *, void *, void *,
+    void *, void *, void *, void *, void *, void *, void *, void *, void *,
+    void *, void *, int64_t, int64_t, int64_t, int64_t) {
+  fprintf(stderr, "QwenQsaGroupQueryAttention requires the real HIP runtime\n");
+  return -1;
+}
+
 int wrap_qsa_group_query_attention(RuntimeState *, int, void *, void *, void *,
                                    void *, void *, void *, void *, void *,
                                    void *, void *, void *, void *, void *,

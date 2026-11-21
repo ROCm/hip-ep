@@ -2352,6 +2352,92 @@ LogicalResult QsaGqaOp::verify() {
   return success();
 }
 
+MutableOperandRange QwenQsaGqaOp::getDpsInitsMutable() {
+  return MutableOperandRange(*this, 16, 3);
+}
+
+void QwenQsaGqaOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult QwenQsaGqaOp::verify() {
+  auto type = [](Value value) { return dyn_cast<ShapedType>(value.getType()); };
+  auto check = [&](Value value, ArrayRef<int64_t> shape, Type element) {
+    auto t = type(value);
+    if (!t || !t.hasRank() || t.getRank() != int64_t(shape.size()) ||
+        t.getElementType() != element)
+      return false;
+    for (auto [actual, required] : llvm::zip(t.getShape(), shape))
+      if (required >= 0 && actual != required)
+        return false;
+    return true;
+  };
+  auto compatible = [](int64_t a, int64_t b) {
+    return ShapedType::isDynamic(a) || ShapedType::isDynamic(b) || a == b;
+  };
+  auto f16 = Float16Type::get(getContext());
+  auto bf16 = BFloat16Type::get(getContext());
+  auto f32 = Float32Type::get(getContext());
+  auto i32 = IntegerType::get(getContext(), 32);
+  auto i64 = IntegerType::get(getContext(), 64);
+  if (!check(getQuery(), {-1, -1, 6144}, f16))
+    return emitOpError(
+        "requires FP16 [B,S,6144] query (24 heads of width 256)");
+  auto query = type(getQuery());
+  int64_t batch = query.getDimSize(0), sequence = query.getDimSize(1);
+  if ((!ShapedType::isDynamic(batch) && (batch < 1 || batch > 8)) ||
+      (!ShapedType::isDynamic(sequence) && sequence < 1))
+    return emitOpError(
+        "requires positive sequence length and batch 1 through 8");
+  auto matchesQuery = [&](Value value, int64_t width) {
+    return check(value, {-1, -1, width}, f16) &&
+           compatible(type(value).getDimSize(0), batch) &&
+           compatible(type(value).getDimSize(1), sequence);
+  };
+  if (!matchesQuery(getKey(), 1024) || !matchesQuery(getValue(), 1024) ||
+      !matchesQuery(getHidden(), 5120) || !matchesQuery(getOutput(), 6144))
+    return emitOpError("requires matching B/S, KV width 1024, hidden width "
+                       "5120 and output width 6144");
+  if (!check(getPastKey(), {-1, 4, -1, -1}, f16))
+    return emitOpError("requires FP16 [B,4,C,256] KV buffers");
+  auto cache = type(getPastKey());
+  int64_t capacity = cache.getDimSize(2), width = cache.getDimSize(3);
+  if ((!ShapedType::isDynamic(capacity) &&
+       (capacity < 1 || capacity > 262144)) ||
+      (!ShapedType::isDynamic(width) && width != 256) ||
+      !compatible(cache.getDimSize(0), batch) ||
+      (!ShapedType::isDynamic(sequence) && !ShapedType::isDynamic(capacity) &&
+       sequence > capacity))
+    return emitOpError("requires capacity through 262144 and KV width 256 "
+                       "(checked at runtime when dynamic)");
+  for (Value value : {getPastValue(), getPresentKey(), getPresentValue()}) {
+    if (!check(value, {-1, 4, -1, -1}, f16))
+      return emitOpError("requires matching FP16 KV buffers");
+    for (int dimension = 0; dimension < 4; ++dimension)
+      if (!compatible(type(value).getDimSize(dimension),
+                      cache.getDimSize(dimension)))
+        return emitOpError("requires matching KV buffer shapes");
+  }
+  if (!check(getProjection(), {640, 5120}, bf16) ||
+      !check(getQNorm(), {128}, bf16) || !check(getTokenKNorm(), {128}, bf16) ||
+      !check(getPoolKNorm(), {128}, bf16) ||
+      !check(getCosCache(), {262144, 32}, f32) ||
+      !check(getSinCache(), {262144, 32}, f32))
+    return emitOpError("requires frozen BF16 Qwen projection/three norms and "
+                       "FP32 partial-RoPE tables");
+  if (!check(getSeqlensK(), {-1}, i32) ||
+      !compatible(type(getSeqlensK()).getDimSize(0), batch) ||
+      !check(getTotalSeqLen(), {}, i32) ||
+      !check(getPositionIds(), {3, -1, -1}, i64) ||
+      !compatible(type(getPositionIds()).getDimSize(1), batch) ||
+      !compatible(type(getPositionIds()).getDimSize(2), sequence))
+    return emitOpError(
+        "requires int32 lengths and canonical int64 [3,B,S] text positions");
+  return success();
+}
+
 MutableOperandRange GqaOp::getDpsInitsMutable() {
   // DPS inits start after all inputs
   // Required inputs: ctx(0), query(1), seqlens_k(6), total_seq_len(7)

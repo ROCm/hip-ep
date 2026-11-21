@@ -86,6 +86,7 @@ constexpr SchemaOnlyOpSpec kSchemaOnlyOps[] = {
     // OrtCustomOp::InferOutputShapeFn; shape_infer_fn is per op, not global.
     {"com.amd", "QMoE", PropagatePrimaryInputOutput},
     {"com.amd", "QsaGroupQueryAttention", InferQsaGqa},
+    {"com.amd", "QwenQsaGroupQueryAttention", InferQsaGqa},
     // {"domain", "OpName", MyShapeInferFn},
 };
 

@@ -17,13 +17,13 @@ def load(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def audit_quality():
-    folder = WORK / "quality/Original"
+def audit_quality(folder=None, variant="Original", export_folder=None):
+    folder = folder or WORK / "quality/Original"
     if not (folder / "protocol.json").exists():
         return {"state": "not_started", "ppl_documents": 0, "gsm_questions": 0}
     protocol_path = folder / "protocol.json"
     protocol = load(protocol_path)
-    exported = load(WORK / "default-rtn-w4a16-64/export.json")
+    exported = load((export_folder or WORK / "default-rtn-w4a16-64") / "export.json")
     assert protocol["export_onnx_sha256"] == exported["onnx_sha256"]
     assert protocol["export_data_sha256"] == exported["data_sha256"]
     directory = SOURCE / "data/qwen-selector-v1"
@@ -42,7 +42,7 @@ def audit_quality():
         )
         assert len({r["index"] for r in rows}) == len(rows)
         assert all(
-            r["protocol_sha256"] == sha(protocol_path) and r["variant"] == "Original"
+            r["protocol_sha256"] == sha(protocol_path) and r["variant"] == variant
             for r in rows
         )
         datasets[name] = rows
@@ -202,6 +202,14 @@ def main():
     assert all(x["status"] == "passed" for x in [verified, support, probe, reference])
     quality = audit_quality()
     long_quality = audit_long_quality()
+    native_quality = {
+        variant: audit_quality(
+            WORK / "native-gqa/quality" / variant,
+            variant,
+            WORK / "native-gqa/models" / variant,
+        )
+        for variant in ["Original", "Changed"]
+    }
     trained_path = SOURCE / "docs/reproducibility/qwen-trained-performance.json"
     trained = load(trained_path)
     assert trained["state"] == "passed" and trained["job"] == "303195"
@@ -323,6 +331,41 @@ def main():
         lines += [
             "The default quality campaign is in progress. Completed native scores will be reported after the frozen 64-window/128-question campaign and independent audit finish. Local progress and partial rows are under `_local/qwen-qsa/quality/Original/`; no completed native Qwen QSA score is established yet."
         ]
+    native_control_path = WORK / "native-gqa/full-model-validation.json"
+    if native_control_path.exists():
+        native_control = load(native_control_path)
+        kernel_control = load(WORK / "native-gqa/kernel-validation.json")
+        operator_control = load(WORK / "native-gqa/operator-validation.json")
+        assert all(
+            control["status"] == "passed"
+            for control in [native_control, kernel_control, operator_control]
+        )
+        lines += [
+            "",
+            "## Native Qwen integration controls",
+            "",
+            "The isolated Qwen native build passes 611 supported compiler tests (nine unsupported) and three compiler/runtime unit tests. Frozen GPU features agree with the canonical CPU fixture within 0.004% relative RMS; tested block IDs and stable ties match exactly. Incremental pools match full prefill exactly. Dedicated batch-four/eight feature and long-index controls qualify those kernels, not full-model batch/long-context feasibility.",
+            "",
+            "The complete native operator, including hipBLASLt BF16 projection and dense-to-sparse cache transition, matches the independent frozen CPU attention oracle within 0.030% relative RMS. Full-model Original/Changed outputs are bit-exact on the tested full-support requests (prefixes 1/17/513/2047 plus four decodes). Sparse 4092+4 versus full prefill differs by 0.07771% relative RMS and replays exactly; first-pruning continuity differs by 0.10323%. ORT profiles verify one EP node dispatch per forward: 20 Original and 39 Changed calls, with unchanged cache addresses.",
+            "",
+            "Both timing variants use the isolated Qwen build and identical backbone bytes. The earlier fresh default remains preserved. Matched quality is independently evaluated below; numerical controls do not substitute for dataset accuracy.",
+            "",
+            "| Metric | Matched native default | Matched native QSA |",
+            "|---|---:|---:|",
+        ]
+
+        def native_cell(variant, metric):
+            item = native_quality[variant]
+            if metric == "ppl" and item["ppl_documents"] == 64:
+                return f"{item['ppl']:.6f}"
+            if metric == "gsm" and item["gsm_questions"] == 128:
+                return f"{item['gsm_correct']}/128 ({100 * item['gsm_correct'] / 128:.2f}%)"
+            return "Pending"
+
+        lines += [
+            f"| PPL, 64 × 4K | {native_cell('Original', 'ppl')} | {native_cell('Changed', 'ppl')} |",
+            f"| GSM8K, 128 questions | {native_cell('Original', 'gsm')} | {native_cell('Changed', 'gsm')} |",
+        ]
     lines += [
         "",
         "## Separate locked long-context inputs",
@@ -388,6 +431,7 @@ def main():
         json.dumps(
             {
                 "default_quality": quality,
+                "matched_native_quality": native_quality,
                 "default_long_quality": long_quality,
                 "native_qsa_results": False,
                 "baseline_established": quality["state"] == "complete",

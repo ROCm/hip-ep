@@ -29,6 +29,17 @@ def main():
         "--lit", type=Path, default=ROOT / "_local/ring-1259/venv/Scripts/lit.exe"
     )
     parser.add_argument(
+        "--work-root",
+        type=Path,
+        default=WORK,
+        help="Parent of the isolated native-gqa build/install directories",
+    )
+    parser.add_argument(
+        "--skip-tests",
+        action="store_true",
+        help="Skip build.py tests when refreshing an already-tested installation",
+    )
+    parser.add_argument(
         "--plan",
         action="store_true",
         help="Print the local dependency recipe without building",
@@ -37,8 +48,8 @@ def main():
     assert os.name == "nt", (
         "This helper reuses the Windows host toolchain; use build.py directly elsewhere"
     )
-    folder = WORK / "native-gqa"
-    folder.mkdir(exist_ok=True)
+    folder = args.work_root.resolve() / "native-gqa"
+    folder.mkdir(parents=True, exist_ok=True)
     old = args.toolchain_root.resolve()
     sdk = Path(sys.base_prefix) / "Lib/site-packages/_rocm_sdk_devel"
     command = [
@@ -61,6 +72,8 @@ def main():
         "--therock_dist",
         str(sdk),
     ]
+    if args.skip_tests:
+        command.append("--skip_tests")
     definitions = {
         "CMAKE_C_COMPILER": "cl",
         "CMAKE_CXX_COMPILER": "cl",

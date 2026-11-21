@@ -241,6 +241,16 @@ configure_file(hip/qsa/qsa_gqa_kernels.hip.in
     ${CMAKE_CURRENT_BINARY_DIR}/qsa_gqa_kernels.hip @ONLY)
 list(APPEND _kernel_sources ${CMAKE_CURRENT_BINARY_DIR}/qsa_gqa_kernels.hip)
 
+set(QWEN_QSA_PORT_PATH "${CMAKE_CURRENT_SOURCE_DIR}/hip/qsa/qwen_qsa_port.hip")
+set(QWEN_QSA_HEADER_PATH "${CMAKE_CURRENT_SOURCE_DIR}/include/hip_qwen_qsa.h")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${QWEN_QSA_PORT_PATH}" "${QWEN_QSA_HEADER_PATH}")
+file(SHA256 "${QWEN_QSA_PORT_PATH}" QWEN_QSA_PORT_SHA)
+file(SHA256 "${QWEN_QSA_HEADER_PATH}" QWEN_QSA_HEADER_SHA)
+configure_file(hip/qsa/qwen_qsa_kernels.hip.in
+    ${CMAKE_CURRENT_BINARY_DIR}/qwen_qsa_kernels.hip @ONLY)
+list(APPEND _kernel_sources ${CMAKE_CURRENT_BINARY_DIR}/qwen_qsa_kernels.hip)
+
 # One SHARED target per arch. Each builds a fatbin with that single slice;
 # OFFLOAD_ARCHS narrows the global list to one element so the resulting
 # DLL/SO is not bloated with code for archs the consumer won't load.
