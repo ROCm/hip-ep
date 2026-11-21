@@ -19,12 +19,16 @@
 // build.
 
 #include "mlir-constants.hpp"
+#include "mlir-node-arg.hpp"
 
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/MLIRContext.h"
 
 #include "llvm/Support/raw_ostream.h"
+#include <array>
+#include <cstdint>
 
 // ONNX TensorProto_DataType codes (subset under test).
 enum : int {
@@ -35,6 +39,7 @@ enum : int {
   ONNX_INT16 = 5,
   ONNX_INT32 = 6,
   ONNX_FLOAT16 = 10,
+  ONNX_BFLOAT16 = 16,
 };
 
 namespace {
@@ -103,6 +108,30 @@ int main() {
     check(f16.isF16() && !asInt(f16), "dense(FLOAT16) -> f16 (unchanged)");
     auto f32 = onnxElementTypeToMlirDenseElementType(ONNX_FLOAT, builder);
     check(f32.isF32() && !asInt(f32), "dense(FLOAT) -> f32 (unchanged)");
+  }
+
+  // BF16 external and inline constants must retain their exact 16-bit payload,
+  // including values whose bits would mean something different as FP16/F32.
+  {
+    auto elem = onnxElementTypeToMlirElementType(ONNX_BFLOAT16, builder);
+    auto dense = onnxElementTypeToMlirDenseElementType(ONNX_BFLOAT16, builder);
+    check(elem.isBF16() && dense == elem,
+          "BFLOAT16 stays bf16 for inline and external constants");
+    check(morphizen::mlir_impl::mlirElementTypeToOnnxType(elem) ==
+              ONNX_BFLOAT16,
+          "BF16 maps back to ONNX BFLOAT16 without becoming FLOAT16");
+    check(morphizen::mlir_impl::mlirElementTypeToOnnxType(
+              builder.getF16Type()) == ONNX_FLOAT16,
+          "FP16 reverse mapping remains FLOAT16");
+    if (dense.isBF16()) {
+      std::array<uint16_t, 4> bits{0x3f80, 0xbf80, 0x0000, 0x7fc1};
+      llvm::ArrayRef<char> raw(reinterpret_cast<const char *>(bits.data()),
+                               sizeof(bits));
+      auto type = mlir::RankedTensorType::get({4}, dense);
+      auto attr = mlir::DenseElementsAttr::getFromRawBuffer(type, raw);
+      check(attr.getRawData() == raw,
+            "BF16 constant bytes are preserved without promotion");
+    }
   }
 
   // --- Dense mapping for UINT16 now matches the bare element-type mapping,

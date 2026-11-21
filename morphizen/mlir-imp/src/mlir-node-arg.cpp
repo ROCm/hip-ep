@@ -83,7 +83,7 @@ int mlirElementTypeToOnnxType(mlir::Type elementType) {
     int mlir_type_code = -1;
     switch (width) {
     case 16:
-      mlir_type_code = 10; // TensorProto_DataType_FLOAT16
+      mlir_type_code = floatType.isBF16() ? 16 : 10; // BFLOAT16 : FLOAT16
       break;
     case 32:
       mlir_type_code = 1; // TensorProto_DataType_FLOAT
