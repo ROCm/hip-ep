@@ -18,6 +18,7 @@ def main():
     parser.add_argument("--label", required=True)
     parser.add_argument("--category", default="simple_python")
     parser.add_argument("--pilot", action="store_true")
+    parser.add_argument("--replay-label", action="append", default=[])
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--count", type=int, default=1)
     parser.add_argument("--cpu-python", required=True)
@@ -76,7 +77,15 @@ def main():
                 "--count",
                 str(args.count),
             ]
-            + (["--pilot"] if args.pilot else []),
+            + (["--pilot"] if args.pilot else [])
+            + [
+                value
+                for label in args.replay_label
+                for value in [
+                    "--replay-queue",
+                    linux_root + "/_local/qsa/native-gqa/bfcl-v4/queues/" + label,
+                ]
+            ],
             cwd=ROOT,
             stdout=client_log,
             stderr=client_error_log,

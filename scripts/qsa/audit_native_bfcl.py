@@ -9,6 +9,7 @@ import argparse
 import hashlib
 import json
 import subprocess
+from pathlib import Path
 
 import bfcl_native_eval as bfcl
 
@@ -80,6 +81,15 @@ def main():
         category, index = case["category"], case["index"]
         for variant in models:
             row = rows_by_key[variant, case["id"]]
+            for source in row.get("replayed_native_responses", []):
+                path = Path(source["path"])
+                assert sha(path) == source["sha256"]
+                native = json.loads(path.read_text(encoding="utf-8"))
+                assert native["status"] == "complete" and native["variant"] == variant
+                assert native["prompt_sha256"] in {
+                    hashlib.sha256(p.encode("utf-8")).hexdigest()
+                    for p in prompts(row["metadata"])
+                }
             assert row["index"] == index and row["bfcl_revision"] == bfcl.REVISION
             assert row["pair_index"] == case["pair_index"]
             assert row["order"] == (
@@ -118,6 +128,7 @@ def main():
         "row_files_sha256": hashes,
         "first_prompts_identical": True,
         "official_scores_recomputed": True,
+        "saved_response_provenance_verified": True,
         "training_updates": 0,
     }
     bfcl.write_json(

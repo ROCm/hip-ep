@@ -64,6 +64,8 @@ class NativeHandler(OSSHandler):
         self.model_name_underline_replaced = registry_name.replace("-", "_")
         self.queue = queue
         self.variant = "Changed" if registry_name.endswith("Changed") else "Original"
+        self.saved_responses = {}
+        self.replayed_sources = []
 
     @override
     def _format_prompt(self, messages, function):
@@ -80,11 +82,19 @@ class NativeHandler(OSSHandler):
 
     @override
     def _query_prompting(self, inference_data):
-        assert self.queue is not None
         prompt = self._format_prompt(
             inference_data["message"], inference_data["function"]
         )
         inference_data["inference_input_log"] = {"formatted_prompt": prompt}
+        key = self.variant, hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        if key in self.saved_responses:
+            response, source = self.saved_responses[key]
+            self.replayed_sources.append(source)
+            inference_data["inference_input_log"]["saved_native_response"] = source
+            # This API operation is a cache lookup; original generation time
+            # and token IDs remain in the referenced native response file.
+            return response, 0.0
+        assert self.queue is not None
         identifier = uuid.uuid4().hex
         request = {
             "request_id": identifier,
@@ -182,6 +192,7 @@ def main():
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--prepare-pilot", action="store_true")
     parser.add_argument("--pilot", action="store_true")
+    parser.add_argument("--replay-queue", type=Path, action="append", default=[])
     parser.add_argument("--queue", type=Path)
     parser.add_argument(
         "--category",
@@ -322,6 +333,12 @@ def main():
         assert json.loads(protocol_path.read_text()) == protocol
     write_json(protocol_path, protocol)
     models = {v: handler(v, args.queue) for v in ["Original", "Changed"]}
+    if args.replay_queue:
+        from native_response_cache import load_responses
+
+        saved = load_responses(TASK, args.replay_queue)
+        for model in models.values():
+            model.saved_responses = saved
     if args.pilot:
         manifest = json.loads((TASK / "pilot-manifest.json").read_text())
         assert manifest["bfcl_revision"] == REVISION
@@ -374,6 +391,7 @@ def main():
             if (variant, entry["id"]) in done:
                 continue
             model = models[variant]
+            model.replayed_sources = []
             result, metadata = model.inference(copy.deepcopy(entry), True, False)
             checked = score(
                 model,
@@ -394,6 +412,7 @@ def main():
                 "correct": checked["valid"],
                 "check": checked,
                 "bfcl_revision": actual,
+                "replayed_native_responses": model.replayed_sources,
             }
             row = make_json_serializable(row)
             with path.open("a", encoding="utf-8") as stream:

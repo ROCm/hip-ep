@@ -123,7 +123,7 @@ def main():
             "",
             "Every selected row was independently rescored with official evaluation inputs, including original Java/JavaScript types, and each pair's initial prompt was checked for equality. Native runtime/infrastructure failures were not scored as wrong answers. Setup-failure logs and completed-row provenance are retained separately.",
             "",
-            f"The pilot made {len(calls):,} native generation requests. The largest observed input was {max(p for p, _ in calls):,} tokens, and the largest input plus generated continuation was {max(p + n for p, n in calls):,} tokens, within a 65,536-token allocation. Including a long-context category does not by itself establish accuracy at 64K: a model can fail tool-use steps before reaching that context length.",
+            f"The retained pilot rows contain {len(calls):,} native generation results. The largest observed input was {max(p for p, _ in calls):,} tokens, and the largest input plus generated continuation was {max(p + n for p, n in calls):,} tokens, within a 65,536-token allocation. Including a long-context category does not by itself establish accuracy at 64K: a model can fail tool-use steps before reaching that context length.",
             "",
             f"Recorded generated tokens total {generated['Original']:,} for Default and {generated['Changed']:,} for QSA. Variant continuations and tool paths can diverge; accuracy-run latency is therefore not a fixed-token throughput comparison. The separate native performance report uses identical teacher-forced token inputs for that comparison.",
         ]
@@ -134,6 +134,8 @@ def main():
     lines += [
         "",
         "The adapter uses official BFCL system prompts, parsers, simulated tool backends and scoring functions. A registry containing only the two local model variants avoids unrelated commercial API SDK imports. Tool histories are isolated by variant and test case. The base tokenizer has no chat template: both variants use the same fixed plain System/User/Assistant transcript, greedy generation, a 4096-token cap (bounded by the 65,536-token context), EOS or fixed transcript-role stopping, and no constrained decoding. No benchmark answers or demonstrations are injected into generation prompts. Official positive/negative AST controls and variant tool-history isolation passed before generation.",
+        "",
+        "If a stage limit interrupts a partial case, saved native generations can be recovered only for the identical variant, full prompt hash and decoding settings under the frozen binary/selector protocol. Their source paths and byte hashes are recorded and independently audited. This reuses actual model outputs without selecting by correctness; missing turns still run on the native GPU. Recovery timings are not inference performance measurements.",
         "",
         "Full BFCL v4's web-search component needs a configured SerpAPI backend; none was found. Memory and web-search results are not included in the component pilot. Missing categories are not assigned zero or represented as an official overall score. See the [official BFCL setup](https://github.com/ShishirPatil/gorilla/tree/6ea57973c7a6097fd7c5915698c54c17c5b1b6c8/berkeley-function-call-leaderboard).",
         "",
