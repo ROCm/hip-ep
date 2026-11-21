@@ -12,7 +12,7 @@ document describes how the fusion chooses the ops of each kernel.
 
 ## Pipeline
 
-`addRocMlirFusionPasses` (`lib/Dialect/Transforms/Pipelines.cpp`) builds the
+`addRocMlirFusionPasses` (`lib/Dialect/Hip/Transforms/Pipelines.cpp`) builds the
 fusion for the EP, `hip-rocmlir-compiler`, `rocmlir-pipeline` and the
 `hip-rocmlir-fusion` pipeline of `hip-mlir-opt`:
 

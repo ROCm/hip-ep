@@ -4,7 +4,7 @@
  */
 
 #include "hip/Conversion/OnnxToHipDNN/Passes.h"
-#include "hip/Dialect/IR/HipDialect.h"
+#include "hip/Dialect/Hip/IR/HipDialect.h"
 
 #include "../../HipDNNGraph/HipDNNGraph.h"
 

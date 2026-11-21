@@ -34,7 +34,7 @@
 
 #include "ReadbackScalar.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
-#include "hip/Dialect/IR/HipDialect.h"
+#include "hip/Dialect/Hip/IR/HipDialect.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"

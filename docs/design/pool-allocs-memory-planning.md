@@ -34,7 +34,7 @@ The default domain ID is zero and is omitted from textual IR. Additional domains
 
 ## Pipeline relationship
 
-[pipeline_pass_menu.md](../pipeline_pass_menu.md) documents pass names and extension anchors. The order source of truth is `lib/Dialect/Transforms/Pipelines.cpp`; the passes immediately surrounding memory planning have distinct roles:
+[pipeline_pass_menu.md](../pipeline_pass_menu.md) documents pass names and extension anchors. The order source of truth is `lib/Dialect/Hip/Transforms/Pipelines.cpp`; the passes immediately surrounding memory planning have distinct roles:
 
 ```text
 ... hip-infer-shapes

@@ -359,10 +359,7 @@ def build_targets(args, build_dir):
 
 
 def run_tests(args, build_dir):
-    """Run the GPU-free test suites (no device needed, so they run on the build
-    machine in every CI job): the MLIR LIT pass-verification suite plus the
-    compiler-plugin registrar, output-allocator, runtime-lowering contract and
-    MatMulNBits LUT ctest unit tests."""
+    """Run the MLIR lit suite and the GPU-free compiler and runtime CTests."""
     step("Test (check-hip-mlir-lit)")
     run_subprocess(
         [
@@ -388,7 +385,7 @@ def run_tests(args, build_dir):
             args.config,
             "-R",
             "StaticPlugins|OutputAllocator|LdsBarrierArchGate|AdaptiveBenchmark"
-            "|RuntimeLoweringContractsUnit|MatMulNBitsAutotune",
+            "|RuntimeLoweringContractsUnit|MatMulNBitsAutotune|HipLegacyTableGen",
             "--output-on-failure",
         ]
     )

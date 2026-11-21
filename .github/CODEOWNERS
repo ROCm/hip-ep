@@ -18,15 +18,14 @@
 /lib/Conversion/                @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd @amd-bqiao @asparkhi @sambanerxilinxamd @CaymanYang @pschlan-amd @akj10 @ayanshul-amd @Vandana9628
 /lib/Dialect/                   @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd @amd-bqiao @asparkhi @sambanerxilinxamd @CaymanYang @pschlan-amd @akj10 @ayanshul-amd @Vandana9628
 /lib/Target/                    @fhanuman @amd-mingw @edelaye @qianglin-amd @amd-bqiao @asparkhi @pschlan-amd
-/lib/CInterface/                @fhanuman @amd-mingw @edelaye @qianglin-amd @amd-bqiao @asparkhi @pschlan-amd
+/lib/CAPI/                      @fhanuman @amd-mingw @edelaye @qianglin-amd @amd-bqiao @asparkhi @pschlan-amd
+/include/hip-c/                 @fhanuman @amd-mingw @edelaye @qianglin-amd @amd-bqiao @asparkhi @pschlan-amd
 /include/hip/Compiler/          @fhanuman @amd-mingw @edelaye @qianglin-amd @amd-bqiao @asparkhi @pschlan-amd
 /include/hip/Conversion/        @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd @amd-bqiao @asparkhi @sambanerxilinxamd @CaymanYang @pschlan-amd @akj10 @ayanshul-amd @Vandana9628
 /include/hip/Dialect/           @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd @amd-bqiao @asparkhi @sambanerxilinxamd @CaymanYang @pschlan-amd @akj10 @ayanshul-amd @Vandana9628
 /include/hip/Target/            @fhanuman @amd-mingw @edelaye @qianglin-amd @amd-bqiao @asparkhi @pschlan-amd
 /include/hip/Support/           @fhanuman @amd-mingw @edelaye @qianglin-amd @amd-bqiao @asparkhi @pschlan-amd
 /include/hip/InitAllPasses.h    @fhanuman @amd-mingw @edelaye @qianglin-amd @amd-bqiao @asparkhi @pschlan-amd
-/include/hip/compiler_api.h     @fhanuman @amd-mingw @edelaye @qianglin-amd @amd-bqiao @asparkhi @pschlan-amd
-/include/hip/compiler_types.h   @fhanuman @amd-mingw @edelaye @qianglin-amd @amd-bqiao @asparkhi @pschlan-amd
 /backend-mlir-compiler/         @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd @amd-bqiao @asparkhi @sambanerxilinxamd @CaymanYang @pschlan-amd @akj10 @ayanshul-amd @Vandana9628
 /morphizen_mlir_init/           @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd @amd-bqiao @asparkhi @sambanerxilinxamd @CaymanYang @pschlan-amd @akj10 @ayanshul-amd @Vandana9628
 /schemas/                       @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd @amd-bqiao @asparkhi @sambanerxilinxamd @CaymanYang @pschlan-amd @akj10 @ayanshul-amd @Vandana9628
@@ -38,8 +37,8 @@
 # ---------------------------------------------------------------------------
 # Generic compiler passes: HIP dialect transforms and pipelines.
 # ---------------------------------------------------------------------------
-/lib/Dialect/Transforms/                @fhanuman @amd-mingw @edelaye @qianglin-amd @amd-bqiao @asparkhi @pschlan-amd
-/include/hip/Dialect/Transforms/        @fhanuman @amd-mingw @edelaye @qianglin-amd @amd-bqiao @asparkhi @pschlan-amd
+/lib/Dialect/Hip/Transforms/            @fhanuman @amd-mingw @edelaye @qianglin-amd @amd-bqiao @asparkhi @pschlan-amd
+/include/hip/Dialect/Hip/Transforms/    @fhanuman @amd-mingw @edelaye @qianglin-amd @amd-bqiao @asparkhi @pschlan-amd
 
 # ---------------------------------------------------------------------------
 # HIP-to-LLVM lowering and its lit tests. Shared with the runtime owners
@@ -98,8 +97,8 @@
 # rocMLIR files outside the HIP-to-TOSA tree: their directory owners plus the
 # HIP-to-TOSA owners. Keep this after the sections it overrides.
 # ---------------------------------------------------------------------------
-/lib/Dialect/Transforms/*RocMlir*           @fhanuman @amd-mingw @edelaye @qianglin-amd @amd-bqiao @asparkhi @pschlan-amd @sambanerxilinxamd @ayanshul-amd
-/lib/Dialect/Transforms/*ROCMlir*           @fhanuman @amd-mingw @edelaye @qianglin-amd @amd-bqiao @asparkhi @pschlan-amd @sambanerxilinxamd @ayanshul-amd
+/lib/Dialect/Hip/Transforms/*RocMlir*      @fhanuman @amd-mingw @edelaye @qianglin-amd @amd-bqiao @asparkhi @pschlan-amd @sambanerxilinxamd @ayanshul-amd
+/lib/Dialect/Hip/Transforms/*ROCMlir*      @fhanuman @amd-mingw @edelaye @qianglin-amd @amd-bqiao @asparkhi @pschlan-amd @sambanerxilinxamd @ayanshul-amd
 /test/lit/Dialect/*rocmlir*                 @fhanuman @amd-mingw @edelaye @qianglin-amd @amd-bqiao @asparkhi @pschlan-amd @sambanerxilinxamd @ayanshul-amd
 /lib/Conversion/HipToLLVM/*RocMlir*         @fhanuman @edelaye @qianglin-amd @amd-bqiao @asparkhi @pschlan-amd @amd-mingw @CaymanYang @akj10 @sambanerxilinxamd @ayanshul-amd
 /test/lit/Conversion/hip-to-llvm/*rocmlir*  @fhanuman @edelaye @qianglin-amd @amd-bqiao @asparkhi @pschlan-amd @amd-mingw @CaymanYang @akj10 @sambanerxilinxamd @ayanshul-amd

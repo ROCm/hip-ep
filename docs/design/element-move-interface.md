@@ -4,7 +4,7 @@ Licensed under the MIT License.
 -->
 # ElementMoveOpInterface, quantize sinking and the cast round-trip fold
 
-`ElementMoveOpInterface` (`include/hip/Dialect/IR/HipElementMoveInterface.td`)
+`ElementMoveOpInterface` (`include/hip/Dialect/Hip/IR/HipElementMoveInterface.td`)
 marks ops whose result elements are copies of elements of some operands, or
 are selected among them by comparison, with no arithmetic. The rocMLIR fusion
 uses it to run those ops on 8- or 16-bit values in quantized graphs. The
@@ -29,7 +29,7 @@ takes only 8- and 16-bit types.
 
 ## The rewrite
 
-`sinkQuantizeThroughElementMoves` (`lib/Dialect/Transforms/SinkQuantize.cpp`)
+`sinkQuantizeThroughElementMoves` (`lib/Dialect/Hip/Transforms/SinkQuantize.cpp`)
 runs in `hip-rocmlir-prepare-quant`, before the other rocMLIR fusion passes,
 so only the rocMLIR path uses it. For each
 per-tensor `hip.quantize_linear` with inline scalar parameters, a static shape,
@@ -59,7 +59,7 @@ elements of both its source and its destination.
 
 rocMLIR's integer conv and gemm take only signed bytes, so a ui8 input costs
 the kernel a widen, a subtraction of 128 and a narrow on each load.
-`rebiasUnsignedQuantizedTrees` (`lib/Dialect/Transforms/RebiasUnsignedQuantize.cpp`)
+`rebiasUnsignedQuantizedTrees` (`lib/Dialect/Hip/Transforms/RebiasUnsignedQuantize.cpp`)
 runs right after the sinking and removes that cost where it can:
 
 ```text
@@ -102,7 +102,7 @@ value back:
 narrow(f(widen(x))) = f(x)
 ```
 
-`FoldCastRoundTripThroughElementMoves` (`lib/Dialect/IR/HipCastCanonicalize.cpp`)
+`FoldCastRoundTripThroughElementMoves` (`lib/Dialect/Hip/IR/HipCastCanonicalize.cpp`)
 is a `hip.cast` canonicalization pattern. From the outer cast, it walks back
 through a chain of ops that implement the interface. Each op in the chain
 must return `movesElements() == true`, have one result, one moved operand,

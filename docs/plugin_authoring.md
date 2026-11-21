@@ -223,7 +223,7 @@ HIP_EP_DEFINE_PLUGIN(myvendor) {
 
 `PipelineSlot` is an append-only enum declared in
 `include/hip/Compiler/PluginRegistry.h`. The current slot list is the
-seven public seams in `lib/Dialect/Transforms/Pipelines.cpp`.
+seven public seams in `lib/Dialect/Hip/Transforms/Pipelines.cpp`.
 `AfterConvertOnnxToHip` is the most common slot for vendor lowerings
 of `onnx.Custom` ops; pick the slot that matches when your transform
 needs to run.

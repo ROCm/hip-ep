@@ -5,7 +5,7 @@
 
 // What this file tests
 // --------------------
-// `MatmulOp::reifyResultShapes` (in lib/Dialect/IR/HipReifyResultShapesImpl.cpp)
+// `MatmulOp::reifyResultShapes` (in lib/Dialect/Hip/IR/HipReifyResultShapesImpl.cpp)
 // — i.e. the PRODUCER side of `ReifyRankedShapedTypeOpInterface` for
 // `hip.matmul`. Validates that for any operand-shape combination (static,
 // dynamic batch, dynamic M, dynamic N, broadcast) it returns a correct

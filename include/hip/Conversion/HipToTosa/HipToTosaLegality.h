@@ -13,7 +13,7 @@
 #ifndef HIP_CONVERSION_HIPTOTOSA_HIPTOTOSALEGALITY_H
 #define HIP_CONVERSION_HIPTOTOSA_HIPTOTOSALEGALITY_H
 
-#include "hip/Dialect/IR/HipDialect.h"
+#include "hip/Dialect/Hip/IR/HipDialect.h"
 
 #include <mlir/Dialect/Tensor/IR/Tensor.h>
 

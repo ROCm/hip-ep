@@ -289,7 +289,7 @@ op is unary or binary — `hip.silu` is unary and still takes `->`. Get the full
 list with:
 
 ```powershell
-$lines = Get-Content include\hip\Dialect\IR\HipOps.td
+$lines = Get-Content include\hip\Dialect\Hip\IR\HipOps.td
 $cur = $null
 for ($i = 0; $i -lt $lines.Count; $i++) {
   if ($lines[$i] -match '^def (Hip_\w+)\s*:') { $cur = $matches[1] }

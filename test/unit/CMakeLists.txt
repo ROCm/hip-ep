@@ -13,6 +13,34 @@
 
 message(STATUS "Configuring MLIR dialect/pass unit tests")
 
+# Downstream projects can use a legacy .td path as the main mlir-tblgen input.
+# A forwarding include alone exits successfully but emits no C++ interface.
+set(hip_build_includes "${PROJECT_BINARY_DIR}/include")
+set(hip_tablegen_includes "${PROJECT_SOURCE_DIR}/include" "${hip_build_includes}"
+  ${MLIR_INCLUDE_DIRS} ${LLVM_INCLUDE_DIRS})
+list(REMOVE_DUPLICATES hip_tablegen_includes)
+list(TRANSFORM hip_tablegen_includes PREPEND "-I")
+foreach(interface IN ITEMS
+    "HipDpsOpInterface;HipDpsOp"
+    "HipElementMoveInterface;ElementMoveOpInterface"
+    "HipOpStateInterface;OpStateOpInterface"
+    "RuntimeAccessOpInterface;RuntimeAccessOpInterface")
+  list(GET interface 0 td_name)
+  list(GET interface 1 cpp_name)
+  foreach(output IN ITEMS decls defs)
+    set(test_name "HipLegacyTableGen.${td_name}.${output}")
+    add_test(NAME ${test_name} COMMAND ${MLIR_TABLEGEN_EXE}
+      ${hip_tablegen_includes} -gen-op-interface-${output}
+      "${hip_build_includes}/hip/Dialect/IR/${td_name}.td")
+    if(output STREQUAL "decls")
+      set(expected "class ${cpp_name}[^a-zA-Z0-9_]")
+    else()
+      set(expected "mlir::hip::${cpp_name}::")
+    endif()
+    set_tests_properties(${test_name} PROPERTIES PASS_REGULAR_EXPRESSION "${expected}")
+  endforeach()
+endforeach()
+
 add_executable(test-runtime-lowering-contracts
   test_runtime_lowering_contracts.cpp
 )

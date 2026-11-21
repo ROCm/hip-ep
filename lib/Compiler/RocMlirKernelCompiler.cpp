@@ -8,8 +8,8 @@
 
 #include "hip/Compiler/RocMlirKernelCompiler.h"
 
-#include "hip/Dialect/IR/HipDialect.h"
-#include "hip/Dialect/Transforms/Passes.h"
+#include "hip/Dialect/Hip/IR/HipDialect.h"
+#include "hip/Dialect/Hip/Transforms/Passes.h"
 #include "hip/debug_log.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"

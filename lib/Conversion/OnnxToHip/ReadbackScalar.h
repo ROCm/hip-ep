@@ -25,7 +25,7 @@
 #ifndef HIP_CONVERSION_ONNXTOHIP_READBACKSCALAR_H
 #define HIP_CONVERSION_ONNXTOHIP_READBACKSCALAR_H
 
-#include "hip/Dialect/IR/HipDialect.h"
+#include "hip/Dialect/Hip/IR/HipDialect.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"

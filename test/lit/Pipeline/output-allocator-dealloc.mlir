@@ -6,7 +6,7 @@
 //
 // The onnx-to-hip pipeline no longer runs ownership-based buffer deallocation
 // at all: hip-pool-allocs owns every buffer lifetime, so there is nothing to
-// deallocate (see lib/Dialect/Transforms/Pipelines.cpp buildOnnxToHipPipelineTail).
+// deallocate (see lib/Dialect/Hip/Transforms/Pipelines.cpp buildOnnxToHipPipelineTail).
 // This file is retained only to document the pass INTERACTION that motivated the
 // output-allocator's placement, should deallocation ever be reintroduced:
 //
