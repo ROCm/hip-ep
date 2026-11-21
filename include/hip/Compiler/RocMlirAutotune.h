@@ -51,7 +51,8 @@ namespace hip {
 
 // Breadth of the perfConfig search. Mirrors rock::TuningParamSetKind without
 // pulling a rocMLIR header into this interface; `Full` and `Exhaustive` are
-// supersets of `Quick` by rocMLIR's own contract.
+// supersets of `Quick` by rocMLIR's own contract. A tuning type skips the
+// shipped problem-cache LUT. An external --problem-cache still takes priority.
 enum class AutotuneSpace { Quick, Full, Exhaustive };
 
 // Parses "quick", "full", or "exhaustive". Returns false and leaves \p out
@@ -92,18 +93,19 @@ struct AutotuneOptions {
   // and logs through it long after the constructor returns, so a StringRef
   // here would dangle for any caller that did not pass a literal.
   std::string logPrefix = "[rocmlir-autotune]";
+  // True when the user chose the search space explicitly: --autotune=<space>
+  // on hip-rocmlir-compiler, or a non-empty HIPDNN_EP_ROCMLIR_AUTOTUNE in the
+  // EP. A provided tuning type skips the shipped LUT. With it false (the
+  // default), the shipped LUT is consulted before the search.
+  bool tuningTypeProvided = false;
   // Also print a line per candidate and the winning perfConfig. Separate from
   // `log` because the per-candidate lines are one per config per kernel --
   // useful when tuning by hand, far too much for a normal compile.
   bool verbose = false;
   // External rocMLIR LUT FlatBuffer (.fb). hip-rocmlir-compiler sets this
-  // from --problem-cache or HIP_ROCMLIR_PROBLEM_CACHE. When set, the shipped
-  // tools/problem-cache/lut/<gpu_arch>.fb is not consulted. The in-process
-  // Execution Provider leaves this empty and uses the shipped table. An
-  // identical problem string is compiled as stored. A miss takes the nearest
-  // legal tile of the same kernel kind (conv, gemm, attention, or
-  // gemm-elementwise-gemm). A tile that fails to compile is skipped for the
-  // next nearest row.
+  // from --problem-cache or HIP_ROCMLIR_PROBLEM_CACHE. When set, this file
+  // takes priority over the search and the shipped table is not consulted.
+  // When empty, the shipped LUT is consulted unless tuningTypeProvided.
   std::string problemCachePath;
   // Where to write this compile's winners. Empty skips the dump. The autotuner
   // does not write the file itself; hip-rocmlir-compiler calls
@@ -163,9 +165,11 @@ bool rocMlirSkipBenchmarking();
 
 // Reads HIPDNN_EP_ROCMLIR_AUTOTUNE for the search space only. Unset or empty
 // selects quick. "quick", "full", and "exhaustive" are the only accepted
-// values. Anything else warns and selects quick. Skipping the search is
-// rocMlirSkipBenchmarking(), not a value of this variable. Returns false,
-// leaving \p out alone, only when that skip flag is set.
+// values. Anything else warns and selects quick. A tuning type skips the
+// shipped problem-cache LUT. An external --problem-cache still takes
+// priority. Skipping the search is rocMlirSkipBenchmarking(), not a
+// value of this variable.
+// Returns false, leaving \p out alone, only when that skip flag is set.
 //
 // Env-only on purpose for now. The custom-kernel autotuners also accept a
 // provider option, but those are read in the Runtime, which already has the
