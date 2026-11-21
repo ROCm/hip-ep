@@ -19,12 +19,21 @@
  *
  * Each case runs twice with two different fill bytes in the output buffer,
  * which has guard elements on both sides: an element the kernel did not write
- * or a write outside the output fails at least one of the two runs.
+ * or a write outside the output fails at least one of the two runs. A case
+ * that passes is then timed with the shared UT timer
+ * (common/hip_adaptive_timing.h).
+ *
+ * Usage:
+ *   test_div.exe [--coverage 1|2|3]      built-in sizes (default 3)
+ *   test_div.exe --n <elements> [--seed <seed>]
+ *                                        one case of that size; seed defaults to n
  */
 
 #include "hip_custom_kernels.h"
 
 #include <hip/hip_runtime.h>
+#include "../../common/hip_adaptive_timing.h"
+#include "../../common/ut_case_input.h"
 
 #include <algorithm>
 #include <cfloat>
@@ -33,10 +42,138 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <initializer_list>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
+
+// ---- Cold-cache timing ----
+// The timed launches rotate over copies of the two inputs, so that each launch
+// reads them from DRAM as in a model rather than from L2 / the Infinity Cache;
+// each copy is read again only after kColdRotationBytes of other copies.
+// HIPDNN_KERNEL_UT_WARM=1 times one copy back to back instead. Same scheme as
+// the other leaves (e.g. qmoe_ragged_mm/Xfp16_Wu4_Yfp16).
+namespace hipdnn_ep_test {
+// Several times the largest last-level cache among the targets.
+constexpr size_t kColdRotationBytes = size_t(256) << 20;
+// Untimed reads before the timed launches, so that the copies' initial fill
+// has left the caches.
+constexpr size_t kColdSettleBytes = size_t(128) << 20;
+// Bounds the copies of inputs of a few KB.
+constexpr int kColdMaxCopies = 4096;
+
+inline bool warmTiming() {
+  const char* v = std::getenv("HIPDNN_KERNEL_UT_WARM");
+  return v && v[0] == '1';
+}
+
+// Copies of the buffers one launch reads. Copy 0 is the buffers themselves;
+// the others share one allocation.
+class ColdCopies {
+public:
+  struct Part {
+    const void* src;
+    size_t bytes;
+  };
+
+  explicit ColdCopies(std::initializer_list<Part> parts) : parts_(parts) {
+    size_t stride = 0;
+    for (const Part& p : parts_) {
+      offsets_.push_back(stride);
+      stride += (p.bytes + 255) & ~size_t(255);
+      bytes_ += p.bytes;
+    }
+    if (warmTiming() || bytes_ == 0) {
+      return;
+    }
+    count_ = 1 + static_cast<int>(std::min<size_t>(
+                     kColdMaxCopies - 1,
+                     (kColdRotationBytes + bytes_ - 1) / bytes_));
+    stride_ = stride;
+    if (hipMalloc(&slab_, stride_ * (count_ - 1)) != hipSuccess) {
+      std::fprintf(stderr,
+                   "cold-cache copies do not fit; timing on warm caches\n");
+      slab_ = nullptr;
+      count_ = 1;
+      return;
+    }
+    // Copy 1 from the buffers, then double the run of filled copies.
+    for (size_t i = 0; i < parts_.size(); ++i) {
+      if (parts_[i].bytes) {
+        (void)hipMemcpy(part(1, i), parts_[i].src, parts_[i].bytes,
+                        hipMemcpyDeviceToDevice);
+      }
+    }
+    for (int filled = 1; filled < count_ - 1;) {
+      const int more = std::min(filled, count_ - 1 - filled);
+      (void)hipMemcpy(static_cast<char*>(slab_) + stride_ * filled, slab_,
+                      stride_ * more, hipMemcpyDeviceToDevice);
+      filled += more;
+    }
+  }
+  ~ColdCopies() {
+    if (slab_) {
+      (void)hipFree(slab_);
+    }
+  }
+  ColdCopies(const ColdCopies&) = delete;
+  ColdCopies& operator=(const ColdCopies&) = delete;
+
+  int count() const { return count_; }
+  size_t bytes() const { return bytes_; }
+  // Part `i` of copy `c`.
+  void* part(int c, size_t i) const {
+    if (c == 0 || parts_[i].bytes == 0) {
+      return const_cast<void*>(parts_[i].src);
+    }
+    return static_cast<char*>(slab_) + stride_ * (c - 1) + offsets_[i];
+  }
+
+private:
+  std::vector<Part> parts_;
+  std::vector<size_t> offsets_;
+  size_t bytes_ = 0;
+  size_t stride_ = 0;
+  int count_ = 1;
+  void* slab_ = nullptr;
+};
+
+// Holds the stream until the host sets *release, so that every timed launch is
+// queued before the first one runs. Gives up after about 0.25 s.
+__global__ void holdStreamKernel(const volatile int* release) {
+  for (int spin = 0; spin < (1 << 16) && *release == 0; ++spin) {
+    __builtin_amdgcn_s_sleep(127);
+  }
+}
+
+// Host-mapped, coherent release flag for holdStreamKernel, or null if it is
+// unavailable.
+inline int* holdReleaseFlag() {
+  static int* flag = [] {
+    void* p = nullptr;
+    return hipHostMalloc(&p, sizeof(int),
+                         hipHostMallocMapped | hipHostMallocCoherent) ==
+                   hipSuccess
+               ? static_cast<int*>(p)
+               : nullptr;
+  }();
+  return flag;
+}
+
+// Mean time of one complete hip_elementwise_div call; launch(c) uses input
+// copy c. The shared UT policy selects the call count.
+template <class Launch>
+double rotatedMeanMs(hipStream_t stream, const ColdCopies& copies,
+                     Launch&& launch) {
+  return timing::adaptiveRotatedMeanMs(
+      stream, copies, launch, holdReleaseFlag(),
+      [&](const int* flag) { holdStreamKernel<<<1, 1, 0, stream>>>(flag); },
+      warmTiming(), kColdSettleBytes, "div_xbf16_wbf16_ybf16",
+      "hip_elementwise_div");
+}
+} // namespace hipdnn_ep_test
 
 namespace {
 
@@ -240,7 +377,9 @@ private:
 
 // One case's results.csv row, written when it goes out of scope so that a
 // case returning early still reports FAIL. relL2 is 0 on PASS (bit-exact)
-// and 1 on FAIL; this leaf only counts mismatching elements.
+// and 1 on FAIL; this leaf only counts mismatching elements. finish() binds a
+// timed PASS to its UT_TIMING record, so the case's timing::CaseScope must be
+// alive when it is called.
 struct ResultRow {
   CsvRow row;
   explicit ResultRow(std::string shape) {
@@ -252,9 +391,12 @@ struct ResultRow {
   ResultRow(const ResultRow&) = delete;
   ResultRow& operator=(const ResultRow&) = delete;
   ~ResultRow() { CsvWriter().write(row); }
-  void finish(bool pass) {
+  void finish(bool pass, double time_ms) {
     row.rel_l2 = pass ? 0.0 : 1.0;
     row.verdict = pass ? "PASS" : "FAIL";
+    row.time_ms = time_ms;
+    hipdnn_ep_test::timing::emitCsvBinding(row.shape, row.config, row.verdict,
+                                           row.rel_l2, row.time_ms);
   }
 };
 
@@ -262,11 +404,18 @@ struct ResultRow {
 
 // bf16 / bf16 -> bf16: every element must match the reference bit for bit
 // (any NaN for a NaN reference) and nothing outside the output is written.
+// A passing case is then timed.
 bool run_div_case(int64_t n, uint64_t seed, hipStream_t stream) {
-  const std::string name = "bf16_div_n" + std::to_string(n);
+  std::string name = "bf16_div_n" + std::to_string(n);
+  if (seed != static_cast<uint64_t>(n)) {
+    name += "_seed" + std::to_string(seed);
+  }
+  hipdnn_ep_test::timing::CaseScope timing_case("div/Xbf16_Wbf16_Ybf16", name,
+                                                "hip_elementwise_div");
   ResultRow result(name);
   const Operands o = make_operands(n, seed);
-  const size_t in_bytes = static_cast<size_t>(n) * sizeof(uint16_t);
+  const size_t in_bytes = hipdnn_ep_test::input::bytes(
+      {static_cast<uint64_t>(n)}, sizeof(uint16_t));
 
   DeviceBytes d_lhs(in_bytes);
   DeviceBytes d_rhs(in_bytes);
@@ -328,18 +477,30 @@ bool run_div_case(int64_t n, uint64_t seed, hipStream_t stream) {
     }
     pass = pass && ok;
   }
+
+  double time_ms = 0.0;
   if (pass) {
-    std::cout << "PASS " << name << '\n';
+    const hipdnn_ep_test::ColdCopies inputs(
+        {{d_lhs.get(), in_bytes}, {d_rhs.get(), in_bytes}});
+    time_ms = hipdnn_ep_test::rotatedMeanMs(stream, inputs, [&](int c) {
+      return hip_elementwise_div(reinterpret_cast<void*>(stream),
+                                 inputs.part(c, 0), inputs.part(c, 1),
+                                 d_out.get() + guard_bytes, n,
+                                 HIP_DTYPE_BFLOAT16);
+    });
+    std::printf("PASS %s time_ms=%.6f\n", name.c_str(), time_ms);
   }
-  result.finish(pass);
+  result.finish(pass, time_ms);
   return pass;
 }
 
 // A dtype the kernel has no Div for must return -1 and leave the output
-// untouched.
+// untouched. Not timed.
 bool run_unsupported_case(hipStream_t stream) {
   const int64_t n = 257;
   const std::string name = "unsupported_u8_div";
+  hipdnn_ep_test::timing::CaseScope timing_case("div/Xbf16_Wbf16_Ybf16", name,
+                                                "hip_elementwise_div");
   ResultRow result(name);
   DeviceBytes d_lhs(static_cast<size_t>(n));
   DeviceBytes d_rhs(static_cast<size_t>(n));
@@ -358,7 +519,7 @@ bool run_unsupported_case(hipStream_t stream) {
   std::cout << (pass ? "PASS " : "FAIL ") << name << " status=" << status
             << " output_untouched=" << (untouched ? "yes" : "no")
             << " (an 'unsupported dtype' message above is expected)\n";
-  result.finish(pass);
+  result.finish(pass, 0.0);
   return pass;
 }
 
@@ -373,51 +534,92 @@ constexpr Size kSizes[] = {
     {257, 1}, {70001, 1}, {256, 2}, {1048579, 3},
 };
 
-bool parse_options(int argc, char** argv, int* coverage) {
-  if (const char* env = std::getenv("HIPDNN_UT_COVERAGE")) {
-    *coverage = std::atoi(env);
+struct Options {
+  int coverage = 3;
+  bool custom = false;
+  int64_t n = 257;
+  uint64_t seed = 0;
+};
+
+// Throws std::invalid_argument on an unknown, incomplete or out-of-range
+// argument.
+Options parse_options(int argc, char** argv) {
+  using hipdnn_ep_test::input::integer;
+  using hipdnn_ep_test::input::value;
+  Options o;
+  const char* env = std::getenv("HIPDNN_UT_COVERAGE");
+  if (env && env[0]) {
+    o.coverage = static_cast<int>(integer(env, "HIPDNN_UT_COVERAGE", 1, 3));
   }
+  bool seed_set = false;
   for (int i = 1; i < argc; ++i) {
     const std::string argument = argv[i];
-    if (argument == "--coverage" && i + 1 < argc) {
-      *coverage = std::atoi(argv[++i]);
+    if (argument == "--coverage") {
+      o.coverage = static_cast<int>(integer(value(argc, argv, i), "coverage", 1, 3));
+    } else if (argument == "--n") {
+      o.n = integer(value(argc, argv, i), "n");
+      o.custom = true;
+    } else if (argument == "--seed") {
+      o.seed = static_cast<uint64_t>(integer(value(argc, argv, i), "seed", 0));
+      seed_set = true;
+      o.custom = true;
     } else {
-      std::cerr << "usage: " << argv[0] << " [--coverage 1|2|3]\n";
-      return false;
+      throw std::invalid_argument(
+          "unknown argument " + argument +
+          "; usage: [--coverage 1|2|3] | [--n <elements>] [--seed <seed>]");
     }
   }
-  return *coverage >= 1 && *coverage <= 3;
+  if (!seed_set) {
+    o.seed = static_cast<uint64_t>(o.n);
+  }
+  return o;
+}
+
+int run(int argc, char** argv) {
+  const Options options = parse_options(argc, argv);
+  hipdnn_ep_test::timing::printTimingMode();
+
+  hipStream_t stream = nullptr;
+  HIP_CHECK(hipStreamCreate(&stream));
+  bool all_pass = true;
+  if (options.custom) {
+    std::cout << "div custom case: n=" << options.n
+              << " seed=" << options.seed << '\n';
+    all_pass = run_div_case(options.n, options.seed, stream);
+  } else {
+    int size_count = 0;
+    for (const Size& size : kSizes) {
+      size_count += size.min_coverage <= options.coverage ? 1 : 0;
+    }
+    std::cout << "div coverage=" << options.coverage << " -> running "
+              << size_count
+              << " size(s) x 1 dtype (bf16) + 1 unsupported case = "
+              << size_count + 1 << " div cases\n";
+    for (const Size& size : kSizes) {
+      if (size.min_coverage > options.coverage) {
+        continue;
+      }
+      all_pass = run_div_case(size.n, static_cast<uint64_t>(size.n), stream) &&
+                 all_pass;
+    }
+    all_pass = run_unsupported_case(stream) && all_pass;
+  }
+  HIP_CHECK(hipStreamDestroy(stream));
+
+  std::cout << (all_pass ? "ALL PASS" : "SOME FAIL") << '\n';
+  return all_pass ? 0 : 1;
 }
 
 } // namespace
 
 int main(int argc, char** argv) {
-  int coverage = 3;
-  if (!parse_options(argc, argv, &coverage)) {
+  try {
+    return run(argc, argv);
+  } catch (const std::invalid_argument& error) {
+    std::cerr << "invalid UT input: " << error.what() << '\n';
     return 2;
+  } catch (const std::exception& error) {
+    std::cerr << "FAIL " << error.what() << '\n';
+    return 1;
   }
-
-  int size_count = 0;
-  for (const Size& size : kSizes) {
-    size_count += size.min_coverage <= coverage ? 1 : 0;
-  }
-  std::cout << "div coverage=" << coverage << " -> running " << size_count
-            << " size(s) x 1 dtype (bf16) + 1 unsupported case = "
-            << size_count + 1 << " div cases\n";
-
-  hipStream_t stream = nullptr;
-  HIP_CHECK(hipStreamCreate(&stream));
-  bool all_pass = true;
-  for (const Size& size : kSizes) {
-    if (size.min_coverage > coverage) {
-      continue;
-    }
-    all_pass = run_div_case(size.n, static_cast<uint64_t>(size.n), stream) &&
-               all_pass;
-  }
-  all_pass = run_unsupported_case(stream) && all_pass;
-  HIP_CHECK(hipStreamDestroy(stream));
-
-  std::cout << (all_pass ? "ALL PASS" : "SOME FAIL") << '\n';
-  return all_pass ? 0 : 1;
 }

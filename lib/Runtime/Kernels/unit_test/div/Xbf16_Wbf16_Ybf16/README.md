@@ -42,10 +42,34 @@ the sizes; the unsupported case runs at every tier.
 
 ```
 make test        HIP_SDK=<sdk> [OFFLOAD=--offload-arch=<gfx>] [COVERAGE=1|2|3]
-make test_custom HIP_SDK=<sdk> ARGS="--coverage 1"
+make test_custom HIP_SDK=<sdk> N=<elements> [SEED=<seed>]
 make build ...
 make clean
 ```
+
+`test_custom` runs one case through the same bit-exact check and timer as
+the suite:
+
+| Make | Exe flag | Default | Meaning |
+|---|---|---|---|
+| `N` | `--n` | 257 | Elements, >= 1. The first ~230 are the special pairs. |
+| `SEED` | `--seed` | `N` | Seed of the random values, >= 0. |
+
+Unknown or out-of-range arguments exit 2.
+
+## Timing
+
+Every passing case is timed with the shared UT timer
+(`common/hip_adaptive_timing.h`) and writes `UT_TIMING` /
+`UT_TIMING_BINDING` records; `time_ms` in `out/results.csv` is its mean.
+`TIMING=screen|standard|confirm` (default `standard`) selects the preset and
+`ADLX_INCLUDE=<dir>` optionally adds GPU clock sampling. The unsupported case
+is not timed.
+
+## Architectures and MODE
+
+`OFFLOAD` defaults to `--offload-arch=gfx11-generic` (gfx115x); pass
+`--offload-arch=gfx1151`, `gfx1170` or `gfx1171` for a chip build.
 
 The op has no autotune table and no tuner; `MODE` only labels
 `out/results.csv`, and every row's `config` is `fixed:elementwise`.

@@ -661,6 +661,54 @@
         {"name": "suite_tier1", "coverage": 1}
       ],
       "gaps": ["custom_shape", "shared_timer", "arch_default"]
+    },
+    {
+      "leaf": "div/Xbf16_Wbf16_Ybf16",
+      "package_executable": "hipdnn-kernel-ut-div-xbf16-wbf16-ybf16.exe",
+      "source": "test_div.cpp",
+      "capabilities": {
+        "coverage": true,
+        "timing": "shared",
+        "mode": "label_only",
+        "rank": false
+      },
+      "suite": {
+        "args": ["--coverage"],
+        "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
+      },
+      "custom": {
+        "selected_by": "--n or --seed",
+        "params": [
+          {
+            "name": "n",
+            "flag": "--n",
+            "make": "N",
+            "type": "int",
+            "exe_default": 257,
+            "make_default": 257,
+            "description": "Elements of lhs, rhs and output; the first ~230 are bf16 special-value pairs, the rest seeded random values."
+          },
+          {
+            "name": "seed",
+            "flag": "--seed",
+            "make": "SEED",
+            "type": "int",
+            "description": "Seed of the random values. Unset uses n, as in the suite."
+          }
+        ],
+        "constraints": [
+          "unknown, incomplete or out-of-range arguments exit 2"
+        ],
+        "checks": [
+          "n >= 1",
+          "seed >= 0"
+        ]
+      },
+      "examples": [
+        {"name": "suite_tier1", "coverage": 1},
+        {"name": "hidden_4096_x_128_tokens", "values": {"n": 524288}}
+      ],
+      "gaps": []
     }
   ]
 }

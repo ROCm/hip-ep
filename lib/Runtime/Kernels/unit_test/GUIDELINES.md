@@ -207,6 +207,10 @@ COVERAGE=N` (any leaf, or the top-level aggregator) builds and runs it.
   f64, i64, i32, i16, i8, u8} and three unsupported pairs, on sizes COVERAGE
   thins (tier1 = 2 sizes, tier2 = 3, tier3 = 4, up to ~1M elements). Outputs
   are compared bit-exactly with a CPU reference.
+- **div** (`Xbf16_Wbf16_Ybf16`): bf16 division over every pair of bf16 special
+  values plus seeded random values, and one unsupported dtype, on sizes
+  COVERAGE thins (tier1 = 2 sizes, tier2 = 3, tier3 = 4). Outputs are
+  compared bit-exactly with an fp32-divide-then-round CPU reference.
 
 A new op's test cpp should follow whichever of the above shapes fit it best:
 if the kernel's dispatch paths are better covered by a small hand-picked
