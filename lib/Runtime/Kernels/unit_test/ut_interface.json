@@ -14,254 +14,54 @@
   "controller": {
     "executable": "bin/hipdnn-kernel-ut.exe",
     "args": [
-      {
-        "flag": "--leaf",
-        "type": "string",
-        "default": "every leaf",
-        "description": "Run only this leaf (<op>/<leaf>, the `leaf` field below). Gets the same DLL search path, environment, stderr capture and results.csv as the suite."
-      },
-      {
-        "flag": "--arch",
-        "type": "string",
-        "default": "detected from GPU 0",
-        "description": "Selects bin/kernel-tests/<arch>/ with the EP's DLL rule: the ISA's own directory first, then its generic target's (gfx115x -> gfx11-generic)."
-      },
-      {
-        "flag": "--mode",
-        "type": "enum",
-        "choices": [
-          "lookup",
-          "autotune"
-        ],
-        "default": "lookup",
-        "description": "lookup resolves configs from the tables embedded in custom_kernels_<arch>.dll and falls through to autotune on a miss; autotune bypasses the tables."
-      },
-      {
-        "flag": "--coverage",
-        "type": "enum",
-        "choices": [
-          1,
-          2,
-          3
-        ],
-        "default": 3,
-        "description": "Shape-coverage tier passed to every leaf as --coverage <N>."
-      },
-      {
-        "flag": "--timing",
-        "type": "enum",
-        "choices": [
-          "screen",
-          "standard",
-          "confirm"
-        ],
-        "default": "standard",
-        "env": "HIPDNN_UT_TIMING",
-        "description": "Timing preset passed to every leaf through HIPDNN_UT_TIMING. confirm is the formal measurement."
-      },
-      {
-        "flag": "--",
-        "type": "separator",
-        "description": "With --leaf: every following argument goes to the leaf unchanged instead of --coverage <N>. Build them from the leaf's custom.params (common/ut_interface.py command does)."
-      }
+      {"flag": "--leaf", "type": "string", "default": "every leaf", "description": "Run only this leaf (<op>/<leaf>, the `leaf` field below). Gets the same DLL search path, environment, stderr capture and results.csv as the suite."},
+      {"flag": "--arch", "type": "string", "default": "detected from GPU 0", "description": "Selects bin/kernel-tests/<arch>/ with the EP's DLL rule: the ISA's own directory first, then its generic target's (gfx115x -> gfx11-generic)."},
+      {"flag": "--mode", "type": "enum", "choices": ["lookup", "autotune"], "default": "lookup", "description": "lookup resolves configs from the tables embedded in custom_kernels_<arch>.dll and falls through to autotune on a miss; autotune bypasses the tables."},
+      {"flag": "--coverage", "type": "enum", "choices": [1, 2, 3], "default": 3, "description": "Shape-coverage tier passed to every leaf as --coverage <N>."},
+      {"flag": "--timing", "type": "enum", "choices": ["screen", "standard", "confirm"], "default": "standard", "env": "HIPDNN_UT_TIMING", "description": "Timing preset passed to every leaf through HIPDNN_UT_TIMING. confirm is the formal measurement."},
+      {"flag": "--", "type": "separator", "description": "With --leaf: every following argument goes to the leaf unchanged instead of --coverage <N>. Build them from the leaf's custom.params (common/ut_interface.py command does)."}
     ],
     "leaf_command": "<bin>/kernel-tests/<arch>/<package_executable> --coverage <N>, or the arguments after -- when --leaf is given",
-    "leaf_environment": [
-      "HIPDNN_UT_TIMING",
-      "HIPDNN_RESULTS_CSV",
-      "HIPDNN_RESULTS_ARCH",
-      "HIPDNN_RESULTS_OP",
-      "HIPDNN_RESULTS_LEAF",
-      "HIPDNN_RESULTS_MODE",
-      "HIPDNN_KERNEL_UT_MODE",
-      "HIPDNN_MATMUL_AUTOTUNE_MODE",
-      "HIPDNN_GQA_AUTOTUNE_MODE",
-      "HIPDNN_KERNEL_UT_STDERR"
-    ],
+    "leaf_environment": ["HIPDNN_UT_TIMING", "HIPDNN_RESULTS_CSV", "HIPDNN_RESULTS_ARCH", "HIPDNN_RESULTS_OP", "HIPDNN_RESULTS_LEAF", "HIPDNN_RESULTS_MODE", "HIPDNN_KERNEL_UT_MODE", "HIPDNN_MATMUL_AUTOTUNE_MODE", "HIPDNN_GQA_AUTOTUNE_MODE", "HIPDNN_KERNEL_UT_STDERR"],
     "exit_codes": {
       "0": "Every leaf passed.",
       "1": "At least one leaf failed or could not be launched.",
       "2": "Bad argument, no GPU detected, or no packaged tests for that arch."
     },
-    "outputs": [
-      "bin/out/results.csv (one row per case and one shape=suite row per leaf)",
-      "bin/out/<executable stem>.stderr.log for a failed leaf"
-    ],
+    "outputs": ["bin/out/results.csv (one row per case and one shape=suite row per leaf)", "bin/out/<executable stem>.stderr.log for a failed leaf"],
     "run_one_case": "cd <bin> && hipdnn-kernel-ut.exe --leaf <leaf> [--timing screen|standard|confirm] [--mode lookup|autotune] -- <leaf arguments>"
   },
   "common": {
     "make": [
-      {
-        "var": "HIP_SDK",
-        "required": true,
-        "default": "$(HIP_PATH)",
-        "description": "HIP SDK root containing bin/hipcc.exe."
-      },
-      {
-        "var": "OFFLOAD",
-        "default": "--offload-arch=gfx11-generic",
-        "description": "Build target. gfx11-generic covers gfx115x; pass --offload-arch=gfx1170 or --offload-arch=gfx1171 for those chips. gfx1151 is the default validation chip."
-      },
-      {
-        "var": "LUT_ARCH",
-        "default": "GPU of the build machine (amdgpu-arch) for a generic target",
-        "description": "Chip whose table a MODE=lookup build embeds."
-      },
-      {
-        "var": "MODE",
-        "default": "lookup",
-        "choices": [
-          "lookup",
-          "autotune"
-        ],
-        "description": "lookup links the real resolver and table and sets the kernel's own HIPDNN_<OP>_AUTOTUNE_MODE=lookup; autotune never reads a table. Ops without a table only label results.csv."
-      },
-      {
-        "var": "COVERAGE",
-        "default": 3,
-        "choices": [
-          1,
-          2,
-          3
-        ],
-        "description": "Shape-coverage tier for make test."
-      },
-      {
-        "var": "TIMING",
-        "default": "standard",
-        "choices": [
-          "screen",
-          "standard",
-          "confirm"
-        ],
-        "description": "Timing preset, exported as HIPDNN_UT_TIMING."
-      },
-      {
-        "var": "RANK",
-        "default": 0,
-        "choices": [
-          0,
-          1
-        ],
-        "description": "RANK=1 builds the UT ranking variant (ops with an offline LUT); it forces MODE=autotune."
-      },
-      {
-        "var": "BUILD_DIR",
-        "default": "out",
-        "description": "Build and results directory."
-      },
-      {
-        "var": "FLATC",
-        "default": "flatc",
-        "description": "flatc used by a MODE=lookup build."
-      },
-      {
-        "var": "FLATBUFFERS_INC",
-        "default": "",
-        "description": "flatbuffers include directory for a MODE=lookup build."
-      },
-      {
-        "var": "ADLX_INCLUDE",
-        "default": "",
-        "description": "Optional ADLX SDK include directory; enables GPU-clock telemetry in UT_TIMING."
-      },
-      {
-        "var": "CSV_FRESH",
-        "default": 1,
-        "description": "1 truncates <BUILD_DIR>/results.csv before test / test_custom."
-      }
+      {"var": "HIP_SDK", "required": true, "default": "$(HIP_PATH)", "description": "HIP SDK root containing bin/hipcc.exe."},
+      {"var": "OFFLOAD", "default": "--offload-arch=gfx11-generic", "description": "Build target. gfx11-generic covers gfx115x; pass --offload-arch=gfx1170 or --offload-arch=gfx1171 for those chips. gfx1151 is the default validation chip."},
+      {"var": "LUT_ARCH", "default": "GPU of the build machine (amdgpu-arch) for a generic target", "description": "Chip whose table a MODE=lookup build embeds."},
+      {"var": "MODE", "default": "lookup", "choices": ["lookup", "autotune"], "description": "lookup links the real resolver and table and sets the kernel's own HIPDNN_<OP>_AUTOTUNE_MODE=lookup; autotune never reads a table. Ops without a table only label results.csv."},
+      {"var": "COVERAGE", "default": 3, "choices": [1, 2, 3], "description": "Shape-coverage tier for make test."},
+      {"var": "TIMING", "default": "standard", "choices": ["screen", "standard", "confirm"], "description": "Timing preset, exported as HIPDNN_UT_TIMING."},
+      {"var": "RANK", "default": 0, "choices": [0, 1], "description": "RANK=1 builds the UT ranking variant (ops with an offline LUT); it forces MODE=autotune."},
+      {"var": "BUILD_DIR", "default": "out", "description": "Build and results directory."},
+      {"var": "FLATC", "default": "flatc", "description": "flatc used by a MODE=lookup build."},
+      {"var": "FLATBUFFERS_INC", "default": "", "description": "flatbuffers include directory for a MODE=lookup build."},
+      {"var": "ADLX_INCLUDE", "default": "", "description": "Optional ADLX SDK include directory; enables GPU-clock telemetry in UT_TIMING."},
+      {"var": "CSV_FRESH", "default": 1, "description": "1 truncates <BUILD_DIR>/results.csv before test / test_custom."}
     ],
     "env": [
-      {
-        "name": "HIPDNN_UT_TIMING",
-        "values": [
-          "screen",
-          "standard",
-          "confirm"
-        ],
-        "default": "standard",
-        "description": "Timing preset of the shared timer."
-      },
-      {
-        "name": "HIPDNN_UT_COVERAGE",
-        "values": [
-          1,
-          2,
-          3
-        ],
-        "description": "Coverage tier when --coverage is absent."
-      },
-      {
-        "name": "HIPDNN_RESULTS_CSV",
-        "description": "Append one row per case to this CSV; HIPDNN_RESULTS_OP / _LEAF / _ARCH / _MODE label the rows."
-      },
-      {
-        "name": "HIPDNN_MATMUL_AUTOTUNE_MODE",
-        "values": [
-          "lookup",
-          "online"
-        ],
-        "description": "The MatMulNBits kernel's own config source. A standalone run must set it together with HIPDNN_KERNEL_UT_MODE."
-      },
-      {
-        "name": "HIPDNN_GQA_AUTOTUNE_MODE",
-        "values": [
-          "lookup",
-          "online"
-        ],
-        "description": "The GQA kernel's own config source."
-      },
-      {
-        "name": "HIPDNN_KERNEL_UT_MODE",
-        "values": [
-          "lookup",
-          "autotune"
-        ],
-        "description": "Mode label read by the leaf."
-      },
-      {
-        "name": "HIPDNN_KERNEL_UT_WARM",
-        "values": [
-          1
-        ],
-        "description": "Time one operand copy on warm caches instead of the cold operand rotation."
-      },
-      {
-        "name": "HIPDNN_KERNEL_UT_STDERR",
-        "description": "Set by the controller: the leaf's stderr log, read back for config diagnostics."
-      },
-      {
-        "name": "HIPDNN_UT_EVIDENCE_BINDING",
-        "description": "Opaque caller string copied into UT_TIMING records."
-      },
-      {
-        "name": "HIPDNN_UT_RANK",
-        "description": "RANK=1 builds: candidate CSV (leaf,shape,priority,config) to rank."
-      },
-      {
-        "name": "HIPDNN_UT_RANK_CATALOG",
-        "values": [
-          1
-        ],
-        "description": "RANK=1 builds: print the config catalog for the requested shapes."
-      },
-      {
-        "name": "HIPDNN_UT_RANK_REFERENCE",
-        "values": [
-          1
-        ],
-        "description": "RANK=1 builds: sequential confirm reference of the supplied candidates."
-      },
-      {
-        "name": "HIPDNN_UT_GPU_ADMISSION",
-        "description": "Optional per-case launcher handshake prefix (FP16 W4 MatMulNBits and FP16 KV GQA decode/prefill); see common/README.md."
-      }
+      {"name": "HIPDNN_UT_TIMING", "values": ["screen", "standard", "confirm"], "default": "standard", "description": "Timing preset of the shared timer."},
+      {"name": "HIPDNN_UT_COVERAGE", "values": [1, 2, 3], "description": "Coverage tier when --coverage is absent."},
+      {"name": "HIPDNN_RESULTS_CSV", "description": "Append one row per case to this CSV; HIPDNN_RESULTS_OP / _LEAF / _ARCH / _MODE label the rows."},
+      {"name": "HIPDNN_MATMUL_AUTOTUNE_MODE", "values": ["lookup", "online"], "description": "The MatMulNBits kernel's own config source. A standalone run must set it together with HIPDNN_KERNEL_UT_MODE."},
+      {"name": "HIPDNN_GQA_AUTOTUNE_MODE", "values": ["lookup", "online"], "description": "The GQA kernel's own config source."},
+      {"name": "HIPDNN_KERNEL_UT_MODE", "values": ["lookup", "autotune"], "description": "Mode label read by the leaf."},
+      {"name": "HIPDNN_KERNEL_UT_WARM", "values": [1], "description": "Time one operand copy on warm caches instead of the cold operand rotation."},
+      {"name": "HIPDNN_KERNEL_UT_STDERR", "description": "Set by the controller: the leaf's stderr log, read back for config diagnostics."},
+      {"name": "HIPDNN_UT_EVIDENCE_BINDING", "description": "Opaque caller string copied into UT_TIMING records."},
+      {"name": "HIPDNN_UT_RANK", "description": "RANK=1 builds: candidate CSV (leaf,shape,priority,config) to rank."},
+      {"name": "HIPDNN_UT_RANK_CATALOG", "values": [1], "description": "RANK=1 builds: print the config catalog for the requested shapes."},
+      {"name": "HIPDNN_UT_RANK_REFERENCE", "values": [1], "description": "RANK=1 builds: sequential confirm reference of the supplied candidates."},
+      {"name": "HIPDNN_UT_GPU_ADMISSION", "description": "Optional per-case launcher handshake prefix (FP16 W4 MatMulNBits and FP16 KV GQA decode/prefill); see common/README.md."}
     ],
-    "leaf_outputs": [
-      "stdout UT_TIMING / UT_TIMING_BINDING JSON records",
-      "stderr UT_TIMING_INVALID diagnostics",
-      "exit code 0 only when every case passed"
-    ]
+    "leaf_outputs": ["stdout UT_TIMING / UT_TIMING_BINDING JSON records", "stderr UT_TIMING_INVALID diagnostics", "exit code 0 only when every case passed"]
   },
   "leaves": [
     {
@@ -275,26 +75,15 @@
         "rank": false
       },
       "suite": {
-        "args": [
-          "--coverage"
-        ],
+        "args": ["--coverage"],
         "coverage_default": "HIPDNN_UT_COVERAGE, else 1"
       },
       "custom": null,
       "examples": [
-        {
-          "name": "suite_tier1",
-          "coverage": 1
-        }
+        {"name": "suite_tier1", "coverage": 1}
       ],
-      "devices": [
-        "gfx1151"
-      ],
-      "gaps": [
-        "custom_shape",
-        "shared_timer",
-        "make_api"
-      ]
+      "devices": ["gfx1151"],
+      "gaps": ["custom_shape", "shared_timer", "make_api"]
     },
     {
       "leaf": "matmul_nbits/Xfp16_Wu2_Yfp16",
@@ -307,51 +96,19 @@
         "rank": true
       },
       "suite": {
-        "args": [
-          "--coverage"
-        ],
+        "args": ["--coverage"],
         "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
       },
       "custom": {
         "selected_by": "a positional MxKxN argument",
         "params": [
-          {
-            "name": "shape",
-            "positional": true,
-            "format": "MxKxN",
-            "make": "SIZE",
-            "make_default": "128x2880x5120",
-            "required": true,
-            "description": "M activation rows, K reduction, N output columns."
-          },
-          {
-            "name": "group_size",
-            "flag": "--group-size",
-            "make": "GS",
-            "type": "int",
-            "exe_default": 128,
-            "make_default": 128,
-            "description": "Quantization block size along K."
-          },
-          {
-            "name": "no_zero_points",
-            "flag": "--no-zeros",
-            "make": "NO_ZEROS",
-            "type": "bool",
-            "exe_default": false,
-            "make_default": "",
-            "description": "Omit zero points (make: NO_ZEROS=1)."
-          }
+          {"name": "shape", "positional": true, "format": "MxKxN", "make": "SIZE", "make_default": "128x2880x5120", "required": true, "description": "M activation rows, K reduction, N output columns."},
+          {"name": "group_size", "flag": "--group-size", "make": "GS", "type": "int", "exe_default": 128, "make_default": 128, "description": "Quantization block size along K."},
+          {"name": "no_zero_points", "flag": "--no-zeros", "make": "NO_ZEROS", "type": "bool", "exe_default": false, "make_default": "", "description": "Omit zero points (make: NO_ZEROS=1)."}
         ]
       },
       "examples": [
-        {
-          "name": "decode",
-          "values": {
-            "shape": "1x2880x5120",
-            "group_size": 32
-          }
-        }
+        {"name": "decode", "values": {"shape": "1x2880x5120", "group_size": 32}}
       ],
       "gaps": []
     },
@@ -366,51 +123,19 @@
         "rank": true
       },
       "suite": {
-        "args": [
-          "--coverage"
-        ],
+        "args": ["--coverage"],
         "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
       },
       "custom": {
         "selected_by": "a positional MxKxN argument",
         "params": [
-          {
-            "name": "shape",
-            "positional": true,
-            "format": "MxKxN",
-            "make": "SIZE",
-            "make_default": "128x2880x5120",
-            "required": true,
-            "description": "M activation rows, K reduction, N output columns."
-          },
-          {
-            "name": "group_size",
-            "flag": "--group-size",
-            "make": "GS",
-            "type": "int",
-            "exe_default": 128,
-            "make_default": 128,
-            "description": "Quantization block size along K."
-          },
-          {
-            "name": "no_zero_points",
-            "flag": "--no-zeros",
-            "make": "NO_ZEROS",
-            "type": "bool",
-            "exe_default": false,
-            "make_default": "",
-            "description": "Omit zero points (make: NO_ZEROS=1)."
-          }
+          {"name": "shape", "positional": true, "format": "MxKxN", "make": "SIZE", "make_default": "128x2880x5120", "required": true, "description": "M activation rows, K reduction, N output columns."},
+          {"name": "group_size", "flag": "--group-size", "make": "GS", "type": "int", "exe_default": 128, "make_default": 128, "description": "Quantization block size along K."},
+          {"name": "no_zero_points", "flag": "--no-zeros", "make": "NO_ZEROS", "type": "bool", "exe_default": false, "make_default": "", "description": "Omit zero points (make: NO_ZEROS=1)."}
         ]
       },
       "examples": [
-        {
-          "name": "decode",
-          "values": {
-            "shape": "1x2880x5120",
-            "group_size": 32
-          }
-        }
+        {"name": "decode", "values": {"shape": "1x2880x5120", "group_size": 32}}
       ],
       "gaps": []
     },
@@ -425,140 +150,35 @@
         "rank": true
       },
       "suite": {
-        "args": [
-          "--coverage"
-        ],
+        "args": ["--coverage"],
         "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
       },
       "custom": {
         "selected_by": "a positional MxKxN argument; the other single-case flags require it",
         "params": [
-          {
-            "name": "shape",
-            "positional": true,
-            "format": "MxKxN",
-            "make": "SIZE",
-            "make_default": "128x2880x5120",
-            "required": true,
-            "description": "M activation rows, K reduction, N output columns."
-          },
-          {
-            "name": "group_size",
-            "flag": "--group-size",
-            "make": "GS",
-            "type": "int",
-            "exe_default": 128,
-            "make_default": 128,
-            "description": "Quantization block size along K."
-          },
-          {
-            "name": "no_zero_points",
-            "flag": "--no-zeros",
-            "make": "NO_ZEROS",
-            "type": "bool",
-            "exe_default": false,
-            "make_default": "",
-            "description": "Omit zero points (make: NO_ZEROS=1)."
-          },
-          {
-            "name": "zero_point_type",
-            "flag": "--zp-type",
-            "make": null,
-            "type": "enum",
-            "choices": [
-              "fp16",
-              "u8"
-            ],
-            "exe_default": "fp16",
-            "description": "Zero-point storage type."
-          },
-          {
-            "name": "route",
-            "flag": "--route",
-            "make": null,
-            "type": "enum",
-            "choices": [
-              "nbits",
-              "dp4a",
-              "padrow"
-            ],
-            "exe_default": "nbits",
-            "description": "Complete entry: hip_matmul_nbits, hip_matmul_nbits_dp4a or hip_matmul_nbits_u4_wmma_padrow."
-          },
-          {
-            "name": "dp4a",
-            "flag": "--dp4a",
-            "make": null,
-            "type": "bool",
-            "exe_default": false,
-            "description": "Same as --route dp4a."
-          },
-          {
-            "name": "b_row_bytes",
-            "flag": "--b-row-bytes",
-            "make": null,
-            "type": "int",
-            "description": "Padded weight row pitch; must equal K/2+128 and selects padrow."
-          }
+          {"name": "shape", "positional": true, "format": "MxKxN", "make": "SIZE", "make_default": "128x2880x5120", "required": true, "description": "M activation rows, K reduction, N output columns."},
+          {"name": "group_size", "flag": "--group-size", "make": "GS", "type": "int", "exe_default": 128, "make_default": 128, "description": "Quantization block size along K."},
+          {"name": "no_zero_points", "flag": "--no-zeros", "make": "NO_ZEROS", "type": "bool", "exe_default": false, "make_default": "", "description": "Omit zero points (make: NO_ZEROS=1)."},
+          {"name": "zero_point_type", "flag": "--zp-type", "make": null, "type": "enum", "choices": ["fp16", "u8"], "exe_default": "fp16", "description": "Zero-point storage type."},
+          {"name": "route", "flag": "--route", "make": null, "type": "enum", "choices": ["nbits", "dp4a", "padrow"], "exe_default": "nbits", "description": "Complete entry: hip_matmul_nbits, hip_matmul_nbits_dp4a or hip_matmul_nbits_u4_wmma_padrow."},
+          {"name": "dp4a", "flag": "--dp4a", "make": null, "type": "bool", "exe_default": false, "description": "Same as --route dp4a."},
+          {"name": "b_row_bytes", "flag": "--b-row-bytes", "make": null, "type": "int", "description": "Padded weight row pitch; must equal K/2+128 and selects padrow."}
         ],
-        "constraints": [
-          "K and group size are even",
-          "dp4a: M=1..7, K%32==0, K%group_size==0, no zero points or u8 zero points",
-          "padrow: M>=2, K%32==0, K%group_size==0"
-        ],
-        "checks": [
-          "K % 2 == 0 and group_size % 2 == 0",
-          "not (dp4a or route == 'dp4a') or (M <= 7 and K % 32 == 0 and K % group_size == 0 and (no_zero_points or zero_point_type == 'u8'))",
-          "b_row_bytes == K // 2 + 128 and M >= 2 and K % 32 == 0 and K % group_size == 0",
-          "not (route == 'padrow') or (M >= 2 and K % 32 == 0 and K % group_size == 0)"
-        ]
+        "constraints": ["K and group size are even", "dp4a: M=1..7, K%32==0, K%group_size==0, no zero points or u8 zero points", "padrow: M>=2, K%32==0, K%group_size==0"],
+        "checks": ["K % 2 == 0 and group_size % 2 == 0", "not (dp4a or route == 'dp4a') or (M <= 7 and K % 32 == 0 and K % group_size == 0 and (no_zero_points or zero_point_type == 'u8'))", "b_row_bytes == K // 2 + 128 and M >= 2 and K % 32 == 0 and K % group_size == 0", "not (route == 'padrow') or (M >= 2 and K % 32 == 0 and K % group_size == 0)"]
       },
       "examples": [
-        {
-          "name": "prefill",
-          "values": {
-            "shape": "128x2880x5120",
-            "group_size": 128
-          }
-        },
-        {
-          "name": "dp4a_decode",
-          "values": {
-            "shape": "1x640x2560",
-            "group_size": 32,
-            "no_zero_points": true,
-            "dp4a": true
-          }
-        },
-        {
-          "name": "padded_rows",
-          "values": {
-            "shape": "68x6144x2560",
-            "group_size": 32,
-            "no_zero_points": true,
-            "b_row_bytes": 3200
-          }
-        }
+        {"name": "prefill", "values": {"shape": "128x2880x5120", "group_size": 128}},
+        {"name": "dp4a_decode", "values": {"shape": "1x640x2560", "group_size": 32, "no_zero_points": true, "dp4a": true}},
+        {"name": "padded_rows", "values": {"shape": "68x6144x2560", "group_size": 32, "no_zero_points": true, "b_row_bytes": 3200}}
       ],
       "diagnostic_flags": [
-        {
-          "flag": "--list-configs",
-          "description": "Print the WMMA and GEMV config inventory."
-        },
-        {
-          "flag": "--help",
-          "description": "Print usage."
-        }
+        {"flag": "--list-configs", "description": "Print the WMMA and GEMV config inventory."},
+        {"flag": "--help", "description": "Print usage."}
       ],
       "env": [
-        {
-          "name": "HIPDNN_MATMUL_NBITS_WMMA_CFG",
-          "description": "Pin a legal WMMA config ID (from --list-configs). Remove when qualifying the LUT lookup."
-        },
-        {
-          "name": "HIPDNN_EP_MATMUL_DP4A_CFG",
-          "description": "Pin a legal DP4A config ID."
-        }
+        {"name": "HIPDNN_MATMUL_NBITS_WMMA_CFG", "description": "Pin a legal WMMA config ID (from --list-configs). Remove when qualifying the LUT lookup."},
+        {"name": "HIPDNN_EP_MATMUL_DP4A_CFG", "description": "Pin a legal DP4A config ID."}
       ],
       "devices_note": "The extended WMMA entries in the suite run on gfx1151 only and print SKIP elsewhere.",
       "gaps": []
@@ -574,51 +194,19 @@
         "rank": true
       },
       "suite": {
-        "args": [
-          "--coverage"
-        ],
+        "args": ["--coverage"],
         "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
       },
       "custom": {
         "selected_by": "a positional MxKxN argument",
         "params": [
-          {
-            "name": "shape",
-            "positional": true,
-            "format": "MxKxN",
-            "make": "SIZE",
-            "make_default": "128x2880x5120",
-            "required": true,
-            "description": "M activation rows, K reduction, N output columns."
-          },
-          {
-            "name": "group_size",
-            "flag": "--group-size",
-            "make": "GS",
-            "type": "int",
-            "exe_default": 128,
-            "make_default": 128,
-            "description": "Quantization block size along K."
-          },
-          {
-            "name": "no_zero_points",
-            "flag": "--no-zeros",
-            "make": "NO_ZEROS",
-            "type": "bool",
-            "exe_default": false,
-            "make_default": "",
-            "description": "Omit zero points (make: NO_ZEROS=1)."
-          }
+          {"name": "shape", "positional": true, "format": "MxKxN", "make": "SIZE", "make_default": "128x2880x5120", "required": true, "description": "M activation rows, K reduction, N output columns."},
+          {"name": "group_size", "flag": "--group-size", "make": "GS", "type": "int", "exe_default": 128, "make_default": 128, "description": "Quantization block size along K."},
+          {"name": "no_zero_points", "flag": "--no-zeros", "make": "NO_ZEROS", "type": "bool", "exe_default": false, "make_default": "", "description": "Omit zero points (make: NO_ZEROS=1)."}
         ]
       },
       "examples": [
-        {
-          "name": "decode",
-          "values": {
-            "shape": "1x2880x5120",
-            "group_size": 32
-          }
-        }
+        {"name": "decode", "values": {"shape": "1x2880x5120", "group_size": 32}}
       ],
       "gaps": []
     },
@@ -633,51 +221,19 @@
         "rank": true
       },
       "suite": {
-        "args": [
-          "--coverage"
-        ],
+        "args": ["--coverage"],
         "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
       },
       "custom": {
         "selected_by": "a positional MxKxN argument",
         "params": [
-          {
-            "name": "shape",
-            "positional": true,
-            "format": "MxKxN",
-            "make": "SIZE",
-            "make_default": "128x2880x5120",
-            "required": true,
-            "description": "M activation rows, K reduction, N output columns."
-          },
-          {
-            "name": "group_size",
-            "flag": "--group-size",
-            "make": "GS",
-            "type": "int",
-            "exe_default": 128,
-            "make_default": 128,
-            "description": "Quantization block size along K."
-          },
-          {
-            "name": "no_zero_points",
-            "flag": "--no-zeros",
-            "make": "NO_ZEROS",
-            "type": "bool",
-            "exe_default": false,
-            "make_default": "",
-            "description": "Omit zero points (make: NO_ZEROS=1)."
-          }
+          {"name": "shape", "positional": true, "format": "MxKxN", "make": "SIZE", "make_default": "128x2880x5120", "required": true, "description": "M activation rows, K reduction, N output columns."},
+          {"name": "group_size", "flag": "--group-size", "make": "GS", "type": "int", "exe_default": 128, "make_default": 128, "description": "Quantization block size along K."},
+          {"name": "no_zero_points", "flag": "--no-zeros", "make": "NO_ZEROS", "type": "bool", "exe_default": false, "make_default": "", "description": "Omit zero points (make: NO_ZEROS=1)."}
         ]
       },
       "examples": [
-        {
-          "name": "decode",
-          "values": {
-            "shape": "1x2880x5120",
-            "group_size": 32
-          }
-        }
+        {"name": "decode", "values": {"shape": "1x2880x5120", "group_size": 32}}
       ],
       "gaps": []
     },
@@ -692,51 +248,19 @@
         "rank": true
       },
       "suite": {
-        "args": [
-          "--coverage"
-        ],
+        "args": ["--coverage"],
         "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
       },
       "custom": {
         "selected_by": "a positional MxKxN argument",
         "params": [
-          {
-            "name": "shape",
-            "positional": true,
-            "format": "MxKxN",
-            "make": "SIZE",
-            "make_default": "128x2880x5120",
-            "required": true,
-            "description": "M activation rows, K reduction, N output columns."
-          },
-          {
-            "name": "group_size",
-            "flag": "--group-size",
-            "make": "GS",
-            "type": "int",
-            "exe_default": 128,
-            "make_default": 128,
-            "description": "Quantization block size along K."
-          },
-          {
-            "name": "no_zero_points",
-            "flag": "--no-zeros",
-            "make": "NO_ZEROS",
-            "type": "bool",
-            "exe_default": false,
-            "make_default": "",
-            "description": "Omit zero points (make: NO_ZEROS=1)."
-          }
+          {"name": "shape", "positional": true, "format": "MxKxN", "make": "SIZE", "make_default": "128x2880x5120", "required": true, "description": "M activation rows, K reduction, N output columns."},
+          {"name": "group_size", "flag": "--group-size", "make": "GS", "type": "int", "exe_default": 128, "make_default": 128, "description": "Quantization block size along K."},
+          {"name": "no_zero_points", "flag": "--no-zeros", "make": "NO_ZEROS", "type": "bool", "exe_default": false, "make_default": "", "description": "Omit zero points (make: NO_ZEROS=1)."}
         ]
       },
       "examples": [
-        {
-          "name": "decode",
-          "values": {
-            "shape": "1x2880x5120",
-            "group_size": 32
-          }
-        }
+        {"name": "decode", "values": {"shape": "1x2880x5120", "group_size": 32}}
       ],
       "gaps": []
     },
@@ -751,88 +275,26 @@
         "rank": true
       },
       "suite": {
-        "args": [
-          "--coverage"
-        ],
+        "args": ["--coverage"],
         "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
       },
       "custom": {
         "selected_by": "a positional MxKxN argument; the other single-case flags require it",
         "params": [
-          {
-            "name": "shape",
-            "positional": true,
-            "format": "MxKxN",
-            "make": "SIZE",
-            "make_default": "128x2880x5120",
-            "required": true,
-            "description": "M activation rows, K reduction, N output columns."
-          },
-          {
-            "name": "group_size",
-            "flag": "--group-size",
-            "make": "GS",
-            "type": "int",
-            "exe_default": 128,
-            "make_default": 128,
-            "description": "Quantization block size along K."
-          },
-          {
-            "name": "no_zero_points",
-            "flag": "--no-zeros",
-            "make": "NO_ZEROS",
-            "type": "bool",
-            "exe_default": false,
-            "make_default": "",
-            "description": "Omit zero points (make: NO_ZEROS=1)."
-          },
-          {
-            "name": "zero_point_type",
-            "flag": "--zp-type",
-            "make": null,
-            "type": "enum",
-            "choices": [
-              "fp16",
-              "u8"
-            ],
-            "exe_default": "fp16",
-            "description": "Zero-point storage type."
-          },
-          {
-            "name": "route",
-            "flag": "--route",
-            "make": null,
-            "type": "enum",
-            "choices": [
-              "nbits"
-            ],
-            "exe_default": "nbits",
-            "description": "dp4a and padrow are FP16-only and are rejected here."
-          }
+          {"name": "shape", "positional": true, "format": "MxKxN", "make": "SIZE", "make_default": "128x2880x5120", "required": true, "description": "M activation rows, K reduction, N output columns."},
+          {"name": "group_size", "flag": "--group-size", "make": "GS", "type": "int", "exe_default": 128, "make_default": 128, "description": "Quantization block size along K."},
+          {"name": "no_zero_points", "flag": "--no-zeros", "make": "NO_ZEROS", "type": "bool", "exe_default": false, "make_default": "", "description": "Omit zero points (make: NO_ZEROS=1)."},
+          {"name": "zero_point_type", "flag": "--zp-type", "make": null, "type": "enum", "choices": ["fp16", "u8"], "exe_default": "fp16", "description": "Zero-point storage type."},
+          {"name": "route", "flag": "--route", "make": null, "type": "enum", "choices": ["nbits"], "exe_default": "nbits", "description": "dp4a and padrow are FP16-only and are rejected here."}
         ],
-        "constraints": [
-          "K and group size are even"
-        ],
-        "checks": [
-          "K % 2 == 0 and group_size % 2 == 0",
-          "route == 'nbits'"
-        ]
+        "constraints": ["K and group size are even"],
+        "checks": ["K % 2 == 0 and group_size % 2 == 0", "route == 'nbits'"]
       },
       "examples": [
-        {
-          "name": "prefill_no_zero_points",
-          "values": {
-            "shape": "128x2880x5120",
-            "group_size": 128,
-            "no_zero_points": true
-          }
-        }
+        {"name": "prefill_no_zero_points", "values": {"shape": "128x2880x5120", "group_size": 128, "no_zero_points": true}}
       ],
       "diagnostic_flags": [
-        {
-          "flag": "--help",
-          "description": "Print usage."
-        }
+        {"flag": "--help", "description": "Print usage."}
       ],
       "gaps": []
     },
@@ -847,51 +309,19 @@
         "rank": true
       },
       "suite": {
-        "args": [
-          "--coverage"
-        ],
+        "args": ["--coverage"],
         "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
       },
       "custom": {
         "selected_by": "a positional MxKxN argument",
         "params": [
-          {
-            "name": "shape",
-            "positional": true,
-            "format": "MxKxN",
-            "make": "SIZE",
-            "make_default": "128x2880x5120",
-            "required": true,
-            "description": "M activation rows, K reduction, N output columns."
-          },
-          {
-            "name": "group_size",
-            "flag": "--group-size",
-            "make": "GS",
-            "type": "int",
-            "exe_default": 128,
-            "make_default": 128,
-            "description": "Quantization block size along K."
-          },
-          {
-            "name": "no_zero_points",
-            "flag": "--no-zeros",
-            "make": "NO_ZEROS",
-            "type": "bool",
-            "exe_default": false,
-            "make_default": "",
-            "description": "Omit zero points (make: NO_ZEROS=1)."
-          }
+          {"name": "shape", "positional": true, "format": "MxKxN", "make": "SIZE", "make_default": "128x2880x5120", "required": true, "description": "M activation rows, K reduction, N output columns."},
+          {"name": "group_size", "flag": "--group-size", "make": "GS", "type": "int", "exe_default": 128, "make_default": 128, "description": "Quantization block size along K."},
+          {"name": "no_zero_points", "flag": "--no-zeros", "make": "NO_ZEROS", "type": "bool", "exe_default": false, "make_default": "", "description": "Omit zero points (make: NO_ZEROS=1)."}
         ]
       },
       "examples": [
-        {
-          "name": "decode",
-          "values": {
-            "shape": "1x2880x5120",
-            "group_size": 32
-          }
-        }
+        {"name": "decode", "values": {"shape": "1x2880x5120", "group_size": 32}}
       ],
       "gaps": []
     },
@@ -906,170 +336,30 @@
         "rank": true
       },
       "suite": {
-        "args": [
-          "--coverage"
-        ],
+        "args": ["--coverage"],
         "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
       },
       "custom": {
         "selected_by": "any shape flag; --all still runs the suite",
         "params": [
-          {
-            "name": "batch",
-            "flag": "--b",
-            "make": "B",
-            "type": "int",
-            "exe_default": 1,
-            "make_default": 1,
-            "description": "Batch size."
-          },
-          {
-            "name": "num_heads",
-            "flag": "--h",
-            "make": "H",
-            "type": "int",
-            "exe_default": 64,
-            "make_default": 32,
-            "description": "Query heads."
-          },
-          {
-            "name": "kv_num_heads",
-            "flag": "--g",
-            "make": "G",
-            "type": "int",
-            "exe_default": 8,
-            "make_default": 8,
-            "description": "KV heads (groups); H must be a multiple of G."
-          },
-          {
-            "name": "head_dim",
-            "flag": "--d",
-            "make": "D",
-            "type": "int",
-            "exe_default": 64,
-            "make_default": 128,
-            "description": "Head dimension."
-          },
-          {
-            "name": "max_seq",
-            "flag": "--max-seq",
-            "make": "MAX_SEQ",
-            "type": "int",
-            "exe_default": 8192,
-            "make_default": 4096,
-            "description": "KV cache capacity."
-          },
-          {
-            "name": "total_seq",
-            "flag": "--total",
-            "make": "TOTAL",
-            "type": "int",
-            "exe_default": 8192,
-            "make_default": 2048,
-            "description": "Effective KV length (seqlens_k+1); at most max_seq."
-          },
-          {
-            "name": "window",
-            "flag": "--window",
-            "make": null,
-            "type": "int",
-            "exe_default": 0,
-            "description": "Sliding window; <=0 is full attention."
-          },
-          {
-            "name": "head_sink",
-            "flag": "--sink",
-            "make": null,
-            "type": "int",
-            "exe_default": 0,
-            "description": "1 adds a per-head sink."
-          },
-          {
-            "name": "smooth_softmax",
-            "flag": "--smooth",
-            "make": null,
-            "type": "int",
-            "exe_default": 0,
-            "description": "1 uses smooth softmax (no explicit sink)."
-          },
-          {
-            "name": "pad",
-            "flag": "--pad",
-            "make": null,
-            "type": "int",
-            "exe_default": 0,
-            "description": ">0: key_bias marks batch b's first b*pad keys as left padding."
-          }
+          {"name": "batch", "flag": "--b", "make": "B", "type": "int", "exe_default": 1, "make_default": 1, "description": "Batch size."},
+          {"name": "num_heads", "flag": "--h", "make": "H", "type": "int", "exe_default": 64, "make_default": 32, "description": "Query heads."},
+          {"name": "kv_num_heads", "flag": "--g", "make": "G", "type": "int", "exe_default": 8, "make_default": 8, "description": "KV heads (groups); H must be a multiple of G."},
+          {"name": "head_dim", "flag": "--d", "make": "D", "type": "int", "exe_default": 64, "make_default": 128, "description": "Head dimension."},
+          {"name": "max_seq", "flag": "--max-seq", "make": "MAX_SEQ", "type": "int", "exe_default": 8192, "make_default": 4096, "description": "KV cache capacity."},
+          {"name": "total_seq", "flag": "--total", "make": "TOTAL", "type": "int", "exe_default": 8192, "make_default": 2048, "description": "Effective KV length (seqlens_k+1); at most max_seq."},
+          {"name": "window", "flag": "--window", "make": null, "type": "int", "exe_default": 0, "description": "Sliding window; <=0 is full attention."},
+          {"name": "head_sink", "flag": "--sink", "make": null, "type": "int", "exe_default": 0, "description": "1 adds a per-head sink."},
+          {"name": "smooth_softmax", "flag": "--smooth", "make": null, "type": "int", "exe_default": 0, "description": "1 uses smooth softmax (no explicit sink)."},
+          {"name": "pad", "flag": "--pad", "make": null, "type": "int", "exe_default": 0, "description": ">0: key_bias marks batch b's first b*pad keys as left padding."}
         ],
-        "checks": [
-          "num_heads % kv_num_heads == 0",
-          "total_seq <= max_seq"
-        ]
+        "checks": ["num_heads % kv_num_heads == 0", "total_seq <= max_seq"]
       },
       "examples": [
-        {
-          "name": "llama31_8b",
-          "values": {
-            "batch": 1,
-            "num_heads": 32,
-            "kv_num_heads": 8,
-            "head_dim": 128,
-            "max_seq": 4096,
-            "total_seq": 2048
-          }
-        },
-        {
-          "name": "gpt_oss_20b_window_sink",
-          "values": {
-            "batch": 1,
-            "num_heads": 64,
-            "kv_num_heads": 8,
-            "head_dim": 64,
-            "max_seq": 4096,
-            "total_seq": 2048,
-            "window": 128,
-            "head_sink": 1
-          }
-        }
+        {"name": "llama31_8b", "values": {"batch": 1, "num_heads": 32, "kv_num_heads": 8, "head_dim": 128, "max_seq": 4096, "total_seq": 2048}},
+        {"name": "gpt_oss_20b_window_sink", "values": {"batch": 1, "num_heads": 64, "kv_num_heads": 8, "head_dim": 64, "max_seq": 4096, "total_seq": 2048, "window": 128, "head_sink": 1}}
       ],
-      "diagnostic_flags": [
-        {
-          "flag": "--all",
-          "description": "Run the suite even when shape flags are given."
-        },
-        {
-          "flag": "--only",
-          "description": "<substring>: run only suite cases whose name contains it."
-        },
-        {
-          "flag": "--md",
-          "description": "Print a Markdown table instead of per-case text (implies --all)."
-        },
-        {
-          "flag": "--verbose",
-          "description": "Per-case detail."
-        },
-        {
-          "flag": "--fused",
-          "description": "Also time the oldest one-block-per-head decode."
-        },
-        {
-          "flag": "--prod-only",
-          "description": "Time only the production-selected config."
-        },
-        {
-          "flag": "--seed",
-          "description": "<int>: input RNG seed (default 1234)."
-        },
-        {
-          "flag": "--iters",
-          "description": "Legacy; ignored by the shared timer."
-        },
-        {
-          "flag": "--only-shape",
-          "description": "Exact CSV / UT_TIMING shape selector for one built-in case at the requested coverage tier; absent/ambiguous match fails."
-        }
-      ],
+      "diagnostic_flags": [{"flag": "--all", "description": "Run the suite even when shape flags are given."}, {"flag": "--only", "description": "<substring>: run only suite cases whose name contains it."}, {"flag": "--md", "description": "Print a Markdown table instead of per-case text (implies --all)."}, {"flag": "--verbose", "description": "Per-case detail."}, {"flag": "--fused", "description": "Also time the oldest one-block-per-head decode."}, {"flag": "--prod-only", "description": "Time only the production-selected config."}, {"flag": "--seed", "description": "<int>: input RNG seed (default 1234)."}, {"flag": "--iters", "description": "Legacy; ignored by the shared timer."}, {"flag": "--only-shape", "description": "Exact CSV / UT_TIMING shape selector for one built-in case at the requested coverage tier; absent/ambiguous match fails."}],
       "gaps": []
     },
     {
@@ -1083,104 +373,29 @@
         "rank": true
       },
       "suite": {
-        "args": [
-          "--coverage"
-        ],
+        "args": ["--coverage"],
         "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
       },
       "custom": {
         "selected_by": "any shape flag; --all still runs the suite",
         "params": [
-          {
-            "name": "batch",
-            "flag": "--b",
-            "make": "B",
-            "type": "int",
-            "exe_default": 1,
-            "make_default": 1,
-            "description": "Batch size."
-          },
-          {
-            "name": "num_heads",
-            "flag": "--h",
-            "make": "H",
-            "type": "int",
-            "exe_default": 40,
-            "make_default": 32,
-            "description": "Query heads."
-          },
-          {
-            "name": "kv_num_heads",
-            "flag": "--g",
-            "make": "G",
-            "type": "int",
-            "exe_default": 10,
-            "make_default": 8,
-            "description": "KV heads (groups); H must be a multiple of G."
-          },
-          {
-            "name": "head_dim",
-            "flag": "--d",
-            "make": "D",
-            "type": "int",
-            "exe_default": 128,
-            "make_default": 128,
-            "description": "Head dimension."
-          },
-          {
-            "name": "max_seq",
-            "flag": "--max-seq",
-            "make": "MAX_SEQ",
-            "type": "int",
-            "exe_default": 8192,
-            "make_default": 4096,
-            "description": "KV cache capacity."
-          },
-          {
-            "name": "total_seq",
-            "flag": "--total",
-            "make": "TOTAL",
-            "type": "int",
-            "exe_default": 8192,
-            "make_default": 2048,
-            "description": "Effective KV length; at most max_seq."
-          }
+          {"name": "batch", "flag": "--b", "make": "B", "type": "int", "exe_default": 1, "make_default": 1, "description": "Batch size."},
+          {"name": "num_heads", "flag": "--h", "make": "H", "type": "int", "exe_default": 40, "make_default": 32, "description": "Query heads."},
+          {"name": "kv_num_heads", "flag": "--g", "make": "G", "type": "int", "exe_default": 10, "make_default": 8, "description": "KV heads (groups); H must be a multiple of G."},
+          {"name": "head_dim", "flag": "--d", "make": "D", "type": "int", "exe_default": 128, "make_default": 128, "description": "Head dimension."},
+          {"name": "max_seq", "flag": "--max-seq", "make": "MAX_SEQ", "type": "int", "exe_default": 8192, "make_default": 4096, "description": "KV cache capacity."},
+          {"name": "total_seq", "flag": "--total", "make": "TOTAL", "type": "int", "exe_default": 8192, "make_default": 2048, "description": "Effective KV length; at most max_seq."}
         ],
-        "checks": [
-          "num_heads % kv_num_heads == 0",
-          "total_seq <= max_seq"
-        ]
+        "checks": ["num_heads % kv_num_heads == 0", "total_seq <= max_seq"]
       },
       "examples": [
-        {
-          "name": "llama31_8b",
-          "values": {
-            "batch": 1,
-            "num_heads": 32,
-            "kv_num_heads": 8,
-            "head_dim": 128,
-            "max_seq": 4096,
-            "total_seq": 2048
-          }
-        }
+        {"name": "llama31_8b", "values": {"batch": 1, "num_heads": 32, "kv_num_heads": 8, "head_dim": 128, "max_seq": 4096, "total_seq": 2048}}
       ],
       "diagnostic_flags": [
-        {
-          "flag": "--all",
-          "description": "Run the suite even when shape flags are given."
-        },
-        {
-          "flag": "--md",
-          "description": "<path>: also write a Markdown table."
-        },
-        {
-          "flag": "--seed",
-          "description": "<int>: input RNG seed (default 1234)."
-        },
-        {
-          "flag": "--iters",
-          "description": "Legacy; ignored by the shared timer."
-        }
+        {"flag": "--all", "description": "Run the suite even when shape flags are given."},
+        {"flag": "--md", "description": "<path>: also write a Markdown table."},
+        {"flag": "--seed", "description": "<int>: input RNG seed (default 1234)."},
+        {"flag": "--iters", "description": "Legacy; ignored by the shared timer."}
       ],
       "gaps": []
     },
@@ -1195,151 +410,32 @@
         "rank": true
       },
       "suite": {
-        "args": [
-          "--coverage"
-        ],
+        "args": ["--coverage"],
         "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
       },
       "custom": {
         "selected_by": "any shape flag",
         "params": [
-          {
-            "name": "batch",
-            "flag": "--b",
-            "make": "B",
-            "type": "int",
-            "exe_default": 1,
-            "make_default": 1,
-            "description": "Batch size."
-          },
-          {
-            "name": "num_heads",
-            "flag": "--h",
-            "make": "H",
-            "type": "int",
-            "exe_default": 32,
-            "make_default": 32,
-            "description": "Query heads."
-          },
-          {
-            "name": "kv_num_heads",
-            "flag": "--g",
-            "make": "G",
-            "type": "int",
-            "exe_default": 8,
-            "make_default": 8,
-            "description": "KV heads (groups); H must be a multiple of G."
-          },
-          {
-            "name": "head_dim",
-            "flag": "--d",
-            "make": "D",
-            "type": "int",
-            "exe_default": 128,
-            "make_default": 128,
-            "description": "Head dimension."
-          },
-          {
-            "name": "seq_q",
-            "flag": "--sq",
-            "make": "SQ",
-            "type": "int",
-            "exe_default": 512,
-            "make_default": 512,
-            "description": "New query tokens."
-          },
-          {
-            "name": "past",
-            "flag": "--past",
-            "make": "PAST",
-            "type": "int",
-            "exe_default": 0,
-            "make_default": 0,
-            "description": "Past KV length; total = past + seq_q."
-          },
-          {
-            "name": "window",
-            "flag": "--window",
-            "make": "WINDOW",
-            "type": "int",
-            "exe_default": 0,
-            "make_default": 0,
-            "description": "Sliding window; <=0 is full attention."
-          },
-          {
-            "name": "max_seq",
-            "flag": "--max-seq",
-            "make": "MAX_SEQ",
-            "type": "int",
-            "description": "KV cache capacity; must hold past+seq_q. Unset keeps a compact cache."
-          },
-          {
-            "name": "scale",
-            "flag": "--scale",
-            "make": "SCALE",
-            "type": "float",
-            "description": "Model softmax scale, finite and >= 0. Unset uses 1/sqrt(D)."
-          },
-          {
-            "name": "nd",
-            "flag": "--nd",
-            "make": "ND",
-            "type": "int",
-            "description": "Configured v8x entry: waves. ND, HB and BKV are given together."
-          },
-          {
-            "name": "hb",
-            "flag": "--hb",
-            "make": "HB",
-            "type": "int",
-            "description": "Configured v8x entry: head block."
-          },
-          {
-            "name": "bkv",
-            "flag": "--bkv",
-            "make": "BKV",
-            "type": "int",
-            "description": "Configured v8x entry: KV tile."
-          },
-          {
-            "name": "pad",
-            "flag": "--pad",
-            "make": null,
-            "type": "int",
-            "exe_default": 0,
-            "description": ">0: key_bias masks b*pad keys of batch b (right padding)."
-          }
+          {"name": "batch", "flag": "--b", "make": "B", "type": "int", "exe_default": 1, "make_default": 1, "description": "Batch size."},
+          {"name": "num_heads", "flag": "--h", "make": "H", "type": "int", "exe_default": 32, "make_default": 32, "description": "Query heads."},
+          {"name": "kv_num_heads", "flag": "--g", "make": "G", "type": "int", "exe_default": 8, "make_default": 8, "description": "KV heads (groups); H must be a multiple of G."},
+          {"name": "head_dim", "flag": "--d", "make": "D", "type": "int", "exe_default": 128, "make_default": 128, "description": "Head dimension."},
+          {"name": "seq_q", "flag": "--sq", "make": "SQ", "type": "int", "exe_default": 512, "make_default": 512, "description": "New query tokens."},
+          {"name": "past", "flag": "--past", "make": "PAST", "type": "int", "exe_default": 0, "make_default": 0, "description": "Past KV length; total = past + seq_q."},
+          {"name": "window", "flag": "--window", "make": "WINDOW", "type": "int", "exe_default": 0, "make_default": 0, "description": "Sliding window; <=0 is full attention."},
+          {"name": "max_seq", "flag": "--max-seq", "make": "MAX_SEQ", "type": "int", "description": "KV cache capacity; must hold past+seq_q. Unset keeps a compact cache."},
+          {"name": "scale", "flag": "--scale", "make": "SCALE", "type": "float", "description": "Model softmax scale, finite and >= 0. Unset uses 1/sqrt(D)."},
+          {"name": "nd", "flag": "--nd", "make": "ND", "type": "int", "description": "Configured v8x entry: waves. ND, HB and BKV are given together."},
+          {"name": "hb", "flag": "--hb", "make": "HB", "type": "int", "description": "Configured v8x entry: head block."},
+          {"name": "bkv", "flag": "--bkv", "make": "BKV", "type": "int", "description": "Configured v8x entry: KV tile."},
+          {"name": "pad", "flag": "--pad", "make": null, "type": "int", "exe_default": 0, "description": ">0: key_bias masks b*pad keys of batch b (right padding)."}
         ],
-        "checks": [
-          "num_heads % kv_num_heads == 0",
-          "max_seq >= past + seq_q",
-          "scale >= 0"
-        ]
+        "checks": ["num_heads % kv_num_heads == 0", "max_seq >= past + seq_q", "scale >= 0"]
       },
       "examples": [
-        {
-          "name": "llama31_8b_with_past",
-          "values": {
-            "batch": 1,
-            "num_heads": 32,
-            "kv_num_heads": 8,
-            "head_dim": 128,
-            "seq_q": 512,
-            "past": 1024,
-            "max_seq": 4096
-          }
-        }
+        {"name": "llama31_8b_with_past", "values": {"batch": 1, "num_heads": 32, "kv_num_heads": 8, "head_dim": 128, "seq_q": 512, "past": 1024, "max_seq": 4096}}
       ],
-      "diagnostic_flags": [
-        {
-          "flag": "--iters",
-          "description": "Legacy; ignored by the shared timer."
-        },
-        {
-          "flag": "--only-shape",
-          "description": "Exact CSV / UT_TIMING shape selector for one built-in case at the requested coverage tier; absent/ambiguous match fails."
-        }
-      ],
+      "diagnostic_flags": [{"flag": "--iters", "description": "Legacy; ignored by the shared timer."}, {"flag": "--only-shape", "description": "Exact CSV / UT_TIMING shape selector for one built-in case at the requested coverage tier; absent/ambiguous match fails."}],
       "gaps": []
     },
     {
@@ -1353,83 +449,27 @@
         "rank": true
       },
       "suite": {
-        "args": [
-          "--coverage"
-        ],
+        "args": ["--coverage"],
         "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
       },
       "custom": {
         "selected_by": "any shape flag; --all still runs the suite",
         "params": [
-          {
-            "name": "num_heads",
-            "flag": "--h",
-            "make": "H",
-            "type": "int",
-            "exe_default": 40,
-            "make_default": 32,
-            "description": "Query heads. Batch is always 1."
-          },
-          {
-            "name": "kv_num_heads",
-            "flag": "--g",
-            "make": "G",
-            "type": "int",
-            "exe_default": 10,
-            "make_default": 8,
-            "description": "KV heads (groups); H must be a multiple of G."
-          },
-          {
-            "name": "head_dim",
-            "flag": "--d",
-            "make": "D",
-            "type": "int",
-            "exe_default": 128,
-            "make_default": 128,
-            "description": "Head dimension."
-          },
-          {
-            "name": "seq_q",
-            "flag": "--sq",
-            "make": "SQ",
-            "type": "int",
-            "exe_default": 2048,
-            "make_default": 512,
-            "description": "Prompt tokens (no past)."
-          }
+          {"name": "num_heads", "flag": "--h", "make": "H", "type": "int", "exe_default": 40, "make_default": 32, "description": "Query heads. Batch is always 1."},
+          {"name": "kv_num_heads", "flag": "--g", "make": "G", "type": "int", "exe_default": 10, "make_default": 8, "description": "KV heads (groups); H must be a multiple of G."},
+          {"name": "head_dim", "flag": "--d", "make": "D", "type": "int", "exe_default": 128, "make_default": 128, "description": "Head dimension."},
+          {"name": "seq_q", "flag": "--sq", "make": "SQ", "type": "int", "exe_default": 2048, "make_default": 512, "description": "Prompt tokens (no past)."}
         ],
-        "checks": [
-          "num_heads % kv_num_heads == 0"
-        ]
+        "checks": ["num_heads % kv_num_heads == 0"]
       },
       "examples": [
-        {
-          "name": "llama31_8b",
-          "values": {
-            "num_heads": 32,
-            "kv_num_heads": 8,
-            "head_dim": 128,
-            "seq_q": 512
-          }
-        }
+        {"name": "llama31_8b", "values": {"num_heads": 32, "kv_num_heads": 8, "head_dim": 128, "seq_q": 512}}
       ],
       "diagnostic_flags": [
-        {
-          "flag": "--all",
-          "description": "Run the suite even when shape flags are given."
-        },
-        {
-          "flag": "--md",
-          "description": "<path>: also write a Markdown table."
-        },
-        {
-          "flag": "--seed",
-          "description": "<int>: input RNG seed (default 1234)."
-        },
-        {
-          "flag": "--iters",
-          "description": "Legacy; ignored by the shared timer."
-        }
+        {"flag": "--all", "description": "Run the suite even when shape flags are given."},
+        {"flag": "--md", "description": "<path>: also write a Markdown table."},
+        {"flag": "--seed", "description": "<int>: input RNG seed (default 1234)."},
+        {"flag": "--iters", "description": "Legacy; ignored by the shared timer."}
       ],
       "gaps": []
     },
@@ -1444,185 +484,40 @@
         "rank": false
       },
       "suite": {
-        "args": [
-          "--coverage"
-        ],
+        "args": ["--coverage"],
         "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
       },
       "custom": {
         "selected_by": "any argument other than --iters and --coverage; the six geometry flags are then required",
         "make_args": "ARGS",
         "params": [
-          {
-            "name": "tokens",
-            "flag": "--tokens",
-            "type": "int",
-            "required": true,
-            "description": "Tokens (M)."
-          },
-          {
-            "name": "hidden",
-            "flag": "--hidden",
-            "type": "int",
-            "required": true,
-            "description": "Hidden size; multiple of 32 and of block size, <= 16384."
-          },
-          {
-            "name": "inter",
-            "flag": "--inter",
-            "type": "int",
-            "required": true,
-            "description": "Expert intermediate size; multiple of 32 and of block size, <= 16384."
-          },
-          {
-            "name": "experts",
-            "flag": "--experts",
-            "type": "int",
-            "required": true,
-            "description": "Experts, 1..1024."
-          },
-          {
-            "name": "topk",
-            "flag": "--topk",
-            "type": "int",
-            "required": true,
-            "description": "Experts per token, 1..min(experts, 32)."
-          },
-          {
-            "name": "block_size",
-            "flag": "--block-size",
-            "type": "int",
-            "required": true,
-            "description": "Quantization block size, power of two in 32..1024."
-          },
-          {
-            "name": "fc1_bias",
-            "flag": "--fc1-bias",
-            "type": "int",
-            "choices": [
-              0,
-              1
-            ],
-            "exe_default": 1,
-            "description": "FC1 bias present."
-          },
-          {
-            "name": "fc2_bias",
-            "flag": "--fc2-bias",
-            "type": "int",
-            "choices": [
-              0,
-              1
-            ],
-            "exe_default": 1,
-            "description": "FC2 bias present."
-          },
-          {
-            "name": "zero_points",
-            "flag": "--zero-points",
-            "type": "int",
-            "choices": [
-              0,
-              1
-            ],
-            "exe_default": 0,
-            "description": "Packed uint4 zero points present."
-          },
-          {
-            "name": "normalize",
-            "flag": "--normalize",
-            "type": "int",
-            "choices": [
-              0,
-              1
-            ],
-            "exe_default": 1,
-            "description": "Normalize routing weights."
-          },
-          {
-            "name": "router_weights",
-            "flag": "--router-weights",
-            "type": "int",
-            "choices": [
-              0,
-              1
-            ],
-            "exe_default": 0,
-            "description": "External router weights."
-          },
-          {
-            "name": "routing_pattern",
-            "flag": "--routing-pattern",
-            "type": "enum",
-            "choices": [
-              "balanced",
-              "skewed",
-              "ties"
-            ],
-            "exe_default": "balanced",
-            "description": "Synthetic router logits."
-          },
-          {
-            "name": "alpha",
-            "flag": "--alpha",
-            "type": "float",
-            "exe_default": 1.0,
-            "description": "SwiGLU alpha, finite."
-          },
-          {
-            "name": "beta",
-            "flag": "--beta",
-            "type": "float",
-            "exe_default": 0.0,
-            "description": "SwiGLU beta, finite."
-          },
-          {
-            "name": "limit",
-            "flag": "--limit",
-            "type": "float",
-            "exe_default": "inf",
-            "description": "SwiGLU clamp, > 0."
-          }
+          {"name": "tokens", "flag": "--tokens", "type": "int", "required": true, "description": "Tokens (M)."},
+          {"name": "hidden", "flag": "--hidden", "type": "int", "required": true, "description": "Hidden size; multiple of 32 and of block size, <= 16384."},
+          {"name": "inter", "flag": "--inter", "type": "int", "required": true, "description": "Expert intermediate size; multiple of 32 and of block size, <= 16384."},
+          {"name": "experts", "flag": "--experts", "type": "int", "required": true, "description": "Experts, 1..1024."},
+          {"name": "topk", "flag": "--topk", "type": "int", "required": true, "description": "Experts per token, 1..min(experts, 32)."},
+          {"name": "block_size", "flag": "--block-size", "type": "int", "required": true, "description": "Quantization block size, power of two in 32..1024."},
+          {"name": "fc1_bias", "flag": "--fc1-bias", "type": "int", "choices": [0, 1], "exe_default": 1, "description": "FC1 bias present."},
+          {"name": "fc2_bias", "flag": "--fc2-bias", "type": "int", "choices": [0, 1], "exe_default": 1, "description": "FC2 bias present."},
+          {"name": "zero_points", "flag": "--zero-points", "type": "int", "choices": [0, 1], "exe_default": 0, "description": "Packed uint4 zero points present."},
+          {"name": "normalize", "flag": "--normalize", "type": "int", "choices": [0, 1], "exe_default": 1, "description": "Normalize routing weights."},
+          {"name": "router_weights", "flag": "--router-weights", "type": "int", "choices": [0, 1], "exe_default": 0, "description": "External router weights."},
+          {"name": "routing_pattern", "flag": "--routing-pattern", "type": "enum", "choices": ["balanced", "skewed", "ties"], "exe_default": "balanced", "description": "Synthetic router logits."},
+          {"name": "alpha", "flag": "--alpha", "type": "float", "exe_default": 1.0, "description": "SwiGLU alpha, finite."},
+          {"name": "beta", "flag": "--beta", "type": "float", "exe_default": 0.0, "description": "SwiGLU beta, finite."},
+          {"name": "limit", "flag": "--limit", "type": "float", "exe_default": "inf", "description": "SwiGLU clamp, > 0."}
         ],
-        "constraints": [
-          "expert weights <= 8 GiB",
-          "unknown, duplicate, incomplete or unsupported arguments exit 2"
-        ],
-        "checks": [
-          "hidden % 32 == 0 and hidden <= 16384 and inter % 32 == 0 and inter <= 16384",
-          "1 <= experts <= 1024 and 1 <= topk <= min(experts, 32)",
-          "32 <= block_size <= 1024 and block_size & (block_size - 1) == 0",
-          "hidden % block_size == 0 and inter % block_size == 0",
-          "experts * hidden * inter * 3 // 2 <= 8 * 1024 ** 3",
-          "limit > 0"
-        ]
+        "constraints": ["expert weights <= 8 GiB", "unknown, duplicate, incomplete or unsupported arguments exit 2"],
+        "checks": ["hidden % 32 == 0 and hidden <= 16384 and inter % 32 == 0 and inter <= 16384", "1 <= experts <= 1024 and 1 <= topk <= min(experts, 32)", "32 <= block_size <= 1024 and block_size & (block_size - 1) == 0", "hidden % block_size == 0 and inter % block_size == 0", "experts * hidden * inter * 3 // 2 <= 8 * 1024 ** 3", "limit > 0"]
       },
       "examples": [
-        {
-          "name": "qwen3_30b_a3b_decode",
-          "values": {
-            "tokens": 1,
-            "hidden": 2048,
-            "inter": 768,
-            "experts": 128,
-            "topk": 8,
-            "block_size": 32,
-            "fc1_bias": 0,
-            "fc2_bias": 0
-          }
-        }
+        {"name": "qwen3_30b_a3b_decode", "values": {"tokens": 1, "hidden": 2048, "inter": 768, "experts": 128, "topk": 8, "block_size": 32, "fc1_bias": 0, "fc2_bias": 0}}
       ],
       "diagnostic_flags": [
-        {
-          "flag": "--iters",
-          "description": "Legacy (1..100000); ignored by the shared timer."
-        }
+        {"flag": "--iters", "description": "Legacy (1..100000); ignored by the shared timer."}
       ],
       "env": [
-        {
-          "name": "HIPDNN_UT_CAPTURE_ONLY",
-          "description": "1: run one call of one explicit shape for a profiler capture, without timing."
-        }
+        {"name": "HIPDNN_UT_CAPTURE_ONLY", "description": "1: run one call of one explicit shape for a profiler capture, without timing."}
       ],
       "gaps": []
     },
@@ -1637,49 +532,24 @@
         "rank": false
       },
       "suite": {
-        "args": [
-          "--coverage"
-        ],
+        "args": ["--coverage"],
         "coverage_default": "3"
       },
       "custom": null,
       "examples": [
-        {
-          "name": "suite_tier1",
-          "coverage": 1
-        }
+        {"name": "suite_tier1", "coverage": 1}
       ],
       "diagnostic_flags": [
-        {
-          "flag": "--launcher-grid-only",
-          "description": "Run only the launcher-grid case."
-        }
+        {"flag": "--launcher-grid-only", "description": "Run only the launcher-grid case."}
       ],
       "env": [
-        {
-          "name": "HIPDNN_QMOE_RAGGED_FC1_TASK_POLICY",
-          "description": "Production dispatch override, consumed as in the EP."
-        },
-        {
-          "name": "HIPDNN_QMOE_RAGGED_FC2_TASK_POLICY",
-          "description": "Production dispatch override."
-        },
-        {
-          "name": "HIPDNN_QMOE_RAGGED_QUEUE_POLICY",
-          "description": "Production dispatch override."
-        },
-        {
-          "name": "HIPDNN_QMOE_RAGGED_GRID_BLOCKS",
-          "description": "Production dispatch override."
-        },
-        {
-          "name": "HIPDNN_QMOE_RAGGED_GRID_FACTOR",
-          "description": "Production dispatch override."
-        }
+        {"name": "HIPDNN_QMOE_RAGGED_FC1_TASK_POLICY", "description": "Production dispatch override, consumed as in the EP."},
+        {"name": "HIPDNN_QMOE_RAGGED_FC2_TASK_POLICY", "description": "Production dispatch override."},
+        {"name": "HIPDNN_QMOE_RAGGED_QUEUE_POLICY", "description": "Production dispatch override."},
+        {"name": "HIPDNN_QMOE_RAGGED_GRID_BLOCKS", "description": "Production dispatch override."},
+        {"name": "HIPDNN_QMOE_RAGGED_GRID_FACTOR", "description": "Production dispatch override."}
       ],
-      "gaps": [
-        "custom_shape"
-      ]
+      "gaps": ["custom_shape"]
     },
     {
       "leaf": "qmoe_ragged_mm/Xfp16_Wu2_Yfp16",
@@ -1697,18 +567,9 @@
       },
       "custom": null,
       "examples": [
-        {
-          "name": "suite_tier1",
-          "coverage": 1
-        }
+        {"name": "suite_tier1", "coverage": 1}
       ],
-      "gaps": [
-        "custom_shape",
-        "coverage",
-        "shared_timer",
-        "results_csv",
-        "make_api"
-      ]
+      "gaps": ["custom_shape", "coverage", "shared_timer", "results_csv", "make_api"]
     },
     {
       "leaf": "gather_block_quantized/Xi64_Wu4_Yfp16",
@@ -1721,23 +582,14 @@
         "rank": false
       },
       "suite": {
-        "args": [
-          "--coverage"
-        ],
+        "args": ["--coverage"],
         "coverage_default": "3"
       },
       "custom": null,
       "examples": [
-        {
-          "name": "suite_tier1",
-          "coverage": 1
-        }
+        {"name": "suite_tier1", "coverage": 1}
       ],
-      "gaps": [
-        "custom_shape",
-        "shared_timer",
-        "arch_default"
-      ]
+      "gaps": ["custom_shape", "shared_timer", "arch_default"]
     },
     {
       "leaf": "gather_block_quantized/Xi64_Wu8_Yfp16",
@@ -1750,23 +602,14 @@
         "rank": false
       },
       "suite": {
-        "args": [
-          "--coverage"
-        ],
+        "args": ["--coverage"],
         "coverage_default": "3"
       },
       "custom": null,
       "examples": [
-        {
-          "name": "suite_tier1",
-          "coverage": 1
-        }
+        {"name": "suite_tier1", "coverage": 1}
       ],
-      "gaps": [
-        "custom_shape",
-        "shared_timer",
-        "arch_default"
-      ]
+      "gaps": ["custom_shape", "shared_timer", "arch_default"]
     },
     {
       "leaf": "gather_block_quantized/Xi64_Wfp8_Yfp16",
@@ -1779,23 +622,14 @@
         "rank": false
       },
       "suite": {
-        "args": [
-          "--coverage"
-        ],
+        "args": ["--coverage"],
         "coverage_default": "3"
       },
       "custom": null,
       "examples": [
-        {
-          "name": "suite_tier1",
-          "coverage": 1
-        }
+        {"name": "suite_tier1", "coverage": 1}
       ],
-      "gaps": [
-        "custom_shape",
-        "shared_timer",
-        "arch_default"
-      ]
+      "gaps": ["custom_shape", "shared_timer", "arch_default"]
     },
     {
       "leaf": "cast/Xany_Yany_bf16",
@@ -1808,782 +642,138 @@
         "rank": false
       },
       "suite": {
-        "args": [
-          "--coverage"
-        ],
+        "args": ["--coverage"],
         "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
       },
       "custom": null,
       "examples": [
-        {
-          "name": "suite_tier1",
-          "coverage": 1
-        }
+        {"name": "suite_tier1", "coverage": 1}
       ],
-      "gaps": [
-        "custom_shape",
-        "shared_timer",
-        "arch_default"
-      ]
+      "gaps": ["custom_shape", "shared_timer", "arch_default"]
     },
     {
       "leaf": "paged_attention/decode/Xfp16_Wfp16_Yfp16",
       "package_executable": "hipdnn-kernel-ut-paged-attention-decode-xfp16-wfp16-yfp16.exe",
       "source": "test_paged_attention.cpp",
-      "capabilities": {
-        "coverage": true,
-        "timing": "shared",
-        "mode": "lookup",
-        "rank": true
-      },
-      "suite": {
-        "args": [
-          "--coverage"
-        ],
-        "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
-      },
+      "capabilities": {"coverage": true, "timing": "shared", "mode": "lookup", "rank": true},
+      "suite": {"args": ["--coverage"], "coverage_default": "HIPDNN_UT_COVERAGE, else 3"},
       "custom": {
         "selected_by": "any custom flag; phase is fixed by the leaf",
         "params": [
-          {
-            "name": "batch",
-            "flag": "--b",
-            "make": "B",
-            "type": "int",
-            "required": false,
-            "exe_default": 3,
-            "make_default": 3,
-            "description": "Positive request count."
-          },
-          {
-            "name": "num_heads",
-            "flag": "--h",
-            "make": "H",
-            "type": "int",
-            "required": false,
-            "exe_default": 8,
-            "make_default": 8,
-            "description": "Positive query heads, multiple of kv_num_heads."
-          },
-          {
-            "name": "kv_num_heads",
-            "flag": "--g",
-            "make": "G",
-            "type": "int",
-            "required": false,
-            "exe_default": 2,
-            "make_default": 2,
-            "description": "Positive KV heads."
-          },
-          {
-            "name": "head_dim",
-            "flag": "--d",
-            "make": "D",
-            "type": "int",
-            "required": false,
-            "exe_default": 128,
-            "make_default": 128,
-            "description": "64/96/128/256; unsupported geometry can be tested with error=geometry."
-          },
-          {
-            "name": "num_pages",
-            "flag": "--pages",
-            "make": "P",
-            "type": "int",
-            "required": false,
-            "exe_default": 64,
-            "make_default": 64,
-            "description": "Positive physical pool page count; shared readonly prefixes may reduce required count."
-          },
-          {
-            "name": "page_size",
-            "flag": "--page-size",
-            "make": "S",
-            "type": "int",
-            "required": false,
-            "exe_default": 17,
-            "make_default": 17,
-            "description": "Positive token slots per page, independent of computation tile."
-          },
-          {
-            "name": "table_columns",
-            "flag": "--table-columns",
-            "make": "M",
-            "type": "int",
-            "required": false,
-            "exe_default": 8,
-            "make_default": 8,
-            "description": "Positive per-request page table width; must hold ceil(post/S)."
-          },
-          {
-            "name": "q_lens",
-            "flag": "--q-lens",
-            "make": "QLENS",
-            "type": "string",
-            "required": false,
-            "exe_default": "1,0,1",
-            "make_default": "1,0,1",
-            "description": "Comma-separated B nonnegative int32 lengths; decode each is 0/1. T=sum(q_lens) fits int32."
-          },
-          {
-            "name": "past",
-            "flag": "--past",
-            "make": "PAST",
-            "type": "string",
-            "required": false,
-            "exe_default": "16,17,18",
-            "make_default": "16,17,18",
-            "description": "Comma-separated B nonnegative int32 history lengths; post must fit int32 and mapping capacity."
-          },
-          {
-            "name": "do_rotary",
-            "flag": "--rotary",
-            "make": "ROTARY",
-            "type": "int",
-            "required": false,
-            "exe_default": 0,
-            "make_default": 0,
-            "description": "0 disables rotary and 1 enables full-D split-half rotary.",
-            "choices": [
-              0,
-              1
-            ]
-          },
-          {
-            "name": "rotary_dim",
-            "flag": "--rotary-dim",
-            "make": "ROTARY_DIM",
-            "type": "int",
-            "required": false,
-            "exe_default": 0,
-            "make_default": 0,
-            "description": "0 expands to D in this driver; public entry requires D when enabled. Other values are unsupported."
-          },
-          {
-            "name": "interleaved",
-            "flag": "--interleaved",
-            "make": "INTERLEAVED",
-            "type": "int",
-            "required": false,
-            "exe_default": 0,
-            "make_default": 0,
-            "description": "0 is split-half; 1 is unsupported when rotary is enabled.",
-            "choices": [
-              0,
-              1
-            ]
-          },
-          {
-            "name": "max_position",
-            "flag": "--max-position",
-            "make": "MAX_POSITION",
-            "type": "int",
-            "required": false,
-            "exe_default": 4096,
-            "make_default": 4096,
-            "description": "Positive cos/sin row capacity; active rotary positions must be below it."
-          },
-          {
-            "name": "scale",
-            "flag": "--scale",
-            "make": "SCALE",
-            "type": "float",
-            "required": false,
-            "exe_default": 0,
-            "make_default": 0,
-            "description": "0 selects 1/sqrt(D), finite positive values are explicit; negative is unsupported, nonfinite invalid."
-          },
-          {
-            "name": "window",
-            "flag": "--window",
-            "make": "WINDOW",
-            "type": "int",
-            "required": false,
-            "exe_default": -1,
-            "make_default": -1,
-            "description": "Nonpositive is full causal history. Positive W includes current token; prefill D256 rejects it."
-          },
-          {
-            "name": "softcap",
-            "flag": "--softcap",
-            "make": "SOFTCAP",
-            "type": "float",
-            "required": false,
-            "exe_default": 0,
-            "make_default": 0,
-            "description": "Only zero is supported; nonzero declines."
-          },
-          {
-            "name": "mapping",
-            "flag": "--map",
-            "make": "MAP",
-            "type": "string",
-            "required": false,
-            "exe_default": "permuted",
-            "make_default": "permuted",
-            "description": "ordered/permuted/shared; shared requires a readonly first prefix page, append pages remain private.",
-            "choices": [
-              "ordered",
-              "permuted",
-              "shared"
-            ]
-          },
-          {
-            "name": "seed",
-            "flag": "--seed",
-            "make": "SEED",
-            "type": "int",
-            "required": false,
-            "exe_default": 1119,
-            "make_default": 1119,
-            "description": "Input and page-permutation seed in uint32 range."
-          },
-          {
-            "name": "error",
-            "flag": "--error",
-            "make": "ERROR",
-            "type": "string",
-            "required": false,
-            "exe_default": "none",
-            "make_default": "none",
-            "description": "Inject only into a valid base. Host validator rejects inapplicable triggers before allocation/reference; write_conflict requires two active requests. Exact host/device rejection and unchanged storage are checked.",
-            "choices": [
-              "none",
-              "cum_start",
-              "cum_end",
-              "cum_order",
-              "negative_past",
-              "decode_length",
-              "post_overflow",
-              "table_small",
-              "bad_page",
-              "position",
-              "workspace",
-              "workspace_alignment",
-              "alias",
-              "pool_alias",
-              "softcap",
-              "negative_scale",
-              "nan_scale",
-              "inf_scale",
-              "nan_softcap",
-              "interleaved",
-              "partial_rotary",
-              "geometry",
-              "write_conflict",
-              "null_rotary",
-              "size_overflow",
-              "tensor_alignment"
-            ]
-          },
-          {
-            "name": "phase",
-            "flag": "--phase",
-            "make": "PHASE",
-            "type": "string",
-            "required": false,
-            "exe_default": "decode",
-            "make_default": "decode",
-            "description": "Must match the selected leaf.",
-            "choices": [
-              "decode"
-            ]
-          },
-          {
-            "name": "shared_prefix",
-            "flag": "--shared-prefix",
-            "make": "SHARED_PREFIX",
-            "type": "int",
-            "required": false,
-            "exe_default": 0,
-            "make_default": 0,
-            "description": "MAP=shared: 0 uses one readonly page; positive token count must be divisible by S and <=past of active requests."
-          }
+          {"name": "batch", "flag": "--b", "make": "B", "type": "int", "required": false, "exe_default": 3, "make_default": 3, "description": "Positive request count."},
+          {"name": "num_heads", "flag": "--h", "make": "H", "type": "int", "required": false, "exe_default": 8, "make_default": 8, "description": "Positive query heads, multiple of kv_num_heads."},
+          {"name": "kv_num_heads", "flag": "--g", "make": "G", "type": "int", "required": false, "exe_default": 2, "make_default": 2, "description": "Positive KV heads."},
+          {"name": "head_dim", "flag": "--d", "make": "D", "type": "int", "required": false, "exe_default": 128, "make_default": 128, "description": "64/96/128/256; unsupported geometry can be tested with error=geometry."},
+          {"name": "num_pages", "flag": "--pages", "make": "P", "type": "int", "required": false, "exe_default": 64, "make_default": 64, "description": "Positive physical pool page count; shared readonly prefixes may reduce required count."},
+          {"name": "page_size", "flag": "--page-size", "make": "S", "type": "int", "required": false, "exe_default": 17, "make_default": 17, "description": "Positive token slots per page, independent of computation tile."},
+          {"name": "table_columns", "flag": "--table-columns", "make": "M", "type": "int", "required": false, "exe_default": 8, "make_default": 8, "description": "Positive per-request page table width; must hold ceil(post/S)."},
+          {"name": "q_lens", "flag": "--q-lens", "make": "QLENS", "type": "string", "required": false, "exe_default": "1,0,1", "make_default": "1,0,1", "description": "Comma-separated B nonnegative int32 lengths; decode each is 0/1. T=sum(q_lens) fits int32."},
+          {"name": "past", "flag": "--past", "make": "PAST", "type": "string", "required": false, "exe_default": "16,17,18", "make_default": "16,17,18", "description": "Comma-separated B nonnegative int32 history lengths; post must fit int32 and mapping capacity."},
+          {"name": "do_rotary", "flag": "--rotary", "make": "ROTARY", "type": "int", "required": false, "exe_default": 0, "make_default": 0, "description": "0 disables rotary and 1 enables full-D split-half rotary.", "choices": [0, 1]},
+          {"name": "rotary_dim", "flag": "--rotary-dim", "make": "ROTARY_DIM", "type": "int", "required": false, "exe_default": 0, "make_default": 0, "description": "0 expands to D in this driver; public entry requires D when enabled. Other values are unsupported."},
+          {"name": "interleaved", "flag": "--interleaved", "make": "INTERLEAVED", "type": "int", "required": false, "exe_default": 0, "make_default": 0, "description": "0 is split-half; 1 is unsupported when rotary is enabled.", "choices": [0, 1]},
+          {"name": "max_position", "flag": "--max-position", "make": "MAX_POSITION", "type": "int", "required": false, "exe_default": 4096, "make_default": 4096, "description": "Positive cos/sin row capacity; active rotary positions must be below it."},
+          {"name": "scale", "flag": "--scale", "make": "SCALE", "type": "float", "required": false, "exe_default": 0, "make_default": 0, "description": "0 selects 1/sqrt(D), finite positive values are explicit; negative is unsupported, nonfinite invalid."},
+          {"name": "window", "flag": "--window", "make": "WINDOW", "type": "int", "required": false, "exe_default": -1, "make_default": -1, "description": "Nonpositive is full causal history. Positive W includes current token; prefill D256 rejects it."},
+          {"name": "softcap", "flag": "--softcap", "make": "SOFTCAP", "type": "float", "required": false, "exe_default": 0, "make_default": 0, "description": "Only zero is supported; nonzero declines."},
+          {"name": "mapping", "flag": "--map", "make": "MAP", "type": "string", "required": false, "exe_default": "permuted", "make_default": "permuted", "description": "ordered/permuted/shared; shared requires a readonly first prefix page, append pages remain private.", "choices": ["ordered", "permuted", "shared"]},
+          {"name": "seed", "flag": "--seed", "make": "SEED", "type": "int", "required": false, "exe_default": 1119, "make_default": 1119, "description": "Input and page-permutation seed in uint32 range."},
+          {"name": "error", "flag": "--error", "make": "ERROR", "type": "string", "required": false, "exe_default": "none", "make_default": "none", "description": "Inject only into a valid base. Host validator rejects inapplicable triggers before allocation/reference; write_conflict requires two active requests. Exact host/device rejection and unchanged storage are checked.", "choices": ["none", "cum_start", "cum_end", "cum_order", "negative_past", "decode_length", "post_overflow", "table_small", "bad_page", "position", "workspace", "workspace_alignment", "alias", "pool_alias", "softcap", "negative_scale", "nan_scale", "inf_scale", "nan_softcap", "interleaved", "partial_rotary", "geometry", "write_conflict", "null_rotary", "size_overflow", "tensor_alignment"]},
+          {"name": "phase", "flag": "--phase", "make": "PHASE", "type": "string", "required": false, "exe_default": "decode", "make_default": "decode", "description": "Must match the selected leaf.", "choices": ["decode"]},
+          {"name": "shared_prefix", "flag": "--shared-prefix", "make": "SHARED_PREFIX", "type": "int", "required": false, "exe_default": 0, "make_default": 0, "description": "MAP=shared: 0 uses one readonly page; positive token count must be divisible by S and <=past of active requests."}
         ],
-        "constraints": [
-          "All geometry values except T are positive int32. All tensor/launch products are checked for overflow.",
-          "q_lens and past have B nonnegative items. Caller must provision P/M for the chosen mapping.",
-          "D64/96/128/256. Decode H/G=1/2/3/4/5/6/8/16 plus 9 at D128.",
-          "Rotary is full-D split-half. Shared map requires past>=S for active requests.",
-          "error chooses explicit expected rejection tests; malformed or unsupported ordinary custom cases fail.",
-          "write_conflict requires at least two q>0 requests; picks stable pair, lowers larger past and aliases append-start page. B2 with two active requests is supported.",
-          "cum_start/cum_end/cum_order/negative_past/decode_length/post_overflow/table_small/bad_page/position/write_conflict/workspace/workspace_alignment/alias/pool_alias/tensor_alignment/null_rotary require T>0.",
-          "decode_length requires T>=2 and supported decode head geometry. table_small requires M*S<2147483647. position requires at least one active post>1. position/null_rotary normalize full-D split-half RoPE.",
-          "d256_window is prefill-only. Host descriptor rejection cases may use T=0; ordinary all-empty cases remain valid."
-        ],
-        "checks": [
-          "batch > 0 and num_heads > 0 and kv_num_heads > 0 and num_heads % kv_num_heads == 0",
-          "num_pages > 0 and page_size > 0 and table_columns > 0 and max_position > 0",
-          "seed >= 0 and seed <= 4294967295",
-          "error != 'write_conflict' or batch >= 2",
-          "error != 'table_small' or table_columns * page_size < 2147483647",
-          "shared_prefix >= 0 and (shared_prefix == 0 or mapping == 'shared' and shared_prefix % page_size == 0)"
-        ]
+        "constraints": ["All geometry values except T are positive int32. All tensor/launch products are checked for overflow.", "q_lens and past have B nonnegative items. Caller must provision P/M for the chosen mapping.", "D64/96/128/256. Decode H/G=1/2/3/4/5/6/8/16 plus 9 at D128.", "Rotary is full-D split-half. Shared map requires past>=S for active requests.", "error chooses explicit expected rejection tests; malformed or unsupported ordinary custom cases fail.", "write_conflict requires at least two q>0 requests; picks stable pair, lowers larger past and aliases append-start page. B2 with two active requests is supported.", "cum_start/cum_end/cum_order/negative_past/decode_length/post_overflow/table_small/bad_page/position/write_conflict/workspace/workspace_alignment/alias/pool_alias/tensor_alignment/null_rotary require T>0.", "decode_length requires T>=2 and supported decode head geometry. table_small requires M*S<2147483647. position requires at least one active post>1. position/null_rotary normalize full-D split-half RoPE.", "d256_window is prefill-only. Host descriptor rejection cases may use T=0; ordinary all-empty cases remain valid."],
+        "checks": ["batch > 0 and num_heads > 0 and kv_num_heads > 0 and num_heads % kv_num_heads == 0", "num_pages > 0 and page_size > 0 and table_columns > 0 and max_position > 0", "seed >= 0 and seed <= 4294967295", "error != 'write_conflict' or batch >= 2", "error != 'table_small' or table_columns * page_size < 2147483647", "shared_prefix >= 0 and (shared_prefix == 0 or mapping == 'shared' and shared_prefix % page_size == 0)"]
       },
       "examples": [
         {
           "name": "llama31_ragged_rotary",
-          "values": {
-            "batch": 3,
-            "num_heads": 32,
-            "kv_num_heads": 8,
-            "head_dim": 128,
-            "q_lens": "1,0,1",
-            "past": "16,17,18",
-            "do_rotary": 1
-          }
+          "values": {"batch": 3, "num_heads": 32, "kv_num_heads": 8, "head_dim": 128, "q_lens": "1,0,1", "past": "16,17,18", "do_rotary": 1}
         },
         {
           "name": "shared_prefix",
-          "values": {
-            "num_heads": 4,
-            "kv_num_heads": 1,
-            "head_dim": 64,
-            "q_lens": "1,0,1",
-            "past": "34,51,68",
-            "mapping": "shared",
-            "window": 41
-          }
+          "values": {"num_heads": 4, "kv_num_heads": 1, "head_dim": 64, "q_lens": "1,0,1", "past": "34,51,68", "mapping": "shared", "window": 41}
         }
       ],
       "diagnostic_flags": [
-        {
-          "flag": "--compare",
-          "description": "0|1, requires COMPARE=1 and FLASH_SOURCE build. Same logical FP16 data compares complete Page/dense, original bare Flash and common post-RoPE cores with shared timer. Diagnostic Page fallback is explicitly default; normal MODE still uses online fallback."
-        },
-        {
-          "flag": "--compare-order",
-          "description": "0: Page complete first (default); 1: dense complete first. Alternate across same-host pairs; same data/config/copies and confirm preset."
-        }
+        {"flag": "--compare", "description": "0|1, requires COMPARE=1 and FLASH_SOURCE build. Same logical FP16 data compares complete Page/dense, original bare Flash and common post-RoPE cores with shared timer. Diagnostic Page fallback is explicitly default; normal MODE still uses online fallback."},
+        {"flag": "--compare-order", "description": "0: Page complete first (default); 1: dense complete first. Alternate across same-host pairs; same data/config/copies and confirm preset."}
       ],
       "gaps": [],
       "env": [
-        {
-          "name": "HIPDNN_PAGED_ATTENTION_AUTOTUNE_MODE",
-          "description": "lookup reads a compatible Page table; online explicitly uses production preparePagedAttention/GQA tuning before final complete-call validation/timing."
-        },
-        {
-          "name": "HIPDNN_PAGED_ATTENTION_CFG",
-          "description": "Optional default, id=N, legacy splits=N;bkv=N or six-field splits/bkv/hb/qw/mt/nd pin. V2 decode splits=0 is adaptive. Actual fixed:pin geometry logged; forbidden with ranking."
-        },
-        {
-          "name": "HIPDNN_UT_RANK",
-          "description": "Four-column leaf,shape,priority,config CSV; requires RANK=1 and default per shape. Exact native case key preserves ragged arrays/page/RoPE/options."
-        },
-        {
-          "name": "HIPDNN_UT_RANK_CATALOG",
-          "description": "1 emits production Page candidate catalog without GPU work; requires HIPDNN_UT_RANK and RANK=1."
-        },
-        {
-          "name": "HIPDNN_UT_RANK_REFERENCE",
-          "description": "1 uses independent sequential confirm in existing shared rank engine."
-        },
-        {
-          "name": "HIPDNN_PAGED_ATTENTION_PUBLIC",
-          "description": "1 validates and times the actual public/default entry; config readback stays outside timing; conflicts with production preparation."
-        },
-        {
-          "name": "HIPDNN_PAGED_ATTENTION_PRODUCTION_PREPARE",
-          "description": "1 in comparison calls the real production lookup/online preparation before configured timing; conflicts with public/pinned route."
-        },
-        {
-          "name": "HIPDNN_UT_FLASH_CFG",
-          "description": "Six-field original Flash configured geometry for marked same-geometry diagnostic comparison."
-        },
-        {
-          "name": "HIPDNN_UT_DENSE_CAPACITY",
-          "description": "Comparison-only positive dense storage capacity, applied symmetrically to old/new controls for capacity sentinels; no production dispatch change."
-        }
+        {"name": "HIPDNN_PAGED_ATTENTION_AUTOTUNE_MODE", "description": "lookup reads a compatible Page table; online explicitly uses production preparePagedAttention/GQA tuning before final complete-call validation/timing."},
+        {"name": "HIPDNN_PAGED_ATTENTION_CFG", "description": "Optional default, id=N, legacy splits=N;bkv=N or six-field splits/bkv/hb/qw/mt/nd pin. V2 decode splits=0 is adaptive. Actual fixed:pin geometry logged; forbidden with ranking."},
+        {"name": "HIPDNN_UT_RANK", "description": "Four-column leaf,shape,priority,config CSV; requires RANK=1 and default per shape. Exact native case key preserves ragged arrays/page/RoPE/options."},
+        {"name": "HIPDNN_UT_RANK_CATALOG", "description": "1 emits production Page candidate catalog without GPU work; requires HIPDNN_UT_RANK and RANK=1."},
+        {"name": "HIPDNN_UT_RANK_REFERENCE", "description": "1 uses independent sequential confirm in existing shared rank engine."},
+        {"name": "HIPDNN_PAGED_ATTENTION_PUBLIC", "description": "1 validates and times the actual public/default entry; config readback stays outside timing; conflicts with production preparation."},
+        {"name": "HIPDNN_PAGED_ATTENTION_PRODUCTION_PREPARE", "description": "1 in comparison calls the real production lookup/online preparation before configured timing; conflicts with public/pinned route."},
+        {"name": "HIPDNN_UT_FLASH_CFG", "description": "Six-field original Flash configured geometry for marked same-geometry diagnostic comparison."},
+        {"name": "HIPDNN_UT_DENSE_CAPACITY", "description": "Comparison-only positive dense storage capacity, applied symmetrically to old/new controls for capacity sentinels; no production dispatch change."}
       ],
-      "build_inputs": {
-        "RANK": "0|1; 1 compiles UT-only adapter and private empty table",
-        "LUT_ARCH": "actual device chip for default table path",
-        "LUT_FB": "external Page FB compiled from JSON, embedded at build; explicit missing path fails; absent default table uses online fallback",
-        "FLATC": "maintained matching FlatBuffers compiler",
-        "FLATBUFFERS_INC": "matching FlatBuffers include directory",
-        "COMPARE": "0|1, native original Flash diagnostic",
-        "FLASH_SOURCE": "exact original source with baseline/hash; compiled through symbol isolation adapter"
-      }
+      "build_inputs": {"RANK": "0|1; 1 compiles UT-only adapter and private empty table", "LUT_ARCH": "actual device chip for default table path", "LUT_FB": "external Page FB compiled from JSON, embedded at build; explicit missing path fails; absent default table uses online fallback", "FLATC": "maintained matching FlatBuffers compiler", "FLATBUFFERS_INC": "matching FlatBuffers include directory", "COMPARE": "0|1, native original Flash diagnostic", "FLASH_SOURCE": "exact original source with baseline/hash; compiled through symbol isolation adapter"}
     },
     {
       "leaf": "paged_attention/prefill/Xfp16_Wfp16_Yfp16",
       "package_executable": "hipdnn-kernel-ut-paged-attention-prefill-xfp16-wfp16-yfp16.exe",
       "source": "test_paged_attention.cpp",
-      "capabilities": {
-        "coverage": true,
-        "timing": "shared",
-        "mode": "lookup",
-        "rank": true
-      },
-      "suite": {
-        "args": [
-          "--coverage"
-        ],
-        "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
-      },
+      "capabilities": {"coverage": true, "timing": "shared", "mode": "lookup", "rank": true},
+      "suite": {"args": ["--coverage"], "coverage_default": "HIPDNN_UT_COVERAGE, else 3"},
       "custom": {
         "selected_by": "any custom flag; phase is fixed by the leaf",
         "params": [
-          {
-            "name": "batch",
-            "flag": "--b",
-            "make": "B",
-            "type": "int",
-            "required": false,
-            "exe_default": 3,
-            "make_default": 3,
-            "description": "Positive request count."
-          },
-          {
-            "name": "num_heads",
-            "flag": "--h",
-            "make": "H",
-            "type": "int",
-            "required": false,
-            "exe_default": 8,
-            "make_default": 8,
-            "description": "Positive query heads, multiple of kv_num_heads."
-          },
-          {
-            "name": "kv_num_heads",
-            "flag": "--g",
-            "make": "G",
-            "type": "int",
-            "required": false,
-            "exe_default": 2,
-            "make_default": 2,
-            "description": "Positive KV heads."
-          },
-          {
-            "name": "head_dim",
-            "flag": "--d",
-            "make": "D",
-            "type": "int",
-            "required": false,
-            "exe_default": 128,
-            "make_default": 128,
-            "description": "64/96/128/256; unsupported geometry can be tested with error=geometry."
-          },
-          {
-            "name": "num_pages",
-            "flag": "--pages",
-            "make": "P",
-            "type": "int",
-            "required": false,
-            "exe_default": 64,
-            "make_default": 64,
-            "description": "Positive physical pool page count; shared readonly prefixes may reduce required count."
-          },
-          {
-            "name": "page_size",
-            "flag": "--page-size",
-            "make": "S",
-            "type": "int",
-            "required": false,
-            "exe_default": 17,
-            "make_default": 17,
-            "description": "Positive token slots per page, independent of computation tile."
-          },
-          {
-            "name": "table_columns",
-            "flag": "--table-columns",
-            "make": "M",
-            "type": "int",
-            "required": false,
-            "exe_default": 8,
-            "make_default": 8,
-            "description": "Positive per-request page table width; must hold ceil(post/S)."
-          },
-          {
-            "name": "q_lens",
-            "flag": "--q-lens",
-            "make": "QLENS",
-            "type": "string",
-            "required": false,
-            "exe_default": "3,0,17",
-            "make_default": "3,0,17",
-            "description": "Comma-separated B nonnegative int32 lengths; decode each is 0/1. T=sum(q_lens) fits int32."
-          },
-          {
-            "name": "past",
-            "flag": "--past",
-            "make": "PAST",
-            "type": "string",
-            "required": false,
-            "exe_default": "16,17,18",
-            "make_default": "16,17,18",
-            "description": "Comma-separated B nonnegative int32 history lengths; post must fit int32 and mapping capacity."
-          },
-          {
-            "name": "do_rotary",
-            "flag": "--rotary",
-            "make": "ROTARY",
-            "type": "int",
-            "required": false,
-            "exe_default": 0,
-            "make_default": 0,
-            "description": "0 disables rotary and 1 enables full-D split-half rotary.",
-            "choices": [
-              0,
-              1
-            ]
-          },
-          {
-            "name": "rotary_dim",
-            "flag": "--rotary-dim",
-            "make": "ROTARY_DIM",
-            "type": "int",
-            "required": false,
-            "exe_default": 0,
-            "make_default": 0,
-            "description": "0 expands to D in this driver; public entry requires D when enabled. Other values are unsupported."
-          },
-          {
-            "name": "interleaved",
-            "flag": "--interleaved",
-            "make": "INTERLEAVED",
-            "type": "int",
-            "required": false,
-            "exe_default": 0,
-            "make_default": 0,
-            "description": "0 is split-half; 1 is unsupported when rotary is enabled.",
-            "choices": [
-              0,
-              1
-            ]
-          },
-          {
-            "name": "max_position",
-            "flag": "--max-position",
-            "make": "MAX_POSITION",
-            "type": "int",
-            "required": false,
-            "exe_default": 4096,
-            "make_default": 4096,
-            "description": "Positive cos/sin row capacity; active rotary positions must be below it."
-          },
-          {
-            "name": "scale",
-            "flag": "--scale",
-            "make": "SCALE",
-            "type": "float",
-            "required": false,
-            "exe_default": 0,
-            "make_default": 0,
-            "description": "0 selects 1/sqrt(D), finite positive values are explicit; negative is unsupported, nonfinite invalid."
-          },
-          {
-            "name": "window",
-            "flag": "--window",
-            "make": "WINDOW",
-            "type": "int",
-            "required": false,
-            "exe_default": -1,
-            "make_default": -1,
-            "description": "Nonpositive is full causal history. Positive W includes current token; prefill D256 rejects it."
-          },
-          {
-            "name": "softcap",
-            "flag": "--softcap",
-            "make": "SOFTCAP",
-            "type": "float",
-            "required": false,
-            "exe_default": 0,
-            "make_default": 0,
-            "description": "Only zero is supported; nonzero declines."
-          },
-          {
-            "name": "mapping",
-            "flag": "--map",
-            "make": "MAP",
-            "type": "string",
-            "required": false,
-            "exe_default": "permuted",
-            "make_default": "permuted",
-            "description": "ordered/permuted/shared; shared requires a readonly first prefix page, append pages remain private.",
-            "choices": [
-              "ordered",
-              "permuted",
-              "shared"
-            ]
-          },
-          {
-            "name": "seed",
-            "flag": "--seed",
-            "make": "SEED",
-            "type": "int",
-            "required": false,
-            "exe_default": 1119,
-            "make_default": 1119,
-            "description": "Input and page-permutation seed in uint32 range."
-          },
-          {
-            "name": "error",
-            "flag": "--error",
-            "make": "ERROR",
-            "type": "string",
-            "required": false,
-            "exe_default": "none",
-            "make_default": "none",
-            "description": "Inject only into a valid base. Host validator rejects inapplicable triggers before allocation/reference; write_conflict requires two active requests. Exact host/device rejection and unchanged storage are checked.",
-            "choices": [
-              "none",
-              "cum_start",
-              "cum_end",
-              "cum_order",
-              "negative_past",
-              "decode_length",
-              "post_overflow",
-              "table_small",
-              "bad_page",
-              "position",
-              "workspace",
-              "workspace_alignment",
-              "alias",
-              "pool_alias",
-              "softcap",
-              "negative_scale",
-              "nan_scale",
-              "inf_scale",
-              "nan_softcap",
-              "interleaved",
-              "partial_rotary",
-              "d256_window",
-              "geometry",
-              "write_conflict",
-              "null_rotary",
-              "size_overflow",
-              "tensor_alignment"
-            ]
-          },
-          {
-            "name": "phase",
-            "flag": "--phase",
-            "make": "PHASE",
-            "type": "string",
-            "required": false,
-            "exe_default": "prefill",
-            "make_default": "prefill",
-            "description": "Must match the selected leaf.",
-            "choices": [
-              "prefill"
-            ]
-          },
-          {
-            "name": "shared_prefix",
-            "flag": "--shared-prefix",
-            "make": "SHARED_PREFIX",
-            "type": "int",
-            "required": false,
-            "exe_default": 0,
-            "make_default": 0,
-            "description": "MAP=shared: 0 uses one readonly page; positive token count must be divisible by S and <=past of active requests."
-          }
+          {"name": "batch", "flag": "--b", "make": "B", "type": "int", "required": false, "exe_default": 3, "make_default": 3, "description": "Positive request count."},
+          {"name": "num_heads", "flag": "--h", "make": "H", "type": "int", "required": false, "exe_default": 8, "make_default": 8, "description": "Positive query heads, multiple of kv_num_heads."},
+          {"name": "kv_num_heads", "flag": "--g", "make": "G", "type": "int", "required": false, "exe_default": 2, "make_default": 2, "description": "Positive KV heads."},
+          {"name": "head_dim", "flag": "--d", "make": "D", "type": "int", "required": false, "exe_default": 128, "make_default": 128, "description": "64/96/128/256; unsupported geometry can be tested with error=geometry."},
+          {"name": "num_pages", "flag": "--pages", "make": "P", "type": "int", "required": false, "exe_default": 64, "make_default": 64, "description": "Positive physical pool page count; shared readonly prefixes may reduce required count."},
+          {"name": "page_size", "flag": "--page-size", "make": "S", "type": "int", "required": false, "exe_default": 17, "make_default": 17, "description": "Positive token slots per page, independent of computation tile."},
+          {"name": "table_columns", "flag": "--table-columns", "make": "M", "type": "int", "required": false, "exe_default": 8, "make_default": 8, "description": "Positive per-request page table width; must hold ceil(post/S)."},
+          {"name": "q_lens", "flag": "--q-lens", "make": "QLENS", "type": "string", "required": false, "exe_default": "3,0,17", "make_default": "3,0,17", "description": "Comma-separated B nonnegative int32 lengths; decode each is 0/1. T=sum(q_lens) fits int32."},
+          {"name": "past", "flag": "--past", "make": "PAST", "type": "string", "required": false, "exe_default": "16,17,18", "make_default": "16,17,18", "description": "Comma-separated B nonnegative int32 history lengths; post must fit int32 and mapping capacity."},
+          {"name": "do_rotary", "flag": "--rotary", "make": "ROTARY", "type": "int", "required": false, "exe_default": 0, "make_default": 0, "description": "0 disables rotary and 1 enables full-D split-half rotary.", "choices": [0, 1]},
+          {"name": "rotary_dim", "flag": "--rotary-dim", "make": "ROTARY_DIM", "type": "int", "required": false, "exe_default": 0, "make_default": 0, "description": "0 expands to D in this driver; public entry requires D when enabled. Other values are unsupported."},
+          {"name": "interleaved", "flag": "--interleaved", "make": "INTERLEAVED", "type": "int", "required": false, "exe_default": 0, "make_default": 0, "description": "0 is split-half; 1 is unsupported when rotary is enabled.", "choices": [0, 1]},
+          {"name": "max_position", "flag": "--max-position", "make": "MAX_POSITION", "type": "int", "required": false, "exe_default": 4096, "make_default": 4096, "description": "Positive cos/sin row capacity; active rotary positions must be below it."},
+          {"name": "scale", "flag": "--scale", "make": "SCALE", "type": "float", "required": false, "exe_default": 0, "make_default": 0, "description": "0 selects 1/sqrt(D), finite positive values are explicit; negative is unsupported, nonfinite invalid."},
+          {"name": "window", "flag": "--window", "make": "WINDOW", "type": "int", "required": false, "exe_default": -1, "make_default": -1, "description": "Nonpositive is full causal history. Positive W includes current token; prefill D256 rejects it."},
+          {"name": "softcap", "flag": "--softcap", "make": "SOFTCAP", "type": "float", "required": false, "exe_default": 0, "make_default": 0, "description": "Only zero is supported; nonzero declines."},
+          {"name": "mapping", "flag": "--map", "make": "MAP", "type": "string", "required": false, "exe_default": "permuted", "make_default": "permuted", "description": "ordered/permuted/shared; shared requires a readonly first prefix page, append pages remain private.", "choices": ["ordered", "permuted", "shared"]},
+          {"name": "seed", "flag": "--seed", "make": "SEED", "type": "int", "required": false, "exe_default": 1119, "make_default": 1119, "description": "Input and page-permutation seed in uint32 range."},
+          {"name": "error", "flag": "--error", "make": "ERROR", "type": "string", "required": false, "exe_default": "none", "make_default": "none", "description": "Inject only into a valid base. Host validator rejects inapplicable triggers before allocation/reference; write_conflict requires two active requests. Exact host/device rejection and unchanged storage are checked.", "choices": ["none", "cum_start", "cum_end", "cum_order", "negative_past", "decode_length", "post_overflow", "table_small", "bad_page", "position", "workspace", "workspace_alignment", "alias", "pool_alias", "softcap", "negative_scale", "nan_scale", "inf_scale", "nan_softcap", "interleaved", "partial_rotary", "d256_window", "geometry", "write_conflict", "null_rotary", "size_overflow", "tensor_alignment"]},
+          {"name": "phase", "flag": "--phase", "make": "PHASE", "type": "string", "required": false, "exe_default": "prefill", "make_default": "prefill", "description": "Must match the selected leaf.", "choices": ["prefill"]},
+          {"name": "shared_prefix", "flag": "--shared-prefix", "make": "SHARED_PREFIX", "type": "int", "required": false, "exe_default": 0, "make_default": 0, "description": "MAP=shared: 0 uses one readonly page; positive token count must be divisible by S and <=past of active requests."}
         ],
-        "constraints": [
-          "All geometry values except T are positive int32. All tensor/launch products are checked for overflow.",
-          "q_lens and past have B nonnegative items. Caller must provision P/M for the chosen mapping.",
-          "D64/96/128/256. Decode H/G=1/2/3/4/5/6/8/16 plus 9 at D128.",
-          "Rotary is full-D split-half. Shared map requires past>=S for active requests.",
-          "error chooses explicit expected rejection tests; malformed or unsupported ordinary custom cases fail.",
-          "write_conflict requires at least two q>0 requests; picks stable pair, lowers larger past and aliases append-start page. B2 with two active requests is supported.",
-          "cum_start/cum_end/cum_order/negative_past/decode_length/post_overflow/table_small/bad_page/position/write_conflict/workspace/workspace_alignment/alias/pool_alias/tensor_alignment/null_rotary require T>0.",
-          "decode_length requires T>=2 and supported decode head geometry. table_small requires M*S<2147483647. position requires at least one active post>1. position/null_rotary normalize full-D split-half RoPE.",
-          "d256_window is prefill-only. Host descriptor rejection cases may use T=0; ordinary all-empty cases remain valid."
-        ],
-        "checks": [
-          "batch > 0 and num_heads > 0 and kv_num_heads > 0 and num_heads % kv_num_heads == 0",
-          "num_pages > 0 and page_size > 0 and table_columns > 0 and max_position > 0",
-          "seed >= 0 and seed <= 4294967295",
-          "error != 'write_conflict' or batch >= 2",
-          "error != 'table_small' or table_columns * page_size < 2147483647",
-          "shared_prefix >= 0 and (shared_prefix == 0 or mapping == 'shared' and shared_prefix % page_size == 0)"
-        ]
+        "constraints": ["All geometry values except T are positive int32. All tensor/launch products are checked for overflow.", "q_lens and past have B nonnegative items. Caller must provision P/M for the chosen mapping.", "D64/96/128/256. Decode H/G=1/2/3/4/5/6/8/16 plus 9 at D128.", "Rotary is full-D split-half. Shared map requires past>=S for active requests.", "error chooses explicit expected rejection tests; malformed or unsupported ordinary custom cases fail.", "write_conflict requires at least two q>0 requests; picks stable pair, lowers larger past and aliases append-start page. B2 with two active requests is supported.", "cum_start/cum_end/cum_order/negative_past/decode_length/post_overflow/table_small/bad_page/position/write_conflict/workspace/workspace_alignment/alias/pool_alias/tensor_alignment/null_rotary require T>0.", "decode_length requires T>=2 and supported decode head geometry. table_small requires M*S<2147483647. position requires at least one active post>1. position/null_rotary normalize full-D split-half RoPE.", "d256_window is prefill-only. Host descriptor rejection cases may use T=0; ordinary all-empty cases remain valid."],
+        "checks": ["batch > 0 and num_heads > 0 and kv_num_heads > 0 and num_heads % kv_num_heads == 0", "num_pages > 0 and page_size > 0 and table_columns > 0 and max_position > 0", "seed >= 0 and seed <= 4294967295", "error != 'write_conflict' or batch >= 2", "error != 'table_small' or table_columns * page_size < 2147483647", "shared_prefix >= 0 and (shared_prefix == 0 or mapping == 'shared' and shared_prefix % page_size == 0)"]
       },
       "examples": [
         {
           "name": "llama31_ragged_rotary",
-          "values": {
-            "batch": 3,
-            "num_heads": 32,
-            "kv_num_heads": 8,
-            "head_dim": 128,
-            "q_lens": "3,0,17",
-            "past": "16,17,18",
-            "do_rotary": 1
-          }
+          "values": {"batch": 3, "num_heads": 32, "kv_num_heads": 8, "head_dim": 128, "q_lens": "3,0,17", "past": "16,17,18", "do_rotary": 1}
         },
         {
           "name": "shared_prefix",
-          "values": {
-            "num_heads": 4,
-            "kv_num_heads": 1,
-            "head_dim": 64,
-            "q_lens": "17,0,33",
-            "past": "34,51,68",
-            "mapping": "shared",
-            "window": 41
-          }
+          "values": {"num_heads": 4, "kv_num_heads": 1, "head_dim": 64, "q_lens": "17,0,33", "past": "34,51,68", "mapping": "shared", "window": 41}
         }
       ],
       "diagnostic_flags": [
-        {
-          "flag": "--compare",
-          "description": "0|1, requires COMPARE=1 and FLASH_SOURCE build. Same logical FP16 data compares complete Page/dense, original bare Flash and common post-RoPE cores with shared timer. Diagnostic Page fallback is explicitly default; normal MODE still uses online fallback."
-        },
-        {
-          "flag": "--compare-order",
-          "description": "0: Page complete first (default); 1: dense complete first. Alternate across same-host pairs; same data/config/copies and confirm preset."
-        }
+        {"flag": "--compare", "description": "0|1, requires COMPARE=1 and FLASH_SOURCE build. Same logical FP16 data compares complete Page/dense, original bare Flash and common post-RoPE cores with shared timer. Diagnostic Page fallback is explicitly default; normal MODE still uses online fallback."},
+        {"flag": "--compare-order", "description": "0: Page complete first (default); 1: dense complete first. Alternate across same-host pairs; same data/config/copies and confirm preset."}
       ],
       "gaps": [],
       "env": [
-        {
-          "name": "HIPDNN_PAGED_ATTENTION_AUTOTUNE_MODE",
-          "description": "lookup reads a compatible Page table; online explicitly uses production preparePagedAttention/GQA tuning before final complete-call validation/timing."
-        },
-        {
-          "name": "HIPDNN_PAGED_ATTENTION_CFG",
-          "description": "Optional default, id=N, legacy splits=N;bkv=N or six-field splits/bkv/hb/qw/mt/nd pin. V2 decode splits=0 is adaptive. Actual fixed:pin geometry logged; forbidden with ranking."
-        },
-        {
-          "name": "HIPDNN_UT_RANK",
-          "description": "Four-column leaf,shape,priority,config CSV; requires RANK=1 and default per shape. Exact native case key preserves ragged arrays/page/RoPE/options."
-        },
-        {
-          "name": "HIPDNN_UT_RANK_CATALOG",
-          "description": "1 emits production Page candidate catalog without GPU work; requires HIPDNN_UT_RANK and RANK=1."
-        },
-        {
-          "name": "HIPDNN_UT_RANK_REFERENCE",
-          "description": "1 uses independent sequential confirm in existing shared rank engine."
-        },
-        {
-          "name": "HIPDNN_PAGED_ATTENTION_PUBLIC",
-          "description": "1 validates and times the actual public/default entry; config readback stays outside timing; conflicts with production preparation."
-        },
-        {
-          "name": "HIPDNN_PAGED_ATTENTION_PRODUCTION_PREPARE",
-          "description": "1 in comparison calls the real production lookup/online preparation before configured timing; conflicts with public/pinned route."
-        },
-        {
-          "name": "HIPDNN_UT_FLASH_CFG",
-          "description": "Six-field original Flash configured geometry for marked same-geometry diagnostic comparison."
-        },
-        {
-          "name": "HIPDNN_UT_DENSE_CAPACITY",
-          "description": "Comparison-only positive dense storage capacity, applied symmetrically to old/new controls for capacity sentinels; no production dispatch change."
-        }
+        {"name": "HIPDNN_PAGED_ATTENTION_AUTOTUNE_MODE", "description": "lookup reads a compatible Page table; online explicitly uses production preparePagedAttention/GQA tuning before final complete-call validation/timing."},
+        {"name": "HIPDNN_PAGED_ATTENTION_CFG", "description": "Optional default, id=N, legacy splits=N;bkv=N or six-field splits/bkv/hb/qw/mt/nd pin. V2 decode splits=0 is adaptive. Actual fixed:pin geometry logged; forbidden with ranking."},
+        {"name": "HIPDNN_UT_RANK", "description": "Four-column leaf,shape,priority,config CSV; requires RANK=1 and default per shape. Exact native case key preserves ragged arrays/page/RoPE/options."},
+        {"name": "HIPDNN_UT_RANK_CATALOG", "description": "1 emits production Page candidate catalog without GPU work; requires HIPDNN_UT_RANK and RANK=1."},
+        {"name": "HIPDNN_UT_RANK_REFERENCE", "description": "1 uses independent sequential confirm in existing shared rank engine."},
+        {"name": "HIPDNN_PAGED_ATTENTION_PUBLIC", "description": "1 validates and times the actual public/default entry; config readback stays outside timing; conflicts with production preparation."},
+        {"name": "HIPDNN_PAGED_ATTENTION_PRODUCTION_PREPARE", "description": "1 in comparison calls the real production lookup/online preparation before configured timing; conflicts with public/pinned route."},
+        {"name": "HIPDNN_UT_FLASH_CFG", "description": "Six-field original Flash configured geometry for marked same-geometry diagnostic comparison."},
+        {"name": "HIPDNN_UT_DENSE_CAPACITY", "description": "Comparison-only positive dense storage capacity, applied symmetrically to old/new controls for capacity sentinels; no production dispatch change."}
       ],
-      "build_inputs": {
-        "RANK": "0|1; 1 compiles UT-only adapter and private empty table",
-        "LUT_ARCH": "actual device chip for default table path",
-        "LUT_FB": "external Page FB compiled from JSON, embedded at build; explicit missing path fails; absent default table uses online fallback",
-        "FLATC": "maintained matching FlatBuffers compiler",
-        "FLATBUFFERS_INC": "matching FlatBuffers include directory",
-        "COMPARE": "0|1, native original Flash diagnostic",
-        "FLASH_SOURCE": "exact original source with baseline/hash; compiled through symbol isolation adapter"
-      }
+      "build_inputs": {"RANK": "0|1; 1 compiles UT-only adapter and private empty table", "LUT_ARCH": "actual device chip for default table path", "LUT_FB": "external Page FB compiled from JSON, embedded at build; explicit missing path fails; absent default table uses online fallback", "FLATC": "maintained matching FlatBuffers compiler", "FLATBUFFERS_INC": "matching FlatBuffers include directory", "COMPARE": "0|1, native original Flash diagnostic", "FLASH_SOURCE": "exact original source with baseline/hash; compiled through symbol isolation adapter"}
     }
   ]
 }
