@@ -118,3 +118,13 @@ The v3/ranking merge preserves `--max-seq`, `--scale`, and `--nd/--hb/--bkv`
 from main. Cold KV rotation retains the original capacity/plane stride.
 Default compact-cache/default-scale shapes keep their existing JSON rank
 keys; explicit capacity/scale inputs add distinct shape suffixes.
+
+For bounded regression confirmation, `--only-shape <shape>` selects exactly one
+built-in case by its CSV / UT_TIMING shape at the requested coverage tier. This
+preserves the suite input seed, sink/smooth/mask attributes, CPU reference and
+production route. An absent or ambiguous match returns nonzero; custom shape
+flags cannot be combined with this selector.
+
+Selected config diagnostics are captured on the untimed correctness call.
+The shared timer runs with configuration logging disabled; CPU reference,
+config selection and sampling policy are unchanged.

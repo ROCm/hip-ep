@@ -47,6 +47,129 @@
 extern "C" {
 #endif
 
+/* FP16 paged causal self-attention. The descriptor is host resident; every
+ * tensor, metadata and workspace pointer is device accessible on stream.
+ * Q/O: [T,Hq,D], new K/V: [T,Hkv,D], pools: [P,S,Hkv,D], table: [B,M].
+ * cum[B+1] starts at zero and ends at T; past[B] is the length BEFORE append.
+ * All inputs and metadata are readonly. K/V pools are updated in place.
+ * Prefill and decode are separate calls selected explicitly by phase. Decode
+ * accepts zero or one new token per request; empty requests produce no rows.
+ *
+ * Caller owns page allocation/COW: each appended physical slot has one writer
+ * and cannot alias another request's historical read region. Readonly prefix
+ * sharing is allowed. No allocator, reference counts or full-history gather.
+ * O/workspace/pools are mutually disjoint and cannot overlap readonly inputs.
+ * Readonly inputs may alias each other. Keep all storage and metadata stable
+ * until stream completion; workspace reuse requires completion of its last call.
+ *
+ * Rotary is optional split-half full-D only (rotary_dim == D, interleaved=0).
+ * cos/sin: [max_position,D/2], FP16, indexed by past[b]+local query position.
+ * Only Q and NEW K rotate, with FP16 storage rounding; V and old K do not.
+ * local_window_size <= 0 means full causal history, W>0 includes current token.
+ * scale=0 selects 1/sqrt(D); finite positive scale is used unchanged.
+ * softcap=0 only. Prefill D256 with positive window is unsupported.
+ * D: 64/96/128/256. Decode Hq/Hkv: 1/2/3/4/5/6/8/16, plus 9 at D128.
+ * Prefill accepts positive integer Hq/Hkv. The public entry uses a geometry
+ * heuristic; decode adapts splits on device to the effective length/window (up to 64).
+ * Explicit preparation below permits online tuning outside hot submissions.
+ *
+ * Workspace query is CPU-only, independent of metadata values/pointers. Align
+ * Q/new K/new V/pools/O need 16-byte alignment, int32 metadata needs 4-byte
+ * alignment, and cos/sin need 2-byte alignment. Sizes and launch-grid products
+ * must fit size_t and the internal signed 32-bit grid index. Align
+ * workspace to 256 bytes. On a successful nonempty submission its first int32
+ * is device status (hip_paged_attention_device_status_t). Read it by D2H AFTER
+ * stream completion. Zero host return means launches submitted, not valid O.
+ * Metadata is validated on device before append; error suppresses all writes
+ * to O/pools. HIP execution failures still require the usual stream error check.
+ * T=0 is a no-launch no-op after geometry/options validation; null storage is
+ * permitted, required workspace=0, and no device-status word is written.
+ */
+typedef enum hip_paged_attention_phase_t {
+  HIP_PAGED_ATTENTION_PREFILL = 0,
+  HIP_PAGED_ATTENTION_DECODE = 1
+} hip_paged_attention_phase_t;
+
+typedef enum hip_paged_attention_status_t {
+  HIP_PAGED_ATTENTION_SUCCESS = 0,
+  HIP_PAGED_ATTENTION_INVALID_ARGUMENT = -1,
+  HIP_PAGED_ATTENTION_UNSUPPORTED = -2,
+  HIP_PAGED_ATTENTION_WORKSPACE_TOO_SMALL = -3,
+  HIP_PAGED_ATTENTION_HIP_ERROR = -4
+} hip_paged_attention_status_t;
+
+typedef enum hip_paged_attention_device_status_t {
+  HIP_PAGED_ATTENTION_DEVICE_SUCCESS = 0,
+  HIP_PAGED_ATTENTION_BAD_CUM = 1,
+  HIP_PAGED_ATTENTION_BAD_PAST = 2,
+  HIP_PAGED_ATTENTION_BAD_DECODE_LENGTH = 3,
+  HIP_PAGED_ATTENTION_POST_OVERFLOW = 4,
+  HIP_PAGED_ATTENTION_TABLE_TOO_SMALL = 5,
+  HIP_PAGED_ATTENTION_BAD_PAGE = 6,
+  HIP_PAGED_ATTENTION_BAD_POSITION = 7,
+  HIP_PAGED_ATTENTION_WRITE_CONFLICT = 8
+} hip_paged_attention_device_status_t;
+
+typedef struct hip_paged_attention_f16_desc {
+  const void *q, *k_new, *v_new;
+  void *k_pool, *v_pool, *o;
+  const int32_t *block_table, *cum, *past_seqlens;
+  const void *cos_cache, *sin_cache;
+  int32_t batch, tokens, num_heads, kv_num_heads, head_dim;
+  int32_t num_pages, page_size, table_columns, max_position;
+  hip_paged_attention_phase_t phase;
+  int32_t do_rotary, rotary_interleaved, rotary_dim;
+  int32_t local_window_size;
+  float scale, softcap;
+} hip_paged_attention_f16_desc;
+
+/* Legacy Page geometry. Decode: bkv=0, explicit power-of-two splits 1..64. Prefill:
+ * splits=0, bkv=16/32/64 (D<=128), 16/32 (D256 without window).
+ * Table/native IDs are never passed to the configured entry. */
+typedef struct hip_paged_attention_f16_config {
+    int splits;
+    int bkv;
+} hip_paged_attention_f16_config;
+HIP_KERNEL_API int hip_paged_attention_f16_configured(
+    void* stream, const hip_paged_attention_f16_desc* desc,
+    void* workspace, size_t workspace_bytes,
+    const hip_paged_attention_f16_config* config);
+
+/* Versioned geometry. Decode splits=0 selects device-length adaptive dispatch;
+ * positive splits retain explicit power-of-two geometry. D128 full-history Page uses the
+ * shared ND2/ND4 geometry (qw=0, mt=1, bkv=16/32); D256 keeps that layout.
+ * The original two-int configured ABI above
+ * keeps its fixed legacy layout. Size is checked before reading this config. */
+typedef struct hip_paged_attention_f16_config_v2 {
+    int splits, bkv, hb, qw, mt, nd;
+} hip_paged_attention_f16_config_v2;
+HIP_KERNEL_API int hip_paged_attention_f16_configured_v2(
+    void* stream, const hip_paged_attention_f16_desc* desc,
+    void* workspace, size_t workspace_bytes,
+    const hip_paged_attention_f16_config_v2* config, size_t config_size);
+
+/* Explicit online preparation. Size-checks config before reading/writing it.
+ * Runs the validated append once, then tunes shared GQA attention launches on
+ * these actual buffers. This call synchronizes and must stay outside hot calls
+ * and graph capture. It may write valid O/pools; invalid metadata retains the
+ * usual device-status/no-visible-writes contract and returns a safe default.
+ * No implicit cache, metadata readback, or tuning occurs in configured_v2.
+ * Caller owns the returned config and its shape/device applicability. */
+HIP_KERNEL_API int hip_paged_attention_f16_prepare_v2(
+    void* stream,const hip_paged_attention_f16_desc* desc,
+    void* workspace,size_t workspace_bytes,
+    hip_paged_attention_f16_config_v2* config,size_t config_size);
+
+/* Read back the last successfully selected launch on this host thread. */
+HIP_KERNEL_API int hip_paged_attention_f16_last_config_v2(
+    hip_paged_attention_f16_config_v2* config, size_t config_size);
+
+HIP_KERNEL_API int hip_paged_attention_f16_workspace_size(
+    const hip_paged_attention_f16_desc *desc, size_t *bytes);
+HIP_KERNEL_API int hip_paged_attention_f16(
+    void *stream, const hip_paged_attention_f16_desc *desc,
+    void *workspace, size_t workspace_bytes);
+
 // tq4_mse_qr_v1: B1/Hq24/G4/D256, BSHD FP16 inputs, packed BNSD cache.
 // Each row is 33 u32 words: FP32 norm then 32 words of centroid indices.
 HIP_KERNEL_API size_t hip_tq4_decode_workspace(int valid_length);

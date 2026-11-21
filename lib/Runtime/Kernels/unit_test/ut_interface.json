@@ -359,16 +359,7 @@
         {"name": "llama31_8b", "values": {"batch": 1, "num_heads": 32, "kv_num_heads": 8, "head_dim": 128, "max_seq": 4096, "total_seq": 2048}},
         {"name": "gpt_oss_20b_window_sink", "values": {"batch": 1, "num_heads": 64, "kv_num_heads": 8, "head_dim": 64, "max_seq": 4096, "total_seq": 2048, "window": 128, "head_sink": 1}}
       ],
-      "diagnostic_flags": [
-        {"flag": "--all", "description": "Run the suite even when shape flags are given."},
-        {"flag": "--only", "description": "<substring>: run only suite cases whose name contains it."},
-        {"flag": "--md", "description": "Print a Markdown table instead of per-case text (implies --all)."},
-        {"flag": "--verbose", "description": "Per-case detail."},
-        {"flag": "--fused", "description": "Also time the oldest one-block-per-head decode."},
-        {"flag": "--prod-only", "description": "Time only the production-selected config."},
-        {"flag": "--seed", "description": "<int>: input RNG seed (default 1234)."},
-        {"flag": "--iters", "description": "Legacy; ignored by the shared timer."}
-      ],
+      "diagnostic_flags": [{"flag": "--all", "description": "Run the suite even when shape flags are given."}, {"flag": "--only", "description": "<substring>: run only suite cases whose name contains it."}, {"flag": "--md", "description": "Print a Markdown table instead of per-case text (implies --all)."}, {"flag": "--verbose", "description": "Per-case detail."}, {"flag": "--fused", "description": "Also time the oldest one-block-per-head decode."}, {"flag": "--prod-only", "description": "Time only the production-selected config."}, {"flag": "--seed", "description": "<int>: input RNG seed (default 1234)."}, {"flag": "--iters", "description": "Legacy; ignored by the shared timer."}, {"flag": "--only-shape", "description": "Exact CSV / UT_TIMING shape selector for one built-in case at the requested coverage tier; absent/ambiguous match fails."}],
       "gaps": []
     },
     {
@@ -444,9 +435,7 @@
       "examples": [
         {"name": "llama31_8b_with_past", "values": {"batch": 1, "num_heads": 32, "kv_num_heads": 8, "head_dim": 128, "seq_q": 512, "past": 1024, "max_seq": 4096}}
       ],
-      "diagnostic_flags": [
-        {"flag": "--iters", "description": "Legacy; ignored by the shared timer."}
-      ],
+      "diagnostic_flags": [{"flag": "--iters", "description": "Legacy; ignored by the shared timer."}, {"flag": "--only-shape", "description": "Exact CSV / UT_TIMING shape selector for one built-in case at the requested coverage tier; absent/ambiguous match fails."}],
       "gaps": []
     },
     {
@@ -661,6 +650,130 @@
         {"name": "suite_tier1", "coverage": 1}
       ],
       "gaps": ["custom_shape", "shared_timer", "arch_default"]
+    },
+    {
+      "leaf": "paged_attention/decode/Xfp16_Wfp16_Yfp16",
+      "package_executable": "hipdnn-kernel-ut-paged-attention-decode-xfp16-wfp16-yfp16.exe",
+      "source": "test_paged_attention.cpp",
+      "capabilities": {"coverage": true, "timing": "shared", "mode": "lookup", "rank": true},
+      "suite": {"args": ["--coverage"], "coverage_default": "HIPDNN_UT_COVERAGE, else 3"},
+      "custom": {
+        "selected_by": "any custom flag; phase is fixed by the leaf",
+        "params": [
+          {"name": "batch", "flag": "--b", "make": "B", "type": "int", "required": false, "exe_default": 3, "make_default": 3, "description": "Positive request count."},
+          {"name": "num_heads", "flag": "--h", "make": "H", "type": "int", "required": false, "exe_default": 8, "make_default": 8, "description": "Positive query heads, multiple of kv_num_heads."},
+          {"name": "kv_num_heads", "flag": "--g", "make": "G", "type": "int", "required": false, "exe_default": 2, "make_default": 2, "description": "Positive KV heads."},
+          {"name": "head_dim", "flag": "--d", "make": "D", "type": "int", "required": false, "exe_default": 128, "make_default": 128, "description": "64/96/128/256; unsupported geometry can be tested with error=geometry."},
+          {"name": "num_pages", "flag": "--pages", "make": "P", "type": "int", "required": false, "exe_default": 64, "make_default": 64, "description": "Positive physical pool page count; shared readonly prefixes may reduce required count."},
+          {"name": "page_size", "flag": "--page-size", "make": "S", "type": "int", "required": false, "exe_default": 17, "make_default": 17, "description": "Positive token slots per page, independent of computation tile."},
+          {"name": "table_columns", "flag": "--table-columns", "make": "M", "type": "int", "required": false, "exe_default": 8, "make_default": 8, "description": "Positive per-request page table width; must hold ceil(post/S)."},
+          {"name": "q_lens", "flag": "--q-lens", "make": "QLENS", "type": "string", "required": false, "exe_default": "1,0,1", "make_default": "1,0,1", "description": "Comma-separated B nonnegative int32 lengths; decode each is 0/1. T=sum(q_lens) fits int32."},
+          {"name": "past", "flag": "--past", "make": "PAST", "type": "string", "required": false, "exe_default": "16,17,18", "make_default": "16,17,18", "description": "Comma-separated B nonnegative int32 history lengths; post must fit int32 and mapping capacity."},
+          {"name": "do_rotary", "flag": "--rotary", "make": "ROTARY", "type": "int", "required": false, "exe_default": 0, "make_default": 0, "description": "0 disables rotary and 1 enables full-D split-half rotary.", "choices": [0, 1]},
+          {"name": "rotary_dim", "flag": "--rotary-dim", "make": "ROTARY_DIM", "type": "int", "required": false, "exe_default": 0, "make_default": 0, "description": "0 expands to D in this driver; public entry requires D when enabled. Other values are unsupported."},
+          {"name": "interleaved", "flag": "--interleaved", "make": "INTERLEAVED", "type": "int", "required": false, "exe_default": 0, "make_default": 0, "description": "0 is split-half; 1 is unsupported when rotary is enabled.", "choices": [0, 1]},
+          {"name": "max_position", "flag": "--max-position", "make": "MAX_POSITION", "type": "int", "required": false, "exe_default": 4096, "make_default": 4096, "description": "Positive cos/sin row capacity; active rotary positions must be below it."},
+          {"name": "scale", "flag": "--scale", "make": "SCALE", "type": "float", "required": false, "exe_default": 0, "make_default": 0, "description": "0 selects 1/sqrt(D), finite positive values are explicit; negative is unsupported, nonfinite invalid."},
+          {"name": "window", "flag": "--window", "make": "WINDOW", "type": "int", "required": false, "exe_default": -1, "make_default": -1, "description": "Nonpositive is full causal history. Positive W includes current token; prefill D256 rejects it."},
+          {"name": "softcap", "flag": "--softcap", "make": "SOFTCAP", "type": "float", "required": false, "exe_default": 0, "make_default": 0, "description": "Only zero is supported; nonzero declines."},
+          {"name": "mapping", "flag": "--map", "make": "MAP", "type": "string", "required": false, "exe_default": "permuted", "make_default": "permuted", "description": "ordered/permuted/shared; shared requires a readonly first prefix page, append pages remain private.", "choices": ["ordered", "permuted", "shared"]},
+          {"name": "seed", "flag": "--seed", "make": "SEED", "type": "int", "required": false, "exe_default": 1119, "make_default": 1119, "description": "Input and page-permutation seed in uint32 range."},
+          {"name": "error", "flag": "--error", "make": "ERROR", "type": "string", "required": false, "exe_default": "none", "make_default": "none", "description": "Inject only into a valid base. Host validator rejects inapplicable triggers before allocation/reference; write_conflict requires two active requests. Exact host/device rejection and unchanged storage are checked.", "choices": ["none", "cum_start", "cum_end", "cum_order", "negative_past", "decode_length", "post_overflow", "table_small", "bad_page", "position", "workspace", "workspace_alignment", "alias", "pool_alias", "softcap", "negative_scale", "nan_scale", "inf_scale", "nan_softcap", "interleaved", "partial_rotary", "geometry", "write_conflict", "null_rotary", "size_overflow", "tensor_alignment"]},
+          {"name": "phase", "flag": "--phase", "make": "PHASE", "type": "string", "required": false, "exe_default": "decode", "make_default": "decode", "description": "Must match the selected leaf.", "choices": ["decode"]},
+          {"name": "shared_prefix", "flag": "--shared-prefix", "make": "SHARED_PREFIX", "type": "int", "required": false, "exe_default": 0, "make_default": 0, "description": "MAP=shared: 0 uses one readonly page; positive token count must be divisible by S and <=past of active requests."}
+        ],
+        "constraints": ["All geometry values except T are positive int32. All tensor/launch products are checked for overflow.", "q_lens and past have B nonnegative items. Caller must provision P/M for the chosen mapping.", "D64/96/128/256. Decode H/G=1/2/3/4/5/6/8/16 plus 9 at D128.", "Rotary is full-D split-half. Shared map requires past>=S for active requests.", "error chooses explicit expected rejection tests; malformed or unsupported ordinary custom cases fail.", "write_conflict requires at least two q>0 requests; picks stable pair, lowers larger past and aliases append-start page. B2 with two active requests is supported.", "cum_start/cum_end/cum_order/negative_past/decode_length/post_overflow/table_small/bad_page/position/write_conflict/workspace/workspace_alignment/alias/pool_alias/tensor_alignment/null_rotary require T>0.", "decode_length requires T>=2 and supported decode head geometry. table_small requires M*S<2147483647. position requires at least one active post>1. position/null_rotary normalize full-D split-half RoPE.", "d256_window is prefill-only. Host descriptor rejection cases may use T=0; ordinary all-empty cases remain valid."],
+        "checks": ["batch > 0 and num_heads > 0 and kv_num_heads > 0 and num_heads % kv_num_heads == 0", "num_pages > 0 and page_size > 0 and table_columns > 0 and max_position > 0", "seed >= 0 and seed <= 4294967295", "error != 'write_conflict' or batch >= 2", "error != 'table_small' or table_columns * page_size < 2147483647", "shared_prefix >= 0 and (shared_prefix == 0 or mapping == 'shared' and shared_prefix % page_size == 0)"]
+      },
+      "examples": [
+        {
+          "name": "llama31_ragged_rotary",
+          "values": {"batch": 3, "num_heads": 32, "kv_num_heads": 8, "head_dim": 128, "q_lens": "1,0,1", "past": "16,17,18", "do_rotary": 1}
+        },
+        {
+          "name": "shared_prefix",
+          "values": {"num_heads": 4, "kv_num_heads": 1, "head_dim": 64, "q_lens": "1,0,1", "past": "34,51,68", "mapping": "shared", "window": 41}
+        }
+      ],
+      "diagnostic_flags": [
+        {"flag": "--compare", "description": "0|1, requires COMPARE=1 and FLASH_SOURCE build. Same logical FP16 data compares complete Page/dense, original bare Flash and common post-RoPE cores with shared timer. Diagnostic Page fallback is explicitly default; normal MODE still uses online fallback."},
+        {"flag": "--compare-order", "description": "0: Page complete first (default); 1: dense complete first. Alternate across same-host pairs; same data/config/copies and confirm preset."}
+      ],
+      "gaps": [],
+      "env": [
+        {"name": "HIPDNN_PAGED_ATTENTION_AUTOTUNE_MODE", "description": "lookup reads a compatible Page table; online explicitly uses production preparePagedAttention/GQA tuning before final complete-call validation/timing."},
+        {"name": "HIPDNN_PAGED_ATTENTION_CFG", "description": "Optional default, id=N, legacy splits=N;bkv=N or six-field splits/bkv/hb/qw/mt/nd pin. V2 decode splits=0 is adaptive. Actual fixed:pin geometry logged; forbidden with ranking."},
+        {"name": "HIPDNN_UT_RANK", "description": "Four-column leaf,shape,priority,config CSV; requires RANK=1 and default per shape. Exact native case key preserves ragged arrays/page/RoPE/options."},
+        {"name": "HIPDNN_UT_RANK_CATALOG", "description": "1 emits production Page candidate catalog without GPU work; requires HIPDNN_UT_RANK and RANK=1."},
+        {"name": "HIPDNN_UT_RANK_REFERENCE", "description": "1 uses independent sequential confirm in existing shared rank engine."},
+        {"name": "HIPDNN_PAGED_ATTENTION_PUBLIC", "description": "1 validates and times the actual public/default entry; config readback stays outside timing; conflicts with production preparation."},
+        {"name": "HIPDNN_PAGED_ATTENTION_PRODUCTION_PREPARE", "description": "1 in comparison calls the real production lookup/online preparation before configured timing; conflicts with public/pinned route."},
+        {"name": "HIPDNN_UT_FLASH_CFG", "description": "Six-field original Flash configured geometry for marked same-geometry diagnostic comparison."},
+        {"name": "HIPDNN_UT_DENSE_CAPACITY", "description": "Comparison-only positive dense storage capacity, applied symmetrically to old/new controls for capacity sentinels; no production dispatch change."}
+      ],
+      "build_inputs": {"RANK": "0|1; 1 compiles UT-only adapter and private empty table", "LUT_ARCH": "actual device chip for default table path", "LUT_FB": "external Page FB compiled from JSON, embedded at build; explicit missing path fails; absent default table uses online fallback", "FLATC": "maintained matching FlatBuffers compiler", "FLATBUFFERS_INC": "matching FlatBuffers include directory", "COMPARE": "0|1, native original Flash diagnostic", "FLASH_SOURCE": "exact original source with baseline/hash; compiled through symbol isolation adapter"}
+    },
+    {
+      "leaf": "paged_attention/prefill/Xfp16_Wfp16_Yfp16",
+      "package_executable": "hipdnn-kernel-ut-paged-attention-prefill-xfp16-wfp16-yfp16.exe",
+      "source": "test_paged_attention.cpp",
+      "capabilities": {"coverage": true, "timing": "shared", "mode": "lookup", "rank": true},
+      "suite": {"args": ["--coverage"], "coverage_default": "HIPDNN_UT_COVERAGE, else 3"},
+      "custom": {
+        "selected_by": "any custom flag; phase is fixed by the leaf",
+        "params": [
+          {"name": "batch", "flag": "--b", "make": "B", "type": "int", "required": false, "exe_default": 3, "make_default": 3, "description": "Positive request count."},
+          {"name": "num_heads", "flag": "--h", "make": "H", "type": "int", "required": false, "exe_default": 8, "make_default": 8, "description": "Positive query heads, multiple of kv_num_heads."},
+          {"name": "kv_num_heads", "flag": "--g", "make": "G", "type": "int", "required": false, "exe_default": 2, "make_default": 2, "description": "Positive KV heads."},
+          {"name": "head_dim", "flag": "--d", "make": "D", "type": "int", "required": false, "exe_default": 128, "make_default": 128, "description": "64/96/128/256; unsupported geometry can be tested with error=geometry."},
+          {"name": "num_pages", "flag": "--pages", "make": "P", "type": "int", "required": false, "exe_default": 64, "make_default": 64, "description": "Positive physical pool page count; shared readonly prefixes may reduce required count."},
+          {"name": "page_size", "flag": "--page-size", "make": "S", "type": "int", "required": false, "exe_default": 17, "make_default": 17, "description": "Positive token slots per page, independent of computation tile."},
+          {"name": "table_columns", "flag": "--table-columns", "make": "M", "type": "int", "required": false, "exe_default": 8, "make_default": 8, "description": "Positive per-request page table width; must hold ceil(post/S)."},
+          {"name": "q_lens", "flag": "--q-lens", "make": "QLENS", "type": "string", "required": false, "exe_default": "3,0,17", "make_default": "3,0,17", "description": "Comma-separated B nonnegative int32 lengths; decode each is 0/1. T=sum(q_lens) fits int32."},
+          {"name": "past", "flag": "--past", "make": "PAST", "type": "string", "required": false, "exe_default": "16,17,18", "make_default": "16,17,18", "description": "Comma-separated B nonnegative int32 history lengths; post must fit int32 and mapping capacity."},
+          {"name": "do_rotary", "flag": "--rotary", "make": "ROTARY", "type": "int", "required": false, "exe_default": 0, "make_default": 0, "description": "0 disables rotary and 1 enables full-D split-half rotary.", "choices": [0, 1]},
+          {"name": "rotary_dim", "flag": "--rotary-dim", "make": "ROTARY_DIM", "type": "int", "required": false, "exe_default": 0, "make_default": 0, "description": "0 expands to D in this driver; public entry requires D when enabled. Other values are unsupported."},
+          {"name": "interleaved", "flag": "--interleaved", "make": "INTERLEAVED", "type": "int", "required": false, "exe_default": 0, "make_default": 0, "description": "0 is split-half; 1 is unsupported when rotary is enabled.", "choices": [0, 1]},
+          {"name": "max_position", "flag": "--max-position", "make": "MAX_POSITION", "type": "int", "required": false, "exe_default": 4096, "make_default": 4096, "description": "Positive cos/sin row capacity; active rotary positions must be below it."},
+          {"name": "scale", "flag": "--scale", "make": "SCALE", "type": "float", "required": false, "exe_default": 0, "make_default": 0, "description": "0 selects 1/sqrt(D), finite positive values are explicit; negative is unsupported, nonfinite invalid."},
+          {"name": "window", "flag": "--window", "make": "WINDOW", "type": "int", "required": false, "exe_default": -1, "make_default": -1, "description": "Nonpositive is full causal history. Positive W includes current token; prefill D256 rejects it."},
+          {"name": "softcap", "flag": "--softcap", "make": "SOFTCAP", "type": "float", "required": false, "exe_default": 0, "make_default": 0, "description": "Only zero is supported; nonzero declines."},
+          {"name": "mapping", "flag": "--map", "make": "MAP", "type": "string", "required": false, "exe_default": "permuted", "make_default": "permuted", "description": "ordered/permuted/shared; shared requires a readonly first prefix page, append pages remain private.", "choices": ["ordered", "permuted", "shared"]},
+          {"name": "seed", "flag": "--seed", "make": "SEED", "type": "int", "required": false, "exe_default": 1119, "make_default": 1119, "description": "Input and page-permutation seed in uint32 range."},
+          {"name": "error", "flag": "--error", "make": "ERROR", "type": "string", "required": false, "exe_default": "none", "make_default": "none", "description": "Inject only into a valid base. Host validator rejects inapplicable triggers before allocation/reference; write_conflict requires two active requests. Exact host/device rejection and unchanged storage are checked.", "choices": ["none", "cum_start", "cum_end", "cum_order", "negative_past", "decode_length", "post_overflow", "table_small", "bad_page", "position", "workspace", "workspace_alignment", "alias", "pool_alias", "softcap", "negative_scale", "nan_scale", "inf_scale", "nan_softcap", "interleaved", "partial_rotary", "d256_window", "geometry", "write_conflict", "null_rotary", "size_overflow", "tensor_alignment"]},
+          {"name": "phase", "flag": "--phase", "make": "PHASE", "type": "string", "required": false, "exe_default": "prefill", "make_default": "prefill", "description": "Must match the selected leaf.", "choices": ["prefill"]},
+          {"name": "shared_prefix", "flag": "--shared-prefix", "make": "SHARED_PREFIX", "type": "int", "required": false, "exe_default": 0, "make_default": 0, "description": "MAP=shared: 0 uses one readonly page; positive token count must be divisible by S and <=past of active requests."}
+        ],
+        "constraints": ["All geometry values except T are positive int32. All tensor/launch products are checked for overflow.", "q_lens and past have B nonnegative items. Caller must provision P/M for the chosen mapping.", "D64/96/128/256. Decode H/G=1/2/3/4/5/6/8/16 plus 9 at D128.", "Rotary is full-D split-half. Shared map requires past>=S for active requests.", "error chooses explicit expected rejection tests; malformed or unsupported ordinary custom cases fail.", "write_conflict requires at least two q>0 requests; picks stable pair, lowers larger past and aliases append-start page. B2 with two active requests is supported.", "cum_start/cum_end/cum_order/negative_past/decode_length/post_overflow/table_small/bad_page/position/write_conflict/workspace/workspace_alignment/alias/pool_alias/tensor_alignment/null_rotary require T>0.", "decode_length requires T>=2 and supported decode head geometry. table_small requires M*S<2147483647. position requires at least one active post>1. position/null_rotary normalize full-D split-half RoPE.", "d256_window is prefill-only. Host descriptor rejection cases may use T=0; ordinary all-empty cases remain valid."],
+        "checks": ["batch > 0 and num_heads > 0 and kv_num_heads > 0 and num_heads % kv_num_heads == 0", "num_pages > 0 and page_size > 0 and table_columns > 0 and max_position > 0", "seed >= 0 and seed <= 4294967295", "error != 'write_conflict' or batch >= 2", "error != 'table_small' or table_columns * page_size < 2147483647", "shared_prefix >= 0 and (shared_prefix == 0 or mapping == 'shared' and shared_prefix % page_size == 0)"]
+      },
+      "examples": [
+        {
+          "name": "llama31_ragged_rotary",
+          "values": {"batch": 3, "num_heads": 32, "kv_num_heads": 8, "head_dim": 128, "q_lens": "3,0,17", "past": "16,17,18", "do_rotary": 1}
+        },
+        {
+          "name": "shared_prefix",
+          "values": {"num_heads": 4, "kv_num_heads": 1, "head_dim": 64, "q_lens": "17,0,33", "past": "34,51,68", "mapping": "shared", "window": 41}
+        }
+      ],
+      "diagnostic_flags": [
+        {"flag": "--compare", "description": "0|1, requires COMPARE=1 and FLASH_SOURCE build. Same logical FP16 data compares complete Page/dense, original bare Flash and common post-RoPE cores with shared timer. Diagnostic Page fallback is explicitly default; normal MODE still uses online fallback."},
+        {"flag": "--compare-order", "description": "0: Page complete first (default); 1: dense complete first. Alternate across same-host pairs; same data/config/copies and confirm preset."}
+      ],
+      "gaps": [],
+      "env": [
+        {"name": "HIPDNN_PAGED_ATTENTION_AUTOTUNE_MODE", "description": "lookup reads a compatible Page table; online explicitly uses production preparePagedAttention/GQA tuning before final complete-call validation/timing."},
+        {"name": "HIPDNN_PAGED_ATTENTION_CFG", "description": "Optional default, id=N, legacy splits=N;bkv=N or six-field splits/bkv/hb/qw/mt/nd pin. V2 decode splits=0 is adaptive. Actual fixed:pin geometry logged; forbidden with ranking."},
+        {"name": "HIPDNN_UT_RANK", "description": "Four-column leaf,shape,priority,config CSV; requires RANK=1 and default per shape. Exact native case key preserves ragged arrays/page/RoPE/options."},
+        {"name": "HIPDNN_UT_RANK_CATALOG", "description": "1 emits production Page candidate catalog without GPU work; requires HIPDNN_UT_RANK and RANK=1."},
+        {"name": "HIPDNN_UT_RANK_REFERENCE", "description": "1 uses independent sequential confirm in existing shared rank engine."},
+        {"name": "HIPDNN_PAGED_ATTENTION_PUBLIC", "description": "1 validates and times the actual public/default entry; config readback stays outside timing; conflicts with production preparation."},
+        {"name": "HIPDNN_PAGED_ATTENTION_PRODUCTION_PREPARE", "description": "1 in comparison calls the real production lookup/online preparation before configured timing; conflicts with public/pinned route."},
+        {"name": "HIPDNN_UT_FLASH_CFG", "description": "Six-field original Flash configured geometry for marked same-geometry diagnostic comparison."},
+        {"name": "HIPDNN_UT_DENSE_CAPACITY", "description": "Comparison-only positive dense storage capacity, applied symmetrically to old/new controls for capacity sentinels; no production dispatch change."}
+      ],
+      "build_inputs": {"RANK": "0|1; 1 compiles UT-only adapter and private empty table", "LUT_ARCH": "actual device chip for default table path", "LUT_FB": "external Page FB compiled from JSON, embedded at build; explicit missing path fails; absent default table uses online fallback", "FLATC": "maintained matching FlatBuffers compiler", "FLATBUFFERS_INC": "matching FlatBuffers include directory", "COMPARE": "0|1, native original Flash diagnostic", "FLASH_SOURCE": "exact original source with baseline/hash; compiled through symbol isolation adapter"}
     }
   ]
 }

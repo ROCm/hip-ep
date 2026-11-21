@@ -1,0 +1,17 @@
+{
+  "schema_version": 2,
+  "kernel_abi": "paged_fp16_pshd_v2",
+  "gpu_arch": "unmeasured",
+  "op": "paged_attention",
+  "layout": "PSHD",
+  "dtype": "Fp16",
+  "model_key": "representative-only",
+  "weight_m": 1,
+  "weight_n": 1,
+  "weight_k": 1,
+  "fallbacks": [],
+  "configs": [],
+  "points": [],
+  "configs_v2": [],
+  "fallbacks_v2": []
+}

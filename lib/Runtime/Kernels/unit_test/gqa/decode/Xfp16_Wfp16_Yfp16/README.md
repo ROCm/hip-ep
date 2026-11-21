@@ -51,3 +51,14 @@ production) and dispatch the resolved config through
 `hip_gqa_flash_decode_configured()`. Both modes append to `out/results.csv`.
 
 CI passes `OFFLOAD`/`HIP_SDK` explicitly; there is no personal default.
+
+The optional GPU admission handshake starts after CPU reference preparation.
+After the final device work, rotation/input cleanup and synchronization finish
+before admission release and CPU comparison/CSV; a lookup phase reacquires it.
+
+`--only-shape <CSV / UT_TIMING shape>` selects exactly one built-in case at
+the requested coverage tier; an absent or ambiguous match returns nonzero.
+
+Selected config diagnostics are captured on the untimed correctness call.
+The shared timer runs with configuration logging disabled; CPU reference,
+config selection and sampling policy are unchanged.
