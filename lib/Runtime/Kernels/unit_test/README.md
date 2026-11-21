@@ -1,6 +1,22 @@
 # Kernel unit tests (`lib/Runtime/Kernels/unit_test`)
 
-This folder contains the source for standalone HIP kernel unit tests.
+This folder contains the source for standalone HIP kernel unit tests. A new
+or changed leaf follows [GUIDELINES.md](GUIDELINES.md).
+
+MatMulNBits, GQA decode/prefill and ragged W4 MatMul use the shared
+[adaptive timing policy](common/README.md). `--timing standard` (default)
+ends a measurement at 1,000 calls or one second of GPU time, whichever comes
+first, when its five groups agree within 3%, and otherwise at one second and ten
+calls; `--timing confirm` (10,000 calls / ten seconds, 1%) is for formal
+performance numbers; `--timing screen` (100 calls / 0.1 s) is the short
+LUT-ranking mode. Correctness checks are identical in all three. Policy, actual iterations, runtime identity
+and dispersion are emitted as `UT_TIMING` JSON records.
+
+The same leaves refresh LUT tables; see
+[Refreshing a LUT with the UT leaves](#refreshing-a-lut-with-the-ut-leaves).
+Every input an external caller passes, to the controller or to one leaf, is
+listed in [`ut_interface.json`](ut_interface.json); see
+[External invocation](#external-invocation-ut_interfacejson).
 
 There are two ways to build and run them:
 
@@ -53,6 +69,7 @@ prefix gets one `kernel-tests/<arch>/`, named exactly like that entry's
 <install>/bin/
   hipdnn-kernel-ut.exe                          # suite controller (one)
   custom_kernels_<arch>.dll                     # installed already, one per arch
+  kernel-tests/ut_interface.json                # caller inputs, see "External invocation"
   kernel-tests/<arch>/
     hipdnn-kernel-ut-matmul-nbits-xfp16-wu2-yfp16.exe
     hipdnn-kernel-ut-matmul-nbits-xfp16-wu3-yfp16.exe
@@ -90,7 +107,9 @@ controller from that `bin` directory:
 |---|---|---|---|
 | `--arch` | `gfxNNNN`, `gfx11-generic`, ... | detected from GPU 0 | Which `kernel-tests/<arch>/` to run. Picked by the same rule the EP uses to load `custom_kernels_<arch>.dll` (`genericTargetFor()` in `backend-mlir-compiler/custom-op-mlir/src/LlvmIrJit.cpp`): the ISA's own directory first, then its generic target's. So on the CI package a gfx1151 runs `kernel-tests/gfx11-generic/` and a gfx1170 runs `kernel-tests/gfx1170/`, the same DLLs the EP loads there. `gfx1170` is not a `gfx11-generic` member. |
 | `--mode` | `lookup`, `autotune` | `lookup` | `lookup` uses the tables embedded in `custom_kernels_<arch>.dll` and falls through to autotune on a miss, like production. `autotune` bypasses the tables (production's `online` mode). |
-| `--coverage` | `1`, `2`, `3` | `3` | Shape tier; see "Shape coverage". `1` suits a per-PR job, `3` a nightly one. |
+| `--coverage` | `1`, `2`, `3` | `3` | Shape tier; see [Shape coverage](GUIDELINES.md#shape-coverage-3-tiers). `1` suits a per-PR job, `3` a nightly one. |
+| `--timing` | `screen`, `standard`, `confirm` | `standard` | Timing preset of the shared timer (`HIPDNN_UT_TIMING`); `confirm` for formal numbers. |
+| `--leaf` | `<op>/<leaf>`, e.g. `gqa/prefill/Xfp16_Wfp16_Yfp16` | every leaf | Run only this leaf. After `--`, the rest of the command line goes to it instead of `--coverage`; see [External invocation](#external-invocation-ut_interfacejson). |
 
 The controller runs the 17 leaves serially, with `bin` as the working
 directory so every leaf finds `custom_kernels_<arch>.dll`. It prints one
@@ -125,16 +144,18 @@ with `shape=suite`, `config=suite-total` and that leaf's `PASS`/`FAIL` in
 `verdict`. A failing CI job is diagnosed from this file: filter
 `verdict == FAIL`.
 
-To run a single leaf by hand, also start it from `bin`:
+To run a single leaf, name it with `--leaf`; after `--` it receives the
+given arguments instead of `--coverage`:
 
 ```
-.\kernel-tests\gfx11-generic\hipdnn-kernel-ut-matmul-nbits-xfp16-wu4-yfp16.exe --coverage 1
+.\hipdnn-kernel-ut.exe --leaf matmul_nbits/Xfp16_Wu4_Yfp16 --coverage 1
+.\hipdnn-kernel-ut.exe --leaf matmul_nbits/Xfp16_Wu4_Yfp16 -- 1x2880x5120 --group-size 32
 ```
 
-A leaf started this way does not get the controller's DLL search path, so it
-loads the driver's HIP runtime from System32, and its `config` column can read
-`unlogged` because it cannot capture the kernels' diagnostics. Run the suite
-through the controller to test the package's runtime and record every config.
+A leaf executable started directly from `bin` also runs, but it does not get
+the controller's DLL search path, so it loads the driver's HIP runtime from
+System32, and its `config` column can read `unlogged` because it cannot capture
+the kernels' diagnostics.
 
 When `BUILD_TESTING` is on, each leaf is also registered with CTest under the
 labels `gpu;kernel-ut;<arch>` (run from the build tree, e.g.
@@ -163,93 +184,24 @@ failed; a failing leaf's `.stderr.log` sits next to it), writes a per-leaf
 table to the job summary, and on a pull request posts the same table as a PR
 comment.
 
-## These are unit tests — comprehensive shapes, not a perf sweep
+## Leaf guidelines
 
-A kernel unit test's job is to catch correctness regressions across a
-**comprehensive** shape surface in well under the ~30 min tier3 budget, not
-to characterize performance across the whole *continuous* shape space (that
-is what `hip/autotune/<op>/tools/` is for). The coverage model is:
-
-> **all categorical situations, fully** (every mode/dtype/flag the op
-> supports) **x a comprehensive set of typical shapes** (multiple M
-> including M=1 GEMV/decode and several M>1 prefill points, crossed with
-> multiple representative `(K,N)` / `(B,H,G,D,seq)` scenarios), **not the
-> full continuous shape space** (no blind `1..4096`-style ladder, and never a
-> giant perf shape like `N≈201088`, `M≈4096` at real FFN size).
-
-Concretely:
-
-- **Categorical axes** (group_size, zero-points on/off, TA/TB transpose,
-  bias on/off, heads-per-group ratio, head_dim,
-  sliding-window/head-sink/smooth-softmax, …) are enumerated in full and run
-  at **every** `COVERAGE` tier. Tensor dtypes are not an axis inside a leaf:
-  each dtype combo is its own leaf (see "Leaf name" below).
-- **Continuous axes** (M/K/N, sequence length) are a comprehensive, explicitly
-  listed set of typical values — e.g. matmul_nbits M in
-  `{1,16,64,128,512[,1024]}` round-robined across several real `(K,N)` layer
-  families (gate/up-proj, down-proj, attn-proj, square); GQA a widened
-  typical context-length / prompt-length list (e.g. `{128,512,2048,8192}`)
-  — still never the full `1..16384`-style ladder, and never a giant perf
-  shape. `COVERAGE=1|2|3` only thins how many of those typical values run
-  (tier3 = the full comprehensive set, tier1 = a minimal fast subset); it
-  never drops a categorical situation.
-
-A tier3 (default) run of one leaf is on the order of tens to ~150 cases, and
-the whole 17-leaf suite at tier3 is budgeted at **up to ~30 min total**
-(measured ~20-25 min in practice) — this is intentionally wider than a
-"finishes in a minute" smoke test, because the shape axis (M=1 vs M>1,
-multiple K/N/seq scenarios) needs real coverage too, not just the categorical
-axis. `COVERAGE=1` (tier1) stays a fast, seconds-to-low-minutes path for
-quick dev iteration. The CPU references that were plain single-threaded
-loops are now multithreaded (`std::thread`, chunked over the independent
-output rows/columns/query-heads) specifically so this wider shape set fits
-the budget — see each leaf's `test_<op>.cpp` and README for the threading
-details.
-
-## Leaf name = tensor dtypes, not a single "fp16"
-
-A leaf folder is **one (X, W, Y) dtype combo**, plus optional suffixes for
-storage/quant extras.
-
-```
-X<xdtype>_W<wdtype>_Y<ydtype>[_ZP<zpdtype>][_other]
-```
-
-| Token | Meaning |
-|---|---|
-| `X` | activation / input (MatMulNBits A, GQA Q, GatherBlockQuantized indices) |
-| `W` | weight / KV (MatMulNBits packed B, GQA K/V cache, GatherBlockQuantized data) |
-| `Y` | output (MatMulNBits C, GQA O, GatherBlockQuantized output) |
-| `_ZP…` | only if zero-point storage is a distinguishing feature of this leaf (`_ZPu8`, `_ZPfp16`, …) |
-
-Examples:
-
-| Leaf | What it is |
-|---|---|
-| `matmul_nbits/Xfp16_Wu4_Yfp16` | A fp16, B uint4, C fp16 |
-| `matmul_nbits/Xfp16_Wu2_Yfp16` | bits=2 |
-| `matmul_nbits/Xfp16_Wu3_Yfp16` | bits=3 |
-| `matmul_nbits/Xfp16_Wi8_Yfp16` | unpacked int8 weights |
-| `matmul_nbits/Xfp32_Wu4_Yfp32` | A fp32, B uint4, C fp32 (likewise `Wu2`, `Wu3`, `Wi8`) |
-| `gqa/decode/Xfp16_Wfp16_Yfp16` | Q/O fp16, KV cache fp16 |
-| `gqa/decode/Xfp16_Wi8_Yfp16` | Q/O fp16, KV cache int8 |
-| `gqa/prefill/Xfp16_Wfp16_Yfp16` | same for prefill |
-| `gqa/prefill/Xfp16_Wi8_Yfp16` | prefill INT8 KV |
-
-If input becomes fp8 later: add `Xfp8_Wfp16_Yfp16`, do **not** rename the
-existing fp16 leaf to a bare `fp16/` or `fp8/`. A folder named `fp16` or `i8`
-is illegal — it does not say which tensor.
-
-Do **not** use `fp16u4`, `decode/fp16`, `prefill/i8`.
+The rules every leaf follows -- scope, naming, required files and
+capabilities, shape coverage, the `ut_interface.json` entry and the checklist
+for a new op or dtype -- are in [GUIDELINES.md](GUIDELINES.md). This README
+covers building, running and refreshing LUTs.
 
 ## Layout
 
 ```
 unit_test/
   README.md
+  GUIDELINES.md              # rules every leaf follows
+  ut_interface.json          # inputs of the controller and every leaf (common/ut_interface.py runs them)
   CMakeLists.txt             # package targets and install rules
   kernel_ut_main.cpp         # hipdnn-kernel-ut.exe controller
   Makefile                   # local suite: build every leaf, run hipdnn-kernel-ut.exe
+  common/                    # shared timer, ranking and LUT-refresh tools, host tests
   matmul_nbits/Xfp16_Wu{2,3,4}_Yfp16/
   matmul_nbits/Xfp16_Wi8_Yfp16/
   matmul_nbits/Xfp32_Wu{2,3,4}_Yfp32/
@@ -264,147 +216,172 @@ unit_test/
   div/Xbf16_Wbf16_Ybf16/
 ```
 
-`unit_test/` holds one directory per op and nothing else besides the four
-files above. The offline autotune LUT sweep tools (not UTs) live under
-`hip/autotune/<op>/tools/` next to each op's real resolver — e.g.
-`hip/autotune/gqa/tools/`, `hip/autotune/matmul_nbits/tools/`. Kernel
+`unit_test/` holds one directory per op and nothing else besides the files
+above. LUT refreshes run through these leaves (see below); the older
+offline sweep tools under `hip/autotune/<op>/tools/` remain only to reproduce
+historical logs. Kernel
 compile-time guards, which run no kernel and need no GPU (e.g.
 `LdsBarrierArchGate`), live in the repository's `test/kernel_guards/` with
 the other GPU-free CTest suites.
 
-## Adding an op or dtype leaf
+## Refreshing a LUT with the UT leaves
 
-Update all of these together:
+LUT tables are refreshed with these leaves rather than a separate sweep
+harness, so a table and the unit tests are measured by the same timer. The eight
+MatMulNBits leaves and four GQA decode/prefill leaves support it; other ops keep
+their previous tools until they are migrated.
 
-1. Add the production launcher declaration to `include/hip_custom_kernels.h`,
-   implementation to `hip/<op>_kernel.hip`, and that HIP file to
-   `lib/Runtime/Kernels/CMakeLists.txt`'s `_kernel_sources`.
-2. Add a leaf directory named from all tensor dtypes, containing exactly its
-   `Makefile`, self-contained `test_<op>.cpp`, and `README.md`. The test must
-   generate inputs and a CPU reference in-process, return non-zero on failure,
-   and support `--coverage 1|2|3`.
-3. Add the leaf once to the `LEAVES` list in `unit_test/Makefile` for local
-   runs, once to `unit_test/CMakeLists.txt` for package install, and
-   once to `kernel_ut_main.cpp`'s `kLeaves` for the controller and CSV report.
-4. Add the new leaf to `kernel_ut_main.cpp` without declaring whether it has a
-   table. The controller always passes the requested `lookup` mode; production
-   code must match the actual dtype/bits, shape, and GPU architecture against
-   the DLL's embedded table, then fall through to autotune on a miss.
-5. If the op supports lookup, add its resolver/schema and checked-in
-   `lut/<arch>.fb` data to the production `custom_kernels_<arch>` build. Do
-   not embed the FB in a test exe: `lookup` must consume the DLL's embedded
-   table, exactly like model execution. A missing compatible table must fall
-   through to autotune.
-6. Ensure the leaf writes one row per case to `HIPDNN_RESULTS_CSV` when set.
-   The controller also writes one `shape=suite` row per leaf, including
-   leaves without per-case rows.
+A refresh does not choose a timing preset. For each shape the ranking mode:
 
-## Required files in every leaf — EXACTLY these three, nothing else
+1. checks every candidate config, always including the no-LUT default, against
+   the leaf's CPU reference;
+2. measures every candidate once with `screen`;
+3. measures the candidates within 5% of the fastest (at most four) plus the
+   default, interleaved, at `standard` goals;
+4. repeats that round at `confirm` goals only when the decision is close or
+   unclear: a winner near the 2% entry line, a winner and runner-up that
+   overlap, a nonconverged finalist, or a shape marked `priority=1`;
+5. stores the winner only when it is not the default and its median ratio to
+   the default is below 0.98; otherwise the default-equivalent entry stays.
 
-| File | Role |
-|---|---|
-| `Makefile` | `test` / `test_custom` / `clean` / `build` (`build` also copies the exe to `PKG_DIR/PKG_NAME` for the `unit_test/` aggregator) |
-| `test_<op>.cpp` | Driver. Entirely self-contained: generates its own inputs (seeded RNG) and computes its own CPU reference **in-process, in C++** — no python, no on-disk data, no `unit_test/common/`. Enumerates the op's categorical situations x typical shapes in C++ (see "Shape coverage" below). Inline empty `resolve()` if needed, guarded by `#ifndef HIPDNN_LUT_LINKED_EXTERNALLY` so `MODE=lookup`'s real resolver (which defines the same symbols) can link. No `autotune_stub.cpp`. |
-| `README.md` | Targets + `MODE` + `COVERAGE` |
+Near-tied finalists can swap between runs; that costs little and is expected.
+Rules, the `UT_RANK` record and gfx1151 results are in
+[common/README.md](common/README.md#native-lut-ranking-ut-rank-v3).
 
-No `gen_data.py`, no python anywhere under `unit_test/`, no `shapes.csv`, no
-`unit_test/common/` (there is nothing left to share — each leaf inlines its own
-~30-line coverage-tier resolver and, where it writes `out/results.csv`, its
-own tiny CSV writer; see "Shape coverage" and "`out/results.csv`" below).
+To refresh `<op>` (`matmul_nbits` or `gqa`) from its existing JSON table:
 
-Forbidden filenames in a leaf: `gen_data.py`, `gen_matmul_nbits*_data.py`,
-`gen_model_data*.py`, `bench_*.py`, `verify_*.py`, `zp_perf_compare.md`,
-`autotune_stub.cpp`, `test_model/*.json`, `shapes.csv`, any committed `out/` /
-`data/`, any home path. If a leaf has a real extra need, justify it in its
-README — default is the three files above and nothing more.
+1. From `hip/autotune/<op>/`, generate default + old-table candidates:
 
-`BUILD_DIR=out`.
+   ```sh
+   python scripts/update_lut.py rank-seed --from-lut lut/gfx1151.json --out <private>/candidates.csv
+   ```
 
-## Shape coverage (3 tiers)
+   The command writes the candidate CSV, `.seed.json` identities and a
+   `.skipped.json` list with reasons. Only JSON input is supported; FB is
+   compiled from JSON. `--sample 20 --seed 111313` selects reproducible points;
+   `--leaf`, `--dtype`, `--rank-phase decode|prefill`, and `--keys` filter them.
+   Choose `--activation fp16|fp32` for MatMulNBits or
+   `--prefill-kv fp16|int8` for GQA prefill at both seed and import/report steps.
+   These dimensions are absent from the respective schema keys.
+2. Build each selected leaf with
+   `make build RANK=1 BUILD_DIR=out_rank HIP_SDK=<sdk>`. On Windows, add
+   `ADLX_INCLUDE=<ADLX SDK Include directory>` for GPU clock diagnostics.
+3. Run the leaves, inspect the point report, and build a private table:
 
-Every leaf's `test_<op>.cpp` defines, near the top of the file:
+   ```sh
+   python scripts/update_lut.py rank-measure --candidates <private>/candidates.csv --leaf-root <checkout>/lib/Runtime/Kernels/unit_test --out <private>/rank.log
+   python scripts/update_lut.py rank-report --rank-log <private>/rank.log --from-lut lut/gfx1151.json --out <private>/report.csv --md <private>/report.md <op options>
+   python scripts/update_lut.py rank-build --rank-log <private>/rank.log --base lut/gfx1151.json --out <private>/candidate.json <op options>
+   python scripts/update_lut.py compile --out <private>/candidate.json --fb-out <private>/candidate.fb --flatc <flatc>
+   ```
 
-- a small, explicit list (or nested loop) of the op's **categorical
-  situations** — every group_size / zero-points / transpose / bias /
-  head-geometry / window-sink-smooth value the op actually supports for the
-  leaf's dtypes. This list is the same size at every tier.
-- a **short list of typical shapes** on the continuous axes (M/K/N or
-  B/H/G/D/seq) — a handful of values, not a ladder. `COVERAGE` selects a
-  subset of *this* list only (tier3 = all of it, tier2 a smaller subset,
-  tier1 the minimal one — e.g. "1 decode + 1 prefill" point).
+   `<op options>` is `--activation fp16|fp32` for MatMulNBits and
+   `--prefill-kv fp16|int8` for GQA prefill. `rank-measure` runs one native
+   process at a time and accepts `--launcher-json` for the host's execution
+   lease wrapper. `rank-report` validates `UT_RANK` and reports the old/default/
+   winner ratios, effective selection changes, retests, exclusions and costs.
+   `rank-build` preserves weights, fallback/config indices, point order and
+   unrelated fields; unchanged selections retain their exact original index.
+4. Review the private JSON/FB before a separately authorized installation.
 
-A CLI flag `--coverage N` (also settable via env `HIPDNN_UT_COVERAGE`,
-default **3**) picks the tier. At startup the exe prints something like
-`coverage=N -> running <n> typical length(s) x <k> categorical case(s) = <n*k>
-<op> cases` so the actual case count is always visible. `make test
-COVERAGE=N` (any leaf, or the top-level aggregator) builds and runs it.
+The old table geometry is resolved against the leaf's current production
+launch descriptors; its config index is never used as a native ID. The leaf
+resolves its actual no-LUT default and deduplicates old=default before measuring.
+To include all legal configs, run `rank-catalog --candidates <private>/candidates.csv`
+with the same `--leaf-root` and `--out <private>/catalog.log`, then repeat
+`rank-seed ... --with-catalog --catalog <private>/catalog.log`. Catalog expansion
+is optional; ordinary existing-table refresh compares only default and old.
 
-**Per op family:**
+For shapes absent from the old table, a hand-written CSV with
+`leaf,shape,priority,config` and one `default` row per shape remains supported.
+Use `rank-catalog` and `rank-candidates --candidates <seed.csv> --catalog <catalog.log>`
+to expand it. The host contract tests run through `make -C common test`, or
+`python3 common/test_ut_lut_from_table.py`: both existing gfx1151 tables are
+reconstructed from synthetic old-config winners with full parsed JSON equality,
+including skipped points, weights, fallback/config indices and array order.
 
-- **gqa decode/prefill (fp16)**: a fixed list of named real-model +
-  geometry-sweep cases (17 for decode, 75 hand-authored rows for prefill:
-  the original 29, short `sq=128` and long pure-prefill `sq=8192` rows, a
-  set that walks every prefill kernel route, and head_dim 96)
-  crossed with (decode) or fused with (prefill) a typical context-length /
-  prompt-length list (decode: `{128,512,2048,8192}`). Prefill's `O(sq^2)`
-  causal-attention CPU reference is multithreaded over `(batch,
-  query-head)` pairs.
-- **gqa decode/prefill (i8)**: same idea, 13 / 9 named geometries x a typical
-  length list (decode: `{128,512,2048,8192}`; prefill:
-  `{128,256,512,1024,2048}`). The geometries cover head_dim 64, 96 and 128,
-  the range `real/gqa.cpp` accepts for an INT8 KV cache (d256 is rejected
-  there). The i8 prefill leaf's two `O(sq^2)` CPU references (i8-cache +
-  fp16) are also multithreaded over `(batch, query-head)` pairs.
-- **matmul_nbits** (all four bit-widths, fp16 and fp32 activations as
-  separate leaves): `group_size {32,64,128} x zero-points {on,off}` (6
-  combos, always full) x 12 typical `(M,K,N)` shapes — M in
-  `{1,16,64,128,512}` round-robined (not a full M x KN cross) across 4
-  representative real-model `(K,N)` layer families (gate/up-proj, attn-proj,
-  down-proj, o-proj/square). Every shape is ALSO crossed with the full 6-way
-  categorical set, so the shape-list size directly multiplies CPU-reference
-  cost by 6 — the reference
-  (`genCase()`'s `O(M*K*N)`, no BLAS) is now multithreaded over `N` to keep
-  this affordable; see the comment above `genCase()` in any
-  `matmul_nbits/*/test_matmul_nbits*.cpp`.
-- **qmoe_ragged_mm**: routing `{balanced, empty experts, skewed}` x input
-  `{contiguous, FC1 gather}` x bias `{off,on}` x zero points `{off,on}` (24
-  combos) on a shape list COVERAGE thins (tier1 = 1 shape, tier2 = 2, tier3 =
-  4 plus the GPT-OSS-20B FC1/FC2 dimensions). Every tier also runs the row
-  counts on both sides of each GEMV / WMMA16 / WMMA64 boundary, the bucket
-  descriptors, the task-policy and launch-grid selectors, and one
-  FC1 -> SwiGLU -> FC2 pipeline.
-- **gather_block_quantized** (u4, u8 and fp8 weights as separate leaves):
-  compact rows `{off,on}` x indices rank `{1,2}`, crossed for u4 / u8 with
-  zero points `{off,on}` x signedness `{unsigned,signed}` (16 combos) and for
-  fp8 with scale granularity `{per-tensor [1,1], per-row, blockwise}` (12
-  combos), on a shape list COVERAGE thins (tier1 = 2 shapes, tier2 = 4,
-  tier3 = 6; rows `1024..8192`, row length `64..3840`, block size
-  `{16,32,64,128}`, `{1,16,2048}` indices). Every index list includes the first
-  and last rows, negative and out-of-range indices. Outputs are compared
-  bit-exactly with the CPU reference.
-- **cast** (one leaf, `Xany_Yany_bf16`, for every cast with bf16 on one side;
-  see its README for why it is not one leaf per pair): bf16 <-> {f32, f16,
-  f64, i64, i32, i16, i8, u8} and three unsupported pairs, on sizes COVERAGE
-  thins (tier1 = 2 sizes, tier2 = 3, tier3 = 4, up to ~1M elements). Outputs
-  are compared bit-exactly with a CPU reference.
-- **div** (`Xbf16_Wbf16_Ybf16`): bf16 division over every pair of bf16 special
-  values plus seeded random values, and one unsupported dtype, on sizes
-  COVERAGE thins (tier1 = 2 sizes, tier2 = 3, tier3 = 4). Outputs are
-  compared bit-exactly with an fp32-divide-then-round CPU reference.
+Each op's details are in [hip/autotune/matmul_nbits/README.md](../hip/autotune/matmul_nbits/README.md#refresh-through-native-ut-ranking)
+and [hip/autotune/gqa/README.md](../hip/autotune/gqa/README.md#refresh-through-native-ut-ranking).
 
-A new op's test cpp should follow whichever of the above shapes fit it best:
-if the kernel's dispatch paths are better covered by a small hand-picked
-matrix than a blind cross product, hand-enumerate it (gqa style); if the
-categorical axes are truly independent, build the real cross product
-(matmul_nbits style). Either way, the array (or the function that builds it)
-is the single source of truth for what "typical" means for that op.
+## External invocation (`ut_interface.json`)
+
+[`ut_interface.json`](ut_interface.json) lists every input an external caller
+(CI, an agent, a script or a colleague) passes to run these tests, and
+[`common/ut_interface.py`](common/ut_interface.py) turns parameter values into
+commands and runs them. The package installs both in `bin/kernel-tests/`.
+
+Run one case through the controller, from `bin`, so the leaf gets the
+package's HIP runtime, environment, stderr capture and `out/results.csv` rows;
+a leaf executable started directly does not (see "Run" above):
+
+```bat
+cd <install>\bin
+hipdnn-kernel-ut.exe --leaf gqa/prefill/Xfp16_Wfp16_Yfp16 --timing standard -- --b 1 --h 32 --g 8 --d 128 --sq 512 --past 1024 --max-seq 4096
+```
+
+The tool (Python 3.8+, standard library only) builds those arguments from
+parameter names and checks them before anything runs:
+
+```bat
+python kernel-tests\ut_interface.py list
+python kernel-tests\ut_interface.py show qmoe/Xfp16_Wu4_Yfp16
+python kernel-tests\ut_interface.py command qmoe/Xfp16_Wu4_Yfp16 tokens=1 hidden=2048 inter=768 experts=128 topk=8 block_size=32
+python kernel-tests\ut_interface.py run qmoe/Xfp16_Wu4_Yfp16 --bin . tokens=1 hidden=2048 inter=768 experts=128 topk=8 block_size=32
+python kernel-tests\ut_interface.py verify --bin .
+```
+
+`list` shows every leaf's parameters, `show` one leaf's flags, defaults,
+constraints and examples. `command` prints the package command and, when every
+given parameter has a Make variable, the `make test_custom` command of the
+source tree. `run` executes the case and prints its `results.csv` rows.
+`verify` runs every example in the file (default `--timing screen`) and prints
+`PASS` or `FAIL` per example; it exits 0 only when all pass. `run` and
+`verify` replace `bin/out/results.csv` like any controller run.
+
+The file's fields:
+
+- `tool` and `controller`: the commands above; the controller flags
+  (`--leaf`, `--arch`, `--mode`, `--coverage`, `--timing`, `--`), what it
+  passes to each leaf, its exit codes and outputs.
+- `common`: the Make and environment variables every leaf shares. `COVERAGE`
+  (`--coverage`, `HIPDNN_UT_COVERAGE`) selects the shape tier, `TIMING`
+  (`HIPDNN_UT_TIMING`) the timing preset, `MODE` with
+  `HIPDNN_<OP>_AUTOTUNE_MODE` the config source and `RANK` with
+  `HIPDNN_UT_RANK*` LUT ranking; `HIP_SDK`, `OFFLOAD`, `LUT_ARCH`, `FLATC` and
+  `FLATBUFFERS_INC` are build inputs.
+- `leaves[]`: one entry per registered leaf with its `package_executable`,
+  `source`, `capabilities` (`coverage`, `timing` = `shared` or `none`,
+  `mode` = `lookup` or `label_only`, `rank`), the `suite` arguments and
+  `custom`, the leaf's single-case interface:
+  - `selected_by`: what switches the leaf from the suite to one case.
+  - `params[]`: every op input of that case. `name` is what the tool takes;
+    `flag` is the leaf argument (`positional` with a `format` when it has
+    none) and `make` the `make test_custom` variable (`null` when only the
+    executable accepts it; `make_args` names a raw `ARGS=` instead), plus
+    `type`, `choices`, `required` and `description`. `exe_default` and
+    `make_default` can differ: an omitted flag takes `exe_default`, an
+    omitted Make variable `make_default`.
+  - `constraints` in words, and `checks`: Python expressions over parameter
+    names (plus `M`, `K`, `N` of an `MxKxN` shape and `min`) that the tool
+    evaluates on the given values, or `exe_default`, before running.
+- `examples[]`: named runnable cases, `values` (parameter name to value) for a
+  custom case or `coverage` for a suite run; real model shapes that finish in
+  seconds.
+- `diagnostic_flags` and a leaf's own `env` do not change the op inputs.
+- `gaps`: required capabilities a leaf that predates the
+  [guidelines](GUIDELINES.md) still lacks (`custom_shape`, `coverage`,
+  `shared_timer`, `results_csv`, `make_api`, `arch_default`). `custom: null`
+  means the leaf cannot run a caller-chosen shape; its example runs the suite.
+
+Every leaf must have an entry; its required fields are in
+[GUIDELINES.md](GUIDELINES.md#required-entry-for-every-new-leaf).
 
 ## Uniform make API (standalone development)
 
 From `unit_test/`, the whole suite, run the way the CI runs it:
 
 ```
-make test  HIP_SDK=<sdk> [OFFLOAD=--offload-arch=<gfx>] [LUT_ARCH=<gfx>] [MODE=lookup|autotune] [COVERAGE=1|2|3]
+make test  HIP_SDK=<sdk> [OFFLOAD=--offload-arch=<gfx>] [LUT_ARCH=<gfx>] [MODE=lookup|autotune] [COVERAGE=1|2|3] [TIMING=screen|standard|confirm]
 make build ...   # build only
 make clean ...
 ```
@@ -420,8 +397,8 @@ the real chip.
 - `OFFLOAD` defaults to `--offload-arch=gfx11-generic`, the target of the
   `custom_kernels_gfx11-generic.dll` every gfx115x part runs, and the kernels
   build at `-O2` like that DLL, so a test measures the code that ships.
-  For gfx1170 pass `OFFLOAD=--offload-arch=gfx1170` (the release target
-  for it). A chip target such as
+  For gfx1170 or gfx1171 pass `OFFLOAD=--offload-arch=gfx1170` or
+  `--offload-arch=gfx1171`. A chip target such as
   `OFFLOAD=--offload-arch=gfx1151` still works and uses that chip's table.
 - The LUTs are per chip (`lut/gfx1151.fb`, ...), so for a `gfx*-generic`
   target `LUT_ARCH` defaults to the GPU of the machine that builds, read with
@@ -630,3 +607,15 @@ overall `PASS`/`FAIL`.
 
 Each leaf inlines its own ~30-line `CsvWriter`/`CsvRow` (no shared header) —
 see the top of any `test_<op>.cpp`.
+
+## QMoE model-shape profiling
+
+`qmoe/Xfp16_Wu4_Yfp16` measures the actual production QMoE wrapper, including
+top-k routing, decode/grouped expert work, activation and reduction, for
+FP16/packed uint4 fused-SwiGLU softmax-routing signatures. It accepts one
+model shape via `make test_custom ARGS="--tokens 1 --hidden 128 --inter 128
+--experts 4 --topk 2 --block-size 32 --fc1-bias 0 --fc2-bias 0
+--zero-points 0 --normalize 1 --router-weights 0" TIMING=screen`.
+The existing `qmoe_ragged_mm` leaf remains a separate primitive test; its
+timing does not stand for an entire QMoE model node. See the full-wrapper
+leaf README for supported attributes, coverage tiers and timing presets.
