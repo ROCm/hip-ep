@@ -87,7 +87,6 @@ prefix gets one `kernel-tests/<arch>/`, named exactly like that entry's
     hipdnn-kernel-ut-gather-block-quantized-xi64-wu8-yfp16.exe
     hipdnn-kernel-ut-gather-block-quantized-xi64-wfp8-yfp16.exe
     hipdnn-kernel-ut-cast-xany-yany-bf16.exe
-    hipdnn-kernel-ut-gather-nd-xi64-wu8-yu8.exe
 ```
 
 ### Run (on a machine with a supported AMD GPU)
@@ -213,7 +212,6 @@ unit_test/
   qmoe_ragged_mm/Xfp16_Wu4_Yfp16/
   gather_block_quantized/Xi64_W{u4,u8,fp8}_Yfp16/
   cast/Xany_Yany_bf16/
-  gather_nd/Xi64_Wu8_Yu8/
 ```
 
 `unit_test/` holds one directory per op and nothing else besides the files
