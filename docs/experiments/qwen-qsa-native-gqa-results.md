@@ -6,7 +6,7 @@ Licensed under the MIT License.
 
 ## Current evidence
 
-Fresh 64-block native default quality is complete and independently audited. Four-block architecture diagnostics also pass native HIP and frozen Hugging Face numerical controls. Native QSA integration is in progress; no native Qwen QSA accuracy or performance result is established yet.
+Fresh 64-block native default quality is complete and independently audited. Four-block architecture diagnostics pass native HIP and frozen Hugging Face numerical controls. Native QSA integration passes kernel, complete-operator and full-model numerical/dispatch controls; matched dataset accuracy and performance are still pending.
 
 Work is isolated on `codex/qwen-native-qsa`, created after OLMo accuracy report commit `7e0e1e3`. The earlier OLMo branch, binaries and results are preserved. The source sparse-attn project is read-only. Training, fine-tuning, recovery training, distillation, learned calibration and selector updates are zero.
 
@@ -67,6 +67,19 @@ The locked Qwen protocol uses 64 test windows of 4,096 tokens and 128 zero-shot,
 
 All rows pass protocol/data identity and score/count audits. 18 default GSM generations reached the cap. Raw completions and capped cases are retained. No native QSA quality result is implied.
 
+## Native Qwen integration controls
+
+The isolated Qwen native build passes 611 supported compiler tests (nine unsupported) and three compiler/runtime unit tests. Frozen GPU features agree with the canonical CPU fixture within 0.004% relative RMS; tested block IDs and stable ties match exactly. Incremental pools match full prefill exactly. Dedicated batch-four/eight feature and long-index controls qualify those kernels, not full-model batch/long-context feasibility.
+
+The complete native operator, including hipBLASLt BF16 projection and dense-to-sparse cache transition, matches the independent frozen CPU attention oracle within 0.030% relative RMS. Full-model Original/Changed outputs are bit-exact on the tested full-support requests (prefixes 1/17/513/2047 plus four decodes). Sparse 4092+4 versus full prefill differs by 0.07771% relative RMS and replays exactly; first-pruning continuity differs by 0.10323%. ORT profiles verify one EP node dispatch per forward: 20 Original and 39 Changed calls, with unchanged cache addresses.
+
+The validated implementation is committed as `7a71b72` on `codex/qwen-native-qsa`. Both timing variants use the isolated Qwen build and identical backbone bytes. The earlier fresh default remains preserved. Matched quality is independently evaluated below; numerical controls do not substitute for dataset accuracy.
+
+| Metric | Matched native default | Matched native QSA |
+|---|---:|---:|
+| PPL, 64 × 4K | Pending | Pending |
+| GSM8K, 128 questions | Pending | Pending |
+
 ## Separate locked long-context inputs
 
 Before native QSA integration or kernel tuning, four natural documents from the pinned Dolma PDF subcorpus were selected with seed 20261124, one per new shard. Prior Qwen selector-data shards and all train/validation/test document hashes are excluded. The bounded selection also rejects shared 16-token fingerprints with the 128 GSM questions. This is not a semantic contamination guarantee or a corpus-representative sample.
@@ -94,9 +107,9 @@ Source job 303195 now times the exact trained step-128 export used for source ac
 
 These are BF16 MI355X results, not hip-ep measurements or a forecast. The source has two warmup pairs and six measured alternating pairs per shape. Its independent wall phase timers include per-step greedy argmax in decode, and variants can follow different token streams. That protocol remains distinct from the planned native fixed-token timing. Full source tables, raw-trial linkage and ranges are in the read-only `../sparse-attn/QWEN_PERFORMANCE.md` and `docs/reproducibility/qwen-trained-performance.json`. Historical untrained timing remains separate.
 
-## QSA and performance work still required
+## Quality and performance work remaining
 
-Integration is limited to layers 27/31/35/39 using the frozen Qwen-specific projection, three zero-centered norms, token-key normalization before four-token FP32 pooling, partial 64-coordinate RoPE, stable 512 historical-block selection and one causal current block. Preserve full KV storage with selected-address reads and all Gated DeltaNet/default work. The MI355X wave64 implementation needs a faithful wave32 port and dedicated feature/index/cache/numerical controls.
+The native wave32 integration and feature/index/cache/numerical controls above are complete. Only layers 27/31/35/39 are replaced, using the frozen Qwen projection, three zero-centered norms, token-key normalization before four-token FP32 pooling, partial 64-coordinate RoPE, stable 512 historical-block selection and one causal current block. Full KV storage, selected-address reads and all Gated DeltaNet/default work are preserved. Finish the matched PPL/GSM campaign and separate long-document quality runs before drawing accuracy conclusions.
 
 Prefill and decode will be measured independently with a fixed common teacher-forced decode stream, identical session/head/cache work, exact-shape warmups, balanced paired trials and uncertainty. Start with feasible batch-one shapes, expanding only after actual support/memory tests. No native Qwen speedup, slowdown or feasible long-context/batch limit has been measured yet.
 
