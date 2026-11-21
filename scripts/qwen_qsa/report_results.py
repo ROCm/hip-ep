@@ -132,6 +132,68 @@ def audit_quality():
     return receipt
 
 
+def audit_long_quality():
+    folder = WORK / "long-quality-default"
+    if not (folder / "rows.jsonl").exists():
+        return []
+    protocol_path = folder / "protocol.json"
+    protocol = load(protocol_path)
+    data = WORK / "long-quality-v1"
+    manifest = load(data / "manifest.json")
+    assert sha(data / "manifest.json") == protocol["dataset_manifest_sha256"]
+    assert sha(data / "documents.json") == protocol["documents_sha256"]
+    assert protocol["documents_sha256"] == manifest["documents_sha256"]
+    exported = load(WORK / "default-rtn-w4a16-64/export.json")
+    assert protocol["export_onnx_sha256"] == exported["onnx_sha256"]
+    assert protocol["export_data_sha256"] == exported["data_sha256"]
+    documents = load(data / "documents.json")
+    rows = [
+        json.loads(line) for line in (folder / "rows.jsonl").read_text().splitlines()
+    ]
+    assert len({(r["context"], r["index"]) for r in rows}) == len(rows)
+    for row in rows:
+        assert row["protocol_sha256"] == sha(protocol_path)
+        assert row["variant"] == "Original" and row["training_updates"] == 0
+        assert row["context"] in manifest["contexts"] and 0 <= row["index"] < 4
+        document = documents[row["index"]]
+        for name in ["document_sha256", "window_sha256"]:
+            assert row[name] == document[name]
+        assert len(document["input_ids"]) >= row["context"]
+        assert row["targets"] == protocol["scored_suffix_targets"] == 1023
+        assert row["finite"] and math.isfinite(row["nll_sum"]) and row["nll_sum"] > 0
+    summary = []
+    for context in sorted(manifest["contexts"]):
+        selected = [r for r in rows if r["context"] == context]
+        if len(selected) == 4:
+            targets = sum(r["targets"] for r in selected)
+            nll = sum(r["nll_sum"] for r in selected) / targets
+            summary.append(
+                {
+                    "context": context,
+                    "documents": 4,
+                    "targets": targets,
+                    "nll": nll,
+                    "ppl": math.exp(nll),
+                }
+            )
+    (folder / "audit.json").write_text(
+        json.dumps(
+            {
+                "state": "complete"
+                if len(summary) == len(manifest["contexts"])
+                else "partial",
+                "protocol_sha256": sha(protocol_path),
+                "rows_sha256": sha(folder / "rows.jsonl"),
+                "rows": summary,
+                "training_updates": 0,
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    return summary
+
+
 def main():
     verified = load(WORK / "handoff-verification.json")
     support = load(WORK / "native-support.json")
@@ -139,6 +201,7 @@ def main():
     reference = load(WORK / "default-4-reference.json")
     assert all(x["status"] == "passed" for x in [verified, support, probe, reference])
     quality = audit_quality()
+    long_quality = audit_long_quality()
     trained_path = SOURCE / "docs/reproducibility/qwen-trained-performance.json"
     trained = load(trained_path)
     assert trained["state"] == "passed" and trained["job"] == "303195"
@@ -169,7 +232,7 @@ def main():
         "",
         "## Current evidence",
         "",
-        "The verified frozen Qwen payload has been imported on CPU, and a four-block default architecture diagnostic passes native HIP and frozen Hugging Face numerical controls. Full 64-block default quality must be established before QSA integration. No native Qwen QSA accuracy or performance result is established yet.",
+        "Fresh 64-block native default quality is complete and independently audited. Four-block architecture diagnostics also pass native HIP and frozen Hugging Face numerical controls. Native QSA integration is in progress; no native Qwen QSA accuracy or performance result is established yet.",
         "",
         "Work is isolated on `codex/qwen-native-qsa`, created after OLMo accuracy report commit `7e0e1e3`. The earlier OLMo branch, binaries and results are preserved. The source sparse-attn project is read-only. Training, fine-tuning, recovery training, distillation, learned calibration and selector updates are zero.",
         "",
@@ -189,7 +252,7 @@ def main():
         "",
         "## Target representation and native behavior",
         "",
-        f"The target is **{probe['gpu']}**, gfx1151/wave32, with {support['ram_total_bytes'] / 2**30:.2f} GiB physical shared memory. The native probe uses PyTorch {probe['torch']}, HIP {probe['hip']} and Transformers {support['transformers']}. The isolated `_local/qwen-qsa/install` copies the unchanged four hash-verified OLMo native compiler/runtime binaries; no Qwen kernel change or rebuild has occurred at this stage.",
+        f"The target is **{probe['gpu']}**, gfx1151/wave32, with {support['ram_total_bytes'] / 2**30:.2f} GiB physical shared memory. The native probe uses PyTorch {probe['torch']}, HIP {probe['hip']} and Transformers {support['transformers']}. The default measurements use `_local/qwen-qsa/install`, which preserves the unchanged four hash-verified OLMo native compiler/runtime binaries. The Qwen port uses a separate build/install directory.",
         "",
         "Native GQA currently supports FP16/FP32 rather than BF16. Full text FP16 weights alone occupy about 50.10 GiB before GPU cache/workspaces and host/compiler copies. A fresh deterministic RTN W4A16 group128 backbone is therefore selected for this machine; small Gated DeltaNet a/b projections, embedding and output head remain FP16. Both later variants must use these exact exported backbone bytes. This is a new conversion from the official checkpoint, with its own default accuracy; it is not a restart of Qwen MXFP4 or reuse of earlier quantized accuracy claims.",
         "",
@@ -266,10 +329,24 @@ def main():
         "",
         "Before native QSA integration or kernel tuning, four natural documents from the pinned Dolma PDF subcorpus were selected with seed 20261124, one per new shard. Prior Qwen selector-data shards and all train/validation/test document hashes are excluded. The bounded selection also rejects shared 16-token fingerprints with the 128 GSM questions. This is not a semantic contamination guarantee or a corpus-representative sample.",
         "",
-        f"Each document supplies nested 16K and 32K prefix trials, scoring the final 1,023 next-token targets at each length. The four locked windows contain 32,896 tokens each, including a 128-token reserve. The document file SHA256 is `{long_manifest['documents_sha256']}`. These inputs have no native long-context accuracy result yet; they will be reported separately from the 4K and GSM diagnostics.",
+        f"Each document supplies nested 16K and 32K prefix trials, scoring the final 1,023 next-token targets at each length. The four locked windows contain 32,896 tokens each, including a 128-token reserve. The document file SHA256 is `{long_manifest['documents_sha256']}`. These suffix scores are reported separately from the 4K and GSM diagnostics.",
         "",
         f"The timing inputs are separately frozen under `_local/qwen-qsa/timing-v1/`, SHA256 `{timing['streams_sha256']}`. Eight common 65,600-token streams concatenate the earlier locked 4K test windows. They support candidate prefix lengths 4K/16K/32K/64K with 64 teacher-forced decode calls, and candidate batches 1/4/8. The protocol declares two warmup pairs and six measured alternating pairs. These are candidate shapes rather than claims of memory/support, and these concatenations are timing inputs rather than natural long-document quality evidence.",
     ]
+    if long_quality:
+        lines += [
+            "",
+            "| Natural-document prefix | Default suffix PPL | Native trained QSA |",
+            "|---|---:|---|",
+        ]
+        for row in long_quality:
+            lines.append(
+                f"| {row['context'] // 1024}K, four documents / {row['targets']:,} targets | {row['ppl']:.6f} | Pending |"
+            )
+        lines += [
+            "",
+            "All listed long-context default outputs were finite and pass document, protocol, row-count and target-count audits. This four-document diagnostic is not a corpus-wide accuracy claim.",
+        ]
     lines += [
         "",
         "## Updated MI355X trained reference",
@@ -292,7 +369,7 @@ def main():
         "",
         "## QSA and performance work still required",
         "",
-        "After default quality is established, integrate only layers 27/31/35/39 using the frozen Qwen-specific projection, three zero-centered norms, token-key normalization before four-token FP32 pooling, partial 64-coordinate RoPE, stable 512 historical-block selection and one causal current block. Preserve full KV storage with selected-address reads and all Gated DeltaNet/default work. The MI355X wave64 implementation needs a faithful wave32 port and dedicated feature/index/cache/numerical controls.",
+        "Integration is limited to layers 27/31/35/39 using the frozen Qwen-specific projection, three zero-centered norms, token-key normalization before four-token FP32 pooling, partial 64-coordinate RoPE, stable 512 historical-block selection and one causal current block. Preserve full KV storage with selected-address reads and all Gated DeltaNet/default work. The MI355X wave64 implementation needs a faithful wave32 port and dedicated feature/index/cache/numerical controls.",
         "",
         "Prefill and decode will be measured independently with a fixed common teacher-forced decode stream, identical session/head/cache work, exact-shape warmups, balanced paired trials and uncertainty. Start with feasible batch-one shapes, expanding only after actual support/memory tests. No native Qwen speedup, slowdown or feasible long-context/batch limit has been measured yet.",
         "",
@@ -311,6 +388,7 @@ def main():
         json.dumps(
             {
                 "default_quality": quality,
+                "default_long_quality": long_quality,
                 "native_qsa_results": False,
                 "baseline_established": quality["state"] == "complete",
                 "long_quality_manifest_sha256": sha(long_manifest_path),

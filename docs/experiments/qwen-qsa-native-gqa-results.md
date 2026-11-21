@@ -6,7 +6,7 @@ Licensed under the MIT License.
 
 ## Current evidence
 
-The verified frozen Qwen payload has been imported on CPU, and a four-block default architecture diagnostic passes native HIP and frozen Hugging Face numerical controls. Full 64-block default quality must be established before QSA integration. No native Qwen QSA accuracy or performance result is established yet.
+Fresh 64-block native default quality is complete and independently audited. Four-block architecture diagnostics also pass native HIP and frozen Hugging Face numerical controls. Native QSA integration is in progress; no native Qwen QSA accuracy or performance result is established yet.
 
 Work is isolated on `codex/qwen-native-qsa`, created after OLMo accuracy report commit `7e0e1e3`. The earlier OLMo branch, binaries and results are preserved. The source sparse-attn project is read-only. Training, fine-tuning, recovery training, distillation, learned calibration and selector updates are zero.
 
@@ -26,7 +26,7 @@ The official local snapshot and selector/data payloads remain unchanged. No OLMo
 
 ## Target representation and native behavior
 
-The target is **AMD Radeon(TM) 8060S Graphics**, gfx1151/wave32, with 63.78 GiB physical shared memory. The native probe uses PyTorch 2.13.0+rocm10.0.0, HIP 7.15.26333 and Transformers 5.19.0. The isolated `_local/qwen-qsa/install` copies the unchanged four hash-verified OLMo native compiler/runtime binaries; no Qwen kernel change or rebuild has occurred at this stage.
+The target is **AMD Radeon(TM) 8060S Graphics**, gfx1151/wave32, with 63.78 GiB physical shared memory. The native probe uses PyTorch 2.13.0+rocm10.0.0, HIP 7.15.26333 and Transformers 5.19.0. The default measurements use `_local/qwen-qsa/install`, which preserves the unchanged four hash-verified OLMo native compiler/runtime binaries. The Qwen port uses a separate build/install directory.
 
 Native GQA currently supports FP16/FP32 rather than BF16. Full text FP16 weights alone occupy about 50.10 GiB before GPU cache/workspaces and host/compiler copies. A fresh deterministic RTN W4A16 group128 backbone is therefore selected for this machine; small Gated DeltaNet a/b projections, embedding and output head remain FP16. Both later variants must use these exact exported backbone bytes. This is a new conversion from the official checkpoint, with its own default accuracy; it is not a restart of Qwen MXFP4 or reuse of earlier quantized accuracy claims.
 
@@ -63,17 +63,24 @@ The locked Qwen protocol uses 64 test windows of 4,096 tokens and 128 zero-shot,
 | Metric | Native default | Native trained QSA |
 |---|---:|---|
 | PPL, 64 × 4K windows | 5.968688 | Pending |
-| GSM8K, 128 questions | In progress | Pending |
+| GSM8K, 128 questions | 111/128 (86.72%) | Pending |
 
-All 64 native default PPL windows are complete and pass the frozen protocol/count audit. The 128-question default GSM campaign is still in progress. No native QSA quality result is established yet.
+All rows pass protocol/data identity and score/count audits. 18 default GSM generations reached the cap. Raw completions and capped cases are retained. No native QSA quality result is implied.
 
 ## Separate locked long-context inputs
 
 Before native QSA integration or kernel tuning, four natural documents from the pinned Dolma PDF subcorpus were selected with seed 20261124, one per new shard. Prior Qwen selector-data shards and all train/validation/test document hashes are excluded. The bounded selection also rejects shared 16-token fingerprints with the 128 GSM questions. This is not a semantic contamination guarantee or a corpus-representative sample.
 
-Each document supplies nested 16K and 32K prefix trials, scoring the final 1,023 next-token targets at each length. The four locked windows contain 32,896 tokens each, including a 128-token reserve. The document file SHA256 is `a91f55b001e2e345072ee9da3f329e90486739e4d405e21d3cf889345889b3a4`. These inputs have no native long-context accuracy result yet; they will be reported separately from the 4K and GSM diagnostics.
+Each document supplies nested 16K and 32K prefix trials, scoring the final 1,023 next-token targets at each length. The four locked windows contain 32,896 tokens each, including a 128-token reserve. The document file SHA256 is `a91f55b001e2e345072ee9da3f329e90486739e4d405e21d3cf889345889b3a4`. These suffix scores are reported separately from the 4K and GSM diagnostics.
 
 The timing inputs are separately frozen under `_local/qwen-qsa/timing-v1/`, SHA256 `5c8ac2934c8f90d049337e50ea89b95a0c427c1b9b21291cc9d18de1827e567b`. Eight common 65,600-token streams concatenate the earlier locked 4K test windows. They support candidate prefix lengths 4K/16K/32K/64K with 64 teacher-forced decode calls, and candidate batches 1/4/8. The protocol declares two warmup pairs and six measured alternating pairs. These are candidate shapes rather than claims of memory/support, and these concatenations are timing inputs rather than natural long-document quality evidence.
+
+| Natural-document prefix | Default suffix PPL | Native trained QSA |
+|---|---:|---|
+| 16K, four documents / 4,092 targets | 6.409937 | Pending |
+| 32K, four documents / 4,092 targets | 5.942933 | Pending |
+
+All listed long-context default outputs were finite and pass document, protocol, row-count and target-count audits. This four-document diagnostic is not a corpus-wide accuracy claim.
 
 ## Updated MI355X trained reference
 
@@ -89,7 +96,7 @@ These are BF16 MI355X results, not hip-ep measurements or a forecast. The source
 
 ## QSA and performance work still required
 
-After default quality is established, integrate only layers 27/31/35/39 using the frozen Qwen-specific projection, three zero-centered norms, token-key normalization before four-token FP32 pooling, partial 64-coordinate RoPE, stable 512 historical-block selection and one causal current block. Preserve full KV storage with selected-address reads and all Gated DeltaNet/default work. The MI355X wave64 implementation needs a faithful wave32 port and dedicated feature/index/cache/numerical controls.
+Integration is limited to layers 27/31/35/39 using the frozen Qwen-specific projection, three zero-centered norms, token-key normalization before four-token FP32 pooling, partial 64-coordinate RoPE, stable 512 historical-block selection and one causal current block. Preserve full KV storage with selected-address reads and all Gated DeltaNet/default work. The MI355X wave64 implementation needs a faithful wave32 port and dedicated feature/index/cache/numerical controls.
 
 Prefill and decode will be measured independently with a fixed common teacher-forced decode stream, identical session/head/cache work, exact-shape warmups, balanced paired trials and uncertainty. Start with feasible batch-one shapes, expanding only after actual support/memory tests. No native Qwen speedup, slowdown or feasible long-context/batch limit has been measured yet.
 
