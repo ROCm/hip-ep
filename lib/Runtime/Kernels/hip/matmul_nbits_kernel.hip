@@ -3072,7 +3072,13 @@ static int getOrTuneDp4aMConfig(
 // K=320 N=10240 9.8 vs 11.5 us, K=256 N=2560 2.9 vs 4.2, K=160 N=8192 4.7 vs
 // 8.0, K=512 N=2048 4.0 vs 4.3. Untuned: every shape it accepts measured
 // faster with one 32-thread block per COLS columns.
-template <int LPR>
+//
+// HAS_ZP is a template parameter, not a null check: the runtime branch on zp
+// between the weight load and the activation loads cost 0.8-2.5 us at
+// K=512 N=2048 (symmetric weights, 7.3-8.4 vs 4.9-7.6 us), 0.1-0.2 us at
+// K=256 and K=320. Several waves per block (one per COLS columns) measured
+// slower at every shape.
+template <int LPR, bool HAS_ZP>
 __global__ __attribute__((amdgpu_waves_per_eu(1, 16)))
 void matmul_nbits_gemv_dp4a_shortk_kernel(
     const int8_t*  __restrict__ a_qb,
@@ -3102,7 +3108,9 @@ void matmul_nbits_gemv_dp4a_shortk_kernel(
         const uint4 b =
             *reinterpret_cast<const uint4*>(B + n * (K / 2) + idx * 16);
         const float sv = static_cast<float>(scales[n * k_blocks + grp]);
-        const int zv = zp ? static_cast<int>(zp[n * k_blocks + grp]) : 8;
+        int zv = 8;
+        if constexpr (HAS_ZP)
+            zv = static_cast<int>(zp[n * k_blocks + grp]);
         const int8_t* aq = a_qb + idx * 32;
         int a_lo[4], a_hi[4], a_sum = 0;
 #pragma unroll
@@ -3168,9 +3176,16 @@ static bool launchDp4aShortK(hipStream_t stream, const int8_t* a_qb,
     switch (chunks) {
 #define DP4A_SHORTK_CASE(C)                                                     \
     case C:                                                                     \
-        hipLaunchKernelGGL(HIP_KERNEL_NAME(matmul_nbits_gemv_dp4a_shortk_kernel<C>), \
-                           dim3(grid), dim3(32), 0, stream, a_qb, a_sc, B, sc,  \
-                           zp, bi, out, N, K, block_size);                      \
+        if (zp)                                                                 \
+            hipLaunchKernelGGL(                                                 \
+                HIP_KERNEL_NAME(matmul_nbits_gemv_dp4a_shortk_kernel<C, true>), \
+                dim3(grid), dim3(32), 0, stream, a_qb, a_sc, B, sc, zp, bi,     \
+                out, N, K, block_size);                                         \
+        else                                                                    \
+            hipLaunchKernelGGL(                                                 \
+                HIP_KERNEL_NAME(matmul_nbits_gemv_dp4a_shortk_kernel<C, false>), \
+                dim3(grid), dim3(32), 0, stream, a_qb, a_sc, B, sc, zp, bi,     \
+                out, N, K, block_size);                                         \
         return true;
     DP4A_SHORTK_CASE(1)  DP4A_SHORTK_CASE(2)  DP4A_SHORTK_CASE(3)
     DP4A_SHORTK_CASE(4)  DP4A_SHORTK_CASE(5)  DP4A_SHORTK_CASE(6)
