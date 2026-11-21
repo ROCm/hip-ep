@@ -457,6 +457,14 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
     fprintf(stderr, "Invalid state in wrap_hipblasLtMatmul\n");
     return -1;
   }
+  // Same types as the real runtime, so a mock run cannot pass one it rejects.
+  if (data_type != HIPDNN_EP_DATATYPE_FLOAT &&
+      data_type != HIPDNN_EP_DATATYPE_HALF &&
+      data_type != HIPDNN_EP_DATATYPE_BFLOAT16) {
+    fprintf(stderr, "wrap_hipblasLtMatmul: unsupported data_type %s (%lld)\n",
+            hipdnn_ep_datatype_name(data_type), (long long)data_type);
+    return -1;
+  }
 
   MOCK_PRINT("[MOCK] wrap_hipblasLtMatmul(M=%lld, N=%lld, K=%lld, "
              "batch=%lld, data_type=%s, transA=%lld, transB=%lld)\n",

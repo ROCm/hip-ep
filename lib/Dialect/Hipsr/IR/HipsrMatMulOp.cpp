@@ -146,12 +146,17 @@ struct MatMulLowering : ConvertOpToLLVMPattern<MatMulOp> {
       return rewriter.notifyMatchFailure(
           op, "operands must be memrefs (run bufferization first)");
     }
-    // Pass the element type (HIPDNN_EP_DATATYPE_*), not its byte size: f16
-    // and bf16 are both 2 bytes but need different hipBLASLt types.
-    int64_t dataType = getHipdnnDataType(aType.getElementType());
-    if (dataType < 0) {
+
+    Type elemType = aType.getElementType();
+    if (elemType != bType.getElementType() ||
+        elemType != outputType.getElementType()) {
+      return rewriter.notifyMatchFailure(op, "mixed element types");
+    }
+
+    if (!elemType.isF32() && !elemType.isF16() && !elemType.isBF16()) {
       return rewriter.notifyMatchFailure(op, "unsupported element type");
     }
+    int64_t dataType = getHipdnnDataType(elemType);
 
     Type i64Type = rewriter.getI64Type();
     auto createI64Const = [&](int64_t value) {

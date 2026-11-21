@@ -32,11 +32,16 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
                                       rewriter.getI64IntegerAttr(value));
     };
 
-    // Pass the element type (HIPDNN_EP_DATATYPE_*), not its byte size: f16
-    // and bf16 are both 2 bytes but need different hipBLASLt types. Checked
-    // before any IR is created so a failed match leaves the op untouched.
-    int64_t dataType = getHipdnnDataType(
-        cast<MemRefType>(op.getA().getType()).getElementType());
+    // The runtime takes one data_type (HIPDNN_EP_DATATYPE_*) for A, B and the
+    // output, so they must share it. Pass the type, not its byte size: f16
+    // and bf16 are both 2 bytes. Checked before any IR is created.
+    auto AType = cast<MemRefType>(op.getA().getType());
+    auto BType = cast<MemRefType>(op.getB().getType());
+    Type elemType = AType.getElementType();
+    if (elemType != BType.getElementType() ||
+        elemType != cast<MemRefType>(op.getOutput().getType()).getElementType())
+      return rewriter.notifyMatchFailure(op, "mixed element types");
+    int64_t dataType = getHipdnnDataType(elemType);
     if (dataType < 0)
       return rewriter.notifyMatchFailure(op, "unsupported element type");
 
@@ -48,8 +53,6 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
         extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
     // Get memref types and shapes
-    auto AType = cast<MemRefType>(op.getA().getType());
-    auto BType = cast<MemRefType>(op.getB().getType());
     int64_t ARank = AType.getRank();
     int64_t BRank = BType.getRank();
     int64_t transA = op.getTransA();
@@ -150,7 +153,7 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
     // integer kernel instead, or the bits are interpreted as floats. The
     // kernel still needs B's batch stride: 0 reuses one matrix, K*N steps
     // to the next. Omitting it made a rank-2 B look batch-contiguous.
-    if (AType.getElementType().isInteger(32)) {
+    if (elemType.isInteger(32)) {
       if (transA || transB)
         return op.emitError("hip.matmul of i32 does not support transpose");
       SmallVector<Type, 9> i32Params = {ptrType, ptrType, ptrType,
