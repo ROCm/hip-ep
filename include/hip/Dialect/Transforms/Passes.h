@@ -26,6 +26,7 @@ enum class ConstantMetadataSourceKind : int32_t {
   Splat = 1,
   File = 2,
   Memory = 3,
+  DiskFile = 4,
 };
 
 #define GEN_PASS_DECL

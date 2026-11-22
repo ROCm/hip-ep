@@ -95,6 +95,33 @@ class TestCumSum:
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=0)
 
+    @pytest.mark.parametrize("exclusive", [0, 1])
+    @pytest.mark.parametrize("reverse", [0, 1])
+    @pytest.mark.parametrize(
+        "dtype,shape,axis",
+        [
+            (np.int32, [16416], 0),
+            (np.int64, [2, 700, 3], 1),
+            (np.float32, [3, 1000], 1),
+            (np.float16, [1, 300], 1),
+        ],
+    )
+    def test_cumsum_long_axis(
+        self, model_runner, dtype, shape, axis, exclusive, reverse
+    ):
+        model = _make_cumsum_model(
+            dtype, shape, axis, exclusive=exclusive, reverse=reverse
+        )
+        rng = np.random.default_rng(504)
+        if np.issubdtype(dtype, np.integer):
+            x = rng.integers(-5, 5, shape, dtype=dtype)
+            atol = 0
+        else:
+            x = rng.uniform(-0.5, 0.5, shape).astype(dtype)
+            atol = 2e-2 if dtype == np.float16 else 1e-4
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=atol, rtol=1e-3)
+
     @pytest.mark.parametrize("seq_len", SEQ_LENS)
     def test_cumsum_position_ids_shape(self, model_runner, seq_len):
         """i64 [1, S], axis=1 -- the canonical attention-mask -> position

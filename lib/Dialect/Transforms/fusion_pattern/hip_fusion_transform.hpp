@@ -30,6 +30,7 @@
 
 #include "hip/Dialect/IR/HipDialect.h"
 
+#include "linear_attention_group_fold.hpp"
 #include "patch_embed_conv_to_gemm.hpp"
 #include "swiglu_fusion.hpp"
 
@@ -269,6 +270,26 @@ isHipQdqUnsignedQuantized(mlir::PatternRewriter &, mlir::PDLResultList &,
   // kernel written for one of them can absorb. Kept separate from the width
   // check because the two are independent properties of the same operand.
   return mlir::success(intType && intType.isUnsigned());
+}
+
+/// every op is a Q/DQ and all of them share one quantized element type
+inline mlir::LogicalResult
+hasSameHipQdqElementType(mlir::PatternRewriter &, mlir::PDLResultList &,
+                         llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.empty())
+    return mlir::failure();
+  mlir::IntegerType first;
+  for (const mlir::PDLValue &arg : args) {
+    auto intType =
+        getQdqQuantizedElementType(arg.dyn_cast<mlir::Operation *>());
+    if (!intType || (first && intType != first))
+      return mlir::failure();
+    first = intType;
+  }
+  // The quantized elementwise kernels take one data type for both operands
+  // and the output, so a mixed chain such as a uint16 activation plus an int8
+  // constant would read the narrower operand at the wider width.
+  return mlir::success();
 }
 
 /// rms computes an L2 normalization over the trailing axis
@@ -797,6 +818,8 @@ inline void registerNativeHelpers(mlir::PDLPatternModule &pdlPatterns) {
                                          isHipQdqQuantizedWidth);
   pdlPatterns.registerConstraintFunction("IsHipQdqUnsignedQuantized",
                                          isHipQdqUnsignedQuantized);
+  pdlPatterns.registerConstraintFunction("HasSameHipQdqElementType",
+                                         hasSameHipQdqElementType);
   pdlPatterns.registerConstraintFunction("IsHipFusableQConvGeometry",
                                          isHipFusableQConvGeometry);
   pdlPatterns.registerConstraintFunction("IsHipPerAxisQuantizedWeight",
@@ -838,6 +861,9 @@ constexpr unsigned kPatchEmbedConvToGemmBenefit = 5;
 /// consumes it.
 constexpr unsigned kSwigluFusionBenefit = 2;
 
+/// The only pattern rooted at `hip.linear_attention`.
+constexpr unsigned kLinearAttentionGroupFoldBenefit = 1;
+
 /// apply this directory's patterns to every function body in module, failure
 /// means the embedded PDLL patterns will not parse or the driver failed
 ///
@@ -853,6 +879,8 @@ inline mlir::LogicalResult run(mlir::ModuleOp module,
       patterns, mlir::PatternBenefit(kPatchEmbedConvToGemmBenefit));
   populateSwigluFusionPattern(patterns,
                               mlir::PatternBenefit(kSwigluFusionBenefit));
+  populateLinearAttentionGroupFoldPattern(
+      patterns, mlir::PatternBenefit(kLinearAttentionGroupFoldBenefit));
 
   // pdl patterns here
   if (pdlBuffer.getBufferSize() != 0) {

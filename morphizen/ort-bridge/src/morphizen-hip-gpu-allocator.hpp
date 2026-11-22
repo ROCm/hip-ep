@@ -97,11 +97,11 @@ inline constexpr SizeClassTable kSizeClassTable = BuildSizeClasses();
 inline constexpr const size_t *kSizeClasses = detail::kSizeClassTable.data;
 inline constexpr size_t kNumSizeClasses = detail::kSizeClassTable.count;
 
-// hipHostMalloc(Mapped|Coherent) backed OrtAllocator. One instance is created
-// per OrtMemoryInfo registered with OrtEpDevice (typically one DEFAULT GPU
+// hipHostMalloc(Mapped|Coherent) backed OrtAllocator. The factory keeps one
+// instance per (device memory type, device id) (typically one DEFAULT GPU
 // info and one HOST_ACCESSIBLE info — both currently route to the same
 // mapped pinned allocator, since AMD APU iGPU shares physical memory with
-// the host). ORT keeps the allocator alive for the matching session.
+// the host) and shares it across sessions.
 struct HipGpuAllocator : OrtAllocator {
   // memory_info ownership stays with the factory. The OrtMemoryInfo's
   // device_id (extracted via OrtApi::MemoryInfoGetId at construction time)
@@ -111,8 +111,8 @@ struct HipGpuAllocator : OrtAllocator {
   // device 0).
   HipGpuAllocator(const OrtMemoryInfo *memory_info, const OrtApi &api);
   // Frees every pinned buffer this allocator ever handed out (both the
-  // currently-free pool entries and any still checked out). Called by the
-  // factory's ReleaseAllocator at session teardown.
+  // currently-free pool entries and any still checked out). Runs when the
+  // owning factory is released.
   ~HipGpuAllocator();
 
 private:
@@ -143,8 +143,8 @@ private:
   // most a few distinct class sizes regardless of how many dynamic shapes the
   // model sees). Pooled (<= 16 MB) buffers are never returned to the driver in
   // Free; they are released wholesale in the destructor — matching the
-  // project's per-session "grow-on-demand, never shrink, free at cleanup"
-  // memory contract.
+  // project's "grow-on-demand, never shrink, free at cleanup" memory
+  // contract.
   //
   // Requests above 16 MB bypass the classes: each is allocated at exactly its
   // size and returned to the driver on Free. The exception is a tensor that is
@@ -225,6 +225,9 @@ private:
   // (e.g. degenerate / fake OrtMemoryInfo); AllocImpl falls back to the
   // current HIP device in that case rather than failing the allocation.
   int device_id_;
+  // DEFAULT memory comes from hipMalloc (not host-dereferenceable) unless
+  // MORPHIZEN_DEFAULT_HIPMALLOC=0; HOST_ACCESSIBLE stays hipHostMalloc.
+  bool device_only_;
 };
 
 // hipMemcpy / hipMemcpyAsync based OrtDataTransferImpl. A single shared

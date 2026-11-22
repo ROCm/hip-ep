@@ -5,6 +5,8 @@
 
 add_library(HipToLLVM STATIC
   HipToLLVM.cpp
+  HostScalarAnalysis.cpp
+  RuntimeAccessInterface.cpp
   MemoryLowering.cpp
   ConvLowering.cpp
   ConvTransposeLowering.cpp
@@ -21,6 +23,7 @@ add_library(HipToLLVM STATIC
   GatherElementsLowering.cpp
   TopKLowering.cpp
   RandomNormalLikeLowering.cpp
+  ArgMaxLowering.cpp
   ScatterElementsLowering.cpp
   CompressLowering.cpp
   OneHotLowering.cpp
@@ -34,12 +37,14 @@ add_library(HipToLLVM STATIC
   QwenQsaGqaLowering.cpp
   MultiHeadAttentionLowering.cpp
   MatMulNBitsLowering.cpp
+  DequantBnb4Lowering.cpp
   QMoELowering.cpp
   QMoEAmdLowering.cpp
   GatherBlockQuantizedLowering.cpp
   QdqLowering.cpp
   GraphLowering.cpp
   CausalConvWithStateLowering.cpp
+  NGramHashMappingLowering.cpp
   GemmLowering.cpp
   WhereLowering.cpp
   EqualLowering.cpp
@@ -47,6 +52,9 @@ add_library(HipToLLVM STATIC
   AndLowering.cpp
   DivLowering.cpp
   LinearAttentionLowering.cpp
+  GatedDeltaNetLowering.cpp
+  DynamicSparseAttentionLowering.cpp
+  SparseAttentionIndexerLowering.cpp
   UnaryElementwiseLowering.cpp
   CumSumLowering.cpp
   PadLowering.cpp
@@ -58,14 +66,17 @@ add_library(HipToLLVM STATIC
   SliceLowering.cpp
   ScatterNDLowering.cpp
   NonZeroLowering.cpp
+  NonMaxSuppressionLowering.cpp
   ReadbackDimLowering.cpp
   ReadbackScalarLowering.cpp
   SizeLowering.cpp
   LoopLowering.cpp
+  ScanLowering.cpp
   IfLowering.cpp
   PoolLowering.cpp
   ResizeLowering.cpp
   GridSampleLowering.cpp
+  RoiAlignLowering.cpp
   GlobalPoolLowering.cpp
   QElementwiseLowering.cpp
   QMatMulLowering.cpp
@@ -90,6 +101,7 @@ target_link_libraries(HipToLLVM PUBLIC
   MLIRLLVMDialect
   MLIRLLVMCommonConversion
   MLIRMemRefDialect
+  MLIRBufferizationTransforms
   MLIRTransforms
   MLIRArithTransforms
   # convert-hip-to-llvm populates the standard dialect->LLVM lowering patterns
@@ -105,3 +117,8 @@ target_link_libraries(HipToLLVM PUBLIC
   # implement this interface. See the guarded walk in HipToLLVM.cpp.
   MLIRConvertToLLVMInterface
 )
+
+# Guard dtype before the unchanged runtime ABI reduces it to byte width.
+if(HIP_EP_RING_ENABLED)
+    target_compile_definitions(HipToLLVM PRIVATE HIP_EP_RING_ENABLED=${HIP_EP_RING_ENABLED})
+endif()

@@ -50,6 +50,9 @@ int64_t mlir::hipsr::getHipdnnDataType(Type elemType) {
   if (elemType.isInteger(16)) {
     return HIPDNN_EP_DATATYPE_INT16;
   }
+  if (isa<Float8E4M3FNType>(elemType)) {
+    return HIPDNN_EP_DATATYPE_FLOAT8E4M3FN;
+  }
   return HIPDNN_EP_DATATYPE_UNSUPPORTED;
 }
 

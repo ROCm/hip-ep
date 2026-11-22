@@ -329,3 +329,165 @@ extern "C" int hip_rope_forward(
 
   return 0;
 }
+
+static __device__ __forceinline__ int mrope_stream(
+    int col, int layout, int section_t, int section_h, int section_w) {
+  if (layout == 0) {
+    if (col < section_t) {
+      return 0;
+    }
+    return col < section_t + section_h ? 1 : 2;
+  }
+  if (col % 3 == 1 && col < 3 * section_h) {
+    return 1;
+  }
+  if (col % 3 == 2 && col < 3 * section_w) {
+    return 2;
+  }
+  return 0;
+}
+
+// One thread per (token, head, j): j < half rotates the pair (j, j + half),
+// j >= half copies channel rotary_dim + (j - half).
+template <typename T>
+__global__ void mrope_half_rotated_kernel(
+    const T* __restrict__ input,
+    const int64_t* __restrict__ position_ids,
+    const T* __restrict__ cos_cache,
+    const T* __restrict__ sin_cache,
+    T* __restrict__ output,
+    int total,
+    int num_tokens,
+    int num_heads,
+    int head_dim,
+    int rotary_dim,
+    int half_rot,
+    int per_head,
+    int max_position,
+    int section_t,
+    int section_h,
+    int section_w,
+    int layout,
+    float scale) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= total) {
+    return;
+  }
+  int j = idx % per_head;
+  int token_head = idx / per_head;
+  int64_t base = static_cast<int64_t>(token_head) * head_dim;
+
+  if (j >= half_rot) {
+    int64_t d = base + rotary_dim + (j - half_rot);
+    output[d] = input[d];
+    return;
+  }
+
+  int token = token_head / num_heads;
+  int stream = mrope_stream(j, layout, section_t, section_h, section_w);
+  int64_t pos =
+      position_ids[static_cast<int64_t>(stream) * num_tokens + token];
+  int64_t i0 = base + j;
+  int64_t i1 = i0 + half_rot;
+  if (pos < 0 || pos >= max_position) {
+    output[i0] = input[i0];
+    output[i1] = input[i1];
+    return;
+  }
+
+  int64_t c = pos * half_rot + j;
+  float cs = static_cast<float>(
+      static_cast<T>(static_cast<float>(cos_cache[c]) * scale));
+  float sn = static_cast<float>(
+      static_cast<T>(static_cast<float>(sin_cache[c]) * scale));
+  float x0 = static_cast<float>(input[i0]);
+  float x1 = static_cast<float>(input[i1]);
+  output[i0] = static_cast<T>(x0 * cs - x1 * sn);
+  output[i1] = static_cast<T>(x1 * cs + x0 * sn);
+}
+
+extern "C" int hip_mrope_forward(
+    void* stream_ptr,
+    const void* input,
+    const void* position_ids,
+    const void* cos_cache,
+    const void* sin_cache,
+    void* output,
+    int64_t batch_size,
+    int64_t seq_len,
+    int64_t num_heads,
+    int64_t head_dim,
+    int64_t rotary_dim,
+    int64_t max_position,
+    int64_t section_t,
+    int64_t section_h,
+    int64_t section_w,
+    int64_t mrope_layout,
+    float scale,
+    int64_t element_size_bytes) {
+  if (!input || !position_ids || !cos_cache || !sin_cache || !output) {
+    fprintf(stderr, "hip_mrope_forward: null pointer argument\n");
+    return -1;
+  }
+  if (batch_size < 0 || seq_len < 0 || num_heads <= 0 || head_dim <= 0 ||
+      rotary_dim <= 0 || rotary_dim % 2 != 0 || rotary_dim > head_dim ||
+      max_position < 0 ||
+      section_t + section_h + section_w != rotary_dim / 2) {
+    fprintf(stderr,
+            "hip_mrope_forward: invalid shape batch=%lld seq=%lld heads=%lld "
+            "head_dim=%lld rotary_dim=%lld section=[%lld,%lld,%lld]\n",
+            (long long)batch_size, (long long)seq_len, (long long)num_heads,
+            (long long)head_dim, (long long)rotary_dim, (long long)section_t,
+            (long long)section_h, (long long)section_w);
+    return -1;
+  }
+
+  const int64_t per_head = rotary_dim / 2 + (head_dim - rotary_dim);
+  const int64_t num_tokens = batch_size * seq_len;
+  const int64_t total = num_tokens * num_heads * per_head;
+  if (total == 0) {
+    return 0;
+  }
+  if (total > INT32_MAX || max_position > INT32_MAX) {
+    fprintf(stderr, "hip_mrope_forward: problem too large (%lld threads)\n",
+            (long long)total);
+    return -1;
+  }
+
+  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  (void)hipGetLastError();
+  const int block_size = 256;
+  const int grid_size = static_cast<int>((total + block_size - 1) / block_size);
+  auto launch = [&](auto type_tag) {
+    using T = decltype(type_tag);
+    hipLaunchKernelGGL(
+        mrope_half_rotated_kernel<T>, dim3(grid_size), dim3(block_size), 0,
+        stream, static_cast<const T*>(input),
+        static_cast<const int64_t*>(position_ids),
+        static_cast<const T*>(cos_cache), static_cast<const T*>(sin_cache),
+        static_cast<T*>(output), static_cast<int>(total),
+        static_cast<int>(num_tokens), static_cast<int>(num_heads),
+        static_cast<int>(head_dim), static_cast<int>(rotary_dim),
+        static_cast<int>(rotary_dim / 2), static_cast<int>(per_head),
+        static_cast<int>(max_position), static_cast<int>(section_t),
+        static_cast<int>(section_h), static_cast<int>(section_w),
+        static_cast<int>(mrope_layout), scale);
+  };
+  if (element_size_bytes == 2) {
+    launch(__half{});
+  } else if (element_size_bytes == 4) {
+    launch(float{});
+  } else {
+    fprintf(stderr, "hip_mrope_forward: unsupported element_size %lld\n",
+            (long long)element_size_bytes);
+    return -1;
+  }
+
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    fprintf(stderr, "hip_mrope_forward: kernel launch failed: %s\n",
+            hipGetErrorString(err));
+    return -1;
+  }
+  return 0;
+}

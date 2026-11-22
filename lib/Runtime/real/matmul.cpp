@@ -484,6 +484,21 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
     return -1;
   }
 
+  // One row against a narrow row-major B (an MoE router: N=128, K=2880): one
+  // GEMV launch. A hipBLASLt call costs 5-12 us of host time on gfx1151,
+  // about as much as the whole GEMV here. Within these bounds the GEMV is also
+  // faster on the GPU; from N=1024 hipBLASLt's kernels match it, and K above
+  // 8192 is unmeasured. With M=1 the activation is K contiguous elements
+  // whatever transA says.
+  if (elem_size == 2 && M == 1 && batch_count == 1 && !transB && N > 0 &&
+      N <= 512 && K > 0 && K <= 8192 && N % 8 == 0 &&
+      reinterpret_cast<uintptr_t>(B) % 16 == 0) {
+    RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: GEMV N=%lld K=%lld\n",
+                      (long long)N, (long long)K);
+    OP_ROCTX_MARK("hip_ep.op.matmul.run.gemv");
+    return hip_gemv_f16_kn(stream, A, B, output, K, N) == 0 ? 0 : -1;
+  }
+
   const char *type_name = (elem_size == 2) ? "f16" : "f32";
   RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: M=%lld, N=%lld, K=%lld, "
                     "batch=%lld, b_batch_stride=%lld, transA=%lld, "
@@ -533,9 +548,13 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
   // runtime bitcode.)
   if (!cached->tuned.load(std::memory_order_acquire)) {
     std::lock_guard<std::mutex> tuneGuard(cached->tune_mu);
-    if (!cached->tuned.load(std::memory_order_relaxed))
+    if (!cached->tuned.load(std::memory_order_relaxed)) {
+      // The candidates' timed runs are launched inside this op's range; the
+      // mark keeps them apart from the op's own GEMM (run.hipblaslt below).
+      OP_ROCTX_MARK("hip_ep.op.matmul.select.benchmark");
       autotuneMatmul(handle, stream, cached, B, A, output, ws_ptr, ws_size,
                      key);
+    }
   }
 
   float alpha = 1.0f;
@@ -550,6 +569,7 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
   void *call_ws_ptr = cached->use_default_algo ? nullptr : ws_ptr;
   size_t call_ws_size = cached->use_default_algo ? 0 : ws_size;
 
+  OP_ROCTX_MARK("hip_ep.op.matmul.run.hipblaslt");
   hipblasStatus_t st =
       hipblasLtMatmul(handle, cached->desc, &alpha, B,
                       cached->layA,    // "A" = B (row->col trick)
@@ -564,4 +584,19 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: completed successfully\n");
   return 0;
+}
+
+int wrap_matmul_i32(RuntimeState *state, const void *A, const void *B,
+                    void *output, int64_t M, int64_t N, int64_t K,
+                    int64_t batch_count, int64_t b_batch_stride) {
+  if (!state || !A || !B || !output) {
+    fprintf(stderr, "wrap_matmul_i32: null argument\n");
+    return -1;
+  }
+  void *stream = hipdnn_ep_state_get_stream(state);
+  int rc = hip_matmul_i32(stream, A, B, output, M, N, K, batch_count,
+                          b_batch_stride);
+  if (rc != 0)
+    fprintf(stderr, "wrap_matmul_i32: hip_matmul_i32 failed (%d)\n", rc);
+  return rc;
 }

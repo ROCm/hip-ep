@@ -41,6 +41,8 @@ mlir::Type onnxElementTypeToMlirElementType(int element_type,
     return builder.getF64Type();
   case 16: // TensorProto_DataType_BFLOAT16
     return builder.getBF16Type();
+  case 17: // TensorProto_DataType_FLOAT8E4M3FN
+    return builder.getType<mlir::Float8E4M3FNType>();
   case 21: // TensorProto_DataType_UINT4
     return builder.getIntegerType(8, false);
   case 22: // TensorProto_DataType_INT4
@@ -52,7 +54,6 @@ mlir::Type onnxElementTypeToMlirElementType(int element_type,
     // TensorProto_DataType_UINT64 = 13,
     // TensorProto_DataType_COMPLEX64 = 14,
     // TensorProto_DataType_COMPLEX128 = 15,
-    // TensorProto_DataType_FLOAT8E4M3FN = 17,
     // TensorProto_DataType_FLOAT8E4M3FNUZ = 18,
     // TensorProto_DataType_FLOAT8E5M2 = 19,
     // TensorProto_DataType_FLOAT8E5M2FNUZ = 20,

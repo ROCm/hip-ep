@@ -20,6 +20,9 @@
 
 module {
   func.func @main_graph(%arg0: tensor<1x3x16xf16>, %arg1: tensor<1x3x16xf32>) -> tensor<1x3x16xf16> {
+    // %arg1 must be read. convert-onnx-to-hip omits an unread argument from
+    // hipdnn.input_count.
+    %used = "onnx.Identity"(%arg1) {onnx_node_name = "/Identity"} : (tensor<1x3x16xf32>) -> tensor<1x3x16xf32>
     "onnx.Return"(%arg0) {onnx_node_name = "/Return"} : (tensor<1x3x16xf16>) -> ()
   }
 }

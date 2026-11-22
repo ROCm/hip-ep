@@ -21,6 +21,7 @@
 #include "mlir/Transforms/Passes.h"
 
 // rocMLIR (rocmlirTriton) C++ API -- linked in-tree, same LLVM/MLIR as us.
+#include "mlir/Dialect/Rock/IR/AmdArchDb.h"
 #include "mlir/Dialect/Rock/IR/Rock.h"
 #include "mlir/Dialect/Rock/IR/RockTuningParamAttrInterface.h"
 #include "mlir/Dialect/Rock/Pipelines/Pipelines.h"
@@ -141,10 +142,38 @@ bool buildBackendPipelineFor(OpPassManager &pm, StringRef arch,
   return true;
 }
 
+// One `rock.prefill` entry, {index, value}. The value has the buffer's
+// element type, and the fill repeats its bit pattern. Nullopt for a negative
+// index, or a value or a width that the fill cannot write.
+static std::optional<KernelPrefill> parsePrefill(Attribute entry) {
+  auto dict = dyn_cast<DictionaryAttr>(entry);
+  if (!dict)
+    return std::nullopt;
+  auto index = dyn_cast_if_present<IntegerAttr>(dict.get("index"));
+  Attribute value = dict.get("value");
+  APInt bits;
+  if (auto integer = dyn_cast_if_present<IntegerAttr>(value))
+    bits = integer.getValue();
+  else if (auto real = dyn_cast_if_present<FloatAttr>(value))
+    bits = real.getValue().bitcastToAPInt();
+  else
+    return std::nullopt;
+  unsigned width = bits.getBitWidth();
+  if (!index || index.getInt() < 0 ||
+      (width != 8 && width != 16 && width != 32))
+    return std::nullopt;
+  KernelPrefill prefill;
+  prefill.argIndex = index.getInt();
+  prefill.elementBytes = width / 8;
+  prefill.pattern = bits.getZExtValue();
+  return prefill;
+}
+
 // Walk the compiled module for the single gpu.binary object and pull out its
-// ELF blob plus the {block, grid} launch geometry.
+// ELF blob, the {block, grid} launch geometry and the arguments to pre-fill.
 bool extractCompiledKernel(ModuleOp mod, CompiledKernel &out) {
   unsigned count = 0;
+  bool unsupportedPrefill = false;
   mod.walk([&](gpu::BinaryOp binary) {
     auto object = llvm::cast<gpu::ObjectAttr>(binary.getObjects()[0]);
     StringRef blob = object.getObject().getValue();
@@ -158,10 +187,27 @@ bool extractCompiledKernel(ModuleOp mod, CompiledKernel &out) {
         continue;
       out.blockSize = block.getInt();
       out.gridSize = grid.getInt();
+      out.prefills.clear();
+      if (auto prefills =
+              kernel.getAttr<ArrayAttr>(rock::PrefillAttr::getMnemonic())) {
+        for (Attribute entry : prefills) {
+          if (std::optional<KernelPrefill> prefill = parsePrefill(entry)) {
+            out.prefills.push_back(*prefill);
+            continue;
+          }
+          llvm::errs() << "error: rocMLIR kernel '"
+                       << kernel.getName().getValue()
+                       << "' needs a pre-fill that the runtime cannot write: "
+                       << entry
+                       << " (expected an integer index and a 1-, 2- or "
+                          "4-byte integer or float value)\n";
+          unsupportedPrefill = true;
+        }
+      }
       ++count;
     }
   });
-  return count == 1 && !out.binary.empty();
+  return count == 1 && !out.binary.empty() && !unsupportedPrefill;
 }
 
 #if defined(HIPDNN_EP_LINK_HIP_HOST) && defined(HIPDNN_HIP_RUNTIME_LIB)
@@ -239,6 +285,30 @@ std::string resolveRocMlirArch() {
 #endif
 }
 
+std::vector<std::string> getRocMlirGemmAccelTypes(MLIRContext &context,
+                                                  StringRef arch) {
+  Builder b(&context);
+  Type candidates[] = {b.getF32Type(),
+                       b.getF16Type(),
+                       b.getBF16Type(),
+                       b.getI8Type(),
+                       b.getType<Float8E4M3FNType>(),
+                       b.getType<Float8E5M2Type>(),
+                       b.getType<Float8E4M3FNUZType>(),
+                       b.getType<Float8E5M2FNUZType>()};
+  std::vector<std::string> accelerated;
+  for (Type type : candidates) {
+    if (rock::getMatrixAccelKind(arch, type, type) ==
+        rock::MatrixAccelKind::None)
+      continue;
+    std::string name;
+    llvm::raw_string_ostream os(name);
+    type.print(os);
+    accelerated.push_back(std::move(name));
+  }
+  return accelerated;
+}
+
 void registerRocMlirDialects(MLIRContext &context) {
   DialectRegistry rockRegistry;
   registerRocMLIRDialects(rockRegistry);
@@ -269,10 +339,10 @@ OwningOpRef<ModuleOp> takeRocMlirKernelsAsTosaModule(ModuleOp module,
   for (auto func : llvm::make_early_inc_range(module.getOps<func::FuncOp>())) {
     if (!func->hasAttr("rock.kernel"))
       continue;
-    // fuse-rocmlir stamps a fixed rock.arch, and the rock tuning passes read
-    // it from the func. Point it at the arch we are actually compiling for,
-    // or the tuning parameters get chosen for a different chip than the
-    // backend emits code for.
+    // The rock tuning passes read rock.arch from the func, and fuse-rocmlir
+    // leaves it unset when it ran without an arch option. Point it at the
+    // arch we are actually compiling for, or the tuning parameters get
+    // chosen for a different chip than the backend emits code for.
     if (!arch.empty())
       func->setAttr("rock.arch", builder.getStringAttr(arch));
     func->remove();
@@ -449,6 +519,11 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
         context, StringRef(kernel.binary.data(), kernel.binary.size())));
     op.setGridSizeAttr(IntegerAttr::get(i64, kernel.gridSize));
     op.setBlockSizeAttr(IntegerAttr::get(i64, kernel.blockSize));
+    SmallVector<int64_t> prefill;
+    for (const KernelPrefill &entry : kernel.prefills)
+      llvm::append_values(prefill, entry.argIndex, entry.elementBytes,
+                          static_cast<int64_t>(entry.pattern));
+    op.setPrefill(prefill);
     totalBytes += kernel.binary.size();
     return WalkResult::advance();
   });

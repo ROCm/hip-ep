@@ -3,5 +3,6 @@
 // Payload digest makes the explicit HIP object rebuild when its included
 // implementation changes, including with the Windows custom-command compiler.
 // QSA source SHA256: @QSA_PORT_SHA@
+// QSA ABI SHA256: @QSA_HEADER_SHA@
 #pragma clang fp contract(off)
 #include "@QSA_PORT_PATH@"

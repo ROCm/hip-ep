@@ -36,7 +36,7 @@ flowchart TD
         BCIN --> JIT
         EMBED --> JIT
         KSO -->|"dlopen + DynamicLibrarySearchGenerator"| JIT
-        ROCM["amdhip64.dll\nhipblaslt.dll\nhipdnn_backend.dll"] -->|"DynamicLibrarySearchGenerator::Load"| JIT
+        ROCM["amdhip64.dll\nhipblaslt.dll"] -->|"DynamicLibrarySearchGenerator::Load"| JIT
     end
 ```
 
@@ -134,6 +134,7 @@ Implements GQA as a multi-step operation:
 - **Attention** (single-token decode): two co-resident kernel families dispatched by `lib/Runtime/real/gqa.cpp`:
   - `gqa_fused_decode` — short-context kernel (one block per query head); preferred at small `skv` where the split-K reduction overhead would dominate. Uses LDS-tiled K/V prefetch: each outer iteration cooperatively stages `TILE=8` rows of K and V into shared memory, then the inner loop crunches 8 softmax steps from LDS. This drives memory-level parallelism via TILE (16 outstanding loads per thread per tile) rather than wave count, since the decode grid (B=1, H=32 → ~32 blocks / ~128 waves on RDNA3 wave32) is too small to hide ~400-cycle global-load latency by wave switching. LDS use per block: `2 * TILE * D * sizeof(_Float16)` = 8 KB at D=128. No `__syncthreads` is needed between prefetch and inner loop because each thread writes only its own column (`K_tile[i*D + tid]`) and reads only its own column. TILE=8 chosen by sweep: TILE=4 loses to outer-loop overhead at small skv; TILE=16 saturates the per-thread outstanding-load budget.
   - `gqa_flash_decode<D, K_SPLITS>` + `gqa_flash_decode_reduce_kernel<D, K_SPLITS>` — GQA-aware split-K Flash Attention 2 for long contexts. One block per (batch, kv-head, K_SPLIT); each block stages K/V tiles into LDS once and reuses them across all HPG=4 query heads (eliminating the 4× KV bandwidth waste of per-query-head loops). Online softmax in log2e space writes `{m, l, O[D]}` partials to a workspace; the reduction kernel merges them across splits. Templated for `D ∈ {64, 128}`, `K_SPLITS=8`.
+  - `hip_gqa_flash_decode_fused_copy` — the same split-K decode for a layer whose past and present caches are separate buffers (no shared KV buffer, the ORT GenAI default): each split block reads its K/V tiles from `past` (rows below `past_len`) or from the new token, attends, and writes the rows it read into `present`. The separate `kv_cache_concat` pass (one full read and write of both caches per layer per token) goes away. Covers B=1, HPG ∈ {4, 5, 6, 8} at D=128 with fp16 caches and no sliding window, with the lookup (not online) autotune policy; anything else keeps concat + flash decode. It always runs the scalar kernel and does not consult the decode LUT: one read and one write of the cache beat concat + decode's two reads and a write whatever impl the LUT would pick for the decode alone. The copy makes the kernel bound by that traffic, which it reaches at far fewer splits than the decode-only kernel, so it sizes its own split count: it targets about 4 blocks (`B·G·splits`) per reported multiprocessor, with at least 16 keys per split (`flashDecodeFusedCopySplits`). Its tile barriers wait on LDS only (`HIPDNN_LDS_BARRIER`), since no global data is exchanged within a block. `HIPDNN_GQA_DECODE_SPLITS` overrides the count, as on the other decode paths.
 - **Prefill**: `gqa_fused_prefill` (multi-token) computes Q·K^T, softmax, and `attn·V` against the assembled KV cache.
 - Can start with a straightforward implementation and optimize later (or swap in CK).
 
@@ -196,7 +197,7 @@ endif()
 These are compiled to bitcode (via `clang -emit-llvm`) and merged into `runtime.bc`. They:
 
 - Include `hip_custom_kernels.h` (pure C, Clang-compatible)
-- Implement `wrap_rotary_embedding(...)` and `wrap_group_query_attention(...)` (declared in [hipdnn_ep_runtime.h](lib/Runtime/hipdnn_ep_runtime.h))
+- Implement `wrap_rotary_embedding(...)` and `wrap_group_query_attention(...)` (declared in [hipdnn_ep_runtime.h](../../lib/Runtime/hipdnn_ep_runtime.h))
 - Extract the HIP stream from `RuntimeState*` via `hipdnn_ep_state_get_stream()`
 - Compute shape info from the parameters passed by the compiler lowering
 - Call the `hip_rope_forward()` / `hip_gqa_forward()` C functions
@@ -241,8 +242,8 @@ jit->getMainJITDylib().addGenerator(std::move(*gen));
 
 After `cmake --install`, the install prefix contains:
 
-- Windows: `<prefix>/bin/onnxruntime_morphizen_ep.dll` (the EP) and `<prefix>/bin/custom_kernels_<arch>.dll` (one per requested arch) co-located.
-- Linux:   `<prefix>/lib/libonnxruntime_morphizen_ep.so` (the EP) and `<prefix>/lib/libcustom_kernels_<arch>.so` (one per requested arch) co-located. The EP `.so` is built with `RPATH=$ORIGIN`.
+- Windows: `<prefix>/bin/hipgpu.dll` (the EP) and `<prefix>/bin/custom_kernels_<arch>.dll` (one per requested arch) co-located.
+- Linux:   `<prefix>/lib/libhipgpu.so` (the EP) and `<prefix>/lib/libcustom_kernels_<arch>.so` (one per requested arch) co-located. The EP `.so` is built with `RPATH=$ORIGIN`.
 
 CI workflows assert co-location by checking for `custom_kernels_gfx1151.dll` / `libcustom_kernels_gfx1151.so` in the staging step — failure here means the install rule in `lib/Runtime/Kernels/CMakeLists.txt` regressed.
 
@@ -276,6 +277,29 @@ Four execution paths, auto-dispatched by shape:
 **bits=2 fractional FP16 zero-points**: AMD Quark 2-bit models encode the non-uniform levels `[-1, -1/3, 1/3, 1]` in the `(index - zero_point) * scale` form by using a *fractional* zero-point of `1.5` (the `2/3` factor is folded into the per-group scale). These arrive as an FP16 zero-point tensor (`zp_elem_size==2`, one value per group), which must be read as FP16 — rounding to an integer would corrupt the `1.5`. The u2 GEMV, WMMA (fused inline-decode and dequant+GEMM), and naive kernels are templated on the zero-point element type (`uint8_t` for the packed-integer path, `_Float16`/`__half` for this path); the dequant math is already float, so the FP16 path matches the uint8 path's performance and the integer path is unchanged. The FP16 buffer is one value per group already, so it is passed straight through with no unpack/convert step.
 
 **WMMA path** (prefill, M≥16): Transposes A/C to column-major internally, converts uint8 zero-points to FP16, then uses `__builtin_amdgcn_wmma_f16_16x16x16_f16` intrinsics with double-buffered shared memory for A tiles and grid swizzling (Morton-order blocks) for L2 cache locality.
+
+**Extended WMMA entries.** `WMMA_EXT_CONFIGS` lists fused int4 entries that run `GemmFp16U4ImplX` (`matmul_nbits_wmma_core_x.h`) instead of the shipped `GemmFp16U4Impl`. The extended core is a separate copy so that no existing `kWmmaConfigs` entry changes. It is specialized to the fused-dequant, FP16-zero-point, no-bias contract its kernels use. Extended entries are chosen only through a LUT that names them (or by the sweep on such a device), never by the online autotuner. They were measured and verified on gfx1151 only, so they run only on a gfx1151 device: `wmmaConfigApplies` refuses them on any other device, which covers LUT answers, sweep candidates, `HIPDNN_MATMUL_NBITS_WMMA_CFG` and an explicit config index. The kernels are still compiled into every WMMA code object (`gfx11-generic` serves gfx1151 too), but nothing launches them elsewhere. `WmmaConfig::variant` selects pipeline options per entry:
+
+| Bit | Option |
+|---|---|
+| 1 | Two-deep global prefetch: two register sets of A/B in flight, with quant-group constants carried per tile |
+| 2 | Wave-uniform source base plus 32-bit per-thread offsets |
+| 4 | Store-first step: write tile i+1 to LDS, issue loads for i+2, then run tile i's WMMAs |
+| 8/16/24 | `sched_group_barrier` pattern on the store-first step (full / LDS reads + global loads / dequant VALU) |
+| 32 | Stage C through LDS and write 16-byte rows (interior tiles only) |
+| 64 | XOR-swizzle 16-byte LDS chunks instead of padding rows |
+| 128 | CU mode: the kernel's waves share one CU and its half of the LDS instead of spreading over the WGP |
+
+An entry's swizzle (`WmmaConfig::swizzle_n`) is the tile-mapping width, a launch argument: groups of that many N-tiles are walked down all M-tiles (1 is plain row-major), which decides whether a group's B columns or the current A rows are reused from cache. Entries that differ only in it run the same kernels, so a width costs no build size.
+
+What the measurements behind these options showed (gfx1151, int4 prefill shapes of the models used to build its table):
+
+- Once B rows are padded (the per-call repack for aliasing strides), the fused dequant VALU work limits int4 at large M. Options that let the next tile's dequant overlap the current WMMAs (store-first, two-deep prefetch) help most. Moving dequant later, by keeping int4 B in LDS and dequantizing at fragment load, did not help.
+- No single option set wins everywhere, so each entry is a measured winner for some shapes and the LUT picks per shape.
+- `sched_group_barrier` patterns constrain the compiler's schedule, so whether one helps depends on the compiler version. That is one reason LUT rows must be measured on the product kernel binary (see the autotune README).
+- The two-deep prefetch also depends on how the compiler widens each tile's 16-bit scale for the packed dequant. Widened in place, in the register its load is still filling, the scale waits for every load in flight and the prefetch drains at every K-step; TheRock 7.13 did that on Linux. HIP 7.16, the SDK of both platforms, widens into another register. After a compiler bump, check the PGR 2 K-loops for `s_waitcnt vmcnt(0)` before the step's WMMAs.
+
+Every extended entry is forced by index in the `Xfp16_Wu4_Yfp16` kernel unit test through `hip_matmul_nbits_u4_wmma_run_config`, which runs exactly the requested config or fails. On any device other than gfx1151 (`hip_matmul_nbits_u4_wmma_ext_device` returns 0), it launches nothing and the test skips that phase. `update_lut.py` rejects a table naming an entry that `WMMA_EXT_CONFIGS` does not compile.
 
 ## Key Design Decisions
 

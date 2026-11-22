@@ -64,7 +64,8 @@ int wrap_causal_conv_with_state(
     const void *weight, const void *bias, const void *past_state, void *output,
     void *present_state, int64_t batch_size, int64_t channels, int64_t seq_len,
     int64_t kernel_size, int64_t ndim, int64_t activation,
-    int64_t element_size_bytes, int64_t channels_last) {
+    int64_t element_size_bytes, int64_t channels_last, int64_t dilation,
+    int64_t state_channels_last) {
   // Retained for ABI stability; this op holds no state (see above).
   (void)op_state_slot;
 
@@ -99,6 +100,17 @@ int wrap_causal_conv_with_state(
     return -1;
   }
 
+  if ((state_channels_last && !channels_last) || dilation < 1 ||
+      (dilation != 1 && !state_channels_last)) {
+    fprintf(
+        stderr,
+        "wrap_causal_conv_with_state: unsupported layout channels_last=%lld "
+        "state_channels_last=%lld dilation=%lld\n",
+        (long long)channels_last, (long long)state_channels_last,
+        (long long)dilation);
+    return -1;
+  }
+
   hipStream_t stream =
       static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
   if (!stream) {
@@ -110,9 +122,11 @@ int wrap_causal_conv_with_state(
       "causal_conv",
       [&] {
         char b[64];
-        snprintf(b, sizeof(b), "%lldx%lldx%lld,k=%lld%s", (long long)batch_size,
-                 (long long)channels, (long long)seq_len,
-                 (long long)kernel_size, channels_last ? ",nlc" : "");
+        snprintf(b, sizeof(b), "%lldx%lldx%lld,k=%lld,d=%lld%s%s",
+                 (long long)batch_size, (long long)channels, (long long)seq_len,
+                 (long long)kernel_size, (long long)dilation,
+                 channels_last ? ",nlc" : "",
+                 state_channels_last ? ",nsc" : "");
         return std::string(b);
       },
       state);
@@ -124,6 +138,21 @@ int wrap_causal_conv_with_state(
                     (long long)seq_len, (long long)kernel_size, (long long)ndim,
                     (long long)activation, (long long)element_size_bytes,
                     (long long)channels_last);
+
+  if (state_channels_last) {
+    int rc = hip_causal_conv_nlc_state(stream, input, weight, bias, past_state,
+                                       output, present_state, batch_size,
+                                       channels, seq_len, kernel_size, dilation,
+                                       activation, element_size_bytes);
+    if (rc != 0) {
+      fprintf(stderr,
+              "wrap_causal_conv_with_state: hip_causal_conv_nlc_state failed "
+              "(%d)\n",
+              rc);
+      return -1;
+    }
+    return 0;
+  }
 
   // ---- Single-step decode (seq_len == 1) ---------------------------------
   // The decode kernel skips the virtual buffer, the conv API and the bias /

@@ -5,6 +5,8 @@
 
 #include "HipToLLVMUtils.h"
 
+#include "mlir/IR/Matchers.h"
+
 namespace mlir {
 namespace hip {
 namespace {
@@ -62,9 +64,11 @@ struct GatherBlockQuantizedOpLowering
     auto outputType = cast<MemRefType>(op.getOutput().getType());
 
     int64_t dataDtype = getHipdnnDataType(dataType.getElementType());
-    if (dataType.getElementType().isUnsignedInteger(8) || op.getBits() == 8 ||
-        op->hasAttr("unsigned_quant_storage"))
+    if (dataDtype != HIPDNN_EP_DATATYPE_FLOAT8E4M3FN &&
+        (dataType.getElementType().isUnsignedInteger(8) || op.getBits() == 8 ||
+         op->hasAttr("unsigned_quant_storage"))) {
       dataDtype = HIPDNN_EP_DATATYPE_UINT8;
+    }
     int64_t indicesDtype = getHipdnnDataType(indicesType.getElementType());
     int64_t scalesDtype = getHipdnnDataType(scalesType.getElementType());
     if (dataDtype < 0 || indicesDtype < 0 || scalesDtype < 0)
@@ -72,8 +76,23 @@ struct GatherBlockQuantizedOpLowering
           op, "unsupported element type on data/indices/scales");
 
     Value statePtr = adaptor.getCtx();
+    std::optional<int64_t> diskConstantIndex;
+    if (auto getConst = op.getData().getDefiningOp<GetConstantOp>();
+        getConst && getConst->hasAttr("hip.disk_resident")) {
+      llvm::APInt index;
+      if (!matchPattern(getConst.getIndex(), m_ConstantInt(&index))) {
+        return rewriter.notifyMatchFailure(
+            op, "disk-resident constant index is not a constant");
+      }
+      diskConstantIndex = index.getSExtValue();
+    }
     Value dataPtr =
-        extractContiguousMemRefPtr(adaptor.getData(), rewriter, loc);
+        diskConstantIndex
+            ? LLVM::ConstantOp::create(
+                  rewriter, loc, i64Type,
+                  rewriter.getI64IntegerAttr(*diskConstantIndex))
+                  .getResult()
+            : extractContiguousMemRefPtr(adaptor.getData(), rewriter, loc);
     Value indicesPtr =
         extractContiguousMemRefPtr(adaptor.getIndices(), rewriter, loc);
     Value scalesPtr =
@@ -144,9 +163,15 @@ struct GatherBlockQuantizedOpLowering
         i64Type, i64Type, i64Type           // data_dtype, indices_dtype,
                                             // scales_dtype
     };
+    if (diskConstantIndex) {
+      paramTypes[1] = i64Type;
+    }
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kWrapGatherBlockQuantized, paramTypes, i32Type);
+        rewriter, module,
+        diskConstantIndex ? kWrapGatherBlockQuantizedFromFile
+                          : kWrapGatherBlockQuantized,
+        paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 

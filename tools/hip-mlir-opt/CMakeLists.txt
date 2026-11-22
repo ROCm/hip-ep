@@ -67,6 +67,15 @@ target_link_libraries(hip-mlir-opt PRIVATE
   ${llvm_libs}
 )
 
+if(BUILD_HIP_UNIT_TESTS)
+  target_compile_definitions(hip-mlir-opt PRIVATE
+    HIPDNN_EP_INCLUDE_TEST_PASSES=1
+  )
+  target_link_libraries(hip-mlir-opt PRIVATE HipTestPasses)
+endif()
+# After the other libraries so the GNU ld rescan group is the last link item.
+hip_link_rocmlir_closure(hip-mlir-opt)
+
 # Install target
 install(TARGETS hip-mlir-opt
   RUNTIME DESTINATION bin

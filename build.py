@@ -10,7 +10,7 @@ update_submodules, --config/--cmake_generator/--cmake_extra_defines/
 --skip_submodule_sync conventions) but deliberately plain: it ensures
 submodules, sets up the platform compiler environment, picks the GPU arch, runs
 the cmake configure/build/install for this project's artifacts -- the MorphiZen
-EP shared library (libonnxruntime_morphizen_ep.so / .dll) plus the HIP MLIR
+EP shared library (libhipgpu.so / hipgpu.dll) plus the HIP MLIR
 tools -- and (on Linux) bundles the runtime .so into a self-contained install/.
 
 All C++ dependency *acquisition* is delegated to cmake/deps.cmake: LLVM/MLIR/LLD
@@ -291,6 +291,18 @@ def generate_build_tree(args, build_dir, prefix_paths, hip_arch, mock):
     run_subprocess(cmd)
 
 
+def _cmake_cache_flag(build_dir, name):
+    """True when CMakeCache.txt records name:BOOL=ON (or name:STRING=ON)."""
+    cache = Path(build_dir) / "CMakeCache.txt"
+    if not cache.exists():
+        return False
+    prefix = f"{name}:"
+    for line in cache.read_text(errors="ignore").splitlines():
+        if line.startswith(prefix) and line.rstrip().endswith("=ON"):
+            return True
+    return False
+
+
 def _llvm_built_from_source(build_dir):
     """True when cmake/deps.cmake built LLVM in-tree (embedded sub-build)."""
     cache = Path(build_dir) / "CMakeCache.txt"
@@ -321,7 +333,13 @@ def build_targets(args, build_dir):
     # (We cannot pull lld into the CMake graph via add_dependencies -- that
     # corrupts LLVM's install(EXPORT); see cmake/deps.cmake.) clang itself is
     # already built as a dependency of lib/Runtime's bitcode step.
-    if _llvm_built_from_source(build_dir) and not IS_WINDOWS:
+    # ld.lld is only required by the opt-in native artifact link
+    # (clang++ -fuse-ld=lld). The default LLVM IR path does not use it.
+    if (
+        _llvm_built_from_source(build_dir)
+        and not IS_WINDOWS
+        and _cmake_cache_flag(build_dir, "HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS")
+    ):
         step("Build in-tree lld (runtime device-link toolchain)")
         run_subprocess(
             [
@@ -343,7 +361,8 @@ def build_targets(args, build_dir):
 def run_tests(args, build_dir):
     """Run the GPU-free test suites (no device needed, so they run on the build
     machine in every CI job): the MLIR LIT pass-verification suite plus the
-    compiler-plugin registrar and output-allocator ctest unit tests."""
+    compiler-plugin registrar, output-allocator, runtime-lowering contract and
+    MatMulNBits LUT ctest unit tests."""
     step("Test (check-hip-mlir-lit)")
     run_subprocess(
         [
@@ -368,7 +387,8 @@ def run_tests(args, build_dir):
             "-C",
             args.config,
             "-R",
-            "StaticPlugins|OutputAllocator|LdsBarrierArchGate",
+            "StaticPlugins|OutputAllocator|LdsBarrierArchGate|AdaptiveBenchmark"
+            "|RuntimeLoweringContractsUnit|MatMulNBitsAutotune",
             "--output-on-failure",
         ]
     )

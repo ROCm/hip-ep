@@ -39,6 +39,8 @@ def main():
         action="store_true",
         help="Skip build.py tests when refreshing an already-tested installation",
     )
+    parser.add_argument("--configure-only", action="store_true")
+    parser.add_argument("--parallel", type=int, default=8)
     parser.add_argument(
         "--plan",
         action="store_true",
@@ -60,7 +62,7 @@ def main():
         "--config",
         "Release",
         "--parallel",
-        "8",
+        str(args.parallel),
         "--skip_wheel",
         "--skip_submodule_sync",
         "--cmake_generator",
@@ -74,6 +76,8 @@ def main():
     ]
     if args.skip_tests:
         command.append("--skip_tests")
+    if args.configure_only:
+        command.append("--skip_build")
     definitions = {
         "CMAKE_C_COMPILER": "cl",
         "CMAKE_CXX_COMPILER": "cl",

@@ -116,6 +116,257 @@ __global__ void hip_pad_kernel(const T *__restrict__ input,
   }
 }
 
+namespace {
+
+// Division by a runtime constant as a multiply-high and a shift. Valid for
+// numerators below 2^31; the launcher checks that before taking the fast path.
+struct TDiv {
+  uint32_t mul; // 0 => a pure shift (divisor is a power of two)
+  uint32_t shr;
+};
+
+__device__ __forceinline__ uint32_t tFastDiv(uint32_t n, TDiv d) {
+  return d.mul ? (__umulhi(n, d.mul) >> d.shr) : (n >> d.shr);
+}
+
+TDiv makeTDiv(int64_t denom) {
+  const uint32_t d = static_cast<uint32_t>(denom < 1 ? 1 : denom);
+  TDiv r{0u, 0u};
+  uint32_t l = 0;
+  while ((1u << l) < d)
+    ++l;
+  if ((1u << l) == d) {
+    r.shr = l;
+    return r;
+  }
+  const uint32_t p = 31 + l;
+  r.mul = static_cast<uint32_t>(((1ull << p) + d - 1) / d);
+  r.shr = p - 32;
+  return r;
+}
+
+constexpr int kPadFastMaxRank = 3;
+constexpr int kPadFastPerThread = 4;
+
+struct PadFastParams {
+  int32_t in[kPadFastMaxRank];
+  int32_t out[kPadFastMaxRank];
+  int32_t lower[kPadFastMaxRank];
+  int32_t in_stride[kPadFastMaxRank];
+  TDiv r_out[kPadFastMaxRank];
+  int32_t groups; // ceil(out[rank-1] / kPadFastPerThread)
+  TDiv r_groups;
+};
+
+// Maps an output coordinate to an input coordinate, or -1 for a constant fill.
+// Same formulas as compute_input_offset.
+template <int MODE>
+__device__ __forceinline__ int32_t padMap(int32_t o, int32_t lower,
+                                          int32_t n) {
+  int32_t i = o - lower;
+  if (i < 0) {
+    if (MODE == 0)
+      return -1;
+    if (MODE == 2)
+      return 0;
+    if (MODE == 1)
+      return -i;
+    return ((i % n) + n) % n;
+  }
+  if (i >= n) {
+    if (MODE == 0)
+      return -1;
+    if (MODE == 2)
+      return n - 1;
+    if (MODE == 1)
+      return n - 2 - (i - n);
+    return i % n;
+  }
+  return i;
+}
+
+// Each thread writes kPadFastPerThread consecutive outputs of one innermost
+// row. The row's outer coordinates are decoded once.
+template <typename T, int MODE, int RANK>
+__global__ void pad_fast_kernel(const T *__restrict__ input,
+                                T *__restrict__ output, PadFastParams p,
+                                T pad_value, uint32_t num_threads) {
+  const uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (tid >= num_threads)
+    return;
+
+  const uint32_t row = tFastDiv(tid, p.r_groups);
+  const int32_t col0 =
+      static_cast<int32_t>(tid - row * p.groups) * kPadFastPerThread;
+
+  bool row_valid = true;
+  int32_t base = 0;
+  uint32_t rem = row;
+#pragma unroll
+  for (int d = RANK - 2; d >= 0; --d) {
+    const uint32_t q = tFastDiv(rem, p.r_out[d]);
+    const int32_t c = static_cast<int32_t>(rem - q * p.out[d]);
+    rem = q;
+    const int32_t ic = padMap<MODE>(c, p.lower[d], p.in[d]);
+    if (ic < 0)
+      row_valid = false;
+    base += ic * p.in_stride[d];
+  }
+
+  const int32_t inner = p.out[RANK - 1];
+  T *out_row = output + static_cast<size_t>(row) * inner;
+#pragma unroll
+  for (int j = 0; j < kPadFastPerThread; ++j) {
+    const int32_t c = col0 + j;
+    if (c >= inner)
+      break;
+    const int32_t ic = padMap<MODE>(c, p.lower[RANK - 1], p.in[RANK - 1]);
+    out_row[c] = (row_valid && ic >= 0) ? input[base + ic] : pad_value;
+  }
+}
+
+struct PadDim {
+  int64_t in, out, lower;
+};
+
+// Merges runs of adjacent unpadded dims (lower == 0 and in == out). A padded
+// dim is never merged with a neighbour: reflect/edge/wrap act per element of
+// that dim, so folding it into another dim would change the result.
+int mergePadDims(const PadParams &p, PadDim *dims) {
+  int n = 0;
+  bool prev_unpadded = false;
+  for (int d = 0; d < p.rank; ++d) {
+    const PadDim cur{p.input_shape[d], p.output_shape[d], p.lower_pads[d]};
+    const bool unpadded = cur.lower == 0 && cur.in == cur.out;
+    if (unpadded && cur.in == 1)
+      continue;
+    if (unpadded && prev_unpadded) {
+      dims[n - 1].in *= cur.in;
+      dims[n - 1].out *= cur.out;
+    } else {
+      dims[n++] = cur;
+    }
+    prev_unpadded = unpadded;
+  }
+  if (n == 0)
+    dims[n++] = PadDim{1, 1, 0};
+  return n;
+}
+
+template <typename T, int MODE, int RANK>
+void launchPadFast(hipStream_t stream, const T *input, T *output,
+                   const PadFastParams &fp, T pad_value,
+                   uint32_t num_threads) {
+  constexpr int kBlock = 256;
+  const unsigned grid = (num_threads + kBlock - 1) / kBlock;
+  hipLaunchKernelGGL(HIP_KERNEL_NAME(pad_fast_kernel<T, MODE, RANK>),
+                     dim3(grid), dim3(kBlock), 0, stream, input, output, fp,
+                     pad_value, num_threads);
+}
+
+template <typename T, int MODE>
+void launchPadFastRank(int rank, hipStream_t stream, const T *input,
+                       T *output, const PadFastParams &fp, T pad_value,
+                       uint32_t num_threads) {
+  switch (rank) {
+  case 1:
+    launchPadFast<T, MODE, 1>(stream, input, output, fp, pad_value,
+                              num_threads);
+    break;
+  case 2:
+    launchPadFast<T, MODE, 2>(stream, input, output, fp, pad_value,
+                              num_threads);
+    break;
+  default:
+    launchPadFast<T, MODE, 3>(stream, input, output, fp, pad_value,
+                              num_threads);
+    break;
+  }
+}
+
+// Launches the fast kernel when the merged problem fits it. Returns false so
+// the caller falls back to hip_pad_kernel.
+template <typename T>
+bool tryPadFast(hipStream_t stream, const T *input, T *output,
+                const PadParams &p, int pad_mode, T pad_value) {
+  if (pad_mode < 0 || pad_mode > 3)
+    return false;
+  PadDim dims[kPadMaxRank];
+  const int rank = mergePadDims(p, dims);
+  if (rank > kPadFastMaxRank)
+    return false;
+
+  constexpr int64_t kLimit = int64_t(1) << 31;
+  int64_t in_elems = 1, out_elems = 1;
+  for (int d = 0; d < rank; ++d) {
+    if (dims[d].in <= 0 || dims[d].out <= 0 || dims[d].in >= kLimit ||
+        dims[d].out >= kLimit || dims[d].lower <= -kLimit ||
+        dims[d].lower >= kLimit)
+      return false;
+    in_elems *= dims[d].in;
+    out_elems *= dims[d].out;
+    if (in_elems >= kLimit || out_elems >= kLimit)
+      return false;
+  }
+
+  PadFastParams fp{};
+  int64_t stride = 1;
+  for (int d = rank - 1; d >= 0; --d) {
+    fp.in[d] = static_cast<int32_t>(dims[d].in);
+    fp.out[d] = static_cast<int32_t>(dims[d].out);
+    fp.lower[d] = static_cast<int32_t>(dims[d].lower);
+    fp.in_stride[d] = static_cast<int32_t>(stride);
+    fp.r_out[d] = makeTDiv(dims[d].out);
+    stride *= dims[d].in;
+  }
+  const int64_t inner = dims[rank - 1].out;
+  const int64_t groups = (inner + kPadFastPerThread - 1) / kPadFastPerThread;
+  fp.groups = static_cast<int32_t>(groups);
+  fp.r_groups = makeTDiv(groups);
+  const int64_t threads = (out_elems / inner) * groups;
+  if (threads >= kLimit)
+    return false;
+  const uint32_t num_threads = static_cast<uint32_t>(threads);
+
+  switch (pad_mode) {
+  case 0:
+    launchPadFastRank<T, 0>(rank, stream, input, output, fp, pad_value,
+                            num_threads);
+    break;
+  case 1:
+    launchPadFastRank<T, 1>(rank, stream, input, output, fp, pad_value,
+                            num_threads);
+    break;
+  case 2:
+    launchPadFastRank<T, 2>(rank, stream, input, output, fp, pad_value,
+                            num_threads);
+    break;
+  default:
+    launchPadFastRank<T, 3>(rank, stream, input, output, fp, pad_value,
+                            num_threads);
+    break;
+  }
+  return true;
+}
+
+template <typename T>
+void launchPad(hipStream_t stream, const void *input, void *output,
+               const PadParams &p, int pad_mode, T pad_value,
+               int64_t num_output_elements) {
+  const T *in = static_cast<const T *>(input);
+  T *out = static_cast<T *>(output);
+  if (tryPadFast<T>(stream, in, out, p, pad_mode, pad_value))
+    return;
+  constexpr int kBlockSize = 256;
+  const int grid_size =
+      static_cast<int>((num_output_elements + kBlockSize - 1) / kBlockSize);
+  hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_pad_kernel<T>), dim3(grid_size),
+                     dim3(kBlockSize), 0, stream, in, out, p, pad_mode,
+                     pad_value, num_output_elements);
+}
+
+} // namespace
+
 extern "C" int hip_pad(void *stream, const void *input, void *output,
                        const int64_t *input_shape_host,
                        const int64_t *output_shape_host,
@@ -154,9 +405,6 @@ extern "C" int hip_pad(void *stream, const void *input, void *output,
     return 0;
 
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
-  constexpr int kBlockSize = 256;
-  int grid_size = static_cast<int>(
-      (num_output_elements + kBlockSize - 1) / kBlockSize);
 
   CUSTOM_KERNELS_DEBUG_LOG(
       "[custom_kernels] hip_pad: dtype=%d, rank=%d, mode=%d, num_out=%lld\n",
@@ -167,31 +415,22 @@ extern "C" int hip_pad(void *stream, const void *input, void *output,
     __half pv = pad_value_host
                     ? *static_cast<const __half *>(pad_value_host)
                     : __float2half(0.0f);
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_pad_kernel<__half>),
-                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
-                       static_cast<const __half *>(input),
-                       static_cast<__half *>(output), p, pad_mode, pv,
-                       num_output_elements);
+    launchPad<__half>(hip_stream, input, output, p, pad_mode, pv,
+                      num_output_elements);
     break;
   }
   case HIP_DTYPE_FLOAT32: {
     float pv = pad_value_host ? *static_cast<const float *>(pad_value_host)
                               : 0.0f;
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_pad_kernel<float>),
-                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
-                       static_cast<const float *>(input),
-                       static_cast<float *>(output), p, pad_mode, pv,
-                       num_output_elements);
+    launchPad<float>(hip_stream, input, output, p, pad_mode, pv,
+                     num_output_elements);
     break;
   }
   case HIP_DTYPE_INT32: {
     int32_t pv = pad_value_host
                      ? *static_cast<const int32_t *>(pad_value_host)
                      : 0;
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_pad_kernel<int32_t>),
-                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
-                       static_cast<const int32_t *>(input),
-                       static_cast<int32_t *>(output), p, pad_mode, pv,
+    launchPad<int32_t>(hip_stream, input, output, p, pad_mode, pv,
                        num_output_elements);
     break;
   }
@@ -199,10 +438,7 @@ extern "C" int hip_pad(void *stream, const void *input, void *output,
     int64_t pv = pad_value_host
                      ? *static_cast<const int64_t *>(pad_value_host)
                      : 0;
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_pad_kernel<int64_t>),
-                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
-                       static_cast<const int64_t *>(input),
-                       static_cast<int64_t *>(output), p, pad_mode, pv,
+    launchPad<int64_t>(hip_stream, input, output, p, pad_mode, pv,
                        num_output_elements);
     break;
   }

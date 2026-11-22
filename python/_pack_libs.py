@@ -54,6 +54,7 @@ _GENERIC_MEMBERS = {
         "gfx1152",
         "gfx1153",
     ),
+    "gfx11-7-generic": ("gfx1170", "gfx1171", "gfx1172"),
     "gfx12-generic": ("gfx1200", "gfx1201"),
 }
 

@@ -36,4 +36,15 @@ module {
 
   // CHECK-LABEL: func.func @mod_dynamic
   // CHECK: hip.mod({{.*}}) ins({{.*}}, {{.*}} : tensor<?x?xi32>, tensor<?x?xi32>) outs({{.*}} : tensor<?x?xi32>)
+
+  func.func @mod_rank5_broadcast_fmod(%a: tensor<2x3x4x5x6xf32>, %b: tensor<1x1x1x1x6xf32>) -> tensor<2x3x4x5x6xf32> {
+    %r = "onnx.Mod"(%a, %b) {fmod = 1 : si64} : (tensor<2x3x4x5x6xf32>, tensor<1x1x1x1x6xf32>) -> tensor<2x3x4x5x6xf32>
+    return %r : tensor<2x3x4x5x6xf32>
+  }
+
+  // CHECK-LABEL: func.func @mod_rank5_broadcast_fmod
+  // CHECK: %[[PA:.*]] = tensor.collapse_shape %{{.*}} {{\[}}[0], [1], [2, 3], [4]] : tensor<2x3x4x5x6xf32> into tensor<2x3x20x6xf32>
+  // CHECK: %[[PB:.*]] = tensor.collapse_shape %{{.*}} {{\[}}[0], [1], [2, 3], [4]] : tensor<1x1x1x1x6xf32> into tensor<1x1x1x6xf32>
+  // CHECK: %[[R:.*]] = hip.mod({{.*}}) ins(%[[PA]], %[[PB]] : tensor<2x3x20x6xf32>, tensor<1x1x1x6xf32>) outs({{.*}} : tensor<2x3x20x6xf32>) {fmod = 1 : i64}
+  // CHECK: tensor.expand_shape %[[R]] {{\[}}[0], [1], [2, 3], [4]] output_shape [2, 3, 4, 5, 6]
 }

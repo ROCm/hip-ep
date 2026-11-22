@@ -22,6 +22,11 @@ of an existing table:
     python update_lut.py build --merge-existing --head-dim 64,128,256
     python update_lut.py compile
 
+or only some geometries (H:G:d), keeping every other geometry's points:
+
+    python update_lut.py measure --phase decode --geometry 24:4:256
+    python update_lut.py build --merge-existing --geometry 24:4:256
+
 The sweep executable must be built first:
     cmake --build <build-dir> --target gqa_autotune_sweep
 
@@ -187,7 +192,7 @@ def run_measure(args):
         shape_files = _gen_shapes(data_dir, args.phase)
     else:
         shape_files = _write_builtin_shapes(data_dir, args.phase,
-                                            args.head_dim)
+                                            args.head_dim, args.geometry)
 
     for shapes_csv in shape_files:
         tag = shapes_csv.stem
@@ -246,18 +251,22 @@ def _decode_lengths():
     return sorted(lens)
 
 
-def _geometries(head_dims=None):
-    """GEOMETRIES, restricted to `head_dims` when given (an incremental sweep)."""
-    if not head_dims:
-        return GEOMETRIES
-    return [g for g in GEOMETRIES if g[2] in head_dims]
+def _geometries(head_dims=None, only=None):
+    """GEOMETRIES, restricted to `head_dims` and to the (H, G, d) triples in
+    `only` when given (an incremental sweep)."""
+    out = GEOMETRIES
+    if head_dims:
+        out = [g for g in out if g[2] in head_dims]
+    if only:
+        out = [g for g in out if tuple(g[:3]) in only]
+    return out
 
 
-def _grid_shapes(head_dims=None):
+def _grid_shapes(head_dims=None, only=None):
     """Canonical list of shapes to measure, as sweep-CSV row dicts."""
     shapes = []
     lengths = _decode_lengths()
-    geometries = _geometries(head_dims)
+    geometries = _geometries(head_dims, only)
     di = 0
     for H, G, d, sink, group, _kernel in geometries:
         for skv in lengths:
@@ -307,7 +316,7 @@ def run_plan(args):
     """Write the shapes-to-measure manifest: every planned point with its config
     marked TBD. This is the coverage plan a sweep fills in; `build` produces the
     real table with configs resolved from the measurements."""
-    shapes = _grid_shapes(args.head_dim)
+    shapes = _grid_shapes(args.head_dim, args.geometry)
     points = [_shape_to_tbd_point(s) for s in shapes]
     # De-dup on the point key (a geometry can repeat a length across groups).
     seen, uniq = set(), []
@@ -337,14 +346,15 @@ def run_plan(args):
         len(uniq), n_dec, len(uniq) - n_dec, out))
 
 
-def _write_builtin_shapes(data_dir, phase, head_dims=None):
-    """Write the coverage grid (decode + prefill) to sweep CSVs. A head_dim
-    subset gets its own file names, so it lands beside a full sweep's results
-    instead of overwriting them."""
+def _write_builtin_shapes(data_dir, phase, head_dims=None, only=None):
+    """Write the coverage grid (decode + prefill) to sweep CSVs. A head_dim or
+    geometry subset gets its own file names, so it lands beside a full sweep's
+    results instead of overwriting them."""
     paths = []
     phases = ['decode', 'prefill'] if phase == 'both' else [phase]
-    shapes = _grid_shapes(head_dims)
+    shapes = _grid_shapes(head_dims, only)
     tag = ''.join('_d{}'.format(d) for d in sorted(head_dims or []))
+    tag += ''.join('_h{}g{}d{}'.format(*g) for g in sorted(only or []))
     for ph in phases:
         rows = [s for s in shapes if s['phase'] == ph]
         out = data_dir / ('shapes_' + ph + tag + '.csv')
@@ -544,7 +554,7 @@ def _load_merge_base(out_json, arch):
 
 
 def _build_from_csvs(data_dir, out_json, arch, merge_existing=False,
-                     head_dims=None):
+                     head_dims=None, only=None):
     """Build gfx<arch>.json (new nearest-neighbour layout) from *_best.csv.
 
     One point per measured shape, literal dims (no bucketing), configs
@@ -560,8 +570,10 @@ def _build_from_csvs(data_dir, out_json, arch, merge_existing=False,
     index and the table scalars are kept verbatim; a group present in both is
     replaced by the new measurements. Pruning is per geometry group, so the
     result equals a full rebuild over the union of the measurements. head_dims
-    limits which *_best.csv rows are read, so older sweeps left in data_dir
-    cannot replace a group by accident.
+    and `only` limit which *_best.csv rows are read, so older sweeps left in
+    data_dir cannot replace a group by accident. With `only` (the --geometry
+    (H, G, d) triples) the replaced group narrows to (phase, head_dim, H, G), so
+    re-measuring one geometry keeps every other geometry at that head_dim.
     """
     base = _load_merge_base(out_json, arch) if merge_existing else None
     configs = []          # list of config dicts
@@ -591,6 +603,8 @@ def _build_from_csvs(data_dir, out_json, arch, merge_existing=False,
                 if d not in HEAD_DIM_CLASS or (head_dims and d not in head_dims):
                     continue
                 H, G, B = _int(row, 'H'), _int(row, 'G'), _int(row, 'B', 1) or 1
+                if only and (H, G, d) not in only:
+                    continue
                 sq, skv = _int(row, 'sq', 1) or 1, _int(row, 'skv', 1) or 1
                 window = _int(row, 'window', -1)
                 phase = PHASE_OF_KERNEL.get(row.get('kernel', ''))
@@ -660,9 +674,14 @@ def _build_from_csvs(data_dir, out_json, arch, merge_existing=False,
     if base is not None:
         # The base table is already pruned against its own measurements;
         # pruning it again against fewer coordinates would drop more of it.
-        rebuilt = {(p['phase'], p['head_dim']) for p in kept}
+        def group(p):
+            if only:
+                return (p['phase'], p['head_dim'], p['num_heads'],
+                        p['kv_num_heads'])
+            return (p['phase'], p['head_dim'])
+        rebuilt = {group(p) for p in kept}
         kept = [dict(p) for p in base['points']
-                if (p['phase'], p['head_dim']) not in rebuilt] + kept
+                if group(p) not in rebuilt] + kept
     used = ({p['config'] for p in kept} | {r['config'] for r in fallbacks})
     # A merge keeps every base config where it was, so the base points read
     # the same in the merged table; only unused new configs are dropped.
@@ -713,13 +732,13 @@ def run_build(args):
     else:
         _build_from_csvs(Path(args.data), lut_json, args.arch,
                          merge_existing=args.merge_existing,
-                         head_dims=args.head_dim)
+                         head_dims=args.head_dim, only=args.geometry)
     print('[build] wrote ' + str(lut_json))
 
 
 def run_compile(args):
-    lut_json = LUT_DIR / ('gfx' + args.arch + '.json')
-    lut_fb = LUT_DIR / ('gfx' + args.arch + '.fb')
+    lut_json = ut_rank_tools.private_path(args.out, LUT_DIR) if args.out else LUT_DIR / ('gfx' + args.arch + '.json')
+    lut_fb = ut_rank_tools.private_path(args.fb_out or str(lut_json.with_suffix('.fb')), LUT_DIR) if args.out else LUT_DIR / ('gfx' + args.arch + '.fb')
     with open(lut_json) as f:
         doc = json.load(f)
     print('[compile] schema_version={} configs={} points={}'.format(
@@ -742,11 +761,28 @@ def run_compile(args):
 # CLI
 # ---------------------------------------------------------------------------
 
+def run_rank_build(args):
+    doc = json.loads(Path(args.base or args.from_lut).read_text(encoding="utf-8"))
+    records = ut_rank_tools.evidence(args.rank_log)
+    if any(not r["leaf"].startswith("gqa/") or ("/prefill/" in r["leaf"] and ("_Wi8_" in r["leaf"]) != (args.prefill_kv == "int8")) for r in records):
+        raise ValueError("select one prefill KV input policy for its Fp16 lookup keys")
+    summary = ut_lut_from_table.update_points(args.op, doc, records)
+    output = ut_rank_tools.private_path(args.out, LUT_DIR)
+    output.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    output.with_suffix(".rank-report.json").write_text(json.dumps(summary, indent=2) + "\n")
+    print("rank table:", output, "updated:", summary["updated"], "skipped:", len(summary["skipped"]))
+
+
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "unit_test/common"))
+import ut_rank_tools
+import ut_lut_from_table
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('command',
-                    choices=['plan', 'measure', 'build', 'compile', 'all'])
+                    choices=['plan', 'measure', 'build', 'compile', 'all', 'rank-catalog', 'rank-candidates', 'rank-measure', 'rank-build', 'rank-reference-candidates', 'rank-seed', 'rank-report'])
     ap.add_argument('--arch', default='1151', help='GPU arch suffix (default: 1151)')
     ap.add_argument('--data', default=str(HERE / 'data'),
                     help='Directory of *_best.csv (default: scripts/data/)')
@@ -770,11 +806,27 @@ def main():
                     help='plan/measure/build only these head dims, e.g. '
                          '64,128,256 (comma list); pair with build '
                          '--merge-existing')
+    ap.add_argument('--geometry',
+                    type=lambda s: {tuple(int(x) for x in g.split(':'))
+                                    for g in s.split(',')},
+                    default=None,
+                    help='plan/measure/build only these H:G:d geometries, e.g. '
+                         '24:4:256 (comma list); with build --merge-existing '
+                         'only those geometries are replaced')
     ap.add_argument('--merge-existing', action='store_true',
                     help='build: add the measured (phase, head_dim) groups to '
                          'the current lut/gfx<arch>.json instead of replacing '
                          'the table')
+    ut_rank_tools.add_arguments(ap)
+    ut_lut_from_table.add_arguments(ap)
+    ap.add_argument("--out", help="explicit private JSON/log/CSV path")
+    ap.add_argument("--fb-out", help="explicit private FlatBuffer output")
+    ap.add_argument("--prefill-kv", choices=["fp16", "int8"], default="fp16")
     args = ap.parse_args()
+    args.op = "gqa"
+    if args.command.startswith("rank-"):
+        ut_rank_tools.dispatch(args, LUT_DIR, run_rank_build)
+        return
 
     cmds = ['measure', 'build', 'compile'] if args.command == 'all' else [args.command]
     for cmd in cmds:

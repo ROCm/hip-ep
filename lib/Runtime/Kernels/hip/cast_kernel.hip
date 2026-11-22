@@ -7,9 +7,61 @@
 #include "debug_log.h"
 
 #include <hip/hip_runtime.h>
+#include <hip/hip_bf16.h>
 #include <hip/hip_fp16.h>
 #include <cstdint>
 #include <cstdio>
+
+namespace {
+
+// Element <-> float for the bf16 cast paths. Integers and f64 use
+// static_cast; f16/bf16 use the HIP intrinsics, which round to nearest even
+// (same as PyTorch and ONNX).
+template <typename T>
+struct CastIO {
+  __device__ static inline float load(T x) { return static_cast<float>(x); }
+  __device__ static inline T store(float x) { return static_cast<T>(x); }
+};
+
+template <>
+struct CastIO<__half> {
+  __device__ static inline float load(__half x) { return __half2float(x); }
+  __device__ static inline __half store(float x) { return __float2half(x); }
+};
+
+template <>
+struct CastIO<__hip_bfloat16> {
+  __device__ static inline float load(__hip_bfloat16 x) {
+    return __bfloat162float(x);
+  }
+  __device__ static inline __hip_bfloat16 store(float x) {
+    return __float2bfloat16(x);
+  }
+};
+
+template <typename T>
+struct TypeTag {
+  using type = T;
+};
+
+// Runtime dtype -> f(TypeTag<T>{}). Returns -1 for an unsupported dtype.
+template <typename F>
+int dispatch_dtype(int dtype, F&& f) {
+  switch (dtype) {
+  case HIP_DTYPE_FLOAT32:  return f(TypeTag<float>{});
+  case HIP_DTYPE_FLOAT16:  return f(TypeTag<__half>{});
+  case HIP_DTYPE_BFLOAT16: return f(TypeTag<__hip_bfloat16>{});
+  case HIP_DTYPE_FLOAT64:  return f(TypeTag<double>{});
+  case HIP_DTYPE_INT64:    return f(TypeTag<int64_t>{});
+  case HIP_DTYPE_INT32:    return f(TypeTag<int32_t>{});
+  case HIP_DTYPE_INT16:    return f(TypeTag<int16_t>{});
+  case HIP_DTYPE_INT8:     return f(TypeTag<int8_t>{});
+  case HIP_DTYPE_UINT8:    return f(TypeTag<uint8_t>{});
+  default:                 return -1;
+  }
+}
+
+} // namespace
 
 __global__ void cast_i64_to_i32_kernel(
     const int64_t* __restrict__ input,
@@ -146,6 +198,20 @@ __global__ void cast_int_to_int_kernel(
   }
 }
 
+// Generic cast through fp32 (used for the bf16 paths). Matches PyTorch
+// torch.aten.to.dtype and ONNX Cast: fp32 -> bf16 rounds to nearest even and
+// keeps NaN, bf16 -> fp32 is exact, float -> integer truncates.
+template <typename Src, typename Dst>
+__global__ void cast_via_float_kernel(
+    const Src* __restrict__ input,
+    Dst* __restrict__ output,
+    int64_t num_elements) {
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    output[idx] = CastIO<Dst>::store(CastIO<Src>::load(input[idx]));
+  }
+}
+
 __global__ void cast_ui8_to_f16_kernel(
     const uint8_t* __restrict__ input,
     __half* __restrict__ output,
@@ -171,6 +237,28 @@ __global__ void cast_ui8_to_f32_kernel(
   }
 }
 
+// ConvInteger casts int8 activations and weights to f32 before hip.conv.
+// Sign is preserved: static_cast<float> of int8_t sign-extends.
+__global__ void cast_i8_to_f32_kernel(
+    const int8_t* __restrict__ input,
+    float* __restrict__ output,
+    int64_t num_elements) {
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    output[idx] = static_cast<float>(input[idx]);
+  }
+}
+
+__global__ void cast_f32_to_ui8_kernel(
+    const float* __restrict__ input,
+    uint8_t* __restrict__ output,
+    int64_t num_elements) {
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    output[idx] = static_cast<uint8_t>(input[idx]);
+  }
+}
+
 __global__ void cast_f16_to_ui8_kernel(
     const __half* __restrict__ input,
     uint8_t* __restrict__ output,
@@ -181,6 +269,41 @@ __global__ void cast_f16_to_ui8_kernel(
   }
 }
 
+template <typename Src, typename Dst>
+static int launch_cast_via_float(hipStream_t stream, const void* input,
+                                 void* output, int64_t num_elements,
+                                 int grid_size, int block_size) {
+  hipLaunchKernelGGL(HIP_KERNEL_NAME(cast_via_float_kernel<Src, Dst>),
+                     dim3(grid_size), dim3(block_size), 0, stream,
+                     static_cast<const Src*>(input),
+                     static_cast<Dst*>(output), num_elements);
+  return 0;
+}
+
+// Launches a cast where one side is bf16. Returns -1 without launching when
+// neither side is bf16 or the other dtype is unsupported, so hip_cast()
+// reports it through its existing "unsupported conversion" branch.
+static int launch_cast_bf16(hipStream_t stream, const void* input,
+                            void* output, int64_t num_elements,
+                            int input_dtype, int output_dtype,
+                            int grid_size, int block_size) {
+  if (input_dtype == HIP_DTYPE_BFLOAT16) {
+    return dispatch_dtype(output_dtype, [&](auto dst) {
+      using Dst = typename decltype(dst)::type;
+      return launch_cast_via_float<__hip_bfloat16, Dst>(
+          stream, input, output, num_elements, grid_size, block_size);
+    });
+  }
+  if (output_dtype == HIP_DTYPE_BFLOAT16) {
+    return dispatch_dtype(input_dtype, [&](auto src) {
+      using Src = typename decltype(src)::type;
+      return launch_cast_via_float<Src, __hip_bfloat16>(
+          stream, input, output, num_elements, grid_size, block_size);
+    });
+  }
+  return -1;
+}
+
 extern "C" int hip_cast(
     void* stream,
     const void* input,
@@ -189,6 +312,9 @@ extern "C" int hip_cast(
     int input_dtype,
     int output_dtype) {
   if (num_elements <= 0) return 0;
+
+  // Drop a stale error so the status returned below belongs to this launch.
+  (void)hipGetLastError();
 
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
   constexpr int kBlockSize = 256;
@@ -300,6 +426,27 @@ extern "C" int hip_cast(
                        dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
                        static_cast<const uint8_t*>(input),
                        static_cast<float*>(output), num_elements);
+  } else if (input_dtype == HIP_DTYPE_INT8 && output_dtype == HIP_DTYPE_FLOAT32) {
+    CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] hip_cast: INT8->FLOAT32, "
+            "num_elements=%lld, grid=%d, block=%d\n",
+            (long long)num_elements, grid_size, kBlockSize);
+    hipLaunchKernelGGL(cast_i8_to_f32_kernel,
+                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const int8_t*>(input),
+                       static_cast<float*>(output), num_elements);
+  } else if (input_dtype == HIP_DTYPE_INT8 && output_dtype == HIP_DTYPE_INT32) {
+    CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] hip_cast: INT8->INT32, "
+            "num_elements=%lld, grid=%d, block=%d\n",
+            (long long)num_elements, grid_size, kBlockSize);
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(cast_int_to_int_kernel<int8_t, int32_t>),
+                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const int8_t*>(input),
+                       static_cast<int32_t*>(output), num_elements);
+  } else if (input_dtype == HIP_DTYPE_FLOAT32 && output_dtype == HIP_DTYPE_UINT8) {
+    hipLaunchKernelGGL(cast_f32_to_ui8_kernel,
+                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const float*>(input),
+                       static_cast<uint8_t*>(output), num_elements);
   } else if (input_dtype == HIP_DTYPE_FLOAT16 && output_dtype == HIP_DTYPE_UINT8) {
     hipLaunchKernelGGL(cast_f16_to_ui8_kernel,
                        dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
@@ -315,6 +462,10 @@ extern "C" int hip_cast(
                        dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
                        static_cast<const int16_t*>(input),
                        static_cast<uint8_t*>(output), num_elements);
+  } else if (launch_cast_bf16(hip_stream, input, output, num_elements,
+                              input_dtype, output_dtype, grid_size,
+                              kBlockSize) == 0) {
+    // bf16 <-> {f32, f16, f64, i64, i32, i16, i8, u8} launched.
   } else {
     fprintf(stderr,
             "[custom_kernels] hip_cast: unsupported conversion "

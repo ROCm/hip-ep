@@ -1,0 +1,109 @@
+{%- comment -%}
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+
+The page's background field. One layer, behind everything, scrolling with the
+document -- so the site reads as content sitting on a single surface rather
+than as a stack of sections that each brought their own colour.
+
+TWO PARTS, AND ONLY THE FIRST IS SITE-WIDE.
+
+  The wash   a deep blue at the top of the document resolving into --bg
+             further down. Every page gets it. It is what stops the site
+             reading as near-black.
+
+  The net    a field of nodes and edges, landing page only. A docs page is
+             two thousand words in a narrow column with a sidebar beside it;
+             a texture under that is noise, and the wash alone gives those
+             pages the same floor without competing with the prose.
+
+WHY A NETWORK AND NOT A DOT GRID. The lattice this replaced was honest about
+scale and said nothing else. Nodes and edges are at least the right family of
+picture for a thing that compiles graphs -- and the detail that sells it is
+that each circle is filled with the page colour, so an edge passing behind one
+is occluded by it. Without that they are circles lying on a tangle of lines.
+
+It is a texture, not a diagram. There are no labels, nothing runs left to
+right, and nothing here should be read as a particular model's graph. If a
+future change wants to explain the pipeline, that is a figure in the content,
+not this.
+
+THE GEOMETRY IS GENERATED, NOT DRAWN. Forty points placed by rejection
+sampling with a minimum separation, each joined to its two nearest
+neighbours. Hand-placed nodes end up evenly spaced because a person cannot
+help it, and an evenly spaced network reads as wallpaper. Reproduce or alter
+it with the seeded script recorded in assets/README.md rather than nudging
+coordinates here.
+
+aria-hidden with no role: this is decoration and a screen reader has nothing
+to gain from it. It also takes no hit test -- see .backdrop in styles.css.
+{%- endcomment -%}
+{%- comment -%}
+The landing-page test is on the markup, not on a modifier class: the network
+is either rendered or it is not, so there is no second state for CSS to
+describe and no selector that could drift out of step with the condition.
+{%- endcomment -%}
+<div class="backdrop" aria-hidden="true">
+  {%- if page.url == '/' -%}
+  {%- comment -%}
+  preserveAspectRatio="xMidYMin slice" rather than the default: the drawing
+  has to cover the layer at any aspect ratio, and anchoring to the top keeps
+  the denser upper half of the field behind the first screen instead of
+  letting it drift off as the viewport gets wider.
+  {%- endcomment -%}
+  <svg class="backdrop__svg" viewBox="0 0 1600 900"
+       preserveAspectRatio="xMidYMin slice" focusable="false">
+    <g class="backdrop__edges">
+      <path d="M870.2 357.0 L1017.5 437.9 M870.2 357.0 L961.2 258.3 M870.2 357.0 L800.3 511.7 M1334.7 45.0 L1438.9 106.9 M1334.7 45.0 L1362.2 221.8 M619.4 298.0 L596.5 476.9 M619.4 298.0 L605.7 91.4 M1017.5 437.9 L961.2 258.3 M656.6 793.6 L508.3 743.2 M656.6 793.6 L721.8 626.8 M67.6 604.2 L116.1 793.1 M67.6 604.2 L298.6 658.1 M931.6 87.6 L741.8 111.5 M931.6 87.6 L1122.3 208.5 M931.6 87.6 L961.2 258.3 M741.8 111.5 L605.7 91.4 M508.3 743.2 L540.0 594.3 M508.3 743.2 L370.6 763.3 M433.9 185.1 L271.6 288.8 M433.9 185.1 L349.4 48.6 M433.9 185.1 L605.7 91.4 M271.9 848.3 L116.1 793.1 M271.9 848.3 L370.6 763.3 M298.6 658.1 L407.4 552.5 M298.6 658.1 L370.6 763.3 M596.5 476.9 L540.0 594.3 M271.6 288.8 L151.8 255.7 M271.6 288.8 L207.0 399.0 M1514.7 389.5 L1507.2 687.2 M1514.7 389.5 L1362.2 221.8 M1514.7 389.5 L1518.6 266.9 M349.4 48.6 L208.3 135.2 M540.0 594.3 L407.4 552.5 M151.8 255.7 L51.4 163.2 M151.8 255.7 L208.3 135.2 M407.4 552.5 L309.3 475.3 M309.3 475.3 L207.0 399.0 M1438.9 106.9 L1362.2 221.8 M1122.3 208.5 L961.2 258.3 M1507.2 687.2 L1247.3 821.7 M1362.2 221.8 L1518.6 266.9 M1102.6 864.9 L1207.4 676.4 M1102.6 864.9 L942.2 702.3 M1102.6 864.9 L1247.3 821.7 M721.8 626.8 L800.3 511.7 M1060.5 629.4 L1243.3 497.4 M1060.5 629.4 L1207.4 676.4 M1060.5 629.4 L942.2 702.3 M1243.3 497.4 L1207.4 676.4 M1207.4 676.4 L1247.3 821.7 M51.4 163.2 L208.3 135.2" />
+    </g>
+    <g class="backdrop__nodes">
+      <circle cx="1017.5" cy="437.9" r="3.2" />
+      <circle cx="656.6" cy="793.6" r="3.2" />
+      <circle cx="67.6" cy="604.2" r="4.5" />
+      <circle cx="931.6" cy="87.6" r="3.2" />
+      <circle cx="741.8" cy="111.5" r="3.2" />
+      <circle cx="508.3" cy="743.2" r="3.2" />
+      <circle cx="271.9" cy="848.3" r="4.5" />
+      <circle cx="116.1" cy="793.1" r="3.2" />
+      <circle cx="298.6" cy="658.1" r="3.2" />
+      <circle cx="596.5" cy="476.9" r="3.2" />
+      <circle cx="271.6" cy="288.8" r="3.2" />
+      <circle cx="1514.7" cy="389.5" r="4.5" />
+      <circle cx="349.4" cy="48.6" r="3.2" />
+      <circle cx="540.0" cy="594.3" r="3.2" />
+      <circle cx="151.8" cy="255.7" r="3.2" />
+      <circle cx="407.4" cy="552.5" r="3.2" />
+      <circle cx="309.3" cy="475.3" r="4.5" />
+      <circle cx="1438.9" cy="106.9" r="3.2" />
+      <circle cx="605.7" cy="91.4" r="3.2" />
+      <circle cx="1122.3" cy="208.5" r="3.2" />
+      <circle cx="1507.2" cy="687.2" r="3.2" />
+      <circle cx="1362.2" cy="221.8" r="4.5" />
+      <circle cx="721.8" cy="626.8" r="3.2" />
+      <circle cx="1060.5" cy="629.4" r="3.2" />
+      <circle cx="1243.3" cy="497.4" r="3.2" />
+      <circle cx="1207.4" cy="676.4" r="4.5" />
+      <circle cx="942.2" cy="702.3" r="3.2" />
+      <circle cx="961.2" cy="258.3" r="3.2" />
+      <circle cx="208.3" cy="135.2" r="3.2" />
+      <circle cx="370.6" cy="763.3" r="4.5" />
+      <circle cx="800.3" cy="511.7" r="3.2" />
+      <circle cx="1518.6" cy="266.9" r="3.2" />
+      <circle cx="207.0" cy="399.0" r="3.2" />
+      <circle cx="1247.3" cy="821.7" r="3.2" />
+    </g>
+    {%- comment -%}
+    Six lit nodes, picked along a diagonal rather than at random so the accent
+    is distributed across the field. Random selection clustered them.
+    {%- endcomment -%}
+    <g class="backdrop__nodes backdrop__nodes--lit">
+      <circle cx="51.4" cy="163.2" r="5" />
+      <circle cx="433.9" cy="185.1" r="5" />
+      <circle cx="619.4" cy="298.0" r="5" />
+      <circle cx="870.2" cy="357.0" r="5" />
+      <circle cx="1334.7" cy="45.0" r="5" />
+      <circle cx="1102.6" cy="864.9" r="5" />
+    </g>
+  </svg>
+  {%- endif -%}
+</div>

@@ -42,7 +42,7 @@ jobs:
       # ilammy/msvc-dev-cmd and mozilla-actions/sccache-action have no
       # Node.js 24 releases yet; allow Node.js 20 until they are updated.
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
-      HIP_ARCHITECTURES: "gfx11-generic;gfx1170"
+      HIP_ARCHITECTURES: "gfx11-generic;gfx11-7-generic"
       SCCACHE_CACHE_SIZE: "200M"
 
     steps:
@@ -55,26 +55,36 @@ jobs:
           fetch-depth: 1
           show-progress: false
 
-      # LLVM and ORT are prebuilt by the deps workflow. fail-on-cache-miss
-      # makes the contract explicit: a green deps run means these entries
-      # exist, so a miss is a wiring bug, not a cue to rebuild.
+      # Caches are the fast path. The prebuild always uploads this run's copy,
+      # so download-artifact still works after a later cache eviction.
       - name: Restore llvm-install
+        id: restore-llvm
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/llvm-install
           key: ${{ inputs.llvm_cache_key }}
-          fail-on-cache-miss: true
+
+      - name: Download llvm-install
+        if: steps.restore-llvm.outputs.cache-hit != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.llvm_cache_key }}
+          path: ${{ runner.workspace }}/llvm-install
 
       - name: Restore ort-install
+        id: restore-ort
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/ort-install
           key: ${{ inputs.ort_cache_key }}
-          fail-on-cache-miss: true
 
-      # Caches are the fast path, but prebuild may have produced a brand-new
-      # artifact set earlier in this workflow run. Upload/download-artifact is
-      # the reliable same-run handoff in that case.
+      - name: Download ort-install
+        if: steps.restore-ort.outputs.cache-hit != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.ort_cache_key }}
+          path: ${{ runner.workspace }}/ort-install
+
       - name: Restore amdgpu-artifacts cache
         id: restore-amdgpu
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
@@ -285,6 +295,16 @@ jobs:
           mkdir -p dll-sizes
           python -c 'import glob,json,os; b="staging/bin"; d={}; p=os.path.join(b,"hipgpu.dll"); d.update({"hipgpu.dll": os.path.getsize(p)} if os.path.isfile(p) else {}); d.update({os.path.basename(x): os.path.getsize(x) for x in sorted(glob.glob(os.path.join(b,"custom_kernels*.dll")))}); open("dll-sizes/dll-sizes.json","w",encoding="utf-8",newline="\n").write(json.dumps(d,indent=2)+"\n"); print(open("dll-sizes/dll-sizes.json",encoding="utf-8").read())'
 
+          # Marker consumed by windows-gpu-test.yml. Absent means the native
+          # smoke tests skip; present only when this build opted in.
+          CACHE="../build/$(basename "$PWD")/CMakeCache.txt"
+          if grep -q '^HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS:BOOL=ON$' "$CACHE"; then
+            echo "Native artifacts enabled; GPU native smoke tests will run"
+            touch staging/native-artifacts.enabled
+          else
+            echo "Native artifacts disabled; GPU native smoke tests will skip"
+          fi
+
           echo "=== Staged package contents ==="
           find staging/ -type f | sort
 
@@ -293,14 +313,14 @@ jobs:
         with:
           name: gpu-test-package
           path: staging/
-          retention-days: ${{ (github.ref == 'refs/heads/main' || contains(github.ref, 'release')) && 14 || 3 }}
+          retention-days: ${{ (github.ref == 'refs/heads/main' || contains(github.ref, 'release')) && 90 || 3 }}
 
       - name: Upload DLL sizes
         uses: actions/upload-artifact@v4
         with:
           name: dll-sizes
           path: dll-sizes/dll-sizes.json
-          retention-days: ${{ (github.ref == 'refs/heads/main' || contains(github.ref, 'release')) && 14 || 3 }}
+          retention-days: ${{ (github.ref == 'refs/heads/main' || contains(github.ref, 'release')) && 90 || 3 }}
 
       - name: Stage Python wheel package
         shell: bash
@@ -334,7 +354,7 @@ jobs:
         with:
           name: hip-python-package
           path: wheelpkg/
-          retention-days: ${{ (github.ref == 'refs/heads/main' || contains(github.ref, 'release')) && 14 || 3 }}
+          retention-days: ${{ (github.ref == 'refs/heads/main' || contains(github.ref, 'release')) && 90 || 3 }}
 
       - name: Save sccache directory
         if: always() && github.ref_name == 'main'

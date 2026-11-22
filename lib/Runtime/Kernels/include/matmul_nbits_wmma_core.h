@@ -48,35 +48,6 @@ hipdnn_wmma_f32_16x16x16_f16_unavailable(half16, half16, float8 c) {
 
 #define WMMA_TILE 16
 
-/* LDS-only workgroup barrier.
- *
- * __syncthreads() is a full workgroup fence: on RDNA it emits s_waitcnt for both
- * counters, s_barrier, AND buffer_gl0_inv, because a workgroup can span the two
- * CUs of a WGP and global-memory coherence between them requires invalidating
- * the per-CU L0. The GEMM K-loop only ever synchronizes shared memory -- the
- * global loads are private to the thread that issues them -- so the L0 flush is
- * pure overhead, once per K-step, and it also throws away any L0 hits the next
- * tile's loads might have had.
- *
- * The "memory" clobber is what keeps the compiler from moving LDS accesses
- * across the barrier; without it the raw s_barrier intrinsic is IntrNoMem and
- * reordering is legal.
- *
- * The standalone s_barrier instruction is provided by the gfx9, gfx10 and
- * gfx11 families. gfx12 replaced it with the s_barrier_signal/s_barrier_wait
- * pair, and later architectures likewise lack it, so the inline asm fails to
- * assemble there. Emit the asm only on the families that provide it and let
- * every other target -- current or future -- fall back to __syncthreads(),
- * which is always correct (a strictly stronger full-workgroup fence); it only
- * reintroduces the redundant per-K-step L0 flush the raw asm skips. */
-#if defined(__HIP_DEVICE_COMPILE__) && defined(__AMDGCN__) &&                   \
-    (defined(__GFX9__) || defined(__GFX10__) || defined(__GFX11__))
-#define HIPDNN_LDS_BARRIER()                                                    \
-    __asm__ __volatile__("s_waitcnt lgkmcnt(0)\n\ts_barrier" ::: "memory")
-#else
-#define HIPDNN_LDS_BARRIER() __syncthreads()
-#endif
-
 /* BK_IN decouples the K-step from the warp-tile shape.
  *
  * BK_T used to be forced to BM_T/(WT_M*WT_N), which is the value that makes each
@@ -525,16 +496,69 @@ void GemmFp16U4Impl(
 
     // ks_begin/ks_end let the caller run the K-step's WMMA in two pieces and put
     // the shared-memory store for the *next* tile between them.
+    //
+    // Which operand is held for the whole K sub-step and which one is streamed
+    // decides the live fragment set: holding all WT_N B fragments and streaming A
+    // keeps WT_N + 1 fragments live, holding the WT_M A fragments and streaming B
+    // keeps WT_M + 1. Each is 8 VGPRs on gfx11 (a half16 per lane); the LDS reads
+    // and the WMMA count are the same either way.
+    //
+    // The 512-thread WT2x4 tile (128x256) streams B when the target's register
+    // file is 1024 VGPRs (gfx11-generic, the binary gfx1150/1151/1152 run, and
+    // gfx1150/1152 builds). waves_per_eu(8) at 512 threads is a 128-VGPR budget
+    // there, and holding the four B fragments needs ~145 next to the 64
+    // accumulator VGPRs: ROCm 7.14 spilled 3 values (16-44 bytes of scratch per
+    // lane), 7.16 spilled 138 and reloaded six of the eight accumulator tiles
+    // from scratch on every K-step (3.5-4x slower). Streaming B (40 -> 24
+    // fragment VGPRs) fits it in 125-128 with no scratch on both compilers and
+    // keeps two workgroups per WGP. A 1536-VGPR target (a gfx1151 build) has a
+    // 192 budget and keeps holding B. The 256-thread WT2x4 tile keeps holding B
+    // everywhere: its budget is 160 and streaming cost it 2-4% (fewer
+    // independent WMMAs per fragment read). So does gfx1170: its gfx12-style
+    // fragments are 4 VGPRs, holding B fits in 116-120 with no scratch, and
+    // streaming measured up to 4% slower there.
+    constexpr bool kStreamB = !HIPDNN_WMMA_GFX12 && (WT_N > WT_M) &&
+                              (THR_L >= 512) && (HIPDNN_VGPRS_PER_SIMD < 1536);
     auto computeWMMA = [&](int buf, int ks_begin, int ks_end)
         __attribute__((always_inline))
     {
 #pragma unroll
         for(int ks = ks_begin; ks < ks_end; ks++)
         {
+            const int k_off = hipdnn_wmma_k_off(sub);
+            if constexpr (kStreamB) {
+                half16 a_frag[WT_M];
+#pragma unroll
+                for(int wm = 0; wm < WT_M; wm++)
+                {
+                    int moff         = (wrow * WT_M + wm) * WMMA_TILE;
+                    u32x4* dst       = reinterpret_cast<u32x4*>(&a_frag[wm]);
+                    const u32x4* src = reinterpret_cast<const u32x4*>(
+                        &smA[buf][moff + lane][ks * WMMA_TILE + k_off]);
+#pragma unroll
+                    for(int i = 0; i < HIPDNN_WMMA_FRAG_ELEMS / 8; i++)
+                        dst[i] = src[i];
+                }
+#pragma unroll
+                for(int wn = 0; wn < WT_N; wn++)
+                {
+                    int noff         = (wcol * WT_N + wn) * WMMA_TILE;
+                    half16 b_frag;
+                    u32x4* dst       = reinterpret_cast<u32x4*>(&b_frag);
+                    const u32x4* src = reinterpret_cast<const u32x4*>(
+                        &smB[buf][noff + lane][ks * WMMA_TILE + k_off]);
+#pragma unroll
+                    for(int i = 0; i < HIPDNN_WMMA_FRAG_ELEMS / 8; i++)
+                        dst[i] = src[i];
+#pragma unroll
+                    for(int wm = 0; wm < WT_M; wm++)
+                        acc[wm][wn] = HIPDNN_WMMA_F32_16X16X16_F16(
+                            a_frag[wm], b_frag, acc[wm][wn]);
+                }
+            } else {
             // 16-byte vector reads: a half16 fragment is two ds_read_b128, which
             // the padded row stride above makes legal.
             half16 b_frag[WT_N];
-            const int k_off = hipdnn_wmma_k_off(sub);
 #pragma unroll
             for(int wn = 0; wn < WT_N; wn++)
             {
@@ -562,6 +586,7 @@ void GemmFp16U4Impl(
                 for(int wn = 0; wn < WT_N; wn++)
                     acc[wm][wn] = HIPDNN_WMMA_F32_16X16X16_F16(
                         a_frag, b_frag[wn], acc[wm][wn]);
+            }
             }
         }
     };
@@ -600,10 +625,19 @@ void GemmFp16U4Impl(
         for(int wn = 0; wn < WT_N; wn++)
         {
             int nbase = col0 + (wcol * WT_N + wn) * WMMA_TILE;
+            // One row pointer per 16x16 tile, then a compile-time row offset
+            // (r - r0 folds to e*2, or e on gfx12) times ldc per element.
+            // Written as C[(mbase + r) * ldc + ...], ROCm 7.16 recomputes the
+            // whole 32-bit index, sign-extends it and does a 64-bit shift and
+            // add for every stored element: +160 VALU per tile in the 256x128
+            // WT4x2 epilogue, which 7.14 had folded into one pointer.
+            const int r0 = hipdnn_wmma_acc_row(sub, 0);
+            _Float16* crow = C + static_cast<int64_t>(mbase + r0) * ldc + nbase + lane;
 #pragma unroll
             for(int e = 0; e < 8; e++)
             {
                 int r = hipdnn_wmma_acc_row(sub, e);
+                _Float16* cp = crow + static_cast<int64_t>(r - r0) * ldc;
                 const int tile_r =
                     (wrow * WT_M + wm) * WMMA_TILE + r;
                 if constexpr (BOUNDS_CHECK) {
@@ -618,7 +652,7 @@ void GemmFp16U4Impl(
                                 value += static_cast<float>(output_bias[nbase + lane]);
                             }
                         }
-                        C[(mbase + r) * ldc + nbase + lane] = (_Float16)value;
+                        *cp = (_Float16)value;
                     }
                 } else {
                     float value = acc[wm][wn][e];
@@ -630,7 +664,7 @@ void GemmFp16U4Impl(
                             value += static_cast<float>(output_bias[nbase + lane]);
                         }
                     }
-                    C[(mbase + r) * ldc + nbase + lane] = (_Float16)value;
+                    *cp = (_Float16)value;
                 }
             }
         }

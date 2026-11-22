@@ -73,3 +73,25 @@ module {
 // CHECK-LABEL: llvm.func @test_matmul_trans_b
 // CHECK: llvm.mlir.constant(1 : i64)
 // CHECK: llvm.call @wrap_hipblasLtMatmul({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+
+// ----- i32 matmul, rank-2 B --------------------------------------------------
+// batchCount comes from A. B holds one matrix, so b_batch_stride is the
+// compile-time constant 0 rather than K*N.
+
+module {
+  func.func @test_matmul_i32_rank2_b(%ctx: !hip.context,
+                                     %A: memref<2x1x2xi32, 1>,
+                                     %B: memref<2x1xi32, 1>,
+                                     %output: memref<2x1x1xi32, 1>) {
+    hip.matmul(%ctx)
+        ins(%A, %B : memref<2x1x2xi32, 1>, memref<2x1xi32, 1>)
+        outs(%output : memref<2x1x1xi32, 1>)
+    return
+  }
+}
+
+// CHECK-LABEL: llvm.func @test_matmul_i32_rank2_b
+// CHECK-NOT: llvm.icmp
+// CHECK-NOT: llvm.select
+// CHECK: %[[STRIDE:.*]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK: llvm.call @wrap_matmul_i32(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %[[STRIDE]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64) -> i32

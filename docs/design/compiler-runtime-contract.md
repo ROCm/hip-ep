@@ -67,7 +67,9 @@ mirror are produced for both artifact formats
   is present in the native artifact too.
 
 The EP selects the loader from `mlir_metadata::Metadata.artifact_format` before
-opening the artifact. See [native-vs-ir-comparison.md](../native-vs-ir-comparison.md).
+opening the artifact. `NATIVE` is available only when the EP is built with
+`-DHIPDNN_EP_ENABLE_NATIVE_ARTIFACTS=ON` (default `OFF`); otherwise session
+setup throws `std::runtime_error`. See [native-vs-ir-comparison.md](../native-vs-ir-comparison.md).
 
 `Metadata.rocmlir_arch` records what the embedded rocMLIR code objects were
 built for, not only the GPU arch: it is `hip::compiler::rocMlirArtifactTarget()`,
@@ -84,6 +86,14 @@ delete the cache and recompile after changing GPUs or toggling either
 `HIPDNN_EP_ROCMLIR` or `HIPDNN_EP_ROCMLIR_AUTOTUNE`. Compilation fails outright
 if autotuning was requested but no HIP device could be reached, so the suffix
 never claims tuning that did not happen.
+
+`HIPDNN_EP_ROCMLIR_AUTOTUNE_BENCH` selects how candidates are timed and is not
+part of the suffix: both modes search the same space and record the same kind
+of artifact. `adaptive` (default) is MIGraphX's `adaptive_topk_benchmark`: a
+short coarse pass over every candidate, then bundled launches for the ten
+fastest within 4x of the best (see `include/hip/Compiler/AdaptiveBenchmark.h`).
+`simple` gives every candidate 20 warmup and 100 timed launches. Benchmark
+inputs hold generated data (floats in [-1, 1), small integers), not zeros.
 
 ---
 
@@ -166,7 +176,8 @@ Dynamic dimensions are encoded as `-1`.
 | `constants_filename` | `string` | Name of the constants file to open via `fs` |
 | `constants[i].size` | `int64` | Byte size of constant `i` |
 | `constants[i].offset` | `int64` | Byte offset of constant `i` in the constants file |
-| `input_count` | `int64` | Number of model inputs |
+| `constants[i].disk_resident` | `bool` | Constant `i` is read on demand from its `FileRefSource`; it has no GPU copy |
+| `input_count` | `int64` | Number of model inputs the graph reads. An unread function argument is omitted |
 | `output_count` | `int64` | Number of model outputs |
 | `inputs[i].shape` | `[int64]` | Tensor dimensions of input `i`; `-1` = dynamic |
 | `inputs[i].element_size` | `int64` | Bytes per element of input `i` |
@@ -198,13 +209,69 @@ The generated LLVM IR plus `RuntimeState` therefore carry pool behavior. See
 [pool-allocs-memory-planning.md](pool-allocs-memory-planning.md) for the
 attribute, lowering, and grow-on-demand runtime contract.
 
+### Disk-resident constants
+
+A constant with `disk_resident` set is consumed only by gathers along axis 0,
+which lower to wrappers that take the constant index instead of a data
+pointer:
+
+- `wrap_gather_from_file(state, constant_index, indices, output, axis, ...)` —
+  same trailing arguments as `wrap_gather`; `axis` is normalized and must be
+  `0`.
+- `wrap_gather_block_quantized_from_file(state, constant_index, indices,
+  scales, zero_points, output, ...)` — same trailing arguments as
+  `wrap_gather_block_quantized`.
+
+`constant_index` is the constant's `globalIndex` and is a compile-time
+constant. For these entries `inference_init` maps the source file instead of
+uploading it, and `hipdnn_ep_constant_get` returns null. See
+[constant-handling-design.md](constant-handling-design.md#disk-resident-gather-tables)
+for selection and the runtime read path.
+
+### rocMLIR kernel dispatch
+
+Each `hip.rocmlir` op lowers to one call:
+
+```text
+wrap_rocmlir(state, kernel_binary, func_name, block_size, grid_size,
+             kernargs, N * sizeof(void*))
+```
+
+- `kernel_binary` is the code object that `hip-fuse-rocmlir` outlined and
+  rocMLIR compiled. `func_name`, `block_size` and `grid_size` come from the
+  same compile.
+- `kernargs` holds `N` bare device pointers: the `ins` operands in order, then
+  the `outs` operands in order.
+- A kernel can have more than one result. rocMLIR appends one output argument
+  per kernel function result, in result order, so the `outs` order is the
+  result order. Extra results are chain values that are also read outside the
+  kernel.
+- Every operand must be contiguous; the lowering passes no layout metadata.
+
+The runtime wrapper does not depend on the operand count, so a kernel with
+more results needs no runtime change.
+
+A kernel argument that rocMLIR marks `rock.prefill` must hold a given value
+before every launch. A split-K kernel adds its partial sums into its output
+with atomics, so it asks for that output to start at 0. The compile stamps
+these arguments on the op as `prefill` (argument index, bytes per element,
+element bit pattern), and each one lowers to a call before the launch, on the
+same stream:
+
+```text
+wrap_rocmlir_prefill(state, kernargs[index], num_elements, bytes, pattern)
+```
+
+The autotuner fills the same arguments before every candidate launch, so a
+split-K config is timed with its fill.
+
 ---
 
 ## Consumers
 
 | Consumer | Fields used | How |
 |----------|-------------|-----|
-| Runtime (`inference_init`) | `constants_filename`, `constants[i].offset` | Reads `__metadata_blob`; opens constants file via `fs`; indexes into blob by offset |
+| Runtime (`inference_init`) | `constants_filename`, `constants[i].offset`, `constants[i].disk_resident` | Reads `__metadata_blob`; opens constants file via `fs`; indexes into blob by offset; maps disk-resident sources |
 | Any caller | all | Reads `__metadata_json` via `inference_get_metadata_json()` |
 
 ---

@@ -1,12 +1,17 @@
 # ============================================================
 # custom_kernels MatMulNBits bits=2 (uint2) Test
 #
-#   make test        OFFLOAD=--offload-arch=gfx1151 HIP_SDK=<sdk> [COVERAGE=1|2|3]
+#   make test        HIP_SDK=<sdk> [OFFLOAD=--offload-arch=<gfx>] [COVERAGE=1|2|3]
 #   make test_custom OFFLOAD=... HIP_SDK=... SIZE=128x2880x5120 GS=128
 #   make clean
 #
-# MODE=lookup (default) -- resolves the config from AUTOTUNE_DIR/lut/<arch>.fb,
-# falling back to autotune when this arch has no table (warned, never a hard
+# OFFLOAD defaults to the release target, gfx11-generic, and the kernels
+# build at -O2 like custom_kernels_<arch>.dll, so the test runs the code
+# that ships. Pass OFFLOAD=--offload-arch=gfx1151 (etc.) for a chip build.
+#
+# MODE=lookup (default) -- resolves the config from
+# AUTOTUNE_DIR/lut/<LUT_ARCH>.fb (see LUT_ARCH below), falling back to
+# autotune when that chip has no table (warned, never a hard
 # failure). MODE=autotune always sweeps. lookup needs flatc + its include/ (a
 # build tool, not part
 # of this repo -- see README): FLATC=<path to flatc(.exe)> FLATBUFFERS_INC=<its
@@ -29,14 +34,21 @@ endif
 
 # ---- Required from CI / CLI ----
 
-OFFLOAD  ?= --offload-arch=gfx1151
+OFFLOAD  ?= --offload-arch=gfx11-generic
 HIP_SDK  ?= $(HIP_PATH)
 MODE     ?= lookup
+RANK     ?= 0
+ifeq ($(RANK),1)
+    override MODE := autotune
+endif
 COVERAGE ?= 3
 
 ifeq ($(HIP_SDK),)
     $(error pass HIP_SDK=<HIP SDK root>)
 endif
+
+# Named UT preset; numeric sampling belongs to common/hip_adaptive_timing.h.
+TIMING ?= standard
 
 # ---- Paths ----
 
@@ -50,7 +62,19 @@ TARGET_DIRECT := $(BUILD_DIR)/test_direct.exe
 RESULTS_CSV   := $(BUILD_DIR)/results.csv
 
 ARCH := $(patsubst --offload-arch=%,%,$(OFFLOAD))
-LUT_FB := $(AUTOTUNE_DIR)/lut/$(ARCH).fb
+
+# The tables are per chip, the build is per target: a gfx*-generic ARCH runs on
+# every member chip, so it takes the table of the GPU the test runs on -- this
+# machine's (amdgpu-arch) unless LUT_ARCH=gfxNNNN names another, e.g. for an exe
+# that is copied to a different box. A concrete ARCH uses its own table.
+ifeq ($(origin LUT_ARCH),undefined)
+    ifneq ($(findstring generic,$(ARCH)),)
+        LUT_ARCH := $(firstword $(shell "$(HIP_SDK)/bin/amdgpu-arch.exe"))
+    else
+        LUT_ARCH := $(ARCH)
+    endif
+endif
+LUT_FB := $(AUTOTUNE_DIR)/lut/$(LUT_ARCH).fb
 
 # MODE resolution: auto picks lut iff the arch's .fb exists; an explicit
 # MODE=lookup with no .fb falls back to autotune (never a hard failure -- see
@@ -71,9 +95,20 @@ FLATBUFFERS_INC ?=
 
 # ---- Build settings ----
 
-KERNEL_FLAGS := -O3 -std=c++17 -x hip -ffp-contract=fast
+KERNEL_FLAGS := -O2 -std=c++17 -x hip -ffp-contract=fast
 CXXFLAGS     := -O3 -std=c++17 -Wno-c23-extensions
 INCLUDES     := -I$(INCLUDE_DIR)
+
+# Standalone ranking controls compile the production source verbatim through
+# a UT-only host adapter. Ordinary builds and production DLLs are unchanged.
+ifeq ($(RANK),1)
+    KERNEL_MODE := lookup
+    KERNEL_HIP := ../../common/matmul_nbits_rank_adapter.hip
+    INCLUDES += -DHIPDNN_UT_RANK_NBITS_ADAPTER=1
+endif
+ifneq ($(ADLX_INCLUDE),)
+    INCLUDES += -I$(ADLX_INCLUDE)
+endif
 
 # ---- Test parameters (test_custom) ----
 
@@ -91,13 +126,13 @@ endif
 
 ifeq ($(DETECTED_OS),Windows)
     HIP_SDK_WIN := $(subst /,\,$(HIP_SDK))
-    RUN_CMD     = set "PATH=$(HIP_SDK_WIN)\bin;%PATH%" && set "HIPDNN_MATMUL_AUTOTUNE_MODE=$(KERNEL_MODE)" && set "HIPDNN_RESULTS_CSV=$(subst /,\,$(RESULTS_CSV))" && set "HIPDNN_RESULTS_OP=matmul_nbits" && set "HIPDNN_RESULTS_LEAF=Xfp16_Wu2_Yfp16" && set "HIPDNN_RESULTS_ARCH=$(ARCH)" && set "HIPDNN_RESULTS_MODE=$(MODE_RESOLVED)" && $(subst /,\,.\$(1))
+    RUN_CMD     = set "PATH=$(HIP_SDK_WIN)\bin;%PATH%" && set "HIPDNN_UT_TIMING=$(TIMING)" && set "HIPDNN_MATMUL_AUTOTUNE_MODE=$(KERNEL_MODE)" && set "HIPDNN_RESULTS_CSV=$(subst /,\,$(RESULTS_CSV))" && set "HIPDNN_RESULTS_OP=matmul_nbits" && set "HIPDNN_RESULTS_LEAF=Xfp16_Wu2_Yfp16" && set "HIPDNN_RESULTS_ARCH=$(ARCH)" && set "HIPDNN_RESULTS_MODE=$(MODE_RESOLVED)" && $(subst /,\,.\$(1))
     define DO_CLEAN
 	if exist $(BUILD_DIR) rmdir /s /q $(BUILD_DIR)
     endef
 else
     HIP_SDK_WIN := $(shell wslpath -w "$(HIP_SDK)")
-    RUN_CMD     = cmd.exe /c "set PATH=$(HIP_SDK_WIN)\bin;%PATH% && set HIPDNN_MATMUL_AUTOTUNE_MODE=$(KERNEL_MODE) && set HIPDNN_RESULTS_CSV=$(RESULTS_CSV) && set HIPDNN_RESULTS_OP=matmul_nbits && set HIPDNN_RESULTS_LEAF=Xfp16_Wu2_Yfp16 && set HIPDNN_RESULTS_ARCH=$(ARCH) && set HIPDNN_RESULTS_MODE=$(MODE_RESOLVED) && %CD%\$(1)"
+    RUN_CMD     = cmd.exe /c "set PATH=$(HIP_SDK_WIN)\bin;%PATH% && set HIPDNN_UT_TIMING=$(TIMING) && set HIPDNN_MATMUL_AUTOTUNE_MODE=$(KERNEL_MODE) && set HIPDNN_RESULTS_CSV=$(RESULTS_CSV) && set HIPDNN_RESULTS_OP=matmul_nbits && set HIPDNN_RESULTS_LEAF=Xfp16_Wu2_Yfp16 && set HIPDNN_RESULTS_ARCH=$(ARCH) && set HIPDNN_RESULTS_MODE=$(MODE_RESOLVED) && %CD%\$(1)"
     define DO_CLEAN
 	rm -rf $(BUILD_DIR)
     endef
@@ -158,16 +193,35 @@ else
     LUT_HEADER_DEP      :=
 endif
 
+# Optional object reuse for standalone rank builds. The caller must bind the
+# object to the same production TU, headers, ISA and KERNEL_FLAGS in its build
+# evidence. Normal builds always compile their own kernel.
+RANK_KERNEL_OBJ ?=
+ifneq ($(RANK_KERNEL_OBJ),)
+    ifneq ($(RANK),1)
+        $(error RANK_KERNEL_OBJ requires RANK=1)
+    endif
+    DIRECT_KERNEL_OBJ := $(RANK_KERNEL_OBJ)
+    ifeq ($(wildcard $(RANK_KERNEL_OBJ)),)
+        $(error RANK_KERNEL_OBJ must name an existing matching object)
+    endif
+endif
+
 direct: FORCE mode_info $(LUT_OBJS) $(LUT_HEADER_DEP) | $(BUILD_DIR)
 	$(HIPCC) -c $(CXXFLAGS) $(OFFLOAD) $(TEST_DEFINES) $(INCLUDES) -I$(AUTOTUNE_DIR) $(LUT_EXTRA_INCLUDES) -x hip test_matmul_nbits_u2.cpp -o $(DIRECT_TEST_OBJ)
+ifeq ($(RANK_KERNEL_OBJ),)
 	$(HIPCC) -c $(KERNEL_FLAGS) $(OFFLOAD) $(INCLUDES) $(KERNEL_HIP) -o $(DIRECT_KERNEL_OBJ)
+endif
 	$(HIPCC) $(OFFLOAD) $(DIRECT_TEST_OBJ) $(DIRECT_KERNEL_OBJ) $(LUT_OBJS) -o $(TARGET_DIRECT)
 
 mode_info:
 	@echo [MODE=$(MODE) -^> $(MODE_RESOLVED)] arch=$(ARCH) lut_fb=$(LUT_FB)
 ifeq ($(MODE),lookup)
 ifneq ($(MODE_RESOLVED),lookup)
-	@echo [MODE=lookup] no LUT for $(ARCH) at $(LUT_FB) -- falling back to MODE=autotune
+	@echo [MODE=lookup] no LUT for $(LUT_ARCH) at $(LUT_FB) -- falling back to MODE=autotune
+ifeq ($(LUT_ARCH),)
+	@echo [MODE=lookup] no GPU detected for the $(ARCH) table; pass LUT_ARCH=gfxNNNN
+endif
 endif
 endif
 ifeq ($(MODE_RESOLVED),lookup)

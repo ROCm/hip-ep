@@ -72,3 +72,59 @@ module {
   // CHECK-SAME: (%{{.*}}, %[[DATA_ARG:.*]]: tensor<4xf32>) -> tensor<4xf32>
   // CHECK: "onnx.Identity"(%[[DATA_ARG]])
 }
+
+// -----
+
+// Each branch reads a different outer value. Both outlined funcs still take
+// the union, in the same order hip.if passes as captures.
+module {
+  func.func @main_graph_asymmetric(%cond: tensor<i1>, %a: tensor<4xf32>, %b: tensor<4xf32>) -> tensor<4xf32> {
+    %res = "onnx.If"(%cond) ({
+    ^bb0():
+      %then_out = "onnx.Identity"(%a) : (tensor<4xf32>) -> tensor<4xf32>
+      "onnx.Yield"(%then_out) : (tensor<4xf32>) -> ()
+    }, {
+    ^bb0():
+      %else_out = "onnx.Identity"(%b) : (tensor<4xf32>) -> tensor<4xf32>
+      "onnx.Yield"(%else_out) : (tensor<4xf32>) -> ()
+    }) : (tensor<i1>) -> tensor<4xf32>
+    return %res : tensor<4xf32>
+  }
+
+  // CHECK-LABEL: func.func @main_graph_asymmetric
+  // CHECK: hip.if(%{{[^)]*}}, %{{[^)]*}})
+  // CHECK-SAME: captures(%[[A:.*]], %[[B:.*]] : tensor<4xf32>, tensor<4xf32>)
+  // CHECK-LABEL: func.func private @main_graph_asymmetric_if_then_n0
+  // CHECK-SAME: (%{{.*}}: !hip.context, %[[A_ARG:.*]]: tensor<4xf32>, %{{.*}}: tensor<4xf32>) -> tensor<4xf32>
+  // CHECK: "onnx.Identity"(%[[A_ARG]])
+  // CHECK-LABEL: func.func private @main_graph_asymmetric_if_else_n1
+  // CHECK-SAME: (%{{.*}}: !hip.context, %{{.*}}: tensor<4xf32>, %[[B_ARG:.*]]: tensor<4xf32>) -> tensor<4xf32>
+  // CHECK: "onnx.Identity"(%[[B_ARG]])
+}
+
+// -----
+
+// Greater of tensor<1xf32> and a scalar broadcasts to tensor<1xui8>. ONNX If
+// accepts that single element. Collapse it and read it back before hip.if.
+module {
+  func.func @main_graph_unit_cond(%cond: tensor<1xui8>) -> tensor<5xf32> {
+    %res = "onnx.If"(%cond) ({
+    ^bb0():
+      %then_out = "onnx.Constant"() {value = dense<[1.000000e+00, 2.000000e+00, 3.000000e+00, 4.000000e+00, 5.000000e+00]> : tensor<5xf32>} : () -> tensor<5xf32>
+      "onnx.Yield"(%then_out) : (tensor<5xf32>) -> ()
+    }, {
+    ^bb0():
+      %else_out = "onnx.Constant"() {value = dense<[5.000000e+00, 4.000000e+00, 3.000000e+00, 2.000000e+00, 1.000000e+00]> : tensor<5xf32>} : () -> tensor<5xf32>
+      "onnx.Yield"(%else_out) : (tensor<5xf32>) -> ()
+    }) : (tensor<1xui8>) -> tensor<5xf32>
+    return %res : tensor<5xf32>
+  }
+
+  // CHECK-LABEL: func.func @main_graph_unit_cond
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[COND:.*]]: tensor<1xui8>)
+  // CHECK: %[[SCALAR:.*]] = tensor.collapse_shape %[[COND]] [] : tensor<1xui8> into tensor<ui8>
+  // CHECK: hip.readback_scalar(%[[CTX]], %[[SCALAR]] : tensor<ui8>) -> ui8
+  // CHECK: arith.cmpi ne
+  // CHECK: hip.if(%[[CTX]], {{.*}})
+  // CHECK-NOT: onnx.If
+}

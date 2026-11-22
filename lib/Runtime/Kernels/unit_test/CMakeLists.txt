@@ -66,7 +66,44 @@ function(add_kernel_package_ut arch executable_name source_file)
     list(APPEND ut_includes ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/hip/autotune/gqa)
   endif()
 
+  if(source_file MATCHES "^qmoe/")
+    list(APPEND ut_includes ${CMAKE_SOURCE_DIR}/lib/Runtime/real ${CMAKE_SOURCE_DIR}/include
+      ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/hip/autotune/matmul_nbits)
+  endif()
+
   set(target ${executable_name}-${arch})
+  # hipcc custom commands do not inherit the C++ compiler's header dependency
+  # scanner. Bind the shared UT policy/profile/context explicitly so a header
+  # edit cannot leave a previously compiled leaf executable in the package.
+  file(GLOB _ut_common_headers CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/common/*.h")
+  set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/${source_file}
+    PROPERTIES OBJECT_DEPENDS "${_ut_common_headers}")
+  if(source_file MATCHES "^qmoe/")
+    # The wrapper is ordinary host C++; only the stream gate needs HIP mode.
+    get_filename_component(_qmoe_leaf "${source_file}" DIRECTORY)
+    hip_add_executable(${target}
+      ${CMAKE_CURRENT_SOURCE_DIR}/${_qmoe_leaf}/timing_gate.hip
+      INCLUDE_DIRECTORIES ${ut_includes}
+      COMPILE_OPTIONS ${ut_options}
+      LINK_LIBRARIES ${kernel_target} ${_kernel_ut_clang_rt}
+      OFFLOAD_ARCHS ${arch})
+    set(_qmoe_host_obj "${CMAKE_CURRENT_BINARY_DIR}/${target}-$<CONFIG>-host.obj")
+    set(_qmoe_include_flags)
+    foreach(_dir IN LISTS ut_includes)
+      list(APPEND _qmoe_include_flags "-I${_dir}")
+    endforeach()
+    file(GLOB_RECURSE _qmoe_runtime_headers CONFIGURE_DEPENDS
+      "${CMAKE_SOURCE_DIR}/lib/Runtime/*.h")
+    add_custom_command(OUTPUT "${_qmoe_host_obj}"
+      COMMAND ${CMAKE_COMMAND} -E env ${HIPCC_ENV} ${HIPCC_EXECUTABLE}
+        -c -x c++ -I${HIP_PATH}/include -D__HIP_PLATFORM_AMD__=1 ${CMAKE_CURRENT_SOURCE_DIR}/${source_file}
+        -o "${_qmoe_host_obj}" ${ut_options} ${_qmoe_include_flags}
+      DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${source_file} ${_ut_common_headers}
+        ${_qmoe_runtime_headers} ${CMAKE_SOURCE_DIR}/lib/Runtime/real/qmoe.cpp
+      VERBATIM COMMAND_EXPAND_LISTS)
+    target_sources(${target} PRIVATE "${_qmoe_host_obj}")
+  else()
   hip_add_executable(${target}
     ${CMAKE_CURRENT_SOURCE_DIR}/${source_file}
     INCLUDE_DIRECTORIES
@@ -79,6 +116,7 @@ function(add_kernel_package_ut arch executable_name source_file)
     OFFLOAD_ARCHS
       ${arch}
   )
+  endif()
   set_target_properties(${target} PROPERTIES
     OUTPUT_NAME ${executable_name}
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/kernel-tests/${arch}
@@ -102,6 +140,11 @@ function(add_kernel_package_ut arch executable_name source_file)
 endfunction()
 
 foreach(_arch IN LISTS HIP_ARCHITECTURES)
+  if(HIP_EP_RING_ENABLED AND (_arch STREQUAL "gfx1151" OR _arch STREQUAL "gfx11-generic"))
+    add_kernel_package_ut(${_arch}
+      hipdnn-kernel-ut-gqa-ring-xfp16-wfp16-yfp16
+      gqa/ring/Xfp16_Wfp16_Yfp16/test_gqa_ring.cpp)
+  endif()
   add_kernel_package_ut(${_arch}
     hipdnn-kernel-ut-matmul-nbits-xfp16-wu2-yfp16
     matmul_nbits/Xfp16_Wu2_Yfp16/test_matmul_nbits_u2.cpp)
@@ -139,8 +182,26 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
     hipdnn-kernel-ut-gqa-prefill-xfp16-wi8-yfp16
     gqa/prefill/Xfp16_Wi8_Yfp16/test_gqa_prefill_i8.cpp)
   add_kernel_package_ut(${_arch}
+    hipdnn-kernel-ut-qmoe-xfp16-wu4-yfp16
+    qmoe/Xfp16_Wu4_Yfp16/test_qmoe.cpp)
+  add_kernel_package_ut(${_arch}
     hipdnn-kernel-ut-qmoe-ragged-mm-xfp16-wu4-yfp16
     qmoe_ragged_mm/Xfp16_Wu4_Yfp16/test_qmoe_ragged_mm.cpp)
+  add_kernel_package_ut(${_arch}
+    hipdnn-kernel-ut-qmoe-ragged-mm-xfp16-wu2-yfp16
+    qmoe_ragged_mm/Xfp16_Wu2_Yfp16/test_qmoe_ragged_mm_u2.cpp)
+  add_kernel_package_ut(${_arch}
+    hipdnn-kernel-ut-gather-block-quantized-xi64-wu4-yfp16
+    gather_block_quantized/Xi64_Wu4_Yfp16/test_gather_block_quantized_u4.cpp)
+  add_kernel_package_ut(${_arch}
+    hipdnn-kernel-ut-gather-block-quantized-xi64-wu8-yfp16
+    gather_block_quantized/Xi64_Wu8_Yfp16/test_gather_block_quantized_u8.cpp)
+  add_kernel_package_ut(${_arch}
+    hipdnn-kernel-ut-gather-block-quantized-xi64-wfp8-yfp16
+    gather_block_quantized/Xi64_Wfp8_Yfp16/test_gather_block_quantized_fp8.cpp)
+  add_kernel_package_ut(${_arch}
+    hipdnn-kernel-ut-cast-xany-yany-bf16
+    cast/Xany_Yany_bf16/test_cast.cpp)
 endforeach()
 
 # One package-facing entry point finds the live GPU arch, invokes every leaf
@@ -151,6 +212,7 @@ hip_add_executable(hipdnn-kernel-ut
   COMPILE_OPTIONS
     -O3
     -std=c++17
+    -DHIP_EP_RING_ENABLED=${HIP_EP_RING_ENABLED}
   OFFLOAD_ARCHS
     ${_kernel_ut_primary_arch}
 )

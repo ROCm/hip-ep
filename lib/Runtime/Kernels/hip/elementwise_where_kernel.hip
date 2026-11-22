@@ -76,6 +76,35 @@ __global__ void where_nd_kernel(const bool *__restrict__ condition,
   output[idx] = condition[cond_idx] ? x[x_idx] : y[y_idx];
 }
 
+// x, y and output share the output shape and the condition broadcasts only
+// over leading axes, so the condition index is flat % cond_numel. One thread
+// per 16-byte vector; cond_numel is a multiple of the vector width.
+template <typename T>
+__global__ void where_suffix_vec_kernel(const bool *__restrict__ condition,
+                                        const uint4 *__restrict__ x,
+                                        const uint4 *__restrict__ y,
+                                        uint4 *__restrict__ output,
+                                        uint32_t total_vecs,
+                                        uint32_t cond_numel) {
+  constexpr int kVec = 16 / sizeof(T);
+  uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (tid >= total_vecs) {
+    return;
+  }
+  const uint32_t c0 = (tid * kVec) % cond_numel;
+  uint4 xv = x[tid];
+  uint4 yv = y[tid];
+  uint4 ov;
+  const T *xs = reinterpret_cast<const T *>(&xv);
+  const T *ys = reinterpret_cast<const T *>(&yv);
+  T *os = reinterpret_cast<T *>(&ov);
+#pragma unroll
+  for (int k = 0; k < kVec; ++k) {
+    os[k] = condition[c0 + k] ? xs[k] : ys[k];
+  }
+  output[tid] = ov;
+}
+
 // Left-pad `src_shape` (length `src_rank`) to `out_rank` with 1s into
 // `padded_shape`, then compute row-major strides over the padded shape and
 // validate NumPy-style broadcast compatibility against `out_shape`.
@@ -135,8 +164,26 @@ static int launch_where(hipStream_t stream, const void *condition,
                         const WhereDimsND &out_shape,
                         const WhereDimsND &cond_stride,
                         const WhereDimsND &x_stride,
-                        const WhereDimsND &y_stride) {
+                        const WhereDimsND &y_stride,
+                        int64_t suffix_cond_numel) {
   constexpr int kBlockSize = 256;
+  constexpr int64_t kVec = 16 / sizeof(T);
+  if (suffix_cond_numel > 0 && suffix_cond_numel % kVec == 0 &&
+      total % kVec == 0 && total <= static_cast<int64_t>(UINT32_MAX) &&
+      reinterpret_cast<uintptr_t>(x) % 16 == 0 &&
+      reinterpret_cast<uintptr_t>(y) % 16 == 0 &&
+      reinterpret_cast<uintptr_t>(output) % 16 == 0) {
+    const uint32_t total_vecs = static_cast<uint32_t>(total / kVec);
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(where_suffix_vec_kernel<T>),
+                       dim3((total_vecs + kBlockSize - 1) / kBlockSize),
+                       dim3(kBlockSize), 0, stream,
+                       static_cast<const bool *>(condition),
+                       static_cast<const uint4 *>(x),
+                       static_cast<const uint4 *>(y),
+                       static_cast<uint4 *>(output), total_vecs,
+                       static_cast<uint32_t>(suffix_cond_numel));
+    return 0;
+  }
   int grid_size = static_cast<int>((total + kBlockSize - 1) / kBlockSize);
   hipLaunchKernelGGL(where_nd_kernel<T>, dim3(grid_size), dim3(kBlockSize), 0,
                      stream, static_cast<const bool *>(condition),
@@ -209,6 +256,22 @@ extern "C" int hip_elementwise_where(
                              &y_shape_nd, &y_stride, "y"))
     return -1;
 
+  // Condition numel when x and y are unbroadcast and the condition only
+  // broadcasts over leading axes; 0 otherwise.
+  int64_t suffix_cond_numel = 1;
+  bool cond_leading = true;
+  for (int k = 0; k < out_rank && suffix_cond_numel > 0; ++k) {
+    if (x_shape_nd.v[k] != out_shape[k] || y_shape_nd.v[k] != out_shape[k]) {
+      suffix_cond_numel = 0;
+    } else if (out_shape[k] == 1) {
+      continue;
+    } else if (cond_shape_nd.v[k] == out_shape[k]) {
+      cond_leading = false;
+      suffix_cond_numel *= out_shape[k];
+    } else if (!cond_leading) {
+      suffix_cond_numel = 0;
+    }
+  }
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
 
   CUSTOM_KERNELS_DEBUG_LOG(
@@ -221,27 +284,28 @@ extern "C" int hip_elementwise_where(
   case HIP_DTYPE_FLOAT32:
     rc = launch_where<float>(hip_stream, condition, x, y, output, total,
                              (int)out_rank, out_shape_nd, cond_stride, x_stride,
-                             y_stride);
+                             y_stride, suffix_cond_numel);
     break;
   case HIP_DTYPE_FLOAT16:
     rc = launch_where<__half>(hip_stream, condition, x, y, output, total,
                               (int)out_rank, out_shape_nd, cond_stride,
-                              x_stride, y_stride);
+                              x_stride, y_stride, suffix_cond_numel);
     break;
   case HIP_DTYPE_BFLOAT16:
     rc = launch_where<__hip_bfloat16>(hip_stream, condition, x, y, output,
                                       total, (int)out_rank, out_shape_nd,
-                                      cond_stride, x_stride, y_stride);
+                                      cond_stride, x_stride, y_stride,
+                                      suffix_cond_numel);
     break;
   case HIP_DTYPE_INT32:
     rc = launch_where<int32_t>(hip_stream, condition, x, y, output, total,
                                (int)out_rank, out_shape_nd, cond_stride,
-                               x_stride, y_stride);
+                               x_stride, y_stride, suffix_cond_numel);
     break;
   case HIP_DTYPE_INT64:
     rc = launch_where<int64_t>(hip_stream, condition, x, y, output, total,
                                (int)out_rank, out_shape_nd, cond_stride,
-                               x_stride, y_stride);
+                               x_stride, y_stride, suffix_cond_numel);
     break;
   default:
     fprintf(stderr,

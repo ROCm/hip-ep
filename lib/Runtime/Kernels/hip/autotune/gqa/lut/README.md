@@ -75,7 +75,7 @@ mismatch is a loud rejection (fall to heuristic) rather than a silently wrong pi
 
 ## What the table covers
 
-The fused decode path admits **heads-per-group ∈ {1,2,3,4,5,8,16}** at
+The fused decode path admits **heads-per-group ∈ {1,2,3,4,5,6,8,16}** at
 **head_dim ∈ {64,96,128,256}** (`flash_decode_geometry_ok` in `real/gqa.cpp`).
 head_dim 96 (`D96`) was added after the other three: all four tables carry its
 rows, measured with `measure --head-dim 96` and folded in by
@@ -88,12 +88,16 @@ A prefill config depends on `head_dim` and on the heads per group (which sets
 the v6x / v8x block layout) but barely on the KV length, so prefill needs far
 fewer points.
 
-The current `gfx1151` table is schema 9 / `gqa-v4`: 31 configs, 2002 points and 8
+The current `gfx1151` table is schema 9 / `gqa-v4`: 31 configs, 1996 points and 8
 per-`(phase, head_dim)` fallbacks, over the model geometries at lengths from 128
 to 65536, batch 1. The points are the saturation-pruned survivors of ~3200
 measured shapes (the rest were reconstructable by nearest-neighbour and dropped).
-The decode points are the `gqa-v3` table's, unchanged; the prefill points were
-re-measured for v6x / v8x. In decode a sliding window is folded into the scanned
+The decode points are the `gqa-v3` table's, unchanged, except 24:4:256 (HpG 6):
+the scalar launcher had no HpG 6 instance when that table was swept, so its
+candidates timed an empty dispatch, and it was re-measured with
+`measure --geometry 24:4:256` once the instance existed. The gfx1150, gfx1152 and
+gfx1170 tables still carry those unmeasured 24:4:256 decode rows. The prefill
+points were re-measured for v6x / v8x. In decode a sliding window is folded into the scanned
 length (`effective_len`) at query time, so the schema has no window field and the
 table needs no separate windowed rows; prefill points are measured without a
 window, and a windowed prefill request skips the 8-wave v6x configs, which have

@@ -50,7 +50,7 @@ template <> struct SwigluTraits<double> {
   __device__ static ComputeType expFn(ComputeType value) { return exp(value); }
 };
 
-template <typename T>
+template <typename T, bool PROMOTE = false>
 __device__ __forceinline__ T computeSwiglu(T gateValue, T upValue) {
   using Traits = SwigluTraits<T>;
   using ComputeType = typename Traits::ComputeType;
@@ -62,18 +62,22 @@ __device__ __forceinline__ T computeSwiglu(T gateValue, T upValue) {
 
   // Match the exported Sigmoid -> Mul -> Mul graph. Each ONNX node produces
   // a tensor of T, so round at both intermediate tensor boundaries.
-  sigmoid = Traits::load(Traits::store(sigmoid));
-  ComputeType activated = Traits::load(Traits::store(gate * sigmoid));
+  if constexpr (!PROMOTE)
+    sigmoid = Traits::load(Traits::store(sigmoid));
+  ComputeType activated = gate * sigmoid;
+  if constexpr (!PROMOTE)
+    activated = Traits::load(Traits::store(activated));
   return Traits::store(activated * up);
 }
 
-template <typename T>
-__global__ void swigluKernel(const T *__restrict__ gate,
+template <typename T, bool PROMOTE = false>
+__global__ __launch_bounds__(PROMOTE ? 256 : 1024)
+void swigluKernel(const T *__restrict__ gate,
                              const T *__restrict__ up, T *__restrict__ output,
                              int64_t numElements) {
   int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (idx < numElements)
-    output[idx] = computeSwiglu<T>(gate[idx], up[idx]);
+    output[idx] = computeSwiglu<T, PROMOTE>(gate[idx], up[idx]);
 }
 
 // 16 bytes per thread: 8 halves or 4 floats. Scalar half loads on a decode
@@ -86,8 +90,9 @@ template <typename T, int V> union SwigluVec {
   T elements[V];
 };
 
-template <typename T, int V>
-__global__ void swigluVecKernel(const T *__restrict__ gate,
+template <typename T, int V, bool PROMOTE = false>
+__global__ __launch_bounds__(PROMOTE ? 256 : 1024)
+void swigluVecKernel(const T *__restrict__ gate,
                                 const T *__restrict__ up,
                                 T *__restrict__ output, int64_t numVectors) {
   int64_t vecIdx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -101,7 +106,7 @@ __global__ void swigluVecKernel(const T *__restrict__ gate,
 #pragma unroll
   for (int i = 0; i < V; ++i)
     outVec.elements[i] =
-        computeSwiglu<T>(gateVec.elements[i], upVec.elements[i]);
+        computeSwiglu<T, PROMOTE>(gateVec.elements[i], upVec.elements[i]);
   *reinterpret_cast<uint4 *>(output + base) = outVec.raw;
 }
 
@@ -116,7 +121,7 @@ static bool swigluAligned16(const void *gate, const void *up,
 
 // Vector path when the buffers are 16-byte aligned and the length fills whole
 // vectors. A length that does not is computed entirely by the scalar kernel.
-template <typename T, int V>
+template <typename T, int V, bool PROMOTE = false>
 static void launchSwiglu(hipStream_t hipStream, const void *gate,
                          const void *up, void *output, int64_t numElements) {
   constexpr int kBlockSize = 256;
@@ -124,7 +129,7 @@ static void launchSwiglu(hipStream_t hipStream, const void *gate,
     const int64_t numVectors = numElements / V;
     const int grid =
         static_cast<int>((numVectors + kBlockSize - 1) / kBlockSize);
-    hipLaunchKernelGGL((swigluVecKernel<T, V>), dim3(grid), dim3(kBlockSize), 0,
+    hipLaunchKernelGGL((swigluVecKernel<T, V, PROMOTE>), dim3(grid), dim3(kBlockSize), 0,
                        hipStream, static_cast<const T *>(gate),
                        static_cast<const T *>(up), static_cast<T *>(output),
                        numVectors);
@@ -133,7 +138,7 @@ static void launchSwiglu(hipStream_t hipStream, const void *gate,
 
   const int grid =
       static_cast<int>((numElements + kBlockSize - 1) / kBlockSize);
-  hipLaunchKernelGGL(swigluKernel<T>, dim3(grid), dim3(kBlockSize), 0,
+  hipLaunchKernelGGL((swigluKernel<T, PROMOTE>), dim3(grid), dim3(kBlockSize), 0,
                      hipStream, static_cast<const T *>(gate),
                      static_cast<const T *>(up), static_cast<T *>(output),
                      numElements);
@@ -183,4 +188,17 @@ extern "C" int hip_swiglu(void *stream, const void *gate, const void *up,
     fprintf(stderr, "[custom_kernels] hip_swiglu launch failed: %s\n",
             hipGetErrorString(error));
   return static_cast<int>(error);
+}
+
+extern "C" int hip_swiglu_promoted(void *stream, const void *gate,
+                                   const void *up, void *output,
+                                   int64_t numElements, int hipDtype) {
+  if (hipDtype != HIP_DTYPE_FLOAT16)
+    return -1;
+  if (numElements <= 0)
+    return 0;
+  (void)hipGetLastError();
+  launchSwiglu<__half, 8, true>(static_cast<hipStream_t>(stream), gate, up,
+                               output, numElements);
+  return static_cast<int>(hipGetLastError());
 }

@@ -19,6 +19,7 @@ The sections below describe the project-specific workflow.
 - For a bug, include a minimal reproduction, relevant logs, platform details, and expected versus actual behavior.
 - Coordinate substantial work in a GitHub issue or discussion before implementation. This helps contributors avoid duplicate work and gives maintainers a chance to provide early design feedback.
 - Changes to public compiler/runtime ABIs, dialect semantics, artifact formats, or pipeline architecture should have a documented design discussion before implementation begins.
+- For compiler changes, read the [compiler pass guidelines](COMPILER_PASS_GUIDELINES.md).
 - Use the [Windows quick start](docs/quick_start.md) or [Linux quick start](docs/quick_start_linux.md) to prepare a development environment.
 
 ## Develop and validate

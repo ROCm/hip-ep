@@ -78,11 +78,13 @@ enum MatmulNbitsZeroPoint : ubyte {
   Asymmetric = 2
 }
 
-// Prefill only; decode points carry Any.
+// Prefill only; decode points carry Any. The pad changes the winner, so each
+// pad is its own category: a lookup never uses a point measured at another
+// pitch, and a pad without a category goes to the phase's fallback.
 enum MatmulNbitsRowStride : ubyte {
   Any = 0,
   Arrival = 1,     // num_groups_k * (block_size/2) bytes per row
-  Padded = 2       // arrival + one 128 B cache line
+  Padded = 2       // arrival + 128 B (the per-call repack, a 128 B row pad)
 }
 
 // ---------------------------------------------------------------------------
@@ -160,6 +162,31 @@ struct MatmulNbitsFallback {
   config: ubyte;
 }
 
+// A config that names an extended WMMA entry (WMMA_EXT_CONFIGS in
+// matmul_nbits_kernel.hip): configs[config] plus the entry's pipeline options,
+// WmmaConfig::variant (bit 7 is the CU-mode build). A config not listed names
+// an original entry.
+struct MatmulNbitsExtendedConfig {
+  config: ubyte;
+  variant: ubyte;
+}
+
+// Optional literal-K/N override. The lower M endpoint is exclusive and the
+// upper endpoint is inclusive. Overlapping ranges for the same full key are
+// malformed; a runtime-illegal config falls through to ordinary point lookup.
+struct MatmulNbitsMInterval {
+  phase: MatmulNbitsPhase;
+  bits: MatmulNbitsBits;
+  group_size: MatmulNbitsGroupSize;
+  zero_point: MatmulNbitsZeroPoint;
+  row_stride: MatmulNbitsRowStride;
+  config: ubyte;
+  m_lo: uint16;
+  m_hi: uint16;
+  k: uint16;
+  n: uint32;
+}
+
 table MatmulNbitsAutotuneLut {
   schema_version: uint32 = 4;
   gpu_arch: string;         // must equal the running device, e.g. "gfx1151"
@@ -186,6 +213,11 @@ table MatmulNbitsAutotuneLut {
   configs: [MatmulNbitsTuneConfig];
   points: [MatmulNbitsTunePoint];
   fallbacks: [MatmulNbitsFallback];
+  // Appended, so a table without it loads as before: no config names an
+  // extended entry.
+  extended_configs: [MatmulNbitsExtendedConfig];
+  // Version 5 writers append ranges; keep the v4 default for old omitted fields.
+  m_intervals: [MatmulNbitsMInterval];
 }
 
 root_type MatmulNbitsAutotuneLut;
