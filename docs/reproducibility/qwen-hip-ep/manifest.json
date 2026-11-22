@@ -3,7 +3,7 @@
   "files": {
     "archive.json": {
       "bytes": 476,
-      "sha256": "5f692ff66a44892a37b9edaf3fc691ccc39a2105d99745d9bbc00da3510998d6"
+      "sha256": "0670bd46804aedae30b676be55af6d2ff67369a5d56c4642399cc444c6bf6e5e"
     },
     "candidate-validation.json": {
       "bytes": 9667,
@@ -35,7 +35,7 @@
     },
     "provenance.json": {
       "bytes": 24271,
-      "sha256": "68ae51494cc68b576c332fe8d5311a1642e7770dfdcd9dadae92cc2286b4bf0e"
+      "sha256": "efc843c40a7e6e8264ddaeb492b6ec0d204e2b12056bf5914a2bcb1a0728fc9f"
     },
     "quality.csv": {
       "bytes": 323,
@@ -46,8 +46,8 @@
       "sha256": "52a76470086f771a4c4130cf0da40c187219cdb6f2ded49bf362e87dba1c585d"
     },
     "raw/mi355x/memory-summary.json": {
-      "bytes": 93718,
-      "sha256": "aec9028cae9b59188a97e6dfdc52ec1169df3b5c6dfd6d5ae00110d3e2c2cab7"
+      "bytes": 91039,
+      "sha256": "42ef6a6f23906dc5f38000ac2321eafe1b2e0f4089501adbe1e840012d9b1b8b"
     },
     "raw/mi355x/qwen-trained-performance.json": {
       "bytes": 8699,
@@ -275,7 +275,7 @@
     },
     "raw/native/receipts/report.json": {
       "bytes": 10158,
-      "sha256": "c5208d89da20df40ab8d9c271a974c3ee681cf718661d0f8111cc1713910b64e"
+      "sha256": "e0b9876b2c3d3a59bac2c389d3893554055e99423bb490adc26653e262dc7013"
     },
     "raw/olmo/environment.json": {
       "bytes": 3628,

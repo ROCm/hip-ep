@@ -141,8 +141,10 @@ and selector before/after integrity passed. Raw evidence:
 `original-w4-rope-v2/partitioned/validation.json`.
 
 Paired quality outputs are `_local/qsa/paired-quality/`; final phase timings are
-`_local/qsa/paired-performance/`. Results are pending and are not inferred from
-the MI355X measurements.
+`_local/qsa/paired-performance/`. Completed workstation results are recorded in
+[the boundary report](../experiments/olmo-qsa-results.md); the later integrated
+implementation is covered in [the native GQA report](../experiments/olmo-qsa-native-gqa-results.md).
+These measurements are separate from the MI355X measurements.
 
 ## Reproduction entry points
 

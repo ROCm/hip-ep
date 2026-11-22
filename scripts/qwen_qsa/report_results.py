@@ -329,7 +329,7 @@ def main():
         "",
         "The pinned release ONNX supplies topology and static RoPE/shape constants only. Every learned constant is regenerated from the verified official BF16 weights. Its topology hash is `44b712df872250c1c1614c3aa717788a103f3a814e0cfd24b22196d3b99509cd`. Export manifests record exact source-parameter coverage, per-projection conversion errors, representation, output graph/data hashes and exporter hash. The four-block diagnostic contains 5,940,028,480 bytes of fresh constants. The full export has 64 blocks: 48 Gated DeltaNet and 16 full-attention layers; native attention is Q24/KV4/D256.",
         "",
-        "The current LinearAttention ABI has one dtype for Q/K/V, gates and recurrent state. Explicit FP32 LinearAttention regions and casts retain **FP32 recurrent state** with FP16 backbone boundaries. The rest of the graph remains identical between the planned variants. Its conversion and numerical error must be evaluated rather than called BF16-exact.",
+        "The current LinearAttention ABI has one dtype for Q/K/V, gates and recurrent state. Explicit FP32 LinearAttention regions and casts retain **FP32 recurrent state** with FP16 backbone boundaries. The rest of the graph remains identical between the measured variants. Its conversion and numerical error must be evaluated rather than called BF16-exact.",
         "",
         "**Gate metadata control:** the checkpoint config includes `output_gate_type=swish`, but the actual Transformers 5.19 Qwen3_5Attention class used by the source experiment executes sigmoid gating. A CPU single-key control matches sigmoid exactly (maximum absolute error 0) and differs from SWISH by 1.761594. The export preserves the executed native **sigmoid** behavior; changing it based solely on that extra metadata field would change the source model.",
         "",
@@ -374,12 +374,12 @@ def main():
     ]
     if quality["state"] == "complete":
         lines += [
-            "| Metric | Native default | Native trained QSA |",
-            "|---|---:|---|",
-            f"| PPL, 64 × 4K windows | {quality['ppl']:.6f} | Pending |",
-            f"| GSM8K, 128 questions | {quality['gsm_correct']}/128 ({100 * quality['gsm_correct'] / 128:.2f}%) | Pending |",
+            "| Metric | Fresh native default |",
+            "|---|---:|",
+            f"| PPL, 64 × 4K windows | {quality['ppl']:.6f} |",
+            f"| GSM8K, 128 questions | {quality['gsm_correct']}/128 ({100 * quality['gsm_correct'] / 128:.2f}%) |",
             "",
-            f"All rows pass protocol/data identity and score/count audits. {quality['gsm_caps']} default GSM generations reached the cap. Raw completions and capped cases are retained. No native QSA quality result is implied.",
+            f"All rows pass protocol/data identity and score/count audits. {quality['gsm_caps']} default GSM generations reached the cap. Raw completions and capped cases are retained. The separate matched default/QSA results follow below.",
         ]
     elif quality["ppl_documents"] == 64:
         lines += [
@@ -460,7 +460,7 @@ def main():
     if failed_64k_path.exists() and load(failed_64k_path)["state"] == "failed":
         lines += [
             "",
-            "**64K has no valid timing result.** The co-resident two-session attempt stopped during warmup when OS available RAM remained below the 2 GiB guard. Its memory trace and failure receipt are retained. Further 64K work was excluded at the user's request. The [separate default/QSA memory-only matrix](qwen-qsa-memory.md) covers batches 1/4/8 and prefixes 4K/16K/32K with one prefill and eight decode calls per isolated process, without rerunning the performance benchmark.",
+            "**64K has no valid timing result.** The co-resident two-session attempt stopped during warmup when OS available RAM remained below the 2 GiB guard. Its memory trace and failure receipt are retained. Further 64K work was excluded at the user's request. The [separate default/QSA memory report](qwen-qsa-memory.md) selects batch1/4K as the memory comparison: 19.3376 versus 19.5849 GiB peak WDDM total commitment. The completed batch4/4K pair remains supplementary. All remaining memory probes were canceled by the user; no memory runs are queued. Each completed probe used one prefill and eight decode calls in an isolated process, without performance repetitions.",
         ]
     if memory:
         lines += [
@@ -511,7 +511,7 @@ def main():
         ]
         for row in long_quality:
             lines.append(
-                f"| {row['context'] // 1024}K, four documents / {row['targets']:,} targets | {row['ppl']:.6f} | Pending |"
+                f"| {row['context'] // 1024}K, four documents / {row['targets']:,} targets | {row['ppl']:.6f} | Unmeasured |"
             )
         lines += [
             "",
@@ -560,15 +560,17 @@ def main():
             )
     lines += [
         "",
-        "These are BF16 MI355X results, not hip-ep measurements or a forecast. The source has two warmup pairs and six measured alternating pairs per shape. Its independent wall phase timers include per-step greedy argmax in decode, and variants can follow different token streams. That protocol remains distinct from the planned native fixed-token timing. Full source tables, raw-trial linkage and ranges are in the read-only `../sparse-attn/QWEN_PERFORMANCE.md` and `docs/reproducibility/qwen-trained-performance.json`. Historical untrained timing remains separate.",
+        "These are BF16 MI355X results, not hip-ep measurements or a forecast. The source has two warmup pairs and six measured alternating pairs per shape. Its independent wall phase timers include per-step greedy argmax in decode, and variants can follow different token streams. That protocol remains distinct from the completed native fixed-token timing. Full source tables, raw-trial linkage and ranges are in the read-only `../sparse-attn/QWEN_PERFORMANCE.md` and `docs/reproducibility/qwen-trained-performance.json`. Historical untrained timing remains separate.",
     ]
     lines += [
         "",
-        "## Quality and performance work remaining",
+        "## Unmeasured coverage and current status",
         "",
         "The native wave32 integration and feature/index/cache/numerical controls above are complete. Only layers 27/31/35/39 are replaced, using the frozen Qwen projection, three zero-centered norms, token-key normalization before four-token FP32 pooling, partial 64-coordinate RoPE, stable 512 historical-block selection and one causal current block. Full KV storage, selected-address reads and all Gated DeltaNet/default work are preserved. The matched 4K PPL/GSM campaign is complete; long-document quality is qualified only where completed matched rows appear above.",
         "",
         "Prefill and decode use independent fixed-token phase timers, identical session/head/cache work, exact-shape warmups and balanced paired trials. Only completed, audited shapes in the performance table establish measured throughput or support; remaining batch/long-context candidates require actual memory and correctness checks.",
+        "",
+        "No further hip-ep benchmarks are scheduled. Matched QSA natural-long quality, Qwen BFCLv4 and Qwen SWE-bench remain unmeasured; they are coverage limits, not active jobs. The local merged PR candidate has separate correctness checks and no new performance/accuracy campaign. See the [audit and paper handoff](../reproducibility/qwen-hip-ep/README.md) for its validation receipts, the selected memory pair and complete raw evidence. The branch and results remain local; nothing has been pushed or published.",
         "",
         "## Evidence and reproduction",
         "",

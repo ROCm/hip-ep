@@ -27,7 +27,7 @@ the measured install remains unchanged. No remote update is part of this work.
 | Existing incremental primitive test covered only13 steps | Extend to137 single-token updates and exact full-prefill pool equality |
 | Existing long ranking controls used only zero-score ties | Add seeded nonzero integer BF16 ranking controls at positions32771/65599 with exact independent stable CPU indices |
 | Qwen error recovery lacked a complete-operator receipt | Add decode-before-prefill, extreme/negative length, bad-position and next-prefill recovery controls |
-| Memory numbers could be mistaken for physical residency or sparse KV savings | Label WDDM commitment, phase sampling limits and full KV retention; export complete/pending/bounded statuses |
+| Memory numbers could be mistaken for physical residency or sparse KV savings | Label WDDM commitment, phase sampling limits and full KV retention; export completed, canceled and bounded statuses |
 | Final branch commit does not identify the historically measured binary | Preserve binary SHA256, original receipts and explicit source reconstruction/build-provenance limit |
 | Git's automatic line-ending conversion would invalidate raw Windows protocol hashes on another OS | Preserve packet JSON/CSV/raw bytes with scoped attributes and recognize CR as part of its original line ending |
 | Text-fixing hooks would rewrite frozen raw evidence, including valid JSON without a final newline | Exclude only the packet's `raw/` tree from mutating whitespace/BOM/line-ending hooks; keep large-file and other checks active |
