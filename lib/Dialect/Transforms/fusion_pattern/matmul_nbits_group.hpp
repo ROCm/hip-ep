@@ -20,6 +20,12 @@
 // emits the quantized row and the group reads it, removing the group's own
 // quantization launch.
 //
+// A projection (or concat group member) whose output is only read through
+// last-axis slices that tile it -- an exported model's fused projection split
+// back into its parts -- becomes one group member per slice, reading a row
+// range of the same weight. The slice of the full output is strided, and each
+// one cost a separate copy launch before its consumer.
+//
 // Before/After IR: matmul_nbits_group.cpp.
 //===----------------------------------------------------------------------===//
 #pragma once

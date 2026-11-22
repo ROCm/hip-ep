@@ -387,3 +387,109 @@ func.func @fp16_zero_points_not_grouped(%ctx: !hip.context,
        accuracy_level = 4 : i64, zp_elem_size = 2 : i64} : tensor<1x1x32xf16>
   return %a, %c : tensor<1x1x32xf16>, tensor<1x1x32xf16>
 }
+
+// -----
+
+// A projection read only through last-axis slices that tile its output (a
+// fused projection split back into its parts) becomes a group with one member
+// per slice, each reading its rows of the same weight. No strided slice of the
+// full output is left for bufferization to copy out.
+// CHECK-LABEL: func.func @sliced_output
+// CHECK:         %[[G:.*]]:2 = hip.matmul_nbits_group(%{{.*}}) ins(%arg1 : tensor<?x?x64xf16>)
+// CHECK-SAME:      weights(%arg2, %arg2 :
+// CHECK-SAME:      scales(%arg3, %arg3 :
+// CHECK-SAME:      outs(%{{.*}}, %{{.*}} : tensor<?x?x8xf16>, tensor<?x?x4xf16>)
+// CHECK-SAME:      N = [8, 4]
+// CHECK-SAME:      row_offsets = array<i64: 0, 8>
+// CHECK-NOT:     tensor.extract_slice
+// CHECK-NOT:     hip.matmul_nbits(
+// CHECK:         hip.swish(%{{.*}}) ins(%[[G]]#0 :
+// CHECK:         return %{{.*}}, %[[G]]#1
+func.func @sliced_output(%ctx: !hip.context, %x: tensor<?x?x64xf16>,
+                         %b: tensor<12x2x16xui8>, %s: tensor<12x2xf16>)
+    -> (tensor<?x?x8xf16>, tensor<?x?x4xf16>) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %d0 = tensor.dim %x, %c0 : tensor<?x?x64xf16>
+  %d1 = tensor.dim %x, %c1 : tensor<?x?x64xf16>
+  %e = tensor.empty(%d0, %d1) : tensor<?x?x12xf16>
+  %y = hip.matmul_nbits(%ctx) ins(%x, %b, %s :
+      tensor<?x?x64xf16>, tensor<12x2x16xui8>, tensor<12x2xf16>)
+      outs(%e : tensor<?x?x12xf16>)
+      {K = 64 : i64, N = 12 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<?x?x12xf16>
+  %y0 = tensor.dim %y, %c0 : tensor<?x?x12xf16>
+  %y1 = tensor.dim %y, %c1 : tensor<?x?x12xf16>
+  %a = tensor.extract_slice %y[0, 0, 0] [%y0, %y1, 8] [1, 1, 1]
+      : tensor<?x?x12xf16> to tensor<?x?x8xf16>
+  %g = tensor.extract_slice %y[0, 0, 8] [%y0, %y1, 4] [1, 1, 1]
+      : tensor<?x?x12xf16> to tensor<?x?x4xf16>
+  %ea = tensor.empty(%y0, %y1) : tensor<?x?x8xf16>
+  %sw = hip.swish(%ctx) ins(%a : tensor<?x?x8xf16>) outs(%ea : tensor<?x?x8xf16>)
+      : tensor<?x?x8xf16>
+  return %sw, %g : tensor<?x?x8xf16>, tensor<?x?x4xf16>
+}
+
+// -----
+
+// The same inside a group: the sliced member becomes two members at row
+// offsets 0 and 32 of its weight, the other member keeps its whole weight.
+// CHECK-LABEL: func.func @sliced_group_member
+// CHECK:         %[[G:.*]]:3 = hip.matmul_nbits_group(
+// CHECK-SAME:      weights(%arg2, %arg2, %arg4 :
+// CHECK-SAME:      N = [32, 32, 16]
+// CHECK-SAME:      row_offsets = array<i64: 0, 32, 0>
+// CHECK-NOT:     tensor.extract_slice
+// CHECK:         return %[[G]]#0, %[[G]]#1, %[[G]]#2
+func.func @sliced_group_member(%ctx: !hip.context, %x: tensor<1x1x64xf16>,
+                               %b0: tensor<64x2x16xui8>, %s0: tensor<64x2xf16>,
+                               %b1: tensor<16x2x16xui8>, %s1: tensor<16x2xf16>)
+    -> (tensor<1x1x32xf16>, tensor<1x1x32xf16>, tensor<1x1x16xf16>) {
+  %e0 = tensor.empty() : tensor<1x1x64xf16>
+  %y = hip.matmul_nbits(%ctx) ins(%x, %b0, %s0 :
+      tensor<1x1x64xf16>, tensor<64x2x16xui8>, tensor<64x2xf16>)
+      outs(%e0 : tensor<1x1x64xf16>)
+      {K = 64 : i64, N = 64 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x1x64xf16>
+  %e1 = tensor.empty() : tensor<1x1x16xf16>
+  %z = hip.matmul_nbits(%ctx) ins(%x, %b1, %s1 :
+      tensor<1x1x64xf16>, tensor<16x2x16xui8>, tensor<16x2xf16>)
+      outs(%e1 : tensor<1x1x16xf16>)
+      {K = 64 : i64, N = 16 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x1x16xf16>
+  %lo = tensor.extract_slice %y[0, 0, 0] [1, 1, 32] [1, 1, 1]
+      : tensor<1x1x64xf16> to tensor<1x1x32xf16>
+  %hi = tensor.extract_slice %y[0, 0, 32] [1, 1, 32] [1, 1, 1]
+      : tensor<1x1x64xf16> to tensor<1x1x32xf16>
+  return %lo, %hi, %z : tensor<1x1x32xf16>, tensor<1x1x32xf16>, tensor<1x1x16xf16>
+}
+
+// -----
+
+// Slices that leave columns unread, or an output read whole as well, keep the
+// projection as it is.
+// CHECK-LABEL: func.func @slices_not_split
+// CHECK-NOT:     hip.matmul_nbits_group
+// CHECK-COUNT-2: hip.matmul_nbits(
+func.func @slices_not_split(%ctx: !hip.context, %x: tensor<1x1x64xf16>,
+                            %b: tensor<12x2x16xui8>, %s: tensor<12x2xf16>,
+                            %x2: tensor<1x1x64xf16>)
+    -> (tensor<1x1x8xf16>, tensor<1x1x8xf16>, tensor<1x1x12xf16>) {
+  %e = tensor.empty() : tensor<1x1x12xf16>
+  %y = hip.matmul_nbits(%ctx) ins(%x, %b, %s :
+      tensor<1x1x64xf16>, tensor<12x2x16xui8>, tensor<12x2xf16>)
+      outs(%e : tensor<1x1x12xf16>)
+      {K = 64 : i64, N = 12 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x1x12xf16>
+  %a = tensor.extract_slice %y[0, 0, 0] [1, 1, 8] [1, 1, 1]
+      : tensor<1x1x12xf16> to tensor<1x1x8xf16>
+  %e2 = tensor.empty() : tensor<1x1x12xf16>
+  %y2 = hip.matmul_nbits(%ctx) ins(%x2, %b, %s :
+      tensor<1x1x64xf16>, tensor<12x2x16xui8>, tensor<12x2xf16>)
+      outs(%e2 : tensor<1x1x12xf16>)
+      {K = 64 : i64, N = 12 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x1x12xf16>
+  %a2 = tensor.extract_slice %y2[0, 0, 0] [1, 1, 8] [1, 1, 1]
+      : tensor<1x1x12xf16> to tensor<1x1x8xf16>
+  return %a, %a2, %y2 : tensor<1x1x8xf16>, tensor<1x1x8xf16>, tensor<1x1x12xf16>
+}
