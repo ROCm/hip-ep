@@ -2529,6 +2529,47 @@ HIP_KERNEL_API int hip_hyper_connection_post_mix_norm(
     float epsilon,
     int hip_dtype);
 
+/*
+ * fp16 hip_hyper_connection_pre_mix / hip_hyper_connection_post_mix_norm that
+ * also write `output` / `normed` quantized per 32-element group, in the layout
+ * and with the rounding of hip_matmul_nbits_quant_act_i8 (bit-identical to
+ * running it on the fp16 result). a_quant receives the row's int8 values,
+ * a_scale one float per 32. Require hip_norm_quant_supported(rows, K, 32) with
+ * K = hidden (pre-mix) or branches * hidden (post-mix norm, whose normed row
+ * is the flattened branches).
+ */
+HIP_KERNEL_API int hip_hyper_connection_pre_mix_quant(
+    void* stream,
+    const void* streams,
+    const void* pre_mix,
+    void* output,
+    int64_t rows,
+    int64_t branches,
+    int64_t hidden,
+    int feature_gate,
+    int gate_sigmoid,
+    float reduction_scale,
+    void* a_quant,
+    void* a_scale);
+
+HIP_KERNEL_API int hip_hyper_connection_post_mix_norm_quant(
+    void* stream,
+    const void* streams,
+    const void* block_output,
+    const void* gate,
+    const void* stream_mix,
+    const void* scale,
+    void* residual,
+    void* normed,
+    int64_t rows,
+    int64_t branches,
+    int64_t hidden,
+    int feature_gate,
+    int gate_activation,
+    float epsilon,
+    void* a_quant,
+    void* a_scale);
+
 /* =========================================================================
  * Skip RMS Normalization (com.microsoft SkipSimplifiedLayerNormalization)
  * =========================================================================

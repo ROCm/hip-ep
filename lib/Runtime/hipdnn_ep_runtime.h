@@ -1673,13 +1673,13 @@ int wrap_engram_gate(RuntimeState *state, void *key, void *query, void *value,
                      float epsilon);
 // com.microsoft HyperConnectionPreMix. streams hold rows * branches * hidden
 // elements. feature_gate 0 is a per-branch gate, 1 is per (branch, hidden).
-int wrap_hyper_connection_pre_mix(RuntimeState *state, void *streams,
-                                  void *pre_mix, void *output,
-                                  int64_t stream_num_elements, int64_t branches,
-                                  int64_t hidden, int64_t feature_gate,
-                                  int64_t gate_sigmoid,
-                                  int64_t element_size_bytes,
-                                  float reduction_scale);
+// a_quant/a_scale (nullable): int8 copy of `output` for
+// hip.matmul_nbits_group, written when hip_norm_quant_supported() accepts it.
+int wrap_hyper_connection_pre_mix(
+    RuntimeState *state, void *streams, void *pre_mix, void *output,
+    int64_t stream_num_elements, int64_t branches, int64_t hidden,
+    int64_t feature_gate, int64_t gate_sigmoid, int64_t element_size_bytes,
+    float reduction_scale, void *a_quant, void *a_scale);
 
 // com.microsoft HyperConnectionPostMix. stream_mix may be null (identity).
 int wrap_hyper_connection_post_mix(RuntimeState *state, void *streams,
@@ -1692,13 +1692,14 @@ int wrap_hyper_connection_post_mix(RuntimeState *state, void *streams,
 
 // PostMix fused with the following branchwise RMSNorm. stream_mix may be
 // null. feature_gate and gate_activation match the HIP op. residual and
-// normed are both written.
+// normed are both written. a_quant/a_scale (nullable): int8 copy of `normed`,
+// as for wrap_hyper_connection_pre_mix.
 int wrap_hyper_connection_post_mix_norm(
     RuntimeState *state, void *streams, void *block_output, void *gate,
     void *stream_mix, void *norm_scale, void *residual, void *normed,
     int64_t stream_num_elements, int64_t branches, int64_t hidden,
     int64_t feature_gate, int64_t gate_activation, int64_t element_size_bytes,
-    float epsilon);
+    float epsilon, void *a_quant, void *a_scale);
 
 // SkipSimplifiedLayerNormalization operation wrapper (Full MS spec)
 // Computes: input_skip_bias_sum = input + skip [+ bias]

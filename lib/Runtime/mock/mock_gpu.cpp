@@ -1835,27 +1835,27 @@ int wrap_engram_gate(RuntimeState *state, void *key, void *query, void *value,
   return 0;
 }
 
-int wrap_hyper_connection_pre_mix(RuntimeState *state, void *streams,
-                                  void *pre_mix, void *output,
-                                  int64_t stream_num_elements, int64_t branches,
-                                  int64_t hidden, int64_t feature_gate,
-                                  int64_t gate_sigmoid,
-                                  int64_t element_size_bytes,
-                                  float reduction_scale) {
+int wrap_hyper_connection_pre_mix(
+    RuntimeState *state, void *streams, void *pre_mix, void *output,
+    int64_t stream_num_elements, int64_t branches, int64_t hidden,
+    int64_t feature_gate, int64_t gate_sigmoid, int64_t element_size_bytes,
+    float reduction_scale, void *a_quant, void *a_scale) {
   (void)gate_sigmoid;
   (void)streams;
   (void)pre_mix;
   (void)output;
+  (void)a_scale;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_hyper_connection_pre_mix\n");
     return -1;
   }
   MOCK_PRINT("[MOCK] wrap_hyper_connection_pre_mix(elements=%lld, "
              "branches=%lld, hidden=%lld, feature_gate=%lld, "
-             "element_size=%lld, scale=%f)\n",
+             "element_size=%lld, scale=%f, quant=%s)\n",
              (long long)stream_num_elements, (long long)branches,
              (long long)hidden, (long long)feature_gate,
-             (long long)element_size_bytes, (double)reduction_scale);
+             (long long)element_size_bytes, (double)reduction_scale,
+             a_quant ? "yes" : "no");
   return 0;
 }
 
@@ -1888,13 +1888,14 @@ int wrap_hyper_connection_post_mix_norm(
     void *stream_mix, void *norm_scale, void *residual, void *normed,
     int64_t stream_num_elements, int64_t branches, int64_t hidden,
     int64_t feature_gate, int64_t gate_activation, int64_t element_size_bytes,
-    float epsilon) {
+    float epsilon, void *a_quant, void *a_scale) {
   (void)streams;
   (void)block_output;
   (void)gate;
   (void)norm_scale;
   (void)residual;
   (void)normed;
+  (void)a_scale;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_hyper_connection_post_mix_norm\n");
     return -1;
@@ -1902,11 +1903,12 @@ int wrap_hyper_connection_post_mix_norm(
   MOCK_PRINT("[MOCK] wrap_hyper_connection_post_mix_norm(elements=%lld, "
              "branches=%lld, hidden=%lld, feature_gate=%lld, "
              "gate_activation=%lld, stream_mix=%s, element_size=%lld, "
-             "epsilon=%f)\n",
+             "epsilon=%f, quant=%s)\n",
              (long long)stream_num_elements, (long long)branches,
              (long long)hidden, (long long)feature_gate,
              (long long)gate_activation, stream_mix ? "yes" : "no",
-             (long long)element_size_bytes, (double)epsilon);
+             (long long)element_size_bytes, (double)epsilon,
+             a_quant ? "yes" : "no");
   return 0;
 }
 

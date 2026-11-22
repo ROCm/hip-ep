@@ -328,9 +328,11 @@ struct MatMulNBitsGroup final
   }
 };
 
-/// A group whose activation is a hip.skip_rms_norm output reads the norm's
+/// A group whose activation is the output of a producer that can also write
+/// it quantized (hip.skip_rms_norm's output, hip.hyper_connection_pre_mix's
+/// output, flattened hip.hyper_connection_post_mix_norm's normed) reads that
 /// quantized copy instead of quantizing the row itself. The group's
-/// block_size has to be the 32 the norm kernel quantizes with.
+/// block_size has to be the 32 the producer kernels quantize with.
 struct MatMulNBitsGroupReadsNormQuant final
     : public mlir::OpRewritePattern<mlir::hip::MatMulNBitsGroupOp> {
   using mlir::OpRewritePattern<mlir::hip::MatMulNBitsGroupOp>::OpRewritePattern;
@@ -342,30 +344,84 @@ struct MatMulNBitsGroupReadsNormQuant final
            group.getK() % kQuantBlockSize == 0;
   }
 
+  /// The producer of `a` if `a` is the result it can quantize and it does not
+  /// write a quantized copy yet.
+  static mlir::Operation *quantProducer(mlir::Value a) {
+    auto result = mlir::dyn_cast<mlir::OpResult>(a);
+    if (!result)
+      return nullptr;
+    mlir::Operation *op = result.getOwner();
+    unsigned idx = result.getResultNumber();
+    if (auto norm = mlir::dyn_cast<mlir::hip::SkipRmsNormOp>(op))
+      return norm.getQuantOutputs().empty() && idx == 0 ? op : nullptr;
+    if (auto pre = mlir::dyn_cast<mlir::hip::HyperConnectionPreMixOp>(op))
+      return pre.getQuantOutputs().empty() && idx == 0 ? op : nullptr;
+    if (auto post = mlir::dyn_cast<mlir::hip::HyperConnectionPostMixNormOp>(op))
+      return post.getQuantOutputs().empty() && post.getFlattened() == 1 &&
+                     idx == 1
+                 ? op
+                 : nullptr;
+    return nullptr;
+  }
+
+  /// Rebuilds `producer` with [qInit, sInit] as its quant_outputs.
+  static mlir::Operation *withQuantOutputs(mlir::PatternRewriter &rewriter,
+                                           mlir::Operation *producer,
+                                           mlir::Value qInit,
+                                           mlir::Value sInit) {
+    llvm::SmallVector<mlir::Type> resultTypes(producer->getResultTypes());
+    resultTypes.push_back(qInit.getType());
+    resultTypes.push_back(sInit.getType());
+    llvm::SmallVector<mlir::Value, 2> quant{qInit, sInit};
+    mlir::IntegerAttr block = rewriter.getI64IntegerAttr(kQuantBlockSize);
+    mlir::Location loc = producer->getLoc();
+    if (auto norm = mlir::dyn_cast<mlir::hip::SkipRmsNormOp>(producer))
+      return mlir::hip::SkipRmsNormOp::create(
+          rewriter, loc, resultTypes, norm.getCtx(), norm.getInput(),
+          norm.getSkip(), norm.getGamma(), norm.getBias(), norm.getOutputs(),
+          quant, norm.getEpsilonAttr(), block);
+    if (auto pre = mlir::dyn_cast<mlir::hip::HyperConnectionPreMixOp>(producer))
+      return mlir::hip::HyperConnectionPreMixOp::create(
+          rewriter, loc, resultTypes, pre.getCtx(), pre.getStreams(),
+          pre.getPreMix(), pre.getOutput(), quant, pre.getBranchesAttr(),
+          pre.getHiddenAttr(), pre.getFlattenedAttr(), pre.getGateLayoutAttr(),
+          pre.getReductionScaleAttr(), pre.getGateSigmoidAttr(), block);
+    auto post = mlir::cast<mlir::hip::HyperConnectionPostMixNormOp>(producer);
+    return mlir::hip::HyperConnectionPostMixNormOp::create(
+        rewriter, loc, resultTypes, post.getCtx(), post.getStreams(),
+        post.getBlockOutput(), post.getGate(), post.getNormScale(),
+        post.getStreamMix(), post.getOutputs(), quant, post.getBranchesAttr(),
+        post.getHiddenAttr(), post.getFlattenedAttr(), post.getGateLayoutAttr(),
+        post.getGateActivationAttr(), post.getEpsilonAttr(), block);
+  }
+
   mlir::LogicalResult
   matchAndRewrite(mlir::hip::MatMulNBitsGroupOp group,
                   mlir::PatternRewriter &rewriter) const override {
     if (!canRead(group))
       return rewriter.notifyMatchFailure(group, "not a norm-quant reader");
-    auto norm = group.getA().getDefiningOp<mlir::hip::SkipRmsNormOp>();
-    if (!norm || !norm.getQuantOutputs().empty() ||
-        norm->getNumResults() == 0 || group.getA() != norm->getResult(0))
-      return rewriter.notifyMatchFailure(group, "A is not a plain norm output");
-    auto aType = mlir::dyn_cast<mlir::RankedTensorType>(group.getA().getType());
+    mlir::Value a = group.getA();
+    mlir::Operation *producer = quantProducer(a);
+    if (!producer)
+      return rewriter.notifyMatchFailure(group,
+                                         "A is not a quantizable producer");
+    auto aType = mlir::dyn_cast<mlir::RankedTensorType>(a.getType());
     if (!aType || !aType.getElementType().isF16() || aType.getRank() < 1 ||
         aType.getShape().back() != group.getK())
       return rewriter.notifyMatchFailure(group, "unsupported activation type");
 
     llvm::SmallVector<mlir::hip::MatMulNBitsGroupOp> readers;
-    for (mlir::Operation *user : norm->getResult(0).getUsers())
+    for (mlir::Operation *user : a.getUsers())
       if (auto g = mlir::dyn_cast<mlir::hip::MatMulNBitsGroupOp>(user))
-        if (g.getA() == norm->getResult(0) && canRead(g) &&
-            !llvm::is_contained(readers, g))
+        if (g.getA() == a && canRead(g) && !llvm::is_contained(readers, g))
           readers.push_back(g);
 
-    mlir::Location loc = norm.getLoc();
-    rewriter.setInsertionPoint(norm);
-    mlir::Value outInit = norm.getOutputs()[0];
+    mlir::Location loc = producer->getLoc();
+    rewriter.setInsertionPoint(producer);
+    mlir::Value outInit =
+        mlir::cast<mlir::DestinationStyleOpInterface>(producer)
+            .getTiedOpOperand(mlir::cast<mlir::OpResult>(a))
+            ->get();
     llvm::SmallVector<mlir::Value> dynSizes;
     for (auto [i, d] : llvm::enumerate(aType.getShape()))
       if (mlir::ShapedType::isDynamic(d))
@@ -381,19 +437,14 @@ struct MatMulNBitsGroupReadsNormQuant final
     mlir::Value sInit = mlir::tensor::EmptyOp::create(
         rewriter, loc, sType.getShape(), sType.getElementType(), dynSizes);
 
-    llvm::SmallVector<mlir::Type> resultTypes(norm->getResultTypes());
-    resultTypes.push_back(qType);
-    resultTypes.push_back(sType);
-    auto quantNorm = mlir::hip::SkipRmsNormOp::create(
-        rewriter, loc, resultTypes, norm.getCtx(), norm.getInput(),
-        norm.getSkip(), norm.getGamma(), norm.getBias(), norm.getOutputs(),
-        mlir::ValueRange{qInit, sInit}, norm.getEpsilonAttr(),
-        rewriter.getI64IntegerAttr(kQuantBlockSize));
-    unsigned numOld = norm->getNumResults();
-    rewriter.replaceOp(norm, quantNorm->getResults().take_front(numOld));
+    mlir::Operation *quantProducerOp =
+        withQuantOutputs(rewriter, producer, qInit, sInit);
+    unsigned numOld = producer->getNumResults();
+    rewriter.replaceOp(producer,
+                       quantProducerOp->getResults().take_front(numOld));
 
-    mlir::Value aQuant = quantNorm->getResult(numOld);
-    mlir::Value aScale = quantNorm->getResult(numOld + 1);
+    mlir::Value aQuant = quantProducerOp->getResult(numOld);
+    mlir::Value aScale = quantProducerOp->getResult(numOld + 1);
     for (mlir::hip::MatMulNBitsGroupOp g : readers)
       rewriter.modifyOpInPlace(g, [&] {
         g.getAQuantMutable().assign(aQuant);

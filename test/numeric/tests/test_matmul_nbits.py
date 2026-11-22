@@ -1194,3 +1194,90 @@ class TestMatMulNBitsGroupNormQuant:
 
         actual, expected = model_runner.run_sample(model, [x, r])
         compare_outputs(actual, expected, atol=2.0, rtol=1e-2, cos_threshold=0.9995)
+
+
+FLASH_NEXT_BRANCHES = 4
+FLASH_NEXT_HIDDEN = 2560
+
+
+def _make_hc_fed_model(seq_len: int, kind: str):
+    """Flash-Next hyper-connection ops feeding two MatMulNBits: HyperConnectionPreMix
+    (kind="pre_mix", K = hidden) or HyperConnectionPostMix + BranchwiseRMSNorm,
+    fused into one post-mix norm (kind="post_norm", K = branches * hidden over
+    the flattened streams). The post-mix residual is a graph output."""
+    rng = np.random.default_rng(29)
+    C, H = FLASH_NEXT_BRANCHES, FLASH_NEXT_HIDDEN
+    S = helper.make_tensor_value_info("S", TensorProto.FLOAT16, [1, seq_len, C * H])
+    hc = dict(domain="com.microsoft", num_branches=C)
+    if kind == "pre_mix":
+        G = helper.make_tensor_value_info("G", TensorProto.FLOAT16, [1, seq_len, C * H])
+        inputs, K, inits, outs = [S, G], H, [], []
+        nodes = [
+            helper.make_node(
+                "HyperConnectionPreMix",
+                ["S", "G"],
+                ["H"],
+                reduction_scale=1.0 / C,
+                **hc,
+            )
+        ]
+    else:
+        B = helper.make_tensor_value_info("B", TensorProto.FLOAT16, [1, seq_len, H])
+        G = helper.make_tensor_value_info("G", TensorProto.FLOAT16, [1, seq_len, C])
+        inputs, K = [S, B, G], C * H
+        scale = rng.uniform(0.5, 1.5, [K]).astype(np.float16)
+        inits = [numpy_helper.from_array(scale, name="norm_scale")]
+        nodes = [
+            helper.make_node("HyperConnectionPostMix", ["S", "B", "G"], ["RES"], **hc),
+            helper.make_node(
+                "BranchwiseRMSNorm",
+                ["RES", "norm_scale"],
+                ["H"],
+                epsilon=1e-6,
+                **hc,
+            ),
+        ]
+        outs = [
+            helper.make_tensor_value_info("RES", TensorProto.FLOAT16, [1, seq_len, K])
+        ]
+    for name, n in (("u", 512), ("v", 256)):
+        inits += _q4_initializers(rng, name, K, n)
+        nodes.append(_q4_node(name, "H", name.upper(), K, n))
+        outs.append(
+            helper.make_tensor_value_info(
+                name.upper(), TensorProto.FLOAT16, [1, seq_len, n]
+            )
+        )
+    return make_model_from_nodes(
+        nodes,
+        inputs,
+        outs,
+        initializers=inits,
+        opset=21,
+        extra_opsets=[helper.make_opsetid("com.microsoft", 1)],
+    )
+
+
+class TestMatMulNBitsGroupHyperConnectionQuant:
+    """A group fed by a Flash-Next hyper-connection op reads the int8 copy the
+    op's kernel writes, as with TestMatMulNBitsGroupNormQuant. seq_len 1 is the
+    shape where the copy is written and read; at 7 neither side uses it."""
+
+    @pytest.mark.parametrize("seq_len", [1, 7])
+    @pytest.mark.parametrize("kind", ["pre_mix", "post_norm"])
+    def test_hc_feeds_group(self, model_runner, seq_len, kind):
+        model = _make_hc_fed_model(seq_len, kind)
+        rng = np.random.default_rng(31)
+        C, H = FLASH_NEXT_BRANCHES, FLASH_NEXT_HIDDEN
+        streams = rng.uniform(-1, 1, [1, seq_len, C * H]).astype(np.float16)
+        if kind == "pre_mix":
+            feeds = [streams, rng.uniform(0, 1, [1, seq_len, C * H]).astype(np.float16)]
+        else:
+            feeds = [
+                streams,
+                rng.uniform(-1, 1, [1, seq_len, H]).astype(np.float16),
+                rng.uniform(0, 1, [1, seq_len, C]).astype(np.float16),
+            ]
+
+        actual, expected = model_runner.run_sample(model, feeds)
+        compare_outputs(actual, expected, atol=2e-1, rtol=1e-2, cos_threshold=0.9995)

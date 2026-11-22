@@ -298,6 +298,85 @@ func.func @norm_feeds_group(%ctx: !hip.context, %x: tensor<1x1x64xf16>,
 
 // -----
 
+// hip.hyper_connection_pre_mix feeding a group writes the quantized copy of
+// its output the same way.
+// CHECK-LABEL: func.func @pre_mix_feeds_group
+// CHECK:         %[[P:.*]]:3 = hip.hyper_connection_pre_mix
+// CHECK-SAME:      quant_outs(%{{.*}}, %{{.*}} : tensor<1x1x32xi8>, tensor<1x1x1xf32>)
+// CHECK-SAME:      quant_block_size = 32
+// CHECK:         hip.matmul_nbits_group(%{{.*}}) ins(%[[P]]#0 : tensor<1x1x32xf16>)
+// CHECK-SAME:      quantized(%[[P]]#1, %[[P]]#2 : tensor<1x1x32xi8>, tensor<1x1x1xf32>)
+func.func @pre_mix_feeds_group(%ctx: !hip.context, %x: tensor<1x1x64xf16>,
+                               %g: tensor<1x1x64xf16>,
+                               %bq: tensor<64x1x16xui8>, %sq: tensor<64x1xf16>,
+                               %bk: tensor<32x1x16xui8>, %sk: tensor<32x1xf16>)
+    -> (tensor<1x1x64xf16>, tensor<1x1x32xf16>) {
+  %ey = tensor.empty() : tensor<1x1x32xf16>
+  %y = hip.hyper_connection_pre_mix(%ctx)
+      ins(%x, %g : tensor<1x1x64xf16>, tensor<1x1x64xf16>)
+      outs(%ey : tensor<1x1x32xf16>)
+      {branches = 2 : i64, flattened = 1 : i64, gate_layout = "feature",
+       hidden = 32 : i64, reduction_scale = 5.000000e-01 : f32}
+      : tensor<1x1x32xf16>
+  %eq = tensor.empty() : tensor<1x1x64xf16>
+  %q = hip.matmul_nbits(%ctx) ins(%y, %bq, %sq :
+      tensor<1x1x32xf16>, tensor<64x1x16xui8>, tensor<64x1xf16>)
+      outs(%eq : tensor<1x1x64xf16>)
+      {K = 32 : i64, N = 64 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x1x64xf16>
+  %ek = tensor.empty() : tensor<1x1x32xf16>
+  %k = hip.matmul_nbits(%ctx) ins(%y, %bk, %sk :
+      tensor<1x1x32xf16>, tensor<32x1x16xui8>, tensor<32x1xf16>)
+      outs(%ek : tensor<1x1x32xf16>)
+      {K = 32 : i64, N = 32 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x1x32xf16>
+  return %q, %k : tensor<1x1x64xf16>, tensor<1x1x32xf16>
+}
+
+// -----
+
+// The flattened normed output of hip.hyper_connection_post_mix_norm (result
+// 1, one row of branches * hidden) feeding a group is quantized in-kernel;
+// the residual keeps result 0.
+// CHECK-LABEL: func.func @post_mix_norm_feeds_group
+// CHECK:         %[[P:.*]]:4 = hip.hyper_connection_post_mix_norm
+// CHECK-SAME:      quant_outs(%{{.*}}, %{{.*}} : tensor<1x1x64xi8>, tensor<1x1x2xf32>)
+// CHECK-SAME:      quant_block_size = 32
+// CHECK:         hip.matmul_nbits_group(%{{.*}}) ins(%[[P]]#1 : tensor<1x1x64xf16>)
+// CHECK-SAME:      quantized(%[[P]]#2, %[[P]]#3 : tensor<1x1x64xi8>, tensor<1x1x2xf32>)
+// CHECK:         return {{.*}}%[[P]]#0
+func.func @post_mix_norm_feeds_group(
+    %ctx: !hip.context, %x: tensor<1x1x64xf16>, %b: tensor<1x1x32xf16>,
+    %g: tensor<1x1x2xf16>, %w: tensor<64xf16>,
+    %bq: tensor<64x2x16xui8>, %sq: tensor<64x2xf16>,
+    %bk: tensor<32x2x16xui8>, %sk: tensor<32x2xf16>)
+    -> (tensor<1x1x64xf16>, tensor<1x1x32xf16>, tensor<1x1x64xf16>) {
+  %er = tensor.empty() : tensor<1x1x64xf16>
+  %en = tensor.empty() : tensor<1x1x64xf16>
+  %r, %n = hip.hyper_connection_post_mix_norm(%ctx)
+      ins(%x, %b, %g, %w : tensor<1x1x64xf16>, tensor<1x1x32xf16>,
+          tensor<1x1x2xf16>, tensor<64xf16>)
+      outs(%er, %en : tensor<1x1x64xf16>, tensor<1x1x64xf16>)
+      {branches = 2 : i64, epsilon = 1.0e-06 : f32, flattened = 1 : i64,
+       gate_activation = 1 : i64, gate_layout = "branch", hidden = 32 : i64}
+      : tensor<1x1x64xf16>, tensor<1x1x64xf16>
+  %eq = tensor.empty() : tensor<1x1x64xf16>
+  %q = hip.matmul_nbits(%ctx) ins(%n, %bq, %sq :
+      tensor<1x1x64xf16>, tensor<64x2x16xui8>, tensor<64x2xf16>)
+      outs(%eq : tensor<1x1x64xf16>)
+      {K = 64 : i64, N = 64 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x1x64xf16>
+  %ek = tensor.empty() : tensor<1x1x32xf16>
+  %k = hip.matmul_nbits(%ctx) ins(%n, %bk, %sk :
+      tensor<1x1x64xf16>, tensor<32x2x16xui8>, tensor<32x2xf16>)
+      outs(%ek : tensor<1x1x32xf16>)
+      {K = 64 : i64, N = 32 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x1x32xf16>
+  return %q, %k, %r : tensor<1x1x64xf16>, tensor<1x1x32xf16>, tensor<1x1x64xf16>
+}
+
+// -----
+
 // Asymmetric weights with packed uint8 zero points (AWQ) are grouped too; each
 // member's zero points follow its weights into the group, in member order.
 // CHECK-LABEL: func.func @zero_points_grouped

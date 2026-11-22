@@ -796,14 +796,15 @@ struct HyperConnectionPreMixOpLowering
     Value scale = LLVM::ConstantOp::create(rewriter, loc, f32Type,
                                            op.getReductionScaleAttr());
 
-    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType, ptrType,
-                                    i64Type, i64Type, i64Type, i64Type,
-                                    i64Type, i64Type, f32Type};
+    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType, ptrType, i64Type,
+                                    i64Type, i64Type, i64Type, i64Type, i64Type,
+                                    f32Type, ptrType, ptrType};
     FailureOr<LLVM::LLVMFuncOp> funcOp =
         LLVM::lookupOrCreateFn(rewriter, module, kWrapHyperConnectionPreMix,
                                paramTypes, rewriter.getI32Type());
     if (failed(funcOp))
       return failure();
+    ValueRange quant = adaptor.getQuantOutputs();
     SmallVector<Value> args = {
         adaptor.getCtx(),
         extractContiguousMemRefPtr(adaptor.getStreams(), rewriter, loc),
@@ -815,7 +816,10 @@ struct HyperConnectionPreMixOpLowering
         featureGate,
         gateSigmoid,
         elementSize,
-        scale};
+        scale,
+        getNullableMemRefPtr(quant.empty() ? Value() : quant[0], rewriter, loc),
+        getNullableMemRefPtr(quant.empty() ? Value() : quant[1], rewriter,
+                             loc)};
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
     return success();
@@ -886,14 +890,16 @@ struct HyperConnectionPostMixNormOpLowering
       return LLVM::ConstantOp::create(rewriter, loc, i64Type,
                                       rewriter.getI64IntegerAttr(v));
     };
-    SmallVector<Type> paramTypes = {
-        ptrType, ptrType, ptrType, ptrType, ptrType, ptrType, ptrType, ptrType,
-        i64Type, i64Type, i64Type, i64Type, i64Type, i64Type, f32Type};
+    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType, ptrType, ptrType,
+                                    ptrType, ptrType, ptrType, i64Type, i64Type,
+                                    i64Type, i64Type, i64Type, i64Type, f32Type,
+                                    ptrType, ptrType};
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapHyperConnectionPostMixNorm, paramTypes,
         rewriter.getI32Type());
     if (failed(funcOp))
       return failure();
+    ValueRange quant = adaptor.getQuantOutputs();
     Value epsilon =
         LLVM::ConstantOp::create(rewriter, loc, f32Type, op.getEpsilonAttr());
     SmallVector<Value> args = {
@@ -911,7 +917,10 @@ struct HyperConnectionPostMixNormOpLowering
         i64Const(op.getGateLayout() == "feature" ? 1 : 0),
         i64Const(op.getGateActivation()),
         i64Const(streamsType.getElementType().getIntOrFloatBitWidth() / 8),
-        epsilon};
+        epsilon,
+        getNullableMemRefPtr(quant.empty() ? Value() : quant[0], rewriter, loc),
+        getNullableMemRefPtr(quant.empty() ? Value() : quant[1], rewriter,
+                             loc)};
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
     return success();

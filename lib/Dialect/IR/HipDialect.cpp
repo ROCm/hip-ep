@@ -1905,7 +1905,22 @@ LogicalResult EngramGateOp::verify() {
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange HyperConnectionPreMixOp::getDpsInitsMutable() {
-  return getOutputMutable();
+  // output and quant_outputs are adjacent; together they are the inits.
+  return MutableOperandRange(getOperation(),
+                             getOutputMutable().getOperandNumber(),
+                             1 + getQuantOutputs().size());
+}
+
+// 0 or 2 quant_outputs (int8 copy, f32 group scales) with a positive block.
+template <typename OpT> static LogicalResult verifyQuantOutputs(OpT op) {
+  size_t numQuant = op.getQuantOutputs().size();
+  if (numQuant != 0 && numQuant != 2)
+    return op.emitOpError(
+               "expected 0 or 2 quant_outputs (a_quant, a_scale), got ")
+           << numQuant;
+  if (numQuant == 2 && op.getQuantBlockSize() <= 0)
+    return op.emitOpError("quant_outputs require a positive quant_block_size");
+  return success();
 }
 
 void HyperConnectionPreMixOp::getEffects(
@@ -1915,8 +1930,12 @@ void HyperConnectionPreMixOp::getEffects(
 }
 
 LogicalResult HyperConnectionPreMixOp::verify() {
-  if (failed(verifyDpsComputeOp(*this, {getStreams(), getPreMix(), getOutput()},
-                                /*numInits=*/1)))
+  if (failed(verifyQuantOutputs(*this)))
+    return failure();
+  SmallVector<Value> dataOperands{getStreams(), getPreMix(), getOutput()};
+  llvm::append_range(dataOperands, getQuantOutputs());
+  if (failed(verifyDpsComputeOp(*this, dataOperands,
+                                /*numInits=*/1 + getQuantOutputs().size())))
     return failure();
 
   int64_t branches = getBranches();
@@ -2076,7 +2095,10 @@ LogicalResult HyperConnectionPostMixOp::verify() {
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange HyperConnectionPostMixNormOp::getDpsInitsMutable() {
-  return getOutputsMutable();
+  // outputs and quant_outputs are adjacent; together they are the inits.
+  OperandRange outs = getOutputs();
+  return MutableOperandRange(getOperation(), outs.getBeginOperandIndex(),
+                             outs.size() + getQuantOutputs().size());
 }
 
 void HyperConnectionPostMixNormOp::getEffects(
@@ -2094,7 +2116,11 @@ LogicalResult HyperConnectionPostMixNormOp::verify() {
     dataOperands.push_back(getStreamMix());
   dataOperands.push_back(getOutputs()[0]);
   dataOperands.push_back(getOutputs()[1]);
-  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/2)))
+  if (failed(verifyQuantOutputs(*this)))
+    return failure();
+  llvm::append_range(dataOperands, getQuantOutputs());
+  if (failed(verifyDpsComputeOp(*this, dataOperands,
+                                /*numInits=*/2 + getQuantOutputs().size())))
     return failure();
   if (getBranches() <= 0 || getHidden() <= 0)
     return emitOpError("branches and hidden must be positive");

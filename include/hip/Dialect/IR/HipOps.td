@@ -1830,7 +1830,9 @@ def Hip_EngramGateOp : Hip_DpsOp_AutoReify<"engram_gate", [AttrSizedOperandSegme
 }
 
 def Hip_HyperConnectionPreMixOp :
-    Hip_DpsOp_AutoReifyInfer<"hyper_connection_pre_mix"> {
+    Hip_DpsOp<"hyper_connection_pre_mix", [
+        DeclareOpInterfaceMethods<InferTypeOpInterface, ["inferReturnTypes"]>
+    ]> {
   let summary = "com.microsoft HyperConnectionPreMix";
   let description = [{
     Reduces C streams to one feature tensor. `gate_sigmoid` 0 multiplies the
@@ -1845,6 +1847,10 @@ def Hip_HyperConnectionPreMixOp :
     when the gate is (..., C, H) or flattened (..., C * H), and `branch`
     when it is (..., C) or (..., C, 1). The product is accumulated in FP32
     and rounded to the element type once. f16 and f32 only.
+
+    Optional quantized copy of `output` (0 or 2 buffers in `quant_outputs`),
+    attached by fusion when the output feeds hip.matmul_nbits_group, with the
+    layout and contract of hip.skip_rms_norm's quant_outputs.
 
     Example:
     ```mlir
@@ -1861,12 +1867,15 @@ def Hip_HyperConnectionPreMixOp :
     Hip_TensorOrMemRef:$streams,
     Hip_TensorOrMemRef:$pre_mix,
     Hip_TensorOrMemRef:$output,
+    // Optional quantized output: [] or [a_quant, a_scale]
+    Variadic<Hip_TensorOrMemRef>:$quant_outputs,
     I64Attr:$branches,
     I64Attr:$hidden,
     I64Attr:$flattened,
     StrAttr:$gate_layout,
     F32Attr:$reduction_scale,
-    DefaultValuedAttr<I64Attr, "0">:$gate_sigmoid
+    DefaultValuedAttr<I64Attr, "0">:$gate_sigmoid,
+    DefaultValuedAttr<I64Attr, "0">:$quant_block_size
   );
 
   let assemblyFormat = [{
@@ -1874,9 +1883,34 @@ def Hip_HyperConnectionPreMixOp :
         $streams `,` $pre_mix `:` type($streams) `,` type($pre_mix)
     `)`
     `outs` `(` $output `:` type($output) `)`
+    (`quant_outs` `(` $quant_outputs^ `:` type($quant_outputs) `)`)?
     attr-dict (`:` type($result_tensors)^)?
   }];
   let hasVerifier = 1;
+
+  // Results follow the inits: output, then the quantized copy if present.
+  let extraClassDefinition = [{
+    ::mlir::LogicalResult $cppClass::reifyResultShapes(
+        ::mlir::OpBuilder &b,
+        ::mlir::ReifiedRankedShapedTypeDims &reified) {
+      return ::llvm::cast<::mlir::hip::HipDpsOp>(getOperation())
+          .reifyResultShapes(b, reified);
+    }
+    ::llvm::LogicalResult $cppClass::inferReturnTypes(
+        ::mlir::MLIRContext *, ::std::optional<::mlir::Location>,
+        ::mlir::ValueRange operands, ::mlir::DictionaryAttr attrs,
+        ::mlir::PropertyRef props, ::mlir::RegionRange regions,
+        ::llvm::SmallVectorImpl<::mlir::Type> &results) {
+      $cppClass::Adaptor adaptor(operands, attrs, props, regions);
+      if (auto t = ::llvm::dyn_cast<::mlir::RankedTensorType>(
+              adaptor.getOutput().getType()))
+        results.push_back(t);
+      for (::mlir::Value q : adaptor.getQuantOutputs())
+        if (auto t = ::llvm::dyn_cast<::mlir::RankedTensorType>(q.getType()))
+          results.push_back(t);
+      return ::mlir::success();
+    }
+  }];
 }
 
 def Hip_HyperConnectionPostMixOp :
@@ -1954,6 +1988,10 @@ def Hip_HyperConnectionPostMixNormOp : Hip_DpsOp_AutoReify<
 
     `outputs` is [residual, normed], both the streams shape. `norm_scale` is
     1-D of length branches * hidden, one hidden-vector per branch.
+
+    Optional quantized copy of `normed` over its flattened (branches * hidden)
+    row (0 or 2 buffers in `quant_outputs`), with the layout and contract of
+    hip.skip_rms_norm's quant_outputs.
   }];
 
   let arguments = (ins
@@ -1964,12 +2002,15 @@ def Hip_HyperConnectionPostMixNormOp : Hip_DpsOp_AutoReify<
     Hip_TensorOrMemRef:$norm_scale,
     Optional<Hip_TensorOrMemRef>:$stream_mix,
     Variadic<Hip_TensorOrMemRef>:$outputs,
+    // Optional quantized normed: [] or [a_quant, a_scale]
+    Variadic<Hip_TensorOrMemRef>:$quant_outputs,
     I64Attr:$branches,
     I64Attr:$hidden,
     I64Attr:$flattened,
     StrAttr:$gate_layout,
     DefaultValuedAttr<I64Attr, "0">:$gate_activation,
-    F32Attr:$epsilon
+    F32Attr:$epsilon,
+    DefaultValuedAttr<I64Attr, "0">:$quant_block_size
   );
 
   let assemblyFormat = [{
@@ -1979,6 +2020,7 @@ def Hip_HyperConnectionPostMixNormOp : Hip_DpsOp_AutoReify<
         type($norm_scale) (`,` type($stream_mix)^)?
     `)`
     `outs` `(` $outputs `:` type($outputs) `)`
+    (`quant_outs` `(` $quant_outputs^ `:` type($quant_outputs) `)`)?
     attr-dict (`:` type($result_tensors)^)?
   }];
   let hasVerifier = 1;
