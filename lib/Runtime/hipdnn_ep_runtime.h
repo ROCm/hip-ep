@@ -1765,19 +1765,16 @@ int wrap_dequant_bnb4(RuntimeState *state, void *packed, void *absmax,
 // nullptr and N = 0. a_quant/a_scale (nullable) hold A already quantized by
 // its producer; they are read only when hip_norm_quant_supported() accepts
 // the shape.
-int wrap_matmul_nbits_group(RuntimeState *state, int op_state_slot,
-                            const void *A, int64_t nseg, const void *B0,
-                            const void *B1, const void *B2, const void *B3,
-                            const void *scales0, const void *scales1,
-                            const void *scales2, const void *scales3,
-                            const void *zero_points0, const void *zero_points1,
-                            const void *zero_points2, const void *zero_points3,
-                            void *out0, void *out1, void *out2, void *out3,
-                            int64_t N0, int64_t N1, int64_t N2, int64_t N3,
-                            int64_t M, int64_t K, int64_t batch_count,
-                            int64_t bits, int64_t block_size, int64_t elem_size,
-                            int64_t scale_elem_size, int64_t epilogue,
-                            const void *a_quant, const void *a_scale);
+int wrap_matmul_nbits_group(
+    RuntimeState *state, int op_state_slot, const void *A, int64_t nseg,
+    const void *B0, const void *B1, const void *B2, const void *B3,
+    const void *scales0, const void *scales1, const void *scales2,
+    const void *scales3, const void *zero_points0, const void *zero_points1,
+    const void *zero_points2, const void *zero_points3, void *out0, void *out1,
+    void *out2, void *out3, int64_t N0, int64_t N1, int64_t N2, int64_t N3,
+    int64_t M, int64_t K, int64_t batch_count, int64_t bits, int64_t block_size,
+    int64_t elem_size, int64_t scale_elem_size, int64_t epilogue,
+    const void *a_quant, const void *a_scale);
 
 // GatherBlockQuantized operation wrapper (com.microsoft).
 // Gather + block-wise dequantize: gather rows from `data` along
