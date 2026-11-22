@@ -5881,6 +5881,14 @@ def Hip_PoolOp : Hip_DpsOp_AutoReify<"pool"> {
     sum). For LP, `p` is the norm exponent (>= 1). For MAX, both attributes
     are ignored.
 
+    Canonicalization rewrites an AVERAGE pool whose one window covers the
+    whole input (static spatial extents, kernel >= extent, no padding or
+    dilation, f16 / f32) to `hip.reduce_mean` over the spatial dims: the mean
+    of the H * W input elements, as ONNX Runtime and PyTorch define such a
+    pool. That includes a kernel larger than the input, which only
+    `ceil_mode` allows: the window positions past the input are not pad
+    cells, so neither divisor counts them.
+
     Only MAX may produce a second output `Indices` of element type i64
     holding the flattened input index of each selected element (per the ONNX
     spec, indices are a flat 1-D tensor of size `N * C * D_1 * ... * D_k`,
@@ -5935,6 +5943,10 @@ def Hip_PoolOp : Hip_DpsOp_AutoReify<"pool"> {
     `outs` `(` $outputs `:` type($outputs) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+
+  // Whole-input average pool -> hip.reduce_mean.
+  // See lib/Dialect/IR/HipPoolCanonicalize.cpp.
+  let hasCanonicalizer = 1;
 }
 
 def Hip_ResizeOp : Hip_DpsOp_AutoReify<"resize",

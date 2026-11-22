@@ -229,7 +229,7 @@ passes, and none runs there.
 
 | Name | Anchor | One-liner |
 |---|---|---|
-| `canonicalize` | any | Standard canonicalization. The `hip.cast` patterns also fold an exact float widening, a chain of single-use element-move ops and the narrowing back into the chain on the narrow type (see [docs/design/element-move-interface.md](design/element-move-interface.md)). |
+| `canonicalize` | any | Standard canonicalization. The `hip.cast` patterns also fold an exact float widening, a chain of single-use element-move ops and the narrowing back into the chain on the narrow type (see [docs/design/element-move-interface.md](design/element-move-interface.md)). A whole-input average `hip.pool` becomes `hip.reduce_mean` (`HipPoolCanonicalize.cpp`). |
 | `cse` | any | Common-subexpression elimination. |
 | `one-shot-bufferize` | module | Tensor → memref bufferization (function boundaries, identity layout); `HIPDNN_EP_BUFFERIZE_COPY_BEFORE_WRITE=1` enables the huge-graph copy-before-write escape hatch. |
 | `buffer-deallocation-pipeline` | module | Ownership-based buffer deallocation; available to custom pipelines and characterization tests, but omitted from the built-in pipeline. |
@@ -285,7 +285,9 @@ ONNX → HIP  (buildOnnxToHipPipeline)
   hip-fusion-transform               (must precede externalization: its patterns
                                       read hip.constant payloads)
   hip-externalize-constants
-  canonicalize ; cse
+  canonicalize ; cse                 (first canonicalize of the tail; also
+                                      rewrites a whole-input average hip.pool
+                                      to hip.reduce_mean)
   func.func(hip-split-duplicate-dps-inits)
   func.func(hip-resolve-tensor-dims)
   «slot: BeforeBufferization»
