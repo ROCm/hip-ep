@@ -24,12 +24,23 @@
  * The output has a padded per-head stride and guard elements on both sides;
  * each case runs twice with two fill bytes, so an element the kernel did not
  * write, or a write into the padding or the guards, fails at least one run.
+ * A case that passes is then timed with the shared UT timer
+ * (common/hip_adaptive_timing.h).
+ *
+ * Usage:
+ *   test_gqa_softmax.exe [--coverage 1|2|3]      built-in cases (default 3)
+ *   test_gqa_softmax.exe --batch B --heads H --queries Q --keys K
+ *       [--mask none|full|key_row|chunk] [--mask-dtype bf16|f16|f32]
+ *       [--out-dtype bf16|f16|f32] [--smooth 0|1] [--seed S]
+ *                                                one case; any flag selects it
  */
 
 #include "hip_custom_kernels.h"
 
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
+#include "../../../common/hip_adaptive_timing.h"
+#include "../../../common/ut_case_input.h"
 
 #include <algorithm>
 #include <cfloat>
@@ -38,10 +49,137 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <initializer_list>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
+
+// ---- Cold-cache timing ----
+// The timed launches rotate over copies of the scores and the mask, so that
+// each launch reads them from DRAM as in a model rather than from L2 / the
+// Infinity Cache; each copy is read again only after kColdRotationBytes of
+// other copies. HIPDNN_KERNEL_UT_WARM=1 times one copy back to back instead.
+// Same scheme as the other leaves (e.g. div/Xbf16_Wbf16_Ybf16).
+namespace hipdnn_ep_test {
+// Several times the largest last-level cache among the targets.
+constexpr size_t kColdRotationBytes = size_t(256) << 20;
+// Untimed reads before the timed launches, so that the copies' initial fill
+// has left the caches.
+constexpr size_t kColdSettleBytes = size_t(128) << 20;
+// Bounds the copies of inputs of a few KB.
+constexpr int kColdMaxCopies = 4096;
+
+inline bool warmTiming() {
+  const char* v = std::getenv("HIPDNN_KERNEL_UT_WARM");
+  return v && v[0] == '1';
+}
+
+// Copies of the buffers one launch reads. Copy 0 is the buffers themselves;
+// the others share one allocation.
+class ColdCopies {
+public:
+  struct Part {
+    const void* src;
+    size_t bytes;
+  };
+
+  explicit ColdCopies(std::initializer_list<Part> parts) : parts_(parts) {
+    size_t stride = 0;
+    for (const Part& p : parts_) {
+      offsets_.push_back(stride);
+      stride += (p.bytes + 255) & ~size_t(255);
+      bytes_ += p.bytes;
+    }
+    if (warmTiming() || bytes_ == 0) {
+      return;
+    }
+    count_ = 1 + static_cast<int>(std::min<size_t>(
+                     kColdMaxCopies - 1,
+                     (kColdRotationBytes + bytes_ - 1) / bytes_));
+    stride_ = stride;
+    if (hipMalloc(&slab_, stride_ * (count_ - 1)) != hipSuccess) {
+      std::fprintf(stderr,
+                   "cold-cache copies do not fit; timing on warm caches\n");
+      slab_ = nullptr;
+      count_ = 1;
+      return;
+    }
+    // Copy 1 from the buffers, then double the run of filled copies.
+    for (size_t i = 0; i < parts_.size(); ++i) {
+      if (parts_[i].bytes) {
+        (void)hipMemcpy(part(1, i), parts_[i].src, parts_[i].bytes,
+                        hipMemcpyDeviceToDevice);
+      }
+    }
+    for (int filled = 1; filled < count_ - 1;) {
+      const int more = std::min(filled, count_ - 1 - filled);
+      (void)hipMemcpy(static_cast<char*>(slab_) + stride_ * filled, slab_,
+                      stride_ * more, hipMemcpyDeviceToDevice);
+      filled += more;
+    }
+  }
+  ~ColdCopies() {
+    if (slab_) {
+      (void)hipFree(slab_);
+    }
+  }
+  ColdCopies(const ColdCopies&) = delete;
+  ColdCopies& operator=(const ColdCopies&) = delete;
+
+  int count() const { return count_; }
+  size_t bytes() const { return bytes_; }
+  // Part `i` of copy `c`.
+  void* part(int c, size_t i) const {
+    if (c == 0 || parts_[i].bytes == 0) {
+      return const_cast<void*>(parts_[i].src);
+    }
+    return static_cast<char*>(slab_) + stride_ * (c - 1) + offsets_[i];
+  }
+
+private:
+  std::vector<Part> parts_;
+  std::vector<size_t> offsets_;
+  size_t bytes_ = 0;
+  size_t stride_ = 0;
+  int count_ = 1;
+  void* slab_ = nullptr;
+};
+
+// Holds the stream until the host sets *release, so that every timed launch is
+// queued before the first one runs. Gives up after about 0.25 s.
+__global__ void holdStreamKernel(const volatile int* release) {
+  for (int spin = 0; spin < (1 << 16) && *release == 0; ++spin) {
+    __builtin_amdgcn_s_sleep(127);
+  }
+}
+
+// Host-mapped, coherent release flag for holdStreamKernel, or null if it is
+// unavailable.
+inline int* holdReleaseFlag() {
+  static int* flag = [] {
+    void* p = nullptr;
+    return hipHostMalloc(&p, sizeof(int),
+                         hipHostMallocMapped | hipHostMallocCoherent) ==
+                   hipSuccess
+               ? static_cast<int*>(p)
+               : nullptr;
+  }();
+  return flag;
+}
+
+// Mean time of one complete softmax call; launch(c) uses input copy c. The
+// shared UT policy selects the call count.
+template <class Launch>
+double rotatedMeanMs(hipStream_t stream, const ColdCopies& copies,
+                     const char* kernel, Launch&& launch) {
+  return timing::adaptiveRotatedMeanMs(
+      stream, copies, launch, holdReleaseFlag(),
+      [&](const int* flag) { holdStreamKernel<<<1, 1, 0, stream>>>(flag); },
+      warmTiming(), kColdSettleBytes, "gqa_softmax_xfp32_wbf16_ybf16", kernel);
+}
+} // namespace hipdnn_ep_test
 
 namespace {
 
@@ -55,9 +193,13 @@ namespace {
     }                                                                          \
   } while (false)
 
+constexpr const char* kLeaf = "gqa/softmax/Xfp32_Wbf16_Ybf16";
 constexpr int64_t kGuardElements = 64;
 constexpr int64_t kStridePad = 5;
 constexpr uint8_t kFillBytes[2] = {0xa5, 0x5a};
+// Largest custom case, in score elements: the double reference holds 8 bytes
+// per element.
+constexpr int64_t kMaxScoreElements = int64_t(1) << 26;
 
 // ---- element types -----------------------------------------------------------
 
@@ -252,7 +394,9 @@ private:
 };
 
 // One case's results.csv row, written when it goes out of scope so that a
-// case returning early still reports FAIL.
+// case returning early still reports FAIL. finish() binds a timed PASS to its
+// UT_TIMING record, so the case's timing::CaseScope must be alive when it is
+// called.
 struct ResultRow {
   CsvRow row;
   explicit ResultRow(std::string shape) {
@@ -264,9 +408,12 @@ struct ResultRow {
   ResultRow(const ResultRow&) = delete;
   ResultRow& operator=(const ResultRow&) = delete;
   ~ResultRow() { CsvWriter().write(row); }
-  void finish(bool pass, double rel_l2) {
+  void finish(bool pass, double rel_l2, double time_ms) {
     row.rel_l2 = rel_l2;
     row.verdict = pass ? "PASS" : "FAIL";
+    row.time_ms = time_ms;
+    hipdnn_ep_test::timing::emitCsvBinding(row.shape, row.config, row.verdict,
+                                           row.rel_l2, row.time_ms);
   }
 };
 
@@ -277,11 +424,28 @@ struct Shape {
   int min_coverage;
 };
 
-// Bias extents and the block of it each call reads. bias_sq == 1 is the
-// one-row (per-key) bias that serves every query row.
+// Bias extents and the block of it each call reads. sq == 1 is the one-row
+// (per-key) bias that serves every query row.
 struct BiasShape {
   int batch, heads, sq, total, row_offset, col_offset;
 };
+
+// The three bias layouts real/gqa.cpp passes: a full [B, H, q, k] mask; a
+// broadcast one-row mask [1, H, 1, k + 3] read at column offset 3 (a sliding
+// window); and a [B, 1, 2q, k] mask read from row offset q (a later prefill
+// chunk).
+enum class Mask { None, Full, KeyRow, Chunk };
+
+BiasShape bias_shape(Mask mask, const Shape& s) {
+  switch (mask) {
+  case Mask::KeyRow:
+    return {1, s.heads, 1, s.rows + 3, 0, 3};
+  case Mask::Chunk:
+    return {s.batch, 1, 2 * s.cols, s.rows, s.cols, 0};
+  default:
+    return {s.batch, s.heads, s.cols, s.rows, 0, 0};
+  }
+}
 
 struct Case {
   Shape shape;
@@ -290,6 +454,17 @@ struct Case {
   BiasShape bias;
   int bias_dtype, out_dtype;
 };
+
+Case make_case(const Shape& shape, Mask mask, int bias_dtype, int out_dtype,
+               bool smooth) {
+  const bool biased = mask != Mask::None;
+  return {shape,
+          smooth,
+          biased,
+          biased ? bias_shape(mask, shape) : BiasShape{},
+          biased ? bias_dtype : 0,
+          out_dtype};
+}
 
 std::string case_name(const Case& c) {
   std::string name = std::string(c.biased ? "biased_" : "softmax_") +
@@ -313,8 +488,15 @@ std::string case_name(const Case& c) {
   return name;
 }
 
+// Checks one case against the reference and, when it passes, times it.
 bool run_case(const Case& c, uint64_t seed, hipStream_t stream) {
-  const std::string name = case_name(c);
+  std::string name = case_name(c);
+  if (seed != 1) {
+    name += "_seed" + std::to_string(seed);
+  }
+  const char* kernel = c.biased ? "hip_gqa_softmax_f32_to_out_biased"
+                                : "hip_gqa_softmax_f32_to_bf16";
+  hipdnn_ep_test::timing::CaseScope timing_case(kLeaf, name, kernel);
   ResultRow result(name);
   const Shape& s = c.shape;
   const int64_t heads = static_cast<int64_t>(s.batch) * s.heads;
@@ -322,7 +504,7 @@ bool run_case(const Case& c, uint64_t seed, hipStream_t stream) {
   const int64_t out_stride = plane + kStridePad;
   const int out_bytes = dtype_bytes(c.out_dtype);
 
-  uint64_t state = seed | 1u;
+  uint64_t state = (seed * 0x9e3779b97f4a7c15ull) | 1u;
   std::vector<float> scores(static_cast<size_t>(heads * plane));
   for (float& v : scores) {
     v = random_float(&state, -12.0f, 12.0f);
@@ -382,8 +564,9 @@ bool run_case(const Case& c, uint64_t seed, hipStream_t stream) {
     }
   }
 
-  DeviceBytes d_scores(scores.size() * sizeof(float));
-  upload(d_scores.get(), scores.data(), scores.size() * sizeof(float));
+  const size_t scores_bytes = scores.size() * sizeof(float);
+  DeviceBytes d_scores(scores_bytes);
+  upload(d_scores.get(), scores.data(), scores_bytes);
   DeviceBytes d_bias(bias_host.size());
   if (c.biased) {
     upload(d_bias.get(), bias_host.data(), bias_host.size());
@@ -392,6 +575,23 @@ bool run_case(const Case& c, uint64_t seed, hipStream_t stream) {
   const size_t body_bytes = static_cast<size_t>(heads * out_stride * out_bytes);
   const size_t total_bytes = body_bytes + 2 * guard_bytes;
   DeviceBytes d_out(total_bytes);
+  void* out_ptr = d_out.get() + guard_bytes;
+
+  const int total_head_queries = static_cast<int>(heads * s.cols);
+  auto launch = [&](const void* scores_ptr, const void* bias_ptr) {
+    if (c.biased) {
+      return hip_gqa_softmax_f32_to_out_biased(
+          reinterpret_cast<void*>(stream), scores_ptr, out_ptr,
+          total_head_queries, s.rows, s.cols, static_cast<int>(plane),
+          static_cast<int>(out_stride), nullptr, s.heads, c.smooth ? 1 : 0,
+          bias_ptr, c.bias.batch, c.bias.heads, c.bias_dtype, c.out_dtype,
+          c.bias.sq, c.bias.row_offset, c.bias.total, c.bias.col_offset);
+    }
+    return hip_gqa_softmax_f32_to_bf16(
+        reinterpret_cast<void*>(stream), scores_ptr, out_ptr,
+        total_head_queries, s.rows, s.cols, static_cast<int>(plane),
+        static_cast<int>(out_stride), nullptr, s.heads, c.smooth ? 1 : 0);
+  };
 
   bool pass = true;
   double err2 = 0.0;
@@ -399,22 +599,7 @@ bool run_case(const Case& c, uint64_t seed, hipStream_t stream) {
   for (uint8_t fill : kFillBytes) {
     const std::vector<uint8_t> filled(total_bytes, fill);
     upload(d_out.get(), filled.data(), total_bytes);
-    void* out_ptr = d_out.get() + guard_bytes;
-    const int total_head_queries = static_cast<int>(heads * s.cols);
-    int status;
-    if (c.biased) {
-      status = hip_gqa_softmax_f32_to_out_biased(
-          reinterpret_cast<void*>(stream), d_scores.get(), out_ptr,
-          total_head_queries, s.rows, s.cols, static_cast<int>(plane),
-          static_cast<int>(out_stride), nullptr, s.heads, c.smooth ? 1 : 0,
-          d_bias.get(), c.bias.batch, c.bias.heads, c.bias_dtype, c.out_dtype,
-          c.bias.sq, c.bias.row_offset, c.bias.total, c.bias.col_offset);
-    } else {
-      status = hip_gqa_softmax_f32_to_bf16(
-          reinterpret_cast<void*>(stream), d_scores.get(), out_ptr,
-          total_head_queries, s.rows, s.cols, static_cast<int>(plane),
-          static_cast<int>(out_stride), nullptr, s.heads, c.smooth ? 1 : 0);
-    }
+    const int status = launch(d_scores.get(), d_bias.get());
     if (status != 0) {
       std::cout << "FAIL " << name << " returned " << status << '\n';
       return false;
@@ -475,17 +660,27 @@ bool run_case(const Case& c, uint64_t seed, hipStream_t stream) {
     pass = pass && ok;
   }
   const double rel_l2 = ref2 > 0.0 ? std::sqrt(err2 / ref2) : 0.0;
+
+  double time_ms = 0.0;
   if (pass) {
-    std::printf("PASS %s relL2=%.3e\n", name.c_str(), rel_l2);
+    const hipdnn_ep_test::ColdCopies inputs(
+        {{d_scores.get(), scores_bytes}, {d_bias.get(), bias_host.size()}});
+    time_ms = hipdnn_ep_test::rotatedMeanMs(stream, inputs, kernel, [&](int k) {
+      return launch(inputs.part(k, 0), inputs.part(k, 1));
+    });
+    std::printf("PASS %s relL2=%.3e time_ms=%.6f\n", name.c_str(), rel_l2,
+                time_ms);
   }
-  result.finish(pass, rel_l2);
+  result.finish(pass, rel_l2, time_ms);
   return pass;
 }
 
 // An unsupported dtype or a null bias must return -1 and leave the output
-// untouched.
+// untouched. Not timed.
 bool run_rejected_case(const char* name, int bias_dtype, int out_dtype,
                        bool null_bias, hipStream_t stream) {
+  hipdnn_ep_test::timing::CaseScope timing_case(
+      kLeaf, name, "hip_gqa_softmax_f32_to_out_biased");
   ResultRow result(name);
   const int rows = 33;
   const int cols = 2;
@@ -507,7 +702,7 @@ bool run_rejected_case(const char* name, int bias_dtype, int out_dtype,
   const bool pass = status == -1 && untouched;
   std::cout << (pass ? "PASS " : "FAIL ") << name << " status=" << status
             << " output_untouched=" << (untouched ? "yes" : "no") << '\n';
-  result.finish(pass, pass ? 0.0 : 1.0);
+  result.finish(pass, pass ? 0.0 : 1.0, 0.0);
   return pass;
 }
 
@@ -518,79 +713,174 @@ constexpr Shape kShapes[] = {
     {1, 1, 1, 1, 2},   {2, 2, 5, 256, 2}, {1, 8, 16, 1000, 3},
 };
 
-bool parse_options(int argc, char** argv, int* coverage) {
-  if (const char* env = std::getenv("HIPDNN_UT_COVERAGE")) {
-    *coverage = std::atoi(env);
-  }
-  for (int i = 1; i < argc; ++i) {
-    const std::string argument = argv[i];
-    if (argument == "--coverage" && i + 1 < argc) {
-      *coverage = std::atoi(argv[++i]);
-    } else {
-      std::cerr << "usage: " << argv[0] << " [--coverage 1|2|3]\n";
-      return false;
-    }
-  }
-  return *coverage >= 1 && *coverage <= 3;
-}
-
-} // namespace
-
-int main(int argc, char** argv) {
-  int coverage = 3;
-  if (!parse_options(argc, argv, &coverage)) {
-    return 2;
-  }
-
+// Every shape runs the bf16 cases (unbiased with and without smooth softmax,
+// and the three mask layouts) plus the fp16 and fp32 regression cases of the
+// biased entry.
+std::vector<Case> suite_cases(int coverage) {
   std::vector<Case> cases;
   for (const Shape& shape : kShapes) {
     if (shape.min_coverage > coverage) {
       continue;
     }
-    // A full [B, H, cols, rows] bias; a broadcast one-row bias
-    // [1, H, 1, rows + 3] read at a column offset (the sliding-window case);
-    // and a [B, 1, 2*cols, rows] bias read from row offset `cols` (a later
-    // prefill chunk).
-    const BiasShape full{shape.batch, shape.heads, shape.cols, shape.rows,
-                         0, 0};
-    const BiasShape key_row{1, shape.heads, 1, shape.rows + 3, 0, 3};
-    const BiasShape chunk{shape.batch, 1, 2 * shape.cols, shape.rows,
-                          shape.cols, 0};
     for (bool smooth : {false, true}) {
-      cases.push_back({shape, smooth, false, {}, 0, HIP_DTYPE_BFLOAT16});
+      cases.push_back(
+          make_case(shape, Mask::None, 0, HIP_DTYPE_BFLOAT16, smooth));
     }
-    cases.push_back({shape, false, true, full, HIP_DTYPE_BFLOAT16,
-                     HIP_DTYPE_BFLOAT16});
-    cases.push_back({shape, true, true, key_row, HIP_DTYPE_BFLOAT16,
-                     HIP_DTYPE_BFLOAT16});
-    cases.push_back({shape, false, true, chunk, HIP_DTYPE_BFLOAT16,
-                     HIP_DTYPE_BFLOAT16});
-    cases.push_back({shape, false, true, full, HIP_DTYPE_FLOAT16,
-                     HIP_DTYPE_FLOAT16});
-    cases.push_back({shape, false, true, chunk, HIP_DTYPE_FLOAT32,
-                     HIP_DTYPE_FLOAT32});
+    cases.push_back(make_case(shape, Mask::Full, HIP_DTYPE_BFLOAT16,
+                              HIP_DTYPE_BFLOAT16, false));
+    cases.push_back(make_case(shape, Mask::KeyRow, HIP_DTYPE_BFLOAT16,
+                              HIP_DTYPE_BFLOAT16, true));
+    cases.push_back(make_case(shape, Mask::Chunk, HIP_DTYPE_BFLOAT16,
+                              HIP_DTYPE_BFLOAT16, false));
+    cases.push_back(make_case(shape, Mask::Full, HIP_DTYPE_FLOAT16,
+                              HIP_DTYPE_FLOAT16, false));
+    cases.push_back(make_case(shape, Mask::Chunk, HIP_DTYPE_FLOAT32,
+                              HIP_DTYPE_FLOAT32, false));
   }
-  std::cout << "gqa/softmax coverage=" << coverage << " -> running "
-            << cases.size() << " softmax cases + 3 rejected cases\n";
+  return cases;
+}
+
+struct Options {
+  int coverage = 3;
+  bool custom = false;
+  Shape shape{1, 8, 16, 1000, 0};
+  Mask mask = Mask::Full;
+  int mask_dtype = HIP_DTYPE_BFLOAT16;
+  int out_dtype = HIP_DTYPE_BFLOAT16;
+  bool smooth = false;
+  uint64_t seed = 1;
+};
+
+int parse_dtype(const std::string& text, const char* name) {
+  if (text == "bf16")
+    return HIP_DTYPE_BFLOAT16;
+  if (text == "f16")
+    return HIP_DTYPE_FLOAT16;
+  if (text == "f32")
+    return HIP_DTYPE_FLOAT32;
+  throw std::invalid_argument(std::string(name) + " must be bf16, f16 or f32");
+}
+
+Mask parse_mask(const std::string& text) {
+  if (text == "none")
+    return Mask::None;
+  if (text == "full")
+    return Mask::Full;
+  if (text == "key_row")
+    return Mask::KeyRow;
+  if (text == "chunk")
+    return Mask::Chunk;
+  throw std::invalid_argument("mask must be none, full, key_row or chunk");
+}
+
+// Throws std::invalid_argument on an unknown, incomplete or out-of-range
+// argument.
+Options parse_options(int argc, char** argv) {
+  using hipdnn_ep_test::input::boolean;
+  using hipdnn_ep_test::input::integer;
+  using hipdnn_ep_test::input::value;
+  Options o;
+  const char* env = std::getenv("HIPDNN_UT_COVERAGE");
+  if (env && env[0]) {
+    o.coverage = static_cast<int>(integer(env, "HIPDNN_UT_COVERAGE", 1, 3));
+  }
+  for (int i = 1; i < argc; ++i) {
+    const std::string argument = argv[i];
+    if (argument == "--coverage") {
+      o.coverage =
+          static_cast<int>(integer(value(argc, argv, i), "coverage", 1, 3));
+      continue;
+    }
+    o.custom = true;
+    if (argument == "--batch") {
+      o.shape.batch = static_cast<int>(integer(value(argc, argv, i), "batch"));
+    } else if (argument == "--heads") {
+      o.shape.heads = static_cast<int>(integer(value(argc, argv, i), "heads"));
+    } else if (argument == "--queries") {
+      o.shape.cols = static_cast<int>(integer(value(argc, argv, i), "queries"));
+    } else if (argument == "--keys") {
+      o.shape.rows = static_cast<int>(integer(value(argc, argv, i), "keys"));
+    } else if (argument == "--mask") {
+      o.mask = parse_mask(value(argc, argv, i));
+    } else if (argument == "--mask-dtype") {
+      o.mask_dtype = parse_dtype(value(argc, argv, i), "mask_dtype");
+    } else if (argument == "--out-dtype") {
+      o.out_dtype = parse_dtype(value(argc, argv, i), "out_dtype");
+    } else if (argument == "--smooth") {
+      o.smooth = boolean(value(argc, argv, i), "smooth");
+    } else if (argument == "--seed") {
+      o.seed = static_cast<uint64_t>(integer(value(argc, argv, i), "seed", 0));
+    } else {
+      throw std::invalid_argument(
+          "unknown argument " + argument +
+          "; usage: [--coverage 1|2|3] | [--batch B] [--heads H] "
+          "[--queries Q] [--keys K] [--mask none|full|key_row|chunk] "
+          "[--mask-dtype bf16|f16|f32] [--out-dtype bf16|f16|f32] "
+          "[--smooth 0|1] [--seed S]");
+    }
+  }
+  if (o.custom) {
+    // The unbiased entry writes bf16 only.
+    if (o.mask == Mask::None && o.out_dtype != HIP_DTYPE_BFLOAT16)
+      throw std::invalid_argument("mask none requires out_dtype bf16");
+    // The chunk mask holds 2 * queries rows.
+    const int64_t elements = static_cast<int64_t>(o.shape.batch) *
+                             o.shape.heads * 2 * o.shape.cols *
+                             (o.shape.rows + 3);
+    if (elements > kMaxScoreElements)
+      throw std::invalid_argument(
+          "batch * heads * queries * keys is too large for the reference");
+  }
+  return o;
+}
+
+int run(int argc, char** argv) {
+  const Options options = parse_options(argc, argv);
+  hipdnn_ep_test::timing::printTimingMode();
 
   hipStream_t stream = nullptr;
   HIP_CHECK(hipStreamCreate(&stream));
   bool all_pass = true;
-  uint64_t seed = 1;
-  for (const Case& c : cases) {
-    all_pass = run_case(c, seed++ * 0x9e3779b97f4a7c15ull, stream) && all_pass;
+  if (options.custom) {
+    const Case c = make_case(options.shape, options.mask, options.mask_dtype,
+                             options.out_dtype, options.smooth);
+    std::cout << "gqa/softmax custom case: " << case_name(c)
+              << " seed=" << options.seed << '\n';
+    all_pass = run_case(c, options.seed, stream);
+  } else {
+    const std::vector<Case> cases = suite_cases(options.coverage);
+    std::cout << "gqa/softmax coverage=" << options.coverage << " -> running "
+              << cases.size() << " softmax cases + 3 rejected cases\n";
+    uint64_t seed = 1;
+    for (const Case& c : cases) {
+      all_pass = run_case(c, seed++, stream) && all_pass;
+    }
+    all_pass = run_rejected_case("rejected_u8_output", HIP_DTYPE_BFLOAT16,
+                                 HIP_DTYPE_UINT8, false, stream) &&
+               all_pass;
+    all_pass = run_rejected_case("rejected_u8_bias", HIP_DTYPE_UINT8,
+                                 HIP_DTYPE_BFLOAT16, false, stream) &&
+               all_pass;
+    all_pass = run_rejected_case("rejected_null_bias", HIP_DTYPE_BFLOAT16,
+                                 HIP_DTYPE_BFLOAT16, true, stream) &&
+               all_pass;
   }
-  all_pass = run_rejected_case("rejected_u8_output", HIP_DTYPE_BFLOAT16,
-                               HIP_DTYPE_UINT8, false, stream) &&
-             all_pass;
-  all_pass = run_rejected_case("rejected_u8_bias", HIP_DTYPE_UINT8,
-                               HIP_DTYPE_BFLOAT16, false, stream) &&
-             all_pass;
-  all_pass = run_rejected_case("rejected_null_bias", HIP_DTYPE_BFLOAT16,
-                               HIP_DTYPE_BFLOAT16, true, stream) &&
-             all_pass;
   HIP_CHECK(hipStreamDestroy(stream));
 
   std::cout << (all_pass ? "ALL PASS" : "SOME FAIL") << '\n';
   return all_pass ? 0 : 1;
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+  try {
+    return run(argc, argv);
+  } catch (const std::invalid_argument& error) {
+    std::cerr << "invalid UT input: " << error.what() << '\n';
+    return 2;
+  } catch (const std::exception& error) {
+    std::cerr << "FAIL " << error.what() << '\n';
+    return 1;
+  }
 }

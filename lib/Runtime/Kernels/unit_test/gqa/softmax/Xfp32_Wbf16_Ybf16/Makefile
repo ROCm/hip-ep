@@ -1,18 +1,25 @@
 # ============================================================
 # custom_kernels GQA softmax (fp32 scores, bf16 bias, bf16 probabilities) Test
 #
-#   make test        OFFLOAD=--offload-arch=gfx1151 HIP_SDK=<sdk> [COVERAGE=1|2|3]
-#   make test_custom OFFLOAD=... HIP_SDK=... ARGS="--coverage 1"
+#   make test        HIP_SDK=<sdk> [OFFLOAD=--offload-arch=<gfx>] [COVERAGE=1|2|3]
+#   make test_custom HIP_SDK=<sdk> [BATCH=..] [HEADS=..] [QUERIES=..] [KEYS=..]
+#                    [MASK=none|full|key_row|chunk] [MASK_DTYPE=bf16|f16|f32]
+#                    [OUT_DTYPE=bf16|f16|f32] [SMOOTH=0|1] [SEED=..]
 #   make clean
+#
+# OFFLOAD defaults to the release target, gfx11-generic. Pass
+# OFFLOAD=--offload-arch=gfx1151 (etc.) for a chip build.
 #
 # The softmax has no autotune table and no tuner, so MODE is accepted for the
 # uniform API but only labels out/results.csv.
 #
 # `test` runs the decomposed-GQA softmax entries with bf16 output (unbiased,
 # and biased with bf16 / fp16 / fp32 masks) plus three rejected calls on the
-# shapes COVERAGE selects (default 3; see unit_test/README.md "Shape
-# coverage"). Inputs and the CPU reference are generated in-process -- no
-# python, no data files.
+# shapes COVERAGE selects (default 3; see unit_test/GUIDELINES.md "Shape
+# coverage"). `test_custom` runs one case of the given shape, mask and dtypes.
+# Every passing case is timed with the shared UT timer; TIMING=screen|standard|
+# confirm (default standard) selects its preset. Inputs and the CPU reference
+# are generated in-process -- no python, no data files.
 # ============================================================
 
 ifeq ($(OS),Windows_NT)
@@ -25,7 +32,7 @@ endif
 
 # ---- Required from CI / CLI ----
 
-OFFLOAD  ?= --offload-arch=gfx1151
+OFFLOAD  ?= --offload-arch=gfx11-generic
 HIP_SDK  ?= $(HIP_PATH)
 MODE     ?= lookup
 COVERAGE ?= 3
@@ -34,6 +41,21 @@ ARGS     ?=
 ifeq ($(HIP_SDK),)
     $(error pass HIP_SDK=<HIP SDK root>)
 endif
+
+# Named UT preset; numeric sampling belongs to common/hip_adaptive_timing.h.
+TIMING ?= standard
+
+# ---- Test parameters (test_custom) ----
+
+BATCH      ?= 1
+HEADS      ?= 8
+QUERIES    ?= 16
+KEYS       ?= 1000
+MASK       ?= full
+MASK_DTYPE ?= bf16
+OUT_DTYPE  ?= bf16
+SMOOTH     ?= 0
+SEED       ?= 1
 
 # ---- Paths ----
 
@@ -52,18 +74,21 @@ ARCH := $(patsubst --offload-arch=%,%,$(OFFLOAD))
 KERNEL_FLAGS := -O2 -std=c++17 -x hip -ffp-contract=fast
 CXXFLAGS     := -O3 -std=c++17
 INCLUDES     := -I$(INCLUDE_DIR)
+ifneq ($(ADLX_INCLUDE),)
+    INCLUDES += -I$(ADLX_INCLUDE)
+endif
 
 # ---- OS-specific: run command + clean ----
 
 ifeq ($(DETECTED_OS),Windows)
     HIP_SDK_WIN := $(subst /,\,$(HIP_SDK))
-    RUN_CMD     = set "PATH=$(HIP_SDK_WIN)\bin;%PATH%" && set "HIPDNN_RESULTS_CSV=$(subst /,\,$(RESULTS_CSV))" && set "HIPDNN_RESULTS_OP=gqa" && set "HIPDNN_RESULTS_LEAF=softmax/Xfp32_Wbf16_Ybf16" && set "HIPDNN_RESULTS_ARCH=$(ARCH)" && set "HIPDNN_RESULTS_MODE=$(MODE)" && $(subst /,\,.\$(1))
+    RUN_CMD     = set "PATH=$(HIP_SDK_WIN)\bin;%PATH%" && set "HIPDNN_UT_TIMING=$(TIMING)" && set "HIPDNN_RESULTS_CSV=$(subst /,\,$(RESULTS_CSV))" && set "HIPDNN_RESULTS_OP=gqa" && set "HIPDNN_RESULTS_LEAF=softmax/Xfp32_Wbf16_Ybf16" && set "HIPDNN_RESULTS_ARCH=$(ARCH)" && set "HIPDNN_RESULTS_MODE=$(MODE)" && $(subst /,\,.\$(1))
     define DO_CLEAN
 	if exist $(BUILD_DIR) rmdir /s /q $(BUILD_DIR)
     endef
 else
     HIP_SDK_WIN := $(shell wslpath -w "$(HIP_SDK)")
-    RUN_CMD     = cmd.exe /c "set PATH=$(HIP_SDK_WIN)\bin;%PATH% && set HIPDNN_RESULTS_CSV=$(RESULTS_CSV) && set HIPDNN_RESULTS_OP=gqa && set HIPDNN_RESULTS_LEAF=softmax/Xfp32_Wbf16_Ybf16 && set HIPDNN_RESULTS_ARCH=$(ARCH) && set HIPDNN_RESULTS_MODE=$(MODE) && %CD%\$(1)"
+    RUN_CMD     = cmd.exe /c "set PATH=$(HIP_SDK_WIN)\bin;%PATH% && set HIPDNN_UT_TIMING=$(TIMING) && set HIPDNN_RESULTS_CSV=$(RESULTS_CSV) && set HIPDNN_RESULTS_OP=gqa && set HIPDNN_RESULTS_LEAF=softmax/Xfp32_Wbf16_Ybf16 && set HIPDNN_RESULTS_ARCH=$(ARCH) && set HIPDNN_RESULTS_MODE=$(MODE) && %CD%\$(1)"
     define DO_CLEAN
 	rm -rf $(BUILD_DIR)
     endef
@@ -105,12 +130,12 @@ test: direct
 	@$(RESET_RESULTS_CSV)
 	$(call RUN_CMD,$(TARGET_DIRECT)) --coverage $(COVERAGE)
 
-# Pass the exe's own flags through ARGS= (e.g. --coverage 1).
+# One case of the given shape, mask and dtypes. ARGS= appends extra exe flags.
 test_custom: direct
 ifeq ($(CSV_FRESH),1)
 	@$(RESET_RESULTS_CSV)
 endif
-	$(call RUN_CMD,$(TARGET_DIRECT)) $(ARGS)
+	$(call RUN_CMD,$(TARGET_DIRECT)) --batch $(BATCH) --heads $(HEADS) --queries $(QUERIES) --keys $(KEYS) --mask $(MASK) --mask-dtype $(MASK_DTYPE) --out-dtype $(OUT_DTYPE) --smooth $(SMOOTH) --seed $(SEED) $(ARGS)
 
 # Build only. The unit_test/ aggregator passes PKG_DIR and PKG_NAME to collect
 # the exe into its hipdnn-kernel-ut package layout.
