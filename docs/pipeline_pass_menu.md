@@ -126,9 +126,10 @@ point per unique problem and one config per distinct perfConfig. The flag
 requires autotune; `HIP_ROCMLIR_SKIP_BENCHMARKING` does not produce a dump.
 Set `HIP_ROCMLIR_SKIP_BENCHMARKING=1` (any present value other than `0`,
 including empty) to skip the GPU search and affix the first enumerated
-perfConfig. The problem cache is not consulted in that mode. A tuning type
-also skips the shipped LUT; an external `--problem-cache` is still consulted
-first. The log names the space (`quick`, `full`, or `exhaustive`) and the
+perfConfig. Neither the shipped LUT nor an external problem cache is consulted
+in that mode. When benchmarking is enabled, a provided tuning type skips the
+shipped LUT, but an external `--problem-cache` is consulted before the search.
+The log names the space (`quick`, `full`, or `exhaustive`) and the
 number of configs in each pool. At the end it prints three wall times:
 perfConfig compile (pool wait, summed across the two pools), serial GPU
 benchmark, and HIP-to-LLVM lowering plus bitcode emit. Per-config timing and
