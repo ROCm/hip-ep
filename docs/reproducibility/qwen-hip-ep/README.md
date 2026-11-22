@@ -136,6 +136,7 @@ is retained in the raw record and is not a throughput measurement or a failure.
 | [quality.json](quality.json), [quality.csv](quality.csv) | Native denominators, PPL and answer counts |
 | [memory.json](memory.json), [memory.csv](memory.csv) | All18 cells, byte units, phase peaks and incomplete status |
 | [provenance.json](provenance.json) | Measured binary/source relationship, local references and historical errata |
+| [candidate-validation.json](candidate-validation.json) | Merged candidate source/binary hashes, commands, logs and passing correctness controls |
 | [manifest.json](manifest.json) | SHA256 and byte count for every generated packet file |
 | [archive.json](archive.json) | Local raw ZIP path, checksum, size and member count |
 | `raw/` | Original quality rows (gzip), timing rows/protocols/summaries and numerical receipts |
@@ -194,7 +195,7 @@ Packet verification is CPU-only and uses the Python standard library:
 python scripts/qwen_qsa/package_evidence.py --verify
 ```
 
-To regenerate after probes are stopped at a case boundary, use
+To regenerate after all probe workers are stopped, use
 `python scripts/qwen_qsa/package_evidence.py`. For a separate PR checkout pass
 `--evidence-root <measured-checkout>` and `--source-root <sparse-attn-checkout>`.
 This exports evidence only and performs no GPU work. The measured checkout and
@@ -208,3 +209,16 @@ For native validation use the local environment and isolated build helper
 allows primitive checks without replacing historical receipts. The audit records
 the exact candidate build and checks separately. Performance/quality scripts
 remain available for an explicitly requested new campaign.
+
+## Remaining work
+
+No hip-ep runs or implementation changes are queued under the accepted scope.
+The selected memory comparison and local audit are complete. Matched QSA
+natural-long quality, Qwen BFCLv4, Qwen SWE-bench and a new merged-candidate
+performance/accuracy campaign remain unmeasured and are not scheduled. The
+canceled memory shapes and64K attempt are not outstanding work.
+
+Paper collation with MI355X and publication remain with the main thread. This
+packet captures the pinned source jobs listed above; it does not track later
+MI355X experiments. The local branch is ready for review, with push and PR
+publication deferred at the user's request.
