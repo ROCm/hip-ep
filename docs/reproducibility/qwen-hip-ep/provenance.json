@@ -1,0 +1,155 @@
+{
+  "schema_version": 1,
+  "created_utc": "2026-11-22T03:21:29.171024+00:00",
+  "evidence_checkout_commit": "efe78ead59558dd3bc0415f9f8f06cc7cc8cdea7",
+  "packet_tool_commit": "efe78ead59558dd3bc0415f9f8f06cc7cc8cdea7",
+  "local_origin_main": "f360f94f80440d08af97f74cb7c09e66f8e31c65",
+  "source_reference_commit": "3b0c30ea4976085798a36d22cefa4089bbef6543",
+  "source_checkout_commit": "ceb69431c703640c93896bf08ccc8bb183f9b014",
+  "mi355x_memory_source_commit": "7a9739e32f19588a1879e2b6545053fff469b4da",
+  "packet_script_sha256": "f6505c392f4775016b9bf9183f438bde976bc6d45e987096c600e36349f4afce",
+  "measured_native_source_reconstruction": {
+    "include/hip/Dialect/IR/HipBufferize.h": {
+      "git_blob": "de26e2dc407c584efec6a16ab3bdfd321681fa34",
+      "sha256": "0b9fb0d34e9dc2d513dc747e1ad7b5de7a06e9e759004fe552c534b86ed15d0b"
+    },
+    "include/hip/Dialect/IR/HipOps.td": {
+      "git_blob": "b940a4e754acf817515d1374d0d1fb631ad7c9dc",
+      "sha256": "4d2c9056082e83493979ef202f80818e774f282c9d3d3c58e2b4fc85f2062c72"
+    },
+    "lib/Conversion/HipToLLVM/CMakeLists.txt": {
+      "git_blob": "b05e24cea3b637c3e0d323b5eefbab0bd762f599",
+      "sha256": "b1a8a2a72336fc6093bf72329f383e153ccf6b8fff6c9a79a0e1cc4dfc264993"
+    },
+    "lib/Conversion/HipToLLVM/HipToLLVM.cpp": {
+      "git_blob": "c0d7a104a6570dfd9a1c200e178e64a2d4e7cc40",
+      "sha256": "13d4e5c63eeb553fed80e81126c6d6290168d7c469858453f97fb7a07804b284"
+    },
+    "lib/Conversion/HipToLLVM/HipToLLVMUtils.h": {
+      "git_blob": "f25060d3aa0469ebccab89fdbc691300e71796a1",
+      "sha256": "0ed81010d03f2946e1502a032f6735249c4c711e2eecfdba15d7585e477c784e"
+    },
+    "lib/Conversion/HipToLLVM/QsaGqaLowering.cpp": {
+      "git_blob": "cad552dbce2c3e7377e9380b49d4ff3d113689c7",
+      "sha256": "ef5eea12ccf316f8dd95db5d7da026d89eea037899f0725b1fa3b06aeba393d8"
+    },
+    "lib/Conversion/HipToLLVM/QwenQsaGqaLowering.cpp": {
+      "git_blob": "cd817d61138a248f919db88433a5e751f6ceeb63",
+      "sha256": "462197167fb8fbe46c7c95f15a3b090546203e9b0cef7ebd12055bdb9499fe89"
+    },
+    "lib/Conversion/OnnxToHip/CMakeLists.txt": {
+      "git_blob": "4286bf083e450c76cc6b16d044254e78eaac8991",
+      "sha256": "5859572df61dc6916da9b305557389958fd2c560d6422144349436f624b6fe70"
+    },
+    "lib/Conversion/OnnxToHip/OnnxToHip.cpp": {
+      "git_blob": "170ece508847932bb1a54d92261cd0bcf5baabac",
+      "sha256": "195769da212e86f9f3753657e2a146343ab3e48612e0903478e86b5caab64f39"
+    },
+    "lib/Conversion/OnnxToHip/OnnxToHipUtils.h": {
+      "git_blob": "95a5e012969b4ca71a3a5b7c38172023562ff8e0",
+      "sha256": "981c9d90bb6e0c32a9c09af7c0ed897aacd873900fa3175fb62525a4e6e9d503"
+    },
+    "lib/Conversion/OnnxToHip/QsaGqaConversion.cpp": {
+      "git_blob": "35efcc772f4a1c6b5eab2ed5e12911cac84b812e",
+      "sha256": "a6b04de05e1f81a58414b8a553b8000f6392a645d2302474931e5c277be84bc7"
+    },
+    "lib/Conversion/OnnxToHip/QwenQsaGqaConversion.cpp": {
+      "git_blob": "7d9fe4cc0564233f6450a5a6c13ae05b33c96c47",
+      "sha256": "d4604faeeb4834d618dc171d0b1006cc579ae043d3a08d92d7bc3116a16096b6"
+    },
+    "lib/Dialect/IR/HipDialect.cpp": {
+      "git_blob": "fd04fc70ee6f3b5aad8be4798d5132b940a8b03a",
+      "sha256": "13e35693744898560e8f8ab06cac27b69889cd94a9928ded8724c7700e48e6b7"
+    },
+    "lib/Runtime/CMakeLists.txt": {
+      "git_blob": "8f1318eceba611c374ee024325eeb4cbfa7c58ae",
+      "sha256": "47e828d1b746af2d3132678a9e6ccbdb5f17da7f0f207d9a398c2698d876b74e"
+    },
+    "lib/Runtime/Kernels/CMakeLists.txt": {
+      "git_blob": "a19c5e899eff45e263ad697bd5ad38150ff8188a",
+      "sha256": "5790eaf708c59d5ddd78d5185de917cf9c4d63499839a184e1e721dfaf148c77"
+    },
+    "lib/Runtime/Kernels/hip/qsa/qsa_gqa_kernels.hip.in": {
+      "git_blob": "b5fa1e6ec841b3c7371d4f13a420c35a4e4ebbee",
+      "sha256": "7f6e852da9239f4a9ea26d1f3b3733af5f41350e09d1830d73c1d89be524055b"
+    },
+    "lib/Runtime/Kernels/hip/qsa/qsa_gqa_projection.hip": {
+      "git_blob": "3535a30c2026c4bf50da292e732a8010351658e9",
+      "sha256": "6fc8e14bc4622fea53bcdb8d62fdef516d1293dd38efd1f70456c117630edbf7"
+    },
+    "lib/Runtime/Kernels/hip/qsa/qsa_port.hip": {
+      "git_blob": "6d51c7a7f47b8f1e892203b6599566c40360ef68",
+      "sha256": "a34a05b13ddc918347f9ad0f0f1bdf21edd3b06306b9a22cf7f646991bdaa05d"
+    },
+    "lib/Runtime/Kernels/hip/qsa/qwen_qsa_kernels.hip.in": {
+      "git_blob": "6f2bcc519664a144a7e29eef10aa49ce35d6166c",
+      "sha256": "6e04699fcb67d5afb691ca8966d26494948d791369cb8a0a30705c5490b8744b"
+    },
+    "lib/Runtime/Kernels/hip/qsa/qwen_qsa_port.hip": {
+      "git_blob": "054d9cc42ad4846472aaed58c92e9f148e0995d3",
+      "sha256": "43b59cd814c6c107c4d54cda475498850e493f5dde606dd33718210857df5c0d"
+    },
+    "lib/Runtime/Kernels/include/hip_qsa.h": {
+      "git_blob": "05337b97bade2dbe967b5671179e78b9fc8da0d9",
+      "sha256": "f323787ff6074574beb2051a5108f02ba33d0d3abac495dee0aeeaf9b97e3f09"
+    },
+    "lib/Runtime/Kernels/include/hip_qsa_gqa.h": {
+      "git_blob": "159a92129f2465ffb599649d86f1ef428739ada3",
+      "sha256": "21450f780f818ead6c51cfae4f1f3519fcd7850daf85810ce3ac2fa14944cbed"
+    },
+    "lib/Runtime/Kernels/include/hip_qwen_qsa.h": {
+      "git_blob": "0e8d7807c6b110008aa1e90eb52fc106124b2402",
+      "sha256": "bf36b277bf7279c2941656e8b53c8a41cd94296d06b070de860557f02aefeb72"
+    },
+    "lib/Runtime/Kernels/qsa/CMakeLists.txt": {
+      "git_blob": "5a2bd44c5e1323b4024ac041f3572babaa1f41bc",
+      "sha256": "9d0d6fd0d976edcf7050300665b3d31c920d028ef5db11313608da4282a5477f"
+    },
+    "lib/Runtime/hipdnn_ep_runtime.h": {
+      "git_blob": "5b25b88373b14cf03e2eaaad738d284cd7c647a6",
+      "sha256": "77c0ac2e965af84c5c57daf485ddd72b22eded2d165f44f15ad90280feb3ad94"
+    },
+    "lib/Runtime/mock/mock_gpu.cpp": {
+      "git_blob": "35f248d891d98a61db5127cb6c9ae82e90d07a0a",
+      "sha256": "87fc62827c23faa8322d1ee9852174d8eef9c9c6e0c99b4022a0a3934985c217"
+    },
+    "lib/Runtime/mock/op_state_stubs.cpp": {
+      "git_blob": "bfc88b868d68d9dc36ba2dd43b0c785482015af4",
+      "sha256": "09c5d90a38d448c77ee3f24c5d653975f46df235037911708eeda5e7850b9954"
+    },
+    "lib/Runtime/real/gqa.cpp": {
+      "git_blob": "e70dbfffd64340b21cdeb3d7014757a476541f37",
+      "sha256": "235ab91d74f8ddce5093565fbd8d98899b9590d987bed04b692bf2be820bb64e"
+    },
+    "lib/Runtime/real/qsa_gqa.cpp": {
+      "git_blob": "286f2af607dc51d0d141875c5bf386b5332f824b",
+      "sha256": "058054c805e7a1406316e1b18650f759368bdf8c6e3e4a74cde8c4bdbeb10ebc"
+    },
+    "lib/Runtime/real/qwen_qsa_gqa.cpp": {
+      "git_blob": "13f2e7823eb7ef8a3a2913d77a06315f816e67ef",
+      "sha256": "7a9b98b03cf5dcecee907bc147b0705b1363d62fb2f754548b1ac0942fc65e45"
+    },
+    "morphizen/mlir-imp/src/mlir-constants.cpp": {
+      "git_blob": "defea6d23db7323f1a64f5b5828ab2d0f34ad98c",
+      "sha256": "33056bc2a849f561166cedc3f0bb68ab80890839980017264f624d17e1e855fe"
+    },
+    "morphizen/mlir-imp/src/mlir-named-attribute.cpp": {
+      "git_blob": "8595bf3405f648ebdcf95d748a0501b463334b3a",
+      "sha256": "d4a6e94e223c5464a9287e988a8665ac0e60f55d3186ab34dba301391655fe37"
+    },
+    "morphizen/mlir-imp/src/mlir-node-arg.cpp": {
+      "git_blob": "c577394b9c276771770b8ba744c7eaafea70e65c",
+      "sha256": "ec08464e712b519e5d070bb7d2685693c56feea359b24c56a4acfb53e3c4080b"
+    },
+    "morphizen/ort-bridge/src/morphizen-ep.cpp": {
+      "git_blob": "40199346d688deff656a6e245d6e538b9ec79edc",
+      "sha256": "e885bd09e387ea0ea5ab7b24541f894359e002b720cc955b6f510c50f7ce8c40"
+    }
+  },
+  "build_provenance_limit": "Measured build began at dirty HEAD2a43690; native implementation subsequently committed in7a71b72. Binary hashes and execution receipts are authoritative; final PR merge build is separate and has no inherited performance claims.",
+  "errata": [
+    "Historical native-support.json recorded unused gqa_back.cpp; compiled implementation is real/gqa.cpp. Inspector corrected without rewriting historical receipt.",
+    "32K paired timing memory sampler attached after four measured pairs; 4K/16K timing had no sampler.",
+    "Batch4/4K default memory probe completed after1551.55s. Stop attempt found parent already gone; retain as complete, not timing or failure."
+  ]
+}

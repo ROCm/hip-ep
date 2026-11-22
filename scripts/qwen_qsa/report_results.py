@@ -456,10 +456,16 @@ def main():
             "",
             "Every listed row has finite outputs, exact warmup replay, unchanged sessions/cache addresses, and independently audited paired raw trials and statistics. Shapes without a completed receipt remain unqualified.",
         ]
+    failed_64k_path = ROOT / "_local/qsa/stages/qwen-native-perf-65536-b1/status.json"
+    if failed_64k_path.exists() and load(failed_64k_path)["state"] == "failed":
+        lines += [
+            "",
+            "**64K has no valid timing result.** The co-resident two-session attempt stopped during warmup when OS available RAM remained below the 2 GiB guard. Its memory trace and failure receipt are retained. Further 64K work was excluded at the user's request. The [separate default/QSA memory-only matrix](qwen-qsa-memory.md) covers batches 1/4/8 and prefixes 4K/16K/32K with one prefill and eight decode calls per isolated process, without rerunning the performance benchmark.",
+        ]
     if memory:
         lines += [
             "",
-            "## Application memory while running",
+            "## Earlier paired-run application memory",
             "",
             "A separate CPU-only sampler reads OS process/system and Windows PDH GPU memory gauges every second without creating a GPU context. The worker holds Original and Changed sessions together, sharing KV serially; these are joint application footprints, not isolated per-variant allocations. The 32K trace attaches mid-run; 64K sampling starts before application startup. Sampled peaks can miss sub-second spikes.",
             "",

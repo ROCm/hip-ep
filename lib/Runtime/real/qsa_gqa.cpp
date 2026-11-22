@@ -124,7 +124,8 @@ extern "C" int wrap_qsa_group_query_attention(
   if (!state || B != 1 || S64 < 1 || C64 < S64 || C64 > 65536 || !query ||
       !key || !value || !past_key || !past_value || !seqlens_k ||
       !total_seq_len || !hidden || !projection || !q_norm || !k_norm || !cos ||
-      !sin || !output || !present_key || !present_value)
+      !sin || !output || !present_key || !present_value ||
+      !state->device_error_flag)
     return failure("invalid geometry or null input");
   auto *qs = QsaState::get_op_state(state, slot);
   if (!qs)
@@ -150,9 +151,10 @@ extern "C" int wrap_qsa_group_query_attention(
       state->seqlens_k_cached_val = length;
     }
   }
-  int past = length == -1 ? 0 : length + 1 - S;
-  if (past < 0 || past > C - S || (past && S != 1))
+  int64_t past64 = length == -1 ? 0 : int64_t(length) + 1 - S;
+  if (past64 < 0 || past64 > C - S || (past64 && S != 1))
     return failure("requires full prefill followed by one-token decode");
+  int past = int(past64);
   if (past && (qs->seen != past || qs->capacity != C || qs->keys != past_key ||
                qs->values != past_value || present_key != past_key ||
                present_value != past_value))

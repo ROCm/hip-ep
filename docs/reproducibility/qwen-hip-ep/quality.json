@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "native": {
+    "Original": {
+      "state": "complete",
+      "ppl_documents": 64,
+      "gsm_questions": 128,
+      "protocol_sha256": "f06c861179226b46fa307d9079b6d3f0ef2345415a44d71314161f5d22491225",
+      "row_files_sha256": {
+        "ppl": "df8b5f130fe1fc828ac30a1c7e1ffb330bd2a34ff3868baf6f6df35e6779d7de",
+        "gsm8k": "3203f26596f9301bfcd6685ecaad476f51f963af416dca6aa434e0a58afb1cd4"
+      },
+      "gsm_correct": 111,
+      "gsm_caps": 18,
+      "training_updates": 0,
+      "targets": 262080,
+      "nll": 1.786527149842939,
+      "ppl": 5.9686880721288516
+    },
+    "Changed": {
+      "state": "complete",
+      "ppl_documents": 64,
+      "gsm_questions": 128,
+      "protocol_sha256": "ad0d441fdd06f75bb1f5d0729c6ac170d0be4144a876282d0b7bb50f0597cc12",
+      "row_files_sha256": {
+        "ppl": "6874b314eba9836541f52e0afba1c34ab8db5dde18005796a472d46a0ab2b53f",
+        "gsm8k": "f94ca385545a959f3fa95ff6abe8f3ff81a8a6794dcdf51b0d62325e001d9615"
+      },
+      "gsm_correct": 111,
+      "gsm_caps": 18,
+      "training_updates": 0,
+      "targets": 262080,
+      "nll": 1.7869597082874613,
+      "ppl": 5.971270437028778
+    }
+  },
+  "mi355x_source_bf16": {
+    "Original": {
+      "ppl": {
+        "nll": 1.7556862930695456,
+        "ppl": 5.78741824436846,
+        "targets": 262080,
+        "documents": 64
+      },
+      "gsm8k": {
+        "correct": 109,
+        "total": 128,
+        "accuracy": 0.8515625,
+        "requests_requiring_sparse_selection": 0
+      }
+    },
+    "Changed": {
+      "ppl": {
+        "nll": 1.7563228357077538,
+        "ppl": 5.791103355586924,
+        "targets": 262080,
+        "documents": 64
+      },
+      "gsm8k": {
+        "correct": 111,
+        "total": 128,
+        "accuracy": 0.8671875,
+        "requests_requiring_sparse_selection": 0
+      }
+    }
+  },
+  "scope": "64 x 4096 PPL windows; 128 GSM8K questions. GSM requests <=666 tokens never reach first pruning at position2052. QSA natural-long quality, Qwen BFCL and Qwen SWE-bench not measured."
+}

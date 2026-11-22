@@ -107,6 +107,8 @@ Tool availability depends on the build configuration; see the platform quick-sta
 - [OLMo native QSA/GQA results](docs/experiments/olmo-qsa-native-gqa-results.md)
 - [OLMo native GSM8K and agent benchmark accuracy](docs/experiments/olmo-qsa-agent-accuracy.md)
 - [Qwen trained-selector port and native default evidence](docs/experiments/qwen-qsa-native-gqa-results.md)
+- [Qwen isolated default/QSA memory-only matrix](docs/experiments/qwen-qsa-memory.md)
+- [Native QSA audit, PR notes and paper data packet](docs/reproducibility/qwen-hip-ep/README.md)
 - [Qwen native GQA port contract](docs/design/qwen-qsa-native-gqa.md)
 - [OLMo QSA boundary prototype audit](docs/design/olmo-qsa-port.md)
 - [OLMo QSA boundary prototype results](docs/experiments/olmo-qsa-results.md)

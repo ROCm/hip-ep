@@ -1,0 +1,67 @@
+{
+  "status": "passed",
+  "training_updates": 0,
+  "rows": [
+    {
+      "check": "full_support_exact",
+      "prefix": 1,
+      "relative_rms": 0.0,
+      "max_absolute": 0.0
+    },
+    {
+      "check": "full_support_exact",
+      "prefix": 17,
+      "relative_rms": 0.0,
+      "max_absolute": 0.0
+    },
+    {
+      "check": "full_support_exact",
+      "prefix": 513,
+      "relative_rms": 0.0,
+      "max_absolute": 0.0
+    },
+    {
+      "check": "full_support_exact",
+      "prefix": 2047,
+      "relative_rms": 0.0,
+      "max_absolute": 0.0
+    },
+    {
+      "check": "sparse_full_vs_cached",
+      "prefix": 4092,
+      "decode": 4,
+      "replay_exact": true,
+      "relative_rms": 0.0007770542870275676,
+      "max_absolute": 0.015625
+    },
+    {
+      "check": "first_pruning_continuity",
+      "relative_rms": 0.0010323002934455872,
+      "max_absolute": 0.01953125
+    }
+  ],
+  "binary_sha256": {
+    "hipgpu.dll": "399e7b10ac8c8da1142f36347bbdf4fa4ab58a0de6ecda190993cc3d12cc100e",
+    "custom_kernels_gfx1151.dll": "80183ff88257bb6c753365ced254beb36e88b11e5622e3351c74520df43e4fb7",
+    "hip-mlir-opt.exe": "8b32e457c69a1e8e2fc44360f55254c09e681b1b40fa0811c8a06ea017f45653",
+    "hip-compiler.exe": "e67e146993bb2ca080b51bf53054cb0414c1e521afb6d0c9e621b54e4017c574"
+  },
+  "validator_sha256": "037d74a6d98056102f5153a700fbab6b73f743a795ee7c7207224798e5ef1541",
+  "kernel_validation_sha256": "861123a2222555ebd7a0d4e11943887745b23f51468d4995ea57b2a3dbcd7eab",
+  "Original": {
+    "forward_calls": 20,
+    "ep_node_dispatches": 20,
+    "dispatches_per_forward": 1,
+    "cache_pointers_unchanged": true,
+    "graph_sha256": "c200a4c9a0d94c195ea78dada12fadd0df6cc8227e1ea5ad88e8a6bd32dec616",
+    "profile_sha256": "e06ad47e4b06cafc508d9290570de5e76ff050f12618cb683ccad631767386f5"
+  },
+  "Changed": {
+    "forward_calls": 39,
+    "ep_node_dispatches": 39,
+    "dispatches_per_forward": 1,
+    "cache_pointers_unchanged": true,
+    "graph_sha256": "c1ce2a4c6f7950d16d4cce186af47a760bd3fa949b71ef07b9df583b0f21e680",
+    "profile_sha256": "4c9cd6ac22e1f4233889b64b06ce56854fe969b6f2879b2887919fae14435660"
+  }
+}

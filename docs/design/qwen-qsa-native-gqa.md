@@ -4,10 +4,12 @@ Licensed under the MIT License.
 -->
 # Frozen Qwen QSA at the native GQA boundary
 
-This is the implementation contract for the queued native port. The full default
-quality campaign runs first, using an isolated unchanged install. QSA is not yet
-integrated. Current support, numerical controls, source identities and quality
-status are in the [evidence record](../experiments/qwen-qsa-native-gqa-results.md).
+This is the implementation contract for the integrated native port. Matched
+default/QSA quality and batch-one performance measurements are complete at the
+qualified contexts. Current support, numerical controls, source identities and
+measurement limits are in the
+[evidence record](../experiments/qwen-qsa-native-gqa-results.md) and the
+[audit and paper handoff](../reproducibility/qwen-hip-ep/README.md).
 
 ## Scope and execution boundary
 

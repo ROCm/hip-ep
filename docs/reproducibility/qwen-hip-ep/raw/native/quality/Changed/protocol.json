@@ -1,0 +1,46 @@
+{
+  "variant": "Changed",
+  "model": "Qwen/Qwen3.8-27B",
+  "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+  "export_onnx_sha256": "c1ce2a4c6f7950d16d4cce186af47a760bd3fa949b71ef07b9df583b0f21e680",
+  "export_data_sha256": "44b55d43fbd271cc85a3234fcc43950d11a8b343c89a8f7e642ebf60487e3262",
+  "data_sha256": {
+    "test.json": "255b0110c2d500438f489de52c424eb993bdcd0f2a13a20851cd6a878ac64227",
+    "gsm8k.json": "81ff84e59c942977cc8306ae41ee83cd02225e103bbb3d3c012f072566a100c7"
+  },
+  "tokenizer_sha256": {
+    "tokenizer.json": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+    "tokenizer_config.json": "b11349aafa7cdc6a320767cf7ceb29ed82f7eda5d65e8e0819e76f0ce947bf27",
+    "chat_template.jinja": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041"
+  },
+  "eos_token_ids": [
+    248044,
+    248046
+  ],
+  "max_new_tokens": 512,
+  "thinking": false,
+  "few_shot": 0,
+  "sampling": "greedy",
+  "gsm_prompt_max_tokens": 154,
+  "capacity": 4096,
+  "batch": 1,
+  "training_updates": 0,
+  "selectors_loaded": true,
+  "recurrent_state": "FP32",
+  "ppl_window_tokens": 4096,
+  "ppl_loss_chunk": 128,
+  "quality_gates_for_later_matched_qsa": {
+    "ppl_increase_percent": 5,
+    "gsm_drop_percentage_points": 2
+  },
+  "evaluator_sha256": "6a88620c00a09149aa9dcc67d94c0d1d00bfbebd3804b25e6e31c1522b76b000",
+  "inference_sha256": "4dafbfbd0e59d5ce687e100507c3b0001d5a85c9c7d20e2df12b683a9884f67c",
+  "common_runtime_sha256": "b839b0816065d57458e749ec666c105cf019015f037e449b87632089e31586de",
+  "binary_sha256": {
+    "hipgpu.dll": "399e7b10ac8c8da1142f36347bbdf4fa4ab58a0de6ecda190993cc3d12cc100e",
+    "custom_kernels_gfx1151.dll": "80183ff88257bb6c753365ced254beb36e88b11e5622e3351c74520df43e4fb7",
+    "hip-mlir-opt.exe": "8b32e457c69a1e8e2fc44360f55254c09e681b1b40fa0811c8a06ea017f45653",
+    "hip-compiler.exe": "e67e146993bb2ca080b51bf53054cb0414c1e521afb6d0c9e621b54e4017c574"
+  },
+  "frozen_selector_sha256": "d7729599f421d80ace536f84145bafa9a6e1eaad22dde18ce42392014a58b5e4"
+}

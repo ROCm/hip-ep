@@ -112,7 +112,7 @@ def main():
         "source_sha256": {
             name: sha(ROOT / name)
             for name in [
-                "lib/Runtime/real/gqa_back.cpp",
+                "lib/Runtime/real/gqa.cpp",
                 "lib/Runtime/real/linear_attention.cpp",
                 "lib/Conversion/HipToLLVM/LinearAttentionLowering.cpp",
             ]

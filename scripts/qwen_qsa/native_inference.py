@@ -14,8 +14,12 @@ from verify_handoff import sha
 
 ROOT = Path(__file__).resolve().parents[2]
 WORK = ROOT / "_local/qwen-qsa"
-os.environ["QSA_HIP_EP_INSTALL"] = str(WORK / "native-gqa/install")
-os.environ["QSA_MODEL_CACHE"] = str(WORK / "native-gqa/model-cache")
+os.environ["QSA_HIP_EP_INSTALL"] = os.environ.get(
+    "QWEN_QSA_INSTALL", str(WORK / "native-gqa/install")
+)
+os.environ["QSA_MODEL_CACHE"] = os.environ.get(
+    "QWEN_QSA_MODEL_CACHE", str(WORK / "native-gqa/model-cache")
+)
 sys.path.insert(0, str(ROOT / "scripts/qsa"))
 from runtime import binding, run, session
 

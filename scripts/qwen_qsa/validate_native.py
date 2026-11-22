@@ -5,6 +5,7 @@
 """Check matched full-model dense support, sparse cache continuity and dispatches."""
 # ruff: noqa: E402
 
+import argparse
 import gc
 import json
 import os
@@ -12,7 +13,7 @@ from pathlib import Path
 
 from verify_handoff import SOURCE, WORK, sha
 
-os.environ["QSA_ORT_PROFILE_DIR"] = str(WORK / "native-gqa/ort-profiles")
+os.environ.setdefault("QSA_ORT_PROFILE_DIR", str(WORK / "native-gqa/ort-profiles"))
 from native_inference import Native
 from runtime import INSTALL
 
@@ -31,10 +32,18 @@ def statistics(actual, expected):
 
 @torch.inference_mode()
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output-dir", type=Path, default=WORK / "native-gqa")
+    parser.add_argument(
+        "--kernel-receipt",
+        type=Path,
+        default=WORK / "native-gqa/kernel-validation.json",
+    )
+    args = parser.parse_args()
     torch.set_num_threads(2)
     task = WORK / "native-gqa"
-    assert INSTALL.resolve() == (task / "install").resolve()
-    kernel = json.loads((task / "kernel-validation.json").read_text())
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    kernel = json.loads(args.kernel_receipt.read_text())
     assert kernel["status"] == "passed"
     assert sha(INSTALL / "bin/custom_kernels_gfx1151.dll") == kernel["kernel_sha256"]
     names = json.loads((WORK / "default-4-support.json").read_text())["binary_sha256"]
@@ -44,7 +53,8 @@ def main():
         "rows": [],
         "binary_sha256": {name: sha(INSTALL / "bin" / name) for name in names},
         "validator_sha256": sha(Path(__file__)),
-        "kernel_validation_sha256": sha(task / "kernel-validation.json"),
+        "kernel_validation_sha256": sha(args.kernel_receipt),
+        "install": str(INSTALL),
     }
     try:
         data = json.loads((SOURCE / "data/qwen-selector-v1/test.json").read_text())
@@ -148,7 +158,7 @@ def main():
         result.update(status="failed", error=repr(exc))
         raise
     finally:
-        (task / "full-model-validation.json").write_text(
+        (args.output_dir / "full-model-validation.json").write_text(
             json.dumps(result, indent=2) + "\n"
         )
     print("Full-model native Qwen controls passed", flush=True)

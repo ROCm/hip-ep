@@ -1,0 +1,73 @@
+{
+  "model": "qwen",
+  "variant": "Original",
+  "shapes": [
+    [
+      16384,
+      1
+    ],
+    [
+      16384,
+      4
+    ],
+    [
+      16384,
+      8
+    ],
+    [
+      32768,
+      1
+    ],
+    [
+      32768,
+      4
+    ],
+    [
+      32768,
+      8
+    ],
+    [
+      65536,
+      1
+    ],
+    [
+      65536,
+      4
+    ]
+  ],
+  "backbone_sha256": "6afff4d4298f267dc9f2e5306ed05bf7fe37d12cc262f205651e4d931a0fc243",
+  "selector_sha256": null,
+  "loaded": {
+    "allocated_bytes": 54713563136,
+    "reserved_bytes": 54769221632,
+    "device_used_bytes": 55580819456,
+    "device_total_bytes": 309220868096
+  },
+  "idle": {
+    "allocated_bytes": 0,
+    "reserved_bytes": 0,
+    "device_used_bytes": 645922816,
+    "device_total_bytes": 309220868096
+  },
+  "model_storage_bytes": 54713457520,
+  "selector_storage_bytes": 0,
+  "warmup_requests_per_shape": 1,
+  "measured_requests_per_shape": 2,
+  "decode_steps": 64,
+  "separate_process_per_model_and_variant": true,
+  "original_has_no_selector_tensors": true,
+  "allocator": "default; empty_cache after each completed request, never between prefill and decode",
+  "device_peak": "20ms polling target of hipMemGetInfo via torch; sampled whole-device usage, not exact process peak",
+  "counters": "allocated/reserved current and exact phase high-water marks; unique storage capacities for decomposition",
+  "exclusions": [
+    "Qwen 65536 B8 unsupported",
+    "OLMo 65472 B4 native prefill unsupported; cache expansion decode only"
+  ],
+  "no_training": true,
+  "no_accuracy": true,
+  "no_performance_results": true,
+  "torch": "2.11.0+rocm10.0.0",
+  "hip": "7.15.26333",
+  "gpu": "AMD Instinct MI355X",
+  "visible_devices": "3"
+}

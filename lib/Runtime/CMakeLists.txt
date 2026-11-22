@@ -248,6 +248,10 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
             ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/include/hip_qwen_qsa.h
             ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/include/hip_qsa.h)
     endif()
+    if(SOURCE_FILE STREQUAL "real/qsa_gqa.cpp")
+        list(APPEND IMPL_DEPS
+            ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/include/hip_qsa_gqa.h)
+    endif()
 
     add_custom_command(
         OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${OUTPUT_BC}
