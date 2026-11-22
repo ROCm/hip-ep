@@ -3,8 +3,8 @@
  * Licensed under the MIT License.
  */
 
-#include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 #include "RegionSuccessorCompat.h"
+#include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #include "llvm/Support/ErrorHandling.h"
 

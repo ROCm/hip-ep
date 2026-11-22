@@ -247,6 +247,9 @@ endfunction()
 # any existing kernel. Track the included implementation explicitly: Windows
 # HIP custom commands do not emit compiler include-dependency files.
 set(QSA_PORT_PATH "${CMAKE_CURRENT_SOURCE_DIR}/hip/qsa/qsa_port.hip")
+set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/hip/qsa/qsa_gqa_projection.hip"
+    APPEND PROPERTY OBJECT_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/hip_qsa_gqa.h")
 set(QSA_HEADER_PATH "${CMAKE_CURRENT_SOURCE_DIR}/include/hip_qsa.h")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${QSA_PORT_PATH}" "${QSA_HEADER_PATH}")
