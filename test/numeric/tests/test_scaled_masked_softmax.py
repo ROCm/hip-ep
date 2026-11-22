@@ -75,9 +75,7 @@ class TestScaledMaskedSoftmax:
         model = _make_model(np.float16, heads, seq, 0.125, -65504.0)
         rng = np.random.default_rng(11)
         scores = rng.uniform(-20, 20, [heads, seq, seq]).astype(np.float16)
-        actual, expected = model_runner.run_sample(
-            model, [scores, _frame_ids(seq, 2)]
-        )
+        actual, expected = model_runner.run_sample(model, [scores, _frame_ids(seq, 2)])
         compare_outputs(actual, expected, atol=2e-3)
 
     @pytest.mark.parametrize("frames", [1, 2])

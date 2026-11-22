@@ -645,13 +645,12 @@ struct ScaledMaskedSoftmaxOpLowering
     int rank = inputType.getRank();
     int64_t elemSizeBytes = inputType.getElementType().isF16() ? 2 : 4;
 
-    SmallVector<Type> paramTypes = {
-        ptrType,   ptrType,   ptrType,   ptrType,   ptrType,
-        indexType, indexType, indexType, indexType, indexType,
-        indexType, f32Type,   f32Type};
-    FailureOr<LLVM::LLVMFuncOp> funcOp =
-        LLVM::lookupOrCreateFn(rewriter, module, kScaledMaskedSoftmax,
-                               paramTypes, getVoidType());
+    SmallVector<Type> paramTypes = {ptrType,   ptrType,   ptrType,   ptrType,
+                                    ptrType,   indexType, indexType, indexType,
+                                    indexType, indexType, indexType, f32Type,
+                                    f32Type};
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kScaledMaskedSoftmax, paramTypes, getVoidType());
     if (failed(funcOp))
       return failure();
 
@@ -667,9 +666,9 @@ struct ScaledMaskedSoftmaxOpLowering
     Value colIdsLen =
         MemRefDescriptor(adaptor.getColIds()).size(rewriter, loc, 0);
     auto f32Const = [&](llvm::APFloat value) -> Value {
-      return LLVM::ConstantOp::create(rewriter, loc, f32Type,
-                                      rewriter.getF32FloatAttr(
-                                          value.convertToFloat()));
+      return LLVM::ConstantOp::create(
+          rewriter, loc, f32Type,
+          rewriter.getF32FloatAttr(value.convertToFloat()));
     };
 
     SmallVector<Value> args = {

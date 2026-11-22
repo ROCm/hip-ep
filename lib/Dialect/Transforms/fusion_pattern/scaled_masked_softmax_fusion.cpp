@@ -6,11 +6,12 @@
 //
 //   Before:
 //     %s = hip.mul(%ctx) ins(%scores, %scale : t, tensor<f16>) outs(%e0) : t
-//     %r = tensor.expand_shape %ids [[0, 1]] : tensor<?xi64> into tensor<?x1xi64>
-//     %c = tensor.expand_shape %ids [[0, 1]] : tensor<?xi64> into tensor<1x?xi64>
-//     %m = hip.equal(%ctx) ins(%r, %c) outs(%e1 : tensor<?x?xui8>)
-//     %w = hip.where(%ctx) ins(%m, %s, %fill : ..., t, tensor<f16>) outs(%e2) : t
-//     %p = hip.miopen.softmax(%ctx) ins(%w : t) outs(%e3 : t) : t
+//     %r = tensor.expand_shape %ids [[0, 1]] : tensor<?xi64> into
+//     tensor<?x1xi64> %c = tensor.expand_shape %ids [[0, 1]] : tensor<?xi64>
+//     into tensor<1x?xi64> %m = hip.equal(%ctx) ins(%r, %c) outs(%e1 :
+//     tensor<?x?xui8>) %w = hip.where(%ctx) ins(%m, %s, %fill : ..., t,
+//     tensor<f16>) outs(%e2) : t %p = hip.miopen.softmax(%ctx) ins(%w : t)
+//     outs(%e3 : t) : t
 //   After:
 //     %p = hip.scaled_masked_softmax(%ctx) ins(%scores, %ids, %ids : t,
 //            tensor<?xi64>, tensor<?xi64>) outs(%e3 : t)
@@ -162,8 +163,8 @@ struct ScaledMaskedSoftmaxFusion
 
 } // namespace
 
-void populateScaledMaskedSoftmaxFusionPattern(
-    mlir::RewritePatternSet &patterns, mlir::PatternBenefit benefit) {
+void populateScaledMaskedSoftmaxFusionPattern(mlir::RewritePatternSet &patterns,
+                                              mlir::PatternBenefit benefit) {
   patterns.add<ScaledMaskedSoftmaxFusion>(patterns.getContext(), benefit);
 }
 
