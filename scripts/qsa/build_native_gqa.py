@@ -41,6 +41,7 @@ def main():
     )
     parser.add_argument("--configure-only", action="store_true")
     parser.add_argument("--parallel", type=int, default=8)
+    parser.add_argument("--cmake-define", action="append", default=[])
     parser.add_argument(
         "--plan",
         action="store_true",
@@ -106,6 +107,8 @@ def main():
     assert args.lit.exists(), args.lit
     for key, value in definitions.items():
         command += ["--cmake_extra_defines", key + "=" + value]
+    for definition in args.cmake_define:
+        command += ["--cmake_extra_defines", definition]
     if args.plan:
         print(json.dumps(command, indent=2))
         return

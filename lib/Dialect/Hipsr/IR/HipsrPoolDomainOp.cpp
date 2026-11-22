@@ -4,6 +4,7 @@
  */
 
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
+#include "RegionSuccessorCompat.h"
 
 #include "llvm/Support/ErrorHandling.h"
 
@@ -21,8 +22,9 @@ PoolDomainOp::getEntrySuccessorOperands(RegionSuccessor successor) {
 
 ValueRange PoolDomainOp::getSuccessorInputs(RegionSuccessor successor) {
   // The parent-op successor is the exit edge, so its inputs are the results.
-  return successor.isOperation() ? ValueRange(getResults())
-                                 : ValueRange(getBody().getArguments());
+  return successor.getSuccessor() == nullptr
+             ? ValueRange(getResults())
+             : ValueRange(getBody().getArguments());
 }
 
 void PoolDomainOp::getSuccessorRegions(
@@ -37,5 +39,5 @@ void PoolDomainOp::getSuccessorRegions(
     llvm::report_fatal_error(
         "hipsr.pool_domain received an unexpected branch point");
   }
-  regions.emplace_back(getOperation());
+  regions.push_back(mlir::hipsr::detail::parentSuccessor(getOperation()));
 }
