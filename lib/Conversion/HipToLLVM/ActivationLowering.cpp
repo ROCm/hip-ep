@@ -387,8 +387,8 @@ struct SwishOpLowering : public ConvertOpToLLVMPattern<SwishOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 7> args = {statePtr,    inputPtr,    outputPtr,
-                                  numElements, dataTypeVal, alphaConst,
+    SmallVector<Value, 7> args = {statePtr,       inputPtr,    outputPtr,
+                                  numElements,    dataTypeVal, alphaConst,
                                   inputScaleConst};
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
