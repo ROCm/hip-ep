@@ -51,6 +51,37 @@ def table(path, rows):
         writer.writerows(rows)
 
 
+def export_bfcl_rows(folder, raw):
+    """Keep every portable file below the repository's 500 KiB file bound."""
+    base = folder / "raw/native/bfcl-v4-50"
+    parts = []
+    for index, offset in enumerate(range(0, len(raw), 256 * 1024)):
+        data = raw[offset : offset + 256 * 1024]
+        compressed = gzip.compress(data, mtime=0)
+        name = f"row-parts/{index:05d}.bin.gz"
+        path = base / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(compressed)
+        parts.append(
+            dict(
+                file=name,
+                bytes=len(compressed),
+                sha256=digest(compressed),
+                uncompressed_bytes=len(data),
+                uncompressed_sha256=digest(data),
+            )
+        )
+    put(
+        base / "rows-parts.json",
+        dict(
+            format="Decompress the gzip byte chunks and concatenate them in listed order to restore the exact UTF-8 rows.jsonl. Individual chunks can split JSON records or UTF-8 sequences.",
+            uncompressed_bytes=len(raw),
+            uncompressed_sha256=digest(raw),
+            parts=parts,
+        ),
+    )
+
+
 def audit_memory_case(folder, row):
     protocol = (folder / "protocol.json").read_bytes()
     samples = (folder / "samples.jsonl").read_bytes()
@@ -158,6 +189,55 @@ def verify(folder):
     assert (
         len({(x["batch"], x["context"], x["variant"]) for x in memory["cases"]}) == 18
     )
+    bfcl = load(folder / "quality.json").get("native_bfcl_v4_pilot")
+    if bfcl:
+        assert bfcl["status"] == "complete" and bfcl["cases"] == 50
+        base = folder / "raw/native/bfcl-v4-50"
+        descriptor = load(base / "rows-parts.json")
+        chunks = []
+        for part in descriptor["parts"]:
+            compressed = (base / part["file"]).read_bytes()
+            assert (
+                digest(compressed) == part["sha256"]
+                and len(compressed) == part["bytes"]
+            )
+            data = gzip.decompress(compressed)
+            assert (
+                digest(data) == part["uncompressed_sha256"]
+                and len(data) == part["uncompressed_bytes"]
+            )
+            chunks.append(data)
+        raw = b"".join(chunks)
+        assert (
+            digest(raw) == descriptor["uncompressed_sha256"]
+            and len(raw) == descriptor["uncompressed_bytes"]
+        )
+        assert digest(raw) == bfcl["rows_sha256"]
+        rows = [json.loads(line) for line in raw.splitlines()]
+        assert len(rows) == 100 and len({(r["variant"], r["id"]) for r in rows}) == 100
+        for variant, values in bfcl["variants"].items():
+            selected = [r for r in rows if r["variant"] == variant]
+            assert len(selected) == values["cases"] == 50
+            assert sum(r["correct"] for r in selected) == values["correct"]
+        workload = load(folder / "quality.json")["native_bfcl_workload_audit"]
+        assert workload["status"] == "passed" and workload["complete"]
+        assert workload["rows_sha256"] == bfcl["rows_sha256"]
+        turns = list(
+            csv.DictReader(
+                (folder / "raw/native/bfcl-v4-50/turns.csv").open(
+                    newline="", encoding="utf-8"
+                )
+            )
+        )
+        assert len(turns) == workload["observed_turn_records"]
+        for variant, values in bfcl["variants"].items():
+            groups = workload["groups_by_frozen_initial_prompt"][variant].values()
+            assert sum(g["cases"] for g in groups) == 50
+            assert sum(g["correct"] for g in groups) == values["correct"]
+            assert (
+                sum(int(t["model_calls"]) for t in turns if t["variant"] == variant)
+                == values["generation_calls"]
+            )
     descriptor = load(folder / "archive.json")
     archive_path = Path(descriptor["path"])
     if archive_path.exists():
@@ -273,6 +353,7 @@ def main():
         "long-quality-default/**/*",
         "memory-v1/**/*",
         "memory-only-v1/**/*",
+        "bfcl-v4-50/**/*",
         "audit/**/*",
     ]:
         for path in sorted(work.glob(pattern)):
@@ -283,6 +364,8 @@ def main():
                 ".log",
                 ".txt",
                 ".cmd",
+                ".csv",
+                ".done",
             ]:
                 continue
             if "model-cache" in path.parts:
@@ -303,6 +386,26 @@ def main():
                     and path.stat().st_size < 450 * 1024
                 )
             if "/quality/" in name and path.suffix not in [".json", ".jsonl"]:
+                portable = False
+            is_bfcl_rows = "/bfcl-v4-50/" in name and path.name == "rows.jsonl"
+            if "/bfcl-v4-50/" in name:
+                portable = path.parent == work / "bfcl-v4-50" and path.name in [
+                    "summary.json",
+                    "manifest.json",
+                    "protocol.json",
+                    "audit.json",
+                    "initial-profile.json",
+                    "checker-self-test.json",
+                    "token-audit.json",
+                    "finalization-tools.json",
+                    "rows.jsonl",
+                    "cases.csv",
+                    "generations.csv",
+                    "categories.csv",
+                    "turns.csv",
+                ]
+            if is_bfcl_rows:
+                export_bfcl_rows(out, path.read_bytes())
                 portable = False
             capture(
                 path,
@@ -448,13 +551,25 @@ def main():
         }
         for variant, job in [("Original", "303046"), ("Changed", "303045")]
     }
+    bfcl_path = work / "bfcl-v4-50/summary.json"
+    bfcl = load(bfcl_path) if bfcl_path.exists() else None
+    if bfcl:
+        bfcl_audit = load(work / "bfcl-v4-50/audit.json")
+        assert bfcl["status"] == "complete" and bfcl_audit["status"] == "passed"
+        assert (
+            digest((work / "bfcl-v4-50/rows.jsonl").read_bytes()) == bfcl["rows_sha256"]
+        )
     put(
         out / "quality.json",
         {
             "schema_version": 1,
             "native": quality,
             "mi355x_source_bf16": source_quality,
-            "scope": "64 x 4096 PPL windows; 128 GSM8K questions. GSM requests <=666 tokens never reach first pruning at position2052. QSA natural-long quality, Qwen BFCL and Qwen SWE-bench not measured.",
+            "native_bfcl_v4_pilot": bfcl,
+            "native_bfcl_workload_audit": load(work / "bfcl-v4-50/token-audit.json")
+            if bfcl
+            else None,
+            "scope": "64 x 4096 PPL windows; 128 GSM8K questions. GSM requests <=666 tokens never reach first pruning at position2052. BFCL is a separate 50-case component pilot when present, not an official overall score. QSA natural-long quality and Qwen SWE-bench remain unmeasured.",
         },
     )
     table(
@@ -477,6 +592,15 @@ def main():
                     ]
                 },
                 "gsm_accuracy_percent": 100 * row["gsm_correct"] / row["gsm_questions"],
+                "bfcl_pilot_cases": bfcl["variants"][variant]["cases"] if bfcl else "",
+                "bfcl_pilot_correct": bfcl["variants"][variant]["correct"]
+                if bfcl
+                else "",
+                "bfcl_pilot_accuracy_percent": bfcl["variants"][variant][
+                    "accuracy_percent"
+                ]
+                if bfcl
+                else "",
             }
             for variant, row in quality.items()
         ],

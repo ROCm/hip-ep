@@ -1,0 +1,24 @@
+{
+  "current_prepared_source_directory": "finalization-source-v3",
+  "source_sha256": {
+    "scripts/qwen_qsa/audit_bfcl_tokens.py": "82246852874e2bce530b22869684d88b543db6a222e2fcb8beb20be6d050f84a",
+    "scripts/qwen_qsa/package_evidence.py": "415528836ae60b2ea74d4401302b9a4a50b38a0290d7c7c7fbc39ee5808420c5",
+    "scripts/qwen_qsa/report_results.py": "b18eb4dde5e82cd381535951df3f238e6ea92102f0845bb108df1a42f0a6074c"
+  },
+  "previous_preparation": {
+    "current_prepared_source_directory": "finalization-source-v2",
+    "source_sha256": {
+      "scripts/qwen_qsa/audit_bfcl_tokens.py": "82246852874e2bce530b22869684d88b543db6a222e2fcb8beb20be6d050f84a",
+      "scripts/qwen_qsa/package_evidence.py": "e728fd76a8c982dc8142e6e95e1cde4dc3f64f84c3a77da808a0cb20d427724d",
+      "scripts/qwen_qsa/report_results.py": "b18eb4dde5e82cd381535951df3f238e6ea92102f0845bb108df1a42f0a6074c"
+    },
+    "earlier_prepared_source_directory": "finalization-source",
+    "earlier_prepared_source_sha256": {
+      "scripts/qwen_qsa/audit_bfcl_tokens.py": "72aba3fecad435c05ad4e2c9d92af552896af4a972d0a34b86ec5ad99cacd616",
+      "scripts/qwen_qsa/package_evidence.py": "23f95458fba8e8f48de9df44ea5798bda600a5733bc1e5323af658b55b55d5cd",
+      "scripts/qwen_qsa/report_results.py": "01f97e1cb27615cd0c3911fa0825817e12f574eb94f9c352a066d1744bea8fbc"
+    },
+    "scope": "CPU-only per-token/per-turn audit, stopping-limit and pruning-subgroup analysis, report generation and evidence export. No inference settings changed."
+  },
+  "scope": "Checked CPU-only per-token/per-turn audit, stopping-limit/pruning-subgroup assessment, report generation and lossless size-bounded portable evidence export. Inference settings are unchanged."
+}

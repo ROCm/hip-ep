@@ -294,6 +294,81 @@ def main():
     timing = load(timing_path)
     assert timing["state"] == "locked"
     assert sha(WORK / "timing-v1/streams.json") == timing["streams_sha256"]
+    bfcl_summary_path = WORK / "bfcl-v4-50/summary.json"
+    if bfcl_summary_path.exists():
+        bfcl = load(bfcl_summary_path)
+        assert bfcl["status"] == "complete"
+        a, b = bfcl["variants"]["Original"], bfcl["variants"]["Changed"]
+        bfcl_note = (
+            f"The [paired50-case BFCLv4 component pilot](qwen-qsa-bfcl-v4-50.md) is complete: "
+            f"default{a['correct']}/50 versus QSA{b['correct']}/50. "
+            "Prompt/response lengths, turns, cap counts and actual pruning coverage accompany the scores. "
+            "This is not the official overall BFCLv4 score. No further hip-ep benchmarks are scheduled."
+        )
+        workload_path = WORK / "bfcl-v4-50/token-audit.json"
+        if workload_path.exists():
+            workload = load(workload_path)
+            assert workload["status"] == "passed" and workload["complete"]
+            assert workload["rows_sha256"] == bfcl["rows_sha256"]
+            steps = workload["official_step_limited_cases"]
+            groups = workload["groups_by_frozen_initial_prompt"]
+            bfcl_note += f" The official step bound stops{steps['Original']}/{steps['Changed']} default/QSA cases; per-turn token/call records are retained."
+            details = [
+                "## Pruning groups and stopping limits",
+                "",
+                "These groups use the frozen initial prompt lengths, selected before generation. Actual later-history pruning coverage is reported above.",
+                "",
+                "| Initial prompt group | Cases | Default correct | QSA correct |",
+                "|---|---:|---:|---:|",
+            ]
+            for label, title in [
+                ("initially_pruned", "Prefill reaches sparse pruning"),
+                ("initially_full_support", "Prefill stays within full support"),
+            ]:
+                ga, gb = groups["Original"][label], groups["Changed"][label]
+                assert ga["cases"] == gb["cases"]
+                details.append(
+                    f"| {title} | {ga['cases']} | {ga['correct']} | {gb['correct']} |"
+                )
+            details += [
+                "",
+                f"BFCL's official `MAXIMUM_STEP_LIMIT=20` setting and pinned stopping semantics were retained. Its step bound stops **{steps['Original']} default cases and{steps['Changed']} QSA cases**, separately from the response-token caps above. A step-limit stop can end a case before all declared turns are reached; the official checker still scores the resulting trajectory. No stopped cases are replaced.",
+                "",
+                "`turns.csv` records each observed benchmark turn, its model-call count, prompt-token totals/range, response-token totals/maximum and step-limit flag. The independent token audit verifies the per-turn nesting against every actual generation's counts. `token-audit.json` retains the stopped case IDs and subgroup numerators/denominators.",
+                "",
+            ]
+            if (
+                groups["Original"]["initially_pruned"]["correct"]
+                == groups["Changed"]["initially_pruned"]["correct"]
+                == 0
+            ):
+                details += [
+                    "Both variants have a floor score on the initially pruned subset. This pilot therefore has limited ability to distinguish quality after pruning, even if pooled scores match.",
+                    "",
+                ]
+            path = ROOT / "docs/experiments/qwen-qsa-bfcl-v4-50.md"
+            text = path.read_text(encoding="utf-8")
+            start, end = (
+                "<!-- BFCL_WORKLOAD_ASSESSMENT_BEGIN -->",
+                "<!-- BFCL_WORKLOAD_ASSESSMENT_END -->",
+            )
+            if start in text:
+                before, _, tail = text.partition(start)
+                assert end in tail
+                text = before + tail.partition(end)[2]
+            assert "## Evidence and reproduction" in text
+            text = text.replace(
+                "## Evidence and reproduction",
+                start
+                + "\n"
+                + "\n".join(details)
+                + end
+                + "\n\n## Evidence and reproduction",
+                1,
+            )
+            path.write_text(text, encoding="utf-8")
+    else:
+        bfcl_note = "The paired50-case BFCLv4 component pilot is in progress; no completed score is claimed yet."
     lines = [
         "<!--",
         "Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.",
@@ -570,7 +645,8 @@ def main():
         "",
         "Prefill and decode use independent fixed-token phase timers, identical session/head/cache work, exact-shape warmups and balanced paired trials. Only completed, audited shapes in the performance table establish measured throughput or support; remaining batch/long-context candidates require actual memory and correctness checks.",
         "",
-        "No further hip-ep benchmarks are scheduled. Matched QSA natural-long quality, Qwen BFCLv4 and Qwen SWE-bench remain unmeasured; they are coverage limits, not active jobs. The local merged PR candidate has separate correctness checks and no new performance/accuracy campaign. See the [audit and paper handoff](../reproducibility/qwen-hip-ep/README.md) for its validation receipts, the selected memory pair and complete raw evidence. The branch and results remain local; nothing has been pushed or published.",
+        bfcl_note
+        + " Matched QSA natural-long quality and Qwen SWE-bench remain unmeasured. The local merged PR candidate has separate correctness checks and no new performance/accuracy campaign. See the [audit and paper handoff](../reproducibility/qwen-hip-ep/README.md) for its validation receipts, the selected memory pair and complete raw evidence. The branch and results remain local; nothing has been pushed or published.",
         "",
         "## Evidence and reproduction",
         "",

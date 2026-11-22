@@ -111,7 +111,9 @@ and replay is exact. Original has 20 forwards/20 EP dispatches; Changed has
 39/39. Cache pointers remain stable. These establish correctness of the merge;
 the archived performance/accuracy campaign belongs to the measured binaries.
 Publication must retain canceled memory-cell statuses and the absence of matched
-QSA natural-long quality, Qwen BFCL and Qwen SWE-bench.
+QSA natural-long quality, a full Qwen BFCLv4 overall score and Qwen SWE-bench.
+The separate50-case BFCLv4 component pilot must retain its sampling, generation
+cap, workload-length and pruning-coverage labels.
 
 The expanded measured-binary controls also pass: all four selectors preserve
 exact pool state through 137 decode steps; nonzero long-history rankings match
