@@ -17,7 +17,17 @@ inline threshold. Run with
 `--ep-option XLNX_model_clone_external_data_threshold=1073741824` (or the
 `XLNX_ABI_2_0_CLONE_EXTERNAL_DATA_THRESHOLD` environment variable) to exercise
 the fold; without it the same graphs check the unfolded path.
+
+test_decomposed_bn_graph_inputs covers a BatchNormalization exported as
+elementwise ops (Sub, Mul, Mul, Add over Unsqueeze'd per-channel vectors and
+an Add/Sqrt/Reciprocal chain for the inverse standard deviation), which the
+fusion pass turns back into one batch norm. Its parameters are graph inputs
+because ORT constant-folds the same chain away when they are initializers. It
+also checks the compiler's IR dump (HIPDNN_EP_IR_DUMP_PATH), because a result
+that matches the reference does not show that the chain was fused.
 """
+
+import re
 
 import numpy as np
 import pytest
@@ -81,6 +91,37 @@ _TOLERANCE = {
 }
 
 
+@pytest.fixture
+def ir_dump(tmp_path, monkeypatch):
+    """Directory that receives the compiler's IR dump for this test.
+
+    The EP reads HIPDNN_EP_IR_DUMP_PATH on every compilation and writes one
+    `ir.<n>.mlir` file per compilation, holding the IR around each pass.
+    """
+    monkeypatch.setenv("HIPDNN_EP_IR_DUMP_PATH", str(tmp_path / "ir.mlir"))
+    return tmp_path
+
+
+def _ir_after_fusion(dump_dir):
+    """The IR printed after hip-fusion-transform, one text per compilation."""
+    texts = []
+    for dump in sorted(dump_dir.glob("ir.*.mlir")):
+        for section in dump.read_text().split("// -----// IR Dump ")[1:]:
+            if section.startswith("After HipFusionTransformPass"):
+                texts.append(section)
+    return texts
+
+
+def _assert_batch_norm_fused(dump_dir):
+    """The elementwise chain became hip.batch_norm and left nothing behind."""
+    texts = _ir_after_fusion(dump_dir)
+    assert texts, f"no IR dump after hip-fusion-transform in {dump_dir}"
+    for text in texts:
+        assert "hip.batch_norm" in text, "chain was not fused into hip.batch_norm"
+        left = set(re.findall(r"hip\.(?:sub|sqrt|reciprocal)\b", text))
+        assert not left, f"elementwise chain ops left after fusion: {sorted(left)}"
+
+
 class TestConvBatchNorm:
     @pytest.mark.parametrize("dtype", [np.float32, np.float16])
     @pytest.mark.parametrize("with_bias", [False, True])
@@ -141,3 +182,64 @@ class TestConvBatchNorm:
         z = rng.uniform(-1.0, 1.0, [1, in_z, SPATIAL, SPATIAL]).astype(dtype)
         actual, expected = model_runner.run_sample(model, [x, z])
         compare_outputs(actual, expected, **_TOLERANCE[dtype])
+
+    @pytest.mark.parametrize("dtype", [np.float32, np.float16])
+    @pytest.mark.parametrize("affine", [True, False])
+    def test_decomposed_bn_graph_inputs(self, model_runner, ir_dump, dtype, affine):
+        """Conv -> elementwise batch norm with per-channel parameters as inputs.
+
+        y = (c - mean) * reciprocal(sqrt(var + eps)) * scale + bias, each vector
+        unsqueezed to [C, 1, 1]; without `affine` there is no scale and no bias.
+        A swapped operand order or a misplaced epsilon gives outputs that stay
+        correlated with the reference, so compare tightly. The compiler's IR must
+        also show the chain fused into hip.batch_norm: a CPU fallback or an
+        unfused chain would pass the comparison just the same.
+        """
+        in_c = 16
+        tp = np_to_onnx_type(dtype)
+        rng = np.random.default_rng(37)
+        inits = [
+            _weight(rng, dtype, "w", in_c),
+            numpy_helper.from_array(np.array(1e-5, dtype=dtype), "eps"),
+            numpy_helper.from_array(np.array([1, 2], dtype=np.int64), "axes"),
+        ]
+        nodes = [
+            _conv_node("x", "w", "c"),
+            helper.make_node("Add", ["var", "eps"], ["var_eps"]),
+            helper.make_node("Sqrt", ["var_eps"], ["std"]),
+            helper.make_node("Reciprocal", ["std"], ["inv_std"]),
+        ]
+        parameters = ["mean", "var"] + (["scale", "bias"] if affine else [])
+        for name in ["mean", "inv_std"] + (["scale", "bias"] if affine else []):
+            nodes.append(helper.make_node("Unsqueeze", [name, "axes"], [f"{name}_v"]))
+        nodes += [
+            helper.make_node("Sub", ["c", "mean_v"], ["centered"]),
+            helper.make_node(
+                "Mul", ["centered", "inv_std_v"], ["normalized" if affine else "y"]
+            ),
+        ]
+        if affine:
+            nodes += [
+                helper.make_node("Mul", ["normalized", "scale_v"], ["scaled"]),
+                helper.make_node("Add", ["scaled", "bias_v"], ["y"]),
+            ]
+        model = make_model_from_nodes(
+            nodes,
+            [helper.make_tensor_value_info("x", tp, [1, in_c, SPATIAL, SPATIAL])]
+            + [helper.make_tensor_value_info(n, tp, [CHANNELS]) for n in parameters],
+            [helper.make_tensor_value_info("y", tp, [1, CHANNELS, SPATIAL, SPATIAL])],
+            initializers=inits,
+        )
+        x = rng.uniform(-1.0, 1.0, [1, in_c, SPATIAL, SPATIAL]).astype(dtype)
+        ranges = {
+            "mean": (-0.5, 0.5),
+            "var": (0.1, 2.0),
+            "scale": (0.5, 2.0),
+            "bias": (-1.0, 1.0),
+        }
+        vectors = [
+            rng.uniform(*ranges[n], [CHANNELS]).astype(dtype) for n in parameters
+        ]
+        actual, expected = model_runner.run_sample(model, [x] + vectors)
+        compare_outputs(actual, expected, **_TOLERANCE[dtype])
+        _assert_batch_norm_fused(ir_dump)
