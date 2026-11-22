@@ -3,7 +3,7 @@
   "files": {
     "archive.json": {
       "bytes": 476,
-      "sha256": "f52b7582ca36a1a58c56881ee0941cd0f2d240d642abb5e612651f6bde226150"
+      "sha256": "5f692ff66a44892a37b9edaf3fc691ccc39a2105d99745d9bbc00da3510998d6"
     },
     "candidate-validation.json": {
       "bytes": 9667,
@@ -18,12 +18,12 @@
       "sha256": "91393fb03615dcedd0204d0e8d82e6c3ddadb26c60b6b8cbb3dad50ca54ec762"
     },
     "memory.csv": {
-      "bytes": 6348,
-      "sha256": "59444cb30fbbf9ec12a038d0d918d6fae8137c77d3aa429ad3bc55915a3ad33c"
+      "bytes": 7176,
+      "sha256": "71af13d0daaae2960887b196c42cbae11f5f8b03810ecbc56bf520b98ca2f7e2"
     },
     "memory.json": {
-      "bytes": 30876,
-      "sha256": "98ed59cf610c388be3697f7e4dc96434cdd339274b3976eb255d0dc53792481b"
+      "bytes": 35573,
+      "sha256": "9169c8ba94d3178a4deef3df292ce422c23a783d396bb1806acc677dba1ef736"
     },
     "performance.csv": {
       "bytes": 1264,
@@ -35,7 +35,7 @@
     },
     "provenance.json": {
       "bytes": 24271,
-      "sha256": "98a60878817782b68e94a51e19b94452bae85d1dc92fb0799fb63c54d2892892"
+      "sha256": "68ae51494cc68b576c332fe8d5311a1642e7770dfdcd9dadae92cc2286b4bf0e"
     },
     "quality.csv": {
       "bytes": 323,
@@ -264,6 +264,10 @@
     "raw/native/receipts/handoff-verification.json": {
       "bytes": 10981,
       "sha256": "55e82636d4f72e195e66a314e182b8a5a21b1f55d2e82ad24a619a88153a20f4"
+    },
+    "raw/native/receipts/memory-campaign.json": {
+      "bytes": 708,
+      "sha256": "0037e957cc83ab39987bc6d4d2c07abf5fe2caf20230aec51fc1807b378b5a61"
     },
     "raw/native/receipts/native-support.json": {
       "bytes": 2538,
