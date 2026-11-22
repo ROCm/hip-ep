@@ -718,6 +718,10 @@
       "status": "pending"
     }
   ],
+  "status_counts": {
+    "complete": 4,
+    "pending": 14
+  },
   "mi355x_reference": "raw/mi355x/memory-summary.json",
   "cross_platform_memory_warning": "MI355X job303626 uses one warmup and two64-decode requests, PyTorch allocation/reservation peaks and20ms device-HBM sampling. Native uses one cold8-decode request and100ms WDDM commitment. Do not compare these as the same memory metric.",
   "unit": "bytes",

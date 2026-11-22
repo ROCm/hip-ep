@@ -97,13 +97,16 @@ Full-session wall timings use two exact-shape warmup pairs and six balanced meas
 
 Every listed row has finite outputs, exact warmup replay, unchanged sessions/cache addresses, and independently audited paired raw trials and statistics. Shapes without a completed receipt remain unqualified.
 
-## Application memory while running
+**64K has no valid timing result.** The co-resident two-session attempt stopped during warmup when OS available RAM remained below the 2 GiB guard. Its memory trace and failure receipt are retained. Further 64K work was excluded at the user's request. The [separate default/QSA memory-only matrix](qwen-qsa-memory.md) covers batches 1/4/8 and prefixes 4K/16K/32K with one prefill and eight decode calls per isolated process, without rerunning the performance benchmark.
+
+## Earlier paired-run application memory
 
 A separate CPU-only sampler reads OS process/system and Windows PDH GPU memory gauges every second without creating a GPU context. The worker holds Original and Changed sessions together, sharing KV serially; these are joint application footprints, not isolated per-variant allocations. The 32K trace attaches mid-run; 64K sampling starts before application startup. Sampled peaks can miss sub-second spikes.
 
 | Prefix | Coverage | Peak process RSS GiB | Peak private commitment GiB | Peak WDDM dedicated usage GiB | Peak WDDM shared usage GiB | Minimum system RAM available GiB |
 |---|---|---:|---:|---:|---:|---:|
 | 32K | partial, attached mid-run | 6.35 | 65.71 | 61.67 | 5.49 | 30.89 |
+| 64K | startup through failed attempt | 39.06 | 96.59 | 61.70 | 38.19 | 0.08 |
 
 WDDM values are driver-reported usage/commitment; they are not a proven physical-residency total. Process RSS, private commitment, GPU dedicated/shared gauges and system RAM overlap and must not be added. Raw timestamped samples, OS lifetime high-water counters, per-request completion markers and immutable source/snapshot identities are retained under `_local/qwen-qsa/memory-v1/`. Memory sampling begins after the earlier uninstrumented trials and partway through 32K; 64K has the observer throughout both variants.
 

@@ -1,0 +1,6 @@
+{
+  "status": "passed",
+  "commit": "8cd94792adeb4146d6e0876e141d88ffdbf88406",
+  "files": 46,
+  "scope": "Every packet manifest hash matches repository-stored bytes, independent of Windows working-tree conversion."
+}

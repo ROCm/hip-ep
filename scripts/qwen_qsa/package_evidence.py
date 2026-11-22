@@ -253,7 +253,7 @@ def main():
         "long-quality-default/**/*",
         "memory-v1/**/*",
         "memory-only-v1/**/*",
-        "audit/*",
+        "audit/**/*",
     ]:
         for path in sorted(work.glob(pattern)):
             if not path.is_file() or path.suffix not in [
@@ -275,6 +275,8 @@ def main():
                 or "/quality/" in name
                 or path.name.endswith("validation.json")
             )
+            if "/audit/" in name and path.suffix == ".json":
+                portable = True
             if "/quality/" in name and path.suffix not in [".json", ".jsonl"]:
                 portable = False
             capture(
@@ -285,6 +287,27 @@ def main():
             )
     # Preserve OLMo and shared-runtime evidence for the complete stacked PR.
     olmo = root / "_local/qsa"
+    for path in sorted((olmo / "stages").glob("qwen-*/**/*")):
+        if path.is_file() and path.suffix in [".json", ".jsonl", ".py", ".log", ".txt"]:
+            capture(
+                path, "native/stages/" + path.relative_to(olmo / "stages").as_posix()
+            )
+    host_inventory = load(olmo / "environment.json")
+    capture(olmo / "environment.json", "olmo/environment.json", portable=True)
+    support = load(work / "default-4-support.json")
+    assert host_inventory["torch"] == support["torch"]
+    assert host_inventory["torch_hip"] == support["hip"]
+    put(
+        out / "environment.json",
+        {
+            "schema_version": 1,
+            "scope": "Historical host inventory captured for the preceding OLMo campaign on the same workstation; GPU, Torch and HIP agree with Qwen support receipts. Available RAM at receipt is not a workload peak.",
+            "inventory": host_inventory,
+            "qwen_support_receipt": "raw/native/receipts/default-4-support.json",
+            "transformers": load(work / "native-support.json")["transformers"],
+            "memory_warning": "Distinguish installed-memory inventory, OS-managed RAM, WDDM dedicated/shared gauges and driver commitment; do not infer physical residency or add overlapping gauges.",
+        },
+    )
     for pattern in [
         "native-gqa/*audit.json",
         "native-gqa/*validation.json",
@@ -457,6 +480,10 @@ def main():
         {
             "schema_version": 1,
             "cases": memory_cases,
+            "status_counts": {
+                state: sum(case["status"] == state for case in memory_cases)
+                for state in sorted({case["status"] for case in memory_cases})
+            },
             "mi355x_reference": "raw/mi355x/memory-summary.json",
             "cross_platform_memory_warning": "MI355X job303626 uses one warmup and two64-decode requests, PyTorch allocation/reservation peaks and20ms device-HBM sampling. Native uses one cold8-decode request and100ms WDDM commitment. Do not compare these as the same memory metric.",
             "unit": "bytes",
@@ -484,6 +511,14 @@ def main():
             "sha256": digest(data),
         }
         raw_files["measured-source/" + name] = data
+    script_commit = "efe78ea"
+    for name in git(
+        root, "diff", "--name-only", "1c9a454..." + script_commit
+    ).splitlines():
+        if name.startswith("scripts/"):
+            raw_files["historical-experiment-source/" + name] = subprocess.check_output(
+                ["git", "-C", str(root), "show", script_commit + ":" + name]
+            )
     put(
         out / "provenance.json",
         {
@@ -496,9 +531,12 @@ def main():
             "source_checkout_commit": git(source, "rev-parse", "HEAD"),
             "mi355x_memory_source_commit": mi355_memory["source_commit"],
             "packet_script_sha256": digest(Path(__file__).read_bytes()),
+            "historical_experiment_script_commit": script_commit,
+            "source_line_endings": "Git source reconstructions use repository-normalized bytes; measured Windows source hashes can include CRLF. Original raw protocols and per-probe source snapshots preserve actual execution bytes.",
             "measured_native_source_reconstruction": source_map,
             "build_provenance_limit": "Measured build began at dirty HEAD2a43690; native implementation subsequently committed in7a71b72. Binary hashes and execution receipts are authoritative; final PR merge build is separate and has no inherited performance claims.",
             "errata": [
+                "Historical generic run_stage.py receipts for Qwen hashed the OLMo selector and only snapshotted scripts/qsa. Use the Qwen execution protocols/export/tensor hashes as model identity; the stage selector fields are not Qwen identity. Future runner selects the Qwen payload and snapshots both script directories.",
                 "Historical native-support.json recorded unused gqa_back.cpp; compiled implementation is real/gqa.cpp. Inspector corrected without rewriting historical receipt.",
                 "32K paired timing memory sampler attached after four measured pairs; 4K/16K timing had no sampler.",
                 "Batch4/4K default memory probe completed after1551.55s. Stop attempt found parent already gone; retain as complete, not timing or failure.",
@@ -532,6 +570,7 @@ def main():
         },
     )
     names = [
+        "environment.json",
         "identity.json",
         "performance.json",
         "performance.csv",

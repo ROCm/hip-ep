@@ -16,6 +16,12 @@ those results remain separate in the
 [OLMo report](../../experiments/olmo-qsa-native-gqa-results.md) and
 [agent evaluation report](../../experiments/olmo-qsa-agent-accuracy.md).
 
+The review branch is `codex/qwen-native-qsa-pr`, checked out locally at
+`_local/qwen-qsa/pr-worktree`. This packet is also kept in the main `hip-ep`
+checkout so the paper agent can read it here. The preceding measured branch,
+`codex/qwen-native-qsa`, retains the historical experiment stack. Unrelated
+Markdown and the sibling source project are left unchanged.
+
 ## What changed
 
 Four full-attention nodes, at zero-based layers **27/31/35/39**, become
@@ -79,6 +85,10 @@ of batches1/4/8, prefixes4096/16384/32768 and both variants. Every cell has an
 explicit status. Pending and bounded/failed attempts must not be treated as
 successful peaks. The human-readable
 [memory report](../../experiments/qwen-qsa-memory.md) shows the captured matrix.
+For a peak-comparison table, filter CSV rows to `phase=overall` and
+`status=complete`, and compare a pair only when both variants completed the same
+batch/context. Other phases and incomplete lower bounds remain available for
+diagnostics. The JSON `status_counts` field summarizes coverage at export time.
 
 These are memory-only probes: one fresh model/session process per variant, one
 prefill, eight fixed decode calls, capacity=prefix+64, no performance repetitions.
@@ -106,6 +116,7 @@ is retained in the raw record and is not a throughput measurement or a failure.
 | File | Contents |
 |---|---|
 | [identity.json](identity.json) | Model revision, payload/tensor/data hashes, frozen layers and representations |
+| [environment.json](environment.json) | Historical workstation inventory, software versions and memory-accounting caveats |
 | [performance.json](performance.json), [performance.csv](performance.csv) | Native raw-summary metrics, intervals, MI355X reference and comparison restrictions |
 | [quality.json](quality.json), [quality.csv](quality.csv) | Native denominators, PPL and answer counts |
 | [memory.json](memory.json), [memory.csv](memory.csv) | All18 cells, byte units, phase peaks and incomplete status |
@@ -120,6 +131,8 @@ records and a measured-source reconstruction. `MANIFEST.json` inside it hashes
 every member. Model weights, compiled caches and large model exports are excluded;
 their hashes and local origins are recorded. The ZIP stays local and is outside
 Git; copy it together with this packet when handing data to another machine.
+The packet's `.gitattributes` preserves original evidence bytes across Git
+checkouts, including Windows protocol line endings used by recorded hashes.
 
 The measured build began at dirty HEAD2a43690; its implementation was subsequently
 committed in7a71b72. Binary hashes and historical execution protocols identify the

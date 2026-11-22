@@ -43,6 +43,9 @@ def main():
     torch.set_num_threads(2)
     task = WORK / "native-gqa"
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    (args.output_dir / "full-model-validator.py").write_bytes(
+        Path(__file__).read_bytes()
+    )
     kernel = json.loads(args.kernel_receipt.read_text())
     assert kernel["status"] == "passed"
     assert sha(INSTALL / "bin/custom_kernels_gfx1151.dll") == kernel["kernel_sha256"]

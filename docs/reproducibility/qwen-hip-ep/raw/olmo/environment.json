@@ -1,0 +1,110 @@
+{
+  "platform": "Windows-11-10.0.26200-SP0",
+  "machine": "XSJRAJEEVP04",
+  "python": "3.13.13",
+  "torch": "2.13.0+rocm10.0.0",
+  "torch_hip": "7.15.26333",
+  "hip_runtime": 71526333,
+  "hip_driver": 71526333,
+  "hardware": {
+    "gpu": {
+      "Name": "AMD Radeon(TM) 8060S Graphics",
+      "DriverVersion": "32.0.22050.4002",
+      "PNPDeviceID": "PCI\\VEN_1002&DEV_1586&SUBSYS_8D01103C&REV_D1\\4&85C8329&0&0041"
+    },
+    "cpu": {
+      "Name": "AMD RYZEN AI MAX+ PRO 395 w/ Radeon 8060S      ",
+      "NumberOfCores": 16,
+      "NumberOfLogicalProcessors": 32
+    },
+    "memory": [
+      {
+        "Capacity": 17179869184,
+        "Speed": 8000
+      },
+      {
+        "Capacity": 17179869184,
+        "Speed": 8000
+      },
+      {
+        "Capacity": 17179869184,
+        "Speed": 8000
+      },
+      {
+        "Capacity": 17179869184,
+        "Speed": 8000
+      },
+      {
+        "Capacity": 17179869184,
+        "Speed": 8000
+      },
+      {
+        "Capacity": 17179869184,
+        "Speed": 8000
+      },
+      {
+        "Capacity": 17179869184,
+        "Speed": 8000
+      },
+      {
+        "Capacity": 17179869184,
+        "Speed": 8000
+      }
+    ]
+  },
+  "device": "_CudaDeviceProperties(name='AMD Radeon(TM) 8060S Graphics', major=11, minor=5, gcnArchName='gfx1151', total_memory=102227MB, multi_processor_count=20, uuid=30303030-3031-3935-3030-303030303030, pci_bus_id=195, pci_device_id=0, pci_domain_id=0, L2_cache_size=2MB)",
+  "device_attributes": {
+    "CooperativeLaunch": {
+      "enum": 10,
+      "status": 0,
+      "value": 0
+    },
+    "CooperativeMultiDeviceLaunch": {
+      "enum": 11,
+      "status": 0,
+      "value": 0
+    },
+    "WarpSize": {
+      "enum": 87,
+      "status": 0,
+      "value": 32
+    },
+    "MultiprocessorCount": {
+      "enum": 63,
+      "status": 0,
+      "value": 20
+    },
+    "Integrated": {
+      "enum": 16,
+      "status": 0,
+      "value": 1
+    }
+  },
+  "os_managed_memory_bytes": 68478697472,
+  "os_available_memory_bytes_at_receipt": 38868164608,
+  "packages": {
+    "onnx": "1.19.1",
+    "onnxruntime": "1.31.0",
+    "transformers": "5.19.0",
+    "safetensors": "0.8.0"
+  },
+  "hip_ep_checkout_commit": "1c9a454141c22bdddfc6071ab8c0c58cb01c36de",
+  "baseline_install": "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\ring-1259\\install\\existing",
+  "selector_sha256": "decd3160f4321839c80fee2ba0b0241575fc06017676e38a04286a3ae3daa10b",
+  "training_updates": 0,
+  "installed_libraries": {
+    "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\ring-1259\\install\\existing\\bin\\hipgpu.dll": "00a220e560cae4f625f926772e422e2700ba8bed383a3f5e0f2e25c9c794d875",
+    "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\ring-1259\\install\\existing\\bin\\custom_kernels_gfx1151.dll": "2cf0c580b612024834967e78c55809e37a35fa5afa6b5dfa70f39553ea3c6ace",
+    "C:\\Users\\rajeevp\\AppData\\Local\\miniforge3\\Lib\\site-packages\\_rocm_sdk_core\\bin\\amdhip64_7.dll": "546fb3d6e2d2194a9526fb94ec2fd3aa5b92a48a7595f04efece80162047ef69"
+  },
+  "baseline_build_receipt": {
+    "variant": "existing",
+    "upstream": "65d1f5a276402d1ab33474f268af9350791a3cba",
+    "head": "e99e1ae046a9dda10417a95135e46e750bc8f3d8",
+    "files": {
+      "bin\\custom_kernels_gfx1151.dll": "2cf0c580b612024834967e78c55809e37a35fa5afa6b5dfa70f39553ea3c6ace",
+      "bin\\hipgpu.dll": "00a220e560cae4f625f926772e422e2700ba8bed383a3f5e0f2e25c9c794d875"
+    }
+  },
+  "baseline_build_receipt_sha256": "9e49ef25d43eab1649fe2fd4e2e993e79a3218321f94e171822ec4946cdf6ed5"
+}

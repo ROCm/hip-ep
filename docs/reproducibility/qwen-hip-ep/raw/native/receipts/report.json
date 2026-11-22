@@ -183,9 +183,9 @@
   ],
   "application_memory": {
     "protocol_sha256": "f4eab57f891ededcbe479442fe9d46b73c9ad243df142827e2f1b03bac7ec1a1",
-    "snapshot_bytes": 445569,
-    "snapshot_sha256": "639b60e402f3339d8c95aa1c445c41a1364c358b2914a4fec8602a0480910f63",
-    "samples": 328,
+    "snapshot_bytes": 744720,
+    "snapshot_sha256": "210f6b86dd663b5b8fb38db480177bdf7690182c00c4c18de69edb0df6ae0e7b",
+    "samples": 609,
     "interval_seconds": 1.0,
     "scope": "Joint benchmark worker process: Original and Changed sessions co-resident with serially shared KV",
     "notes": [
@@ -216,6 +216,27 @@
         "peak_sampled_wddm_dedicated_usage_bytes": 66217385984,
         "peak_sampled_wddm_shared_usage_bytes": 5897732096,
         "peak_sampled_wddm_total_committed_bytes": 72115118080
+      },
+      {
+        "stage": "qwen-native-perf-65536-b1",
+        "context": 65536,
+        "batch": 1,
+        "coverage": "startup through failed attempt",
+        "stage_state": "failed",
+        "samples": 278,
+        "first_sample_unix": 1795311120.0953095,
+        "last_sample_unix": 1795311397.0946386,
+        "peak_sampled_rss_tree_bytes": 41935622144,
+        "peak_sampled_private_commit_tree_bytes": 103710593024,
+        "max_worker_lifetime_peak_rss_bytes": 41931239424,
+        "max_worker_lifetime_peak_private_commit_bytes": 131316494336,
+        "minimum_system_ram_available_bytes": 89911296,
+        "maximum_system_ram_used_bytes": 68388786176,
+        "maximum_sample_gap_seconds": 1.1181845664978027,
+        "gpu_counter_sample_count": 276,
+        "peak_sampled_wddm_dedicated_usage_bytes": 66244743168,
+        "peak_sampled_wddm_shared_usage_bytes": 41008971776,
+        "peak_sampled_wddm_total_committed_bytes": 107253714944
       }
     ]
   },
@@ -245,5 +266,5 @@
   "timing_manifest_sha256": "3c712f4d4b2a933e3b8957904f442b57bdf30c178592dbd3ff4201799c0e075a",
   "trained_source_evidence_sha256": "fb3388de9909ce9e48d5866527db0f85b3f6be85aab552c38c55c0f70436833a",
   "trained_source_raw_sha256": "6599d6500145512992e3621ae4fad410de4fec42acb74b4433dfca57bce05cc7",
-  "report_sha256": "c6fc5fefbfe5c9dd2366299ef25bf4fac8794fd25c6d1d6a1c6193921ed9ac5e"
+  "report_sha256": "1c5f628a715a27db3fdf577f45cf3ee93c0a6bb5c362323cf6017ff9464248d7"
 }

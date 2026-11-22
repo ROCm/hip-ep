@@ -1,0 +1,9 @@
+{
+  "coordinator_pid": 20628,
+  "after_case": "_local\\qwen-qsa\\memory-only-v1\\b4-s4096-Changed\\result.json",
+  "requested_unix": 1795316341.3392642,
+  "reason": "Pause only between completed memory probes for PR build/kernel audit; preserve measured stack and avoid CPU/build interference with memory limits.",
+  "state": "paused_between_probes",
+  "completed_case_status": "complete",
+  "ended_unix": 1795317625.753856
+}

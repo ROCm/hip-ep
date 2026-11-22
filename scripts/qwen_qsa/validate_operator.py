@@ -35,6 +35,7 @@ def main():
     torch.set_num_threads(2)
     task = args.output_dir
     task.mkdir(parents=True, exist_ok=True)
+    (task / "validator.py").write_bytes(Path(__file__).read_bytes())
     control = json.loads(args.kernel_receipt.read_text())
     assert control["status"] == "passed"
     assert sha(INSTALL / "bin/custom_kernels_gfx1151.dll") == control["kernel_sha256"]
