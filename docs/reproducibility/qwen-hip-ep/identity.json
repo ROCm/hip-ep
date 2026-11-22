@@ -1,0 +1,141 @@
+{
+  "model": "Qwen/Qwen3.8-27B",
+  "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+  "selector_sha256": "d7729599f421d80ace536f84145bafa9a6e1eaad22dde18ce42392014a58b5e4",
+  "parameters": 13108736,
+  "tensors": {
+    "selectors.27.pool_k_norm.weight": {
+      "dtype": "BF16",
+      "shape": [
+        128
+      ],
+      "raw_sha256": "25f3c401c387e9599e7708f2c4c817254a5f608cdb2fb97506033578dcc3fcd9"
+    },
+    "selectors.27.projection.weight": {
+      "dtype": "BF16",
+      "shape": [
+        640,
+        5120
+      ],
+      "raw_sha256": "17b7eb71b1252a92c170808478bf8d22995b527e90c153db4b4d248476513edd"
+    },
+    "selectors.27.q_norm.weight": {
+      "dtype": "BF16",
+      "shape": [
+        128
+      ],
+      "raw_sha256": "bc3079148d393af0a4721ed802a9fa5850b355b18ad81673fa35c60ec8ce4da8"
+    },
+    "selectors.27.token_k_norm.weight": {
+      "dtype": "BF16",
+      "shape": [
+        128
+      ],
+      "raw_sha256": "281a92c6ade0afa7508cd8c99023c3fc2aed656e170badd54b319231f5d62063"
+    },
+    "selectors.31.pool_k_norm.weight": {
+      "dtype": "BF16",
+      "shape": [
+        128
+      ],
+      "raw_sha256": "ca342b64c55d80fe163058e87935c9b00a13f3ee70196a0dc93788279fe928d5"
+    },
+    "selectors.31.projection.weight": {
+      "dtype": "BF16",
+      "shape": [
+        640,
+        5120
+      ],
+      "raw_sha256": "f398ac2e052c71327328c7382bc609a8d5fa7958e7652cc67e400d3fbd44f228"
+    },
+    "selectors.31.q_norm.weight": {
+      "dtype": "BF16",
+      "shape": [
+        128
+      ],
+      "raw_sha256": "54faf2fb32099b01003d325b26b0a7cb7f86864b694c149685a57f7d90eec20e"
+    },
+    "selectors.31.token_k_norm.weight": {
+      "dtype": "BF16",
+      "shape": [
+        128
+      ],
+      "raw_sha256": "da4cb3c2330e04d59e33a9753d030bde98182db7eff2466c631d3264e11aa3c9"
+    },
+    "selectors.35.pool_k_norm.weight": {
+      "dtype": "BF16",
+      "shape": [
+        128
+      ],
+      "raw_sha256": "068c789f3c2cf4018bbcc8c6d1048bd42d71175174cbc53d12df569425ed01ec"
+    },
+    "selectors.35.projection.weight": {
+      "dtype": "BF16",
+      "shape": [
+        640,
+        5120
+      ],
+      "raw_sha256": "c28092090a55ded16ebca92fb46e751fe2768faa5e495f4dbcb3de346564876d"
+    },
+    "selectors.35.q_norm.weight": {
+      "dtype": "BF16",
+      "shape": [
+        128
+      ],
+      "raw_sha256": "c353da14a222809b5218e1987ed17cc055ecc4cf04d0bde32e1e7c49991e43d8"
+    },
+    "selectors.35.token_k_norm.weight": {
+      "dtype": "BF16",
+      "shape": [
+        128
+      ],
+      "raw_sha256": "e94c78606a5a97b50f76f6c0e46ccde569914233571efb2369dbf937dc81cc01"
+    },
+    "selectors.39.pool_k_norm.weight": {
+      "dtype": "BF16",
+      "shape": [
+        128
+      ],
+      "raw_sha256": "9aca3e89d69768ac32ac2f37878a6bbc546d0820e3959d82c49c94794634028b"
+    },
+    "selectors.39.projection.weight": {
+      "dtype": "BF16",
+      "shape": [
+        640,
+        5120
+      ],
+      "raw_sha256": "1392984b130d3a8a84f1e34308ebcb9e6c6b6b5b0c1737b2c2dc82e3e6c93fb3"
+    },
+    "selectors.39.q_norm.weight": {
+      "dtype": "BF16",
+      "shape": [
+        128
+      ],
+      "raw_sha256": "2af281bbb0878f9a64c57604a7a1a1d58c65c40738506399e0abcb2b1aa43370"
+    },
+    "selectors.39.token_k_norm.weight": {
+      "dtype": "BF16",
+      "shape": [
+        128
+      ],
+      "raw_sha256": "54622af575692f1030f104d3f02af96635b959640a94bfd682831dbd8c49d597"
+    }
+  },
+  "data_sha256": {
+    "train.json": "fda26c9657832e625f829702b8dbb81d956f4532d3c27eaefeb99ff6176fa064",
+    "validation.json": "14161d9fa7bbe98725bd42a528e5ec1354b6045e09ae9b4cc97a8ab937541d97",
+    "test.json": "255b0110c2d500438f489de52c424eb993bdcd0f2a13a20851cd6a878ac64227",
+    "gsm8k.json": "81ff84e59c942977cc8306ae41ee83cd02225e103bbb3d3c012f072566a100c7"
+  },
+  "schema_version": 1,
+  "layers": [
+    27,
+    31,
+    35,
+    39
+  ],
+  "training_updates_in_hip_ep": 0,
+  "native_representation": "Fresh RTN W4A16 group128; FP16 activation/KV; FP32 recurrent state; BF16 selector",
+  "mi355x_representation": "Source BF16 backbone; frozen BF16 selector",
+  "selector_pt_sha256": "2d2672cf7108d233bc4ff1f7259a4aff4f674434199165d966b493817a1d5edd"
+}

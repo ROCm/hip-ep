@@ -1,0 +1,2679 @@
+{
+  "state": "passed",
+  "job": "303626",
+  "source_commit": "7a9739e32f19588a1879e2b6545053fff469b4da",
+  "node": "crsuse2-m2m-v3-241",
+  "scheduler_gpu": "3",
+  "image_digest": "sha256:190c60d49255f084121606f63728265c27dfd98acbfa3eb4996928c128b57a1c",
+  "raw_sha256": {
+    "olmo-Original/memory.jsonl": "03ccdd4e067be360a69963a951a49282a46e4d468a761f2fd0c82e27d8e73d79",
+    "olmo-Changed/memory.jsonl": "ec4b4ede705c1c88cd8b5e1f616c8925e3de2279b4a974f82ce629d3b6c02d5a",
+    "qwen-Original/memory.jsonl": "9b944e73763fff54bda69983f116076c4d4e70a01b91f8d75e10bf7b55bd4073",
+    "qwen-Changed/memory.jsonl": "64ed011a1fd7f4d06d01d778b15052016e6be9fb0e7f8109ed61357b71b186f2"
+  },
+  "protocol_sha256": {
+    "olmo-Original/protocol.json": "17770167bc3aa9c7b4770f1fb50120524445dbe23839705dd724d9cf2e14d542",
+    "olmo-Changed/protocol.json": "26561c287154ab7637ab58294c4205e569d98a277b2cccd6ead112a3c99a82a4",
+    "qwen-Original/protocol.json": "9c08608f4786a5dd379896daff4bf74683faba9dc4c306701d2aaa2af6c7d588",
+    "qwen-Changed/protocol.json": "72cc522a1a0e3d006f2e235a86fde513085488f50032fcfbc24376bdb7840fd8"
+  },
+  "models": {
+    "olmo": {
+      "Original": {
+        "loaded": {
+          "allocated_bytes": 5135935488,
+          "reserved_bytes": 5270142976,
+          "device_used_bytes": 6075449344,
+          "device_total_bytes": 309220868096
+        },
+        "idle": {
+          "allocated_bytes": 0,
+          "reserved_bytes": 0,
+          "device_used_bytes": 645922816,
+          "device_total_bytes": 309220868096
+        },
+        "model_storage_bytes": 5084390400,
+        "selector_storage_bytes": 0,
+        "backbone_sha256": "1f77ca4fd3fe62ef6e81f57b3961d90d150cf5ffef6a05968e45d503c733b826",
+        "selector_sha256": null,
+        "torch": "2.11.0+rocm10.0.0",
+        "hip": "7.15.26333",
+        "gpu": "AMD Instinct MI355X"
+      },
+      "Changed": {
+        "loaded": {
+          "allocated_bytes": 5156911104,
+          "reserved_bytes": 5312086016,
+          "device_used_bytes": 6121586688,
+          "device_total_bytes": 309220868096
+        },
+        "idle": {
+          "allocated_bytes": 0,
+          "reserved_bytes": 0,
+          "device_used_bytes": 645922816,
+          "device_total_bytes": 309220868096
+        },
+        "model_storage_bytes": 5084390400,
+        "selector_storage_bytes": 20973568,
+        "backbone_sha256": "1f77ca4fd3fe62ef6e81f57b3961d90d150cf5ffef6a05968e45d503c733b826",
+        "selector_sha256": "decd3160f4321839c80fee2ba0b0241575fc06017676e38a04286a3ae3daa10b",
+        "torch": "2.11.0+rocm10.0.0",
+        "hip": "7.15.26333",
+        "gpu": "AMD Instinct MI355X"
+      }
+    },
+    "qwen": {
+      "Original": {
+        "loaded": {
+          "allocated_bytes": 54713563136,
+          "reserved_bytes": 54769221632,
+          "device_used_bytes": 55580819456,
+          "device_total_bytes": 309220868096
+        },
+        "idle": {
+          "allocated_bytes": 0,
+          "reserved_bytes": 0,
+          "device_used_bytes": 645922816,
+          "device_total_bytes": 309220868096
+        },
+        "model_storage_bytes": 54713457520,
+        "selector_storage_bytes": 0,
+        "backbone_sha256": "6afff4d4298f267dc9f2e5306ed05bf7fe37d12cc262f205651e4d931a0fc243",
+        "selector_sha256": null,
+        "torch": "2.11.0+rocm10.0.0",
+        "hip": "7.15.26333",
+        "gpu": "AMD Instinct MI355X"
+      },
+      "Changed": {
+        "loaded": {
+          "allocated_bytes": 54739783680,
+          "reserved_bytes": 54790193152,
+          "device_used_bytes": 55605985280,
+          "device_total_bytes": 309220868096
+        },
+        "idle": {
+          "allocated_bytes": 0,
+          "reserved_bytes": 0,
+          "device_used_bytes": 645922816,
+          "device_total_bytes": 309220868096
+        },
+        "model_storage_bytes": 54713457520,
+        "selector_storage_bytes": 26217472,
+        "backbone_sha256": "6afff4d4298f267dc9f2e5306ed05bf7fe37d12cc262f205651e4d931a0fc243",
+        "selector_sha256": "2d2672cf7108d233bc4ff1f7259a4aff4f674434199165d966b493817a1d5edd",
+        "torch": "2.11.0+rocm10.0.0",
+        "hip": "7.15.26333",
+        "gpu": "AMD Instinct MI355X"
+      }
+    }
+  },
+  "rows": [
+    {
+      "model": "olmo",
+      "context": 16384,
+      "batch": 1,
+      "Original": {
+        "prefill": {
+          "peak_allocated_bytes": 15592610304,
+          "peak_reserved_bytes": 16737370112,
+          "sampled_peak_device_used_bytes": 18289262592,
+          "maximum_sample_gap_seconds": 0.02050013699044939,
+          "end": {
+            "allocated_bytes": 13805906432.0,
+            "reserved_bytes": 16737370112.0,
+            "device_used_bytes": 18289262592.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            15592610304,
+            15592610304
+          ],
+          "peak_reserved_range_bytes": [
+            16737370112,
+            16737370112
+          ],
+          "sampled_peak_device_range_bytes": [
+            18289262592,
+            18289262592
+          ]
+        },
+        "decode": {
+          "peak_allocated_bytes": 13873308672,
+          "peak_reserved_bytes": 16739467264,
+          "sampled_peak_device_used_bytes": 18291359744,
+          "maximum_sample_gap_seconds": 0.020668713012128137,
+          "end": {
+            "allocated_bytes": 8982489600.0,
+            "reserved_bytes": 16739467264.0,
+            "device_used_bytes": 18291359744.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            13873308672,
+            13873308672
+          ],
+          "peak_reserved_range_bytes": [
+            16739467264,
+            16739467264
+          ],
+          "sampled_peak_device_range_bytes": [
+            18291359744,
+            18291359744
+          ]
+        },
+        "before_request": {
+          "allocated_bytes": 5215627264.0,
+          "reserved_bytes": 5538578432.0,
+          "device_used_bytes": 7090470912.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_start": {
+          "allocated_bytes": 13805906432.0,
+          "reserved_bytes": 16737370112.0,
+          "device_used_bytes": 18289262592.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_components": {
+          "native_cache_storage_bytes": 3766484992.0,
+          "selector_runtime_storage_bytes": 0.0
+        },
+        "prefill_components": {
+          "native_cache_storage_bytes": 8589934592.0,
+          "selector_runtime_storage_bytes": 0.0
+        },
+        "cache_expanded": false,
+        "request_peak_allocated_bytes": 15592610304,
+        "request_peak_reserved_bytes": 16739467264,
+        "request_sampled_peak_device_used_bytes": 18291359744
+      },
+      "Changed": {
+        "prefill": {
+          "peak_allocated_bytes": 16164987392,
+          "peak_reserved_bytes": 18519949312,
+          "sampled_peak_device_used_bytes": 20285751296,
+          "maximum_sample_gap_seconds": 0.020407967997016385,
+          "end": {
+            "allocated_bytes": 14395060736.0,
+            "reserved_bytes": 18519949312.0,
+            "device_used_bytes": 20285751296.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            16164987392,
+            16164987392
+          ],
+          "peak_reserved_range_bytes": [
+            18519949312,
+            18519949312
+          ],
+          "sampled_peak_device_range_bytes": [
+            20285751296,
+            20285751296
+          ]
+        },
+        "decode": {
+          "peak_allocated_bytes": 14462462976,
+          "peak_reserved_bytes": 18519949312,
+          "sampled_peak_device_used_bytes": 20285751296,
+          "maximum_sample_gap_seconds": 0.020846150000579655,
+          "end": {
+            "allocated_bytes": 9013802496.0,
+            "reserved_bytes": 18519949312.0,
+            "device_used_bytes": 20285751296.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            14462462976,
+            14462462976
+          ],
+          "peak_reserved_range_bytes": [
+            18519949312,
+            18519949312
+          ],
+          "sampled_peak_device_range_bytes": [
+            20285751296,
+            20285751296
+          ]
+        },
+        "before_request": {
+          "allocated_bytes": 5236602880.0,
+          "reserved_bytes": 5580521472.0,
+          "device_used_bytes": 7346323456.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_start": {
+          "allocated_bytes": 14395060736.0,
+          "reserved_bytes": 18519949312.0,
+          "device_used_bytes": 20285751296.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_components": {
+          "native_cache_storage_bytes": 3766484992.0,
+          "selector_runtime_storage_bytes": 9319296.0
+        },
+        "prefill_components": {
+          "native_cache_storage_bytes": 8594128896.0,
+          "selector_runtime_storage_bytes": 562933632.0
+        },
+        "cache_expanded": false,
+        "request_peak_allocated_bytes": 16164987392,
+        "request_peak_reserved_bytes": 18519949312,
+        "request_sampled_peak_device_used_bytes": 20285751296
+      }
+    },
+    {
+      "model": "olmo",
+      "context": 16384,
+      "batch": 2,
+      "Original": {
+        "prefill": {
+          "peak_allocated_bytes": 25667460096,
+          "peak_reserved_bytes": 27483176960,
+          "sampled_peak_device_used_bytes": 29043458048,
+          "maximum_sample_gap_seconds": 0.02072987300925888,
+          "end": {
+            "allocated_bytes": 22396173312.0,
+            "reserved_bytes": 27483176960.0,
+            "device_used_bytes": 29043458048.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            25667460096,
+            25667460096
+          ],
+          "peak_reserved_range_bytes": [
+            27483176960,
+            27483176960
+          ],
+          "sampled_peak_device_range_bytes": [
+            29043458048,
+            29043458048
+          ]
+        },
+        "decode": {
+          "peak_allocated_bytes": 22530708992,
+          "peak_reserved_bytes": 27485274112,
+          "sampled_peak_device_used_bytes": 29045555200,
+          "maximum_sample_gap_seconds": 0.020729391995701008,
+          "end": {
+            "allocated_bytes": 12749388800.0,
+            "reserved_bytes": 27485274112.0,
+            "device_used_bytes": 29045555200.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            22530708992,
+            22530708992
+          ],
+          "peak_reserved_range_bytes": [
+            27485274112,
+            27485274112
+          ],
+          "sampled_peak_device_range_bytes": [
+            29045555200,
+            29045555200
+          ]
+        },
+        "before_request": {
+          "allocated_bytes": 5215627264.0,
+          "reserved_bytes": 5538578432.0,
+          "device_used_bytes": 7098859520.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_start": {
+          "allocated_bytes": 22396173312.0,
+          "reserved_bytes": 27485274112.0,
+          "device_used_bytes": 29045555200.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_components": {
+          "native_cache_storage_bytes": 7532969984.0,
+          "selector_runtime_storage_bytes": 0.0
+        },
+        "prefill_components": {
+          "native_cache_storage_bytes": 17179869184.0,
+          "selector_runtime_storage_bytes": 0.0
+        },
+        "cache_expanded": false,
+        "request_peak_allocated_bytes": 25667460096,
+        "request_peak_reserved_bytes": 27485274112,
+        "request_sampled_peak_device_used_bytes": 29045555200
+      },
+      "Changed": {
+        "prefill": {
+          "peak_allocated_bytes": 26789137408,
+          "peak_reserved_bytes": 30983323648,
+          "sampled_peak_device_used_bytes": 32931577856,
+          "maximum_sample_gap_seconds": 0.020931507999193855,
+          "end": {
+            "allocated_bytes": 23534627840.0,
+            "reserved_bytes": 30983323648.0,
+            "device_used_bytes": 32931577856.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            26789137408,
+            26789137408
+          ],
+          "peak_reserved_range_bytes": [
+            30983323648,
+            30983323648
+          ],
+          "sampled_peak_device_range_bytes": [
+            32931577856,
+            32931577856
+          ]
+        },
+        "decode": {
+          "peak_allocated_bytes": 23669163520,
+          "peak_reserved_bytes": 30985420800,
+          "sampled_peak_device_used_bytes": 32933675008,
+          "maximum_sample_gap_seconds": 0.020678262997535057,
+          "end": {
+            "allocated_bytes": 12788887552.0,
+            "reserved_bytes": 30985420800.0,
+            "device_used_bytes": 32933675008.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            23669163520,
+            23669163520
+          ],
+          "peak_reserved_range_bytes": [
+            30985420800,
+            30985420800
+          ],
+          "sampled_peak_device_range_bytes": [
+            32933675008,
+            32933675008
+          ]
+        },
+        "before_request": {
+          "allocated_bytes": 5236602880.0,
+          "reserved_bytes": 5580521472.0,
+          "device_used_bytes": 7528775680.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_start": {
+          "allocated_bytes": 23534627840.0,
+          "reserved_bytes": 30985420800.0,
+          "device_used_bytes": 32933675008.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_components": {
+          "native_cache_storage_bytes": 7532969984.0,
+          "selector_runtime_storage_bytes": 18637568.0
+        },
+        "prefill_components": {
+          "native_cache_storage_bytes": 17188257792.0,
+          "selector_runtime_storage_bytes": 1109090048.0
+        },
+        "cache_expanded": false,
+        "request_peak_allocated_bytes": 26789137408,
+        "request_peak_reserved_bytes": 30985420800,
+        "request_sampled_peak_device_used_bytes": 32933675008
+      }
+    },
+    {
+      "model": "olmo",
+      "context": 16384,
+      "batch": 4,
+      "Original": {
+        "prefill": {
+          "peak_allocated_bytes": 45817159680,
+          "peak_reserved_bytes": 50402951168,
+          "sampled_peak_device_used_bytes": 51971620864,
+          "maximum_sample_gap_seconds": 0.02060649399936665,
+          "end": {
+            "allocated_bytes": 39576706560.0,
+            "reserved_bytes": 50402951168.0,
+            "device_used_bytes": 51971620864.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            45817159680,
+            45817159680
+          ],
+          "peak_reserved_range_bytes": [
+            50402951168,
+            50402951168
+          ],
+          "sampled_peak_device_range_bytes": [
+            51971620864,
+            51971620864
+          ]
+        },
+        "decode": {
+          "peak_allocated_bytes": 39845509120,
+          "peak_reserved_bytes": 50405048320,
+          "sampled_peak_device_used_bytes": 51973718016,
+          "maximum_sample_gap_seconds": 0.020889349005301483,
+          "end": {
+            "allocated_bytes": 20282908160.0,
+            "reserved_bytes": 50405048320.0,
+            "device_used_bytes": 51973718016.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            39845509120,
+            39845509120
+          ],
+          "peak_reserved_range_bytes": [
+            50405048320,
+            50405048320
+          ],
+          "sampled_peak_device_range_bytes": [
+            51973718016,
+            51973718016
+          ]
+        },
+        "before_request": {
+          "allocated_bytes": 5215627264.0,
+          "reserved_bytes": 5538578432.0,
+          "device_used_bytes": 7107248128.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_start": {
+          "allocated_bytes": 39576706560.0,
+          "reserved_bytes": 50405048320.0,
+          "device_used_bytes": 51973718016.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_components": {
+          "native_cache_storage_bytes": 15065939968.0,
+          "selector_runtime_storage_bytes": 0.0
+        },
+        "prefill_components": {
+          "native_cache_storage_bytes": 34359738368.0,
+          "selector_runtime_storage_bytes": 0.0
+        },
+        "cache_expanded": false,
+        "request_peak_allocated_bytes": 45817159680,
+        "request_peak_reserved_bytes": 50405048320,
+        "request_sampled_peak_device_used_bytes": 51973718016
+      },
+      "Changed": {
+        "prefill": {
+          "peak_allocated_bytes": 48039538688,
+          "peak_reserved_bytes": 56656658432,
+          "sampled_peak_device_used_bytes": 58615398400,
+          "maximum_sample_gap_seconds": 0.020555825001792982,
+          "end": {
+            "allocated_bytes": 41815862784.0,
+            "reserved_bytes": 56656658432.0,
+            "device_used_bytes": 58615398400.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            48039538688,
+            48039538688
+          ],
+          "peak_reserved_range_bytes": [
+            56656658432,
+            56656658432
+          ],
+          "sampled_peak_device_range_bytes": [
+            58615398400,
+            58615398400
+          ]
+        },
+        "decode": {
+          "peak_allocated_bytes": 42084665344,
+          "peak_reserved_bytes": 56658755584,
+          "sampled_peak_device_used_bytes": 58617495552,
+          "maximum_sample_gap_seconds": 0.02063281400478445,
+          "end": {
+            "allocated_bytes": 20341158400.0,
+            "reserved_bytes": 56658755584.0,
+            "device_used_bytes": 58617495552.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            42084665344,
+            42084665344
+          ],
+          "peak_reserved_range_bytes": [
+            56658755584,
+            56658755584
+          ],
+          "sampled_peak_device_range_bytes": [
+            58617495552,
+            58617495552
+          ]
+        },
+        "before_request": {
+          "allocated_bytes": 5236602880.0,
+          "reserved_bytes": 5580521472.0,
+          "device_used_bytes": 7539261440.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_start": {
+          "allocated_bytes": 41815862784.0,
+          "reserved_bytes": 56658755584.0,
+          "device_used_bytes": 58617495552.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_components": {
+          "native_cache_storage_bytes": 15065939968.0,
+          "selector_runtime_storage_bytes": 37274112.0
+        },
+        "prefill_components": {
+          "native_cache_storage_bytes": 34376515584.0,
+          "selector_runtime_storage_bytes": 2201402880.0
+        },
+        "cache_expanded": false,
+        "request_peak_allocated_bytes": 48039538688,
+        "request_peak_reserved_bytes": 56658755584,
+        "request_sampled_peak_device_used_bytes": 58617495552
+      }
+    },
+    {
+      "model": "olmo",
+      "context": 32768,
+      "batch": 1,
+      "Original": {
+        "prefill": {
+          "peak_allocated_bytes": 26506451456,
+          "peak_reserved_bytes": 28726788096,
+          "sampled_peak_device_used_bytes": 30295457792,
+          "maximum_sample_gap_seconds": 0.02058530399517622,
+          "end": {
+            "allocated_bytes": 22395972096.0,
+            "reserved_bytes": 28726788096.0,
+            "device_used_bytes": 30295457792.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            26506451456,
+            26506451456
+          ],
+          "peak_reserved_range_bytes": [
+            28726788096,
+            28726788096
+          ],
+          "sampled_peak_device_range_bytes": [
+            30295457792,
+            30295457792
+          ]
+        },
+        "decode": {
+          "peak_allocated_bytes": 22463374336,
+          "peak_reserved_bytes": 28726788096,
+          "sampled_peak_device_used_bytes": 30295457792,
+          "maximum_sample_gap_seconds": 0.02069382299669087,
+          "end": {
+            "allocated_bytes": 11130071552.0,
+            "reserved_bytes": 28726788096.0,
+            "device_used_bytes": 30295457792.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            22463374336,
+            22463374336
+          ],
+          "peak_reserved_range_bytes": [
+            28726788096,
+            28726788096
+          ],
+          "sampled_peak_device_range_bytes": [
+            30295457792,
+            30295457792
+          ]
+        },
+        "before_request": {
+          "allocated_bytes": 5215627264.0,
+          "reserved_bytes": 5538578432.0,
+          "device_used_bytes": 7107248128.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_start": {
+          "allocated_bytes": 22395972096.0,
+          "reserved_bytes": 28726788096.0,
+          "device_used_bytes": 30295457792.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_components": {
+          "native_cache_storage_bytes": 5913968640.0,
+          "selector_runtime_storage_bytes": 0.0
+        },
+        "prefill_components": {
+          "native_cache_storage_bytes": 17179869184.0,
+          "selector_runtime_storage_bytes": 0.0
+        },
+        "cache_expanded": false,
+        "request_peak_allocated_bytes": 26506451456,
+        "request_peak_reserved_bytes": 28726788096,
+        "request_sampled_peak_device_used_bytes": 30295457792
+      },
+      "Changed": {
+        "prefill": {
+          "peak_allocated_bytes": 27623039488,
+          "peak_reserved_bytes": 29657923584,
+          "sampled_peak_device_used_bytes": 31620857856,
+          "maximum_sample_gap_seconds": 0.020936778004397638,
+          "end": {
+            "allocated_bytes": 23546114560.0,
+            "reserved_bytes": 29657923584.0,
+            "device_used_bytes": 31620857856.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            27623039488,
+            27623039488
+          ],
+          "peak_reserved_range_bytes": [
+            29657923584,
+            29657923584
+          ],
+          "sampled_peak_device_range_bytes": [
+            31620857856,
+            31620857856
+          ]
+        },
+        "decode": {
+          "peak_allocated_bytes": 23613516800,
+          "peak_reserved_bytes": 29657923584,
+          "sampled_peak_device_used_bytes": 31620857856,
+          "maximum_sample_gap_seconds": 0.020746451991726644,
+          "end": {
+            "allocated_bytes": 11168757248.0,
+            "reserved_bytes": 29657923584.0,
+            "device_used_bytes": 31620857856.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            23613516800,
+            23613516800
+          ],
+          "peak_reserved_range_bytes": [
+            29657923584,
+            29657923584
+          ],
+          "sampled_peak_device_range_bytes": [
+            31620857856,
+            31620857856
+          ]
+        },
+        "before_request": {
+          "allocated_bytes": 5236602880.0,
+          "reserved_bytes": 5580521472.0,
+          "device_used_bytes": 7543455744.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_start": {
+          "allocated_bytes": 23546114560.0,
+          "reserved_bytes": 29657923584.0,
+          "device_used_bytes": 31620857856.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_components": {
+          "native_cache_storage_bytes": 5913968640.0,
+          "selector_runtime_storage_bytes": 17707904.0
+        },
+        "prefill_components": {
+          "native_cache_storage_bytes": 17184063488.0,
+          "selector_runtime_storage_bytes": 1124970368.0
+        },
+        "cache_expanded": false,
+        "request_peak_allocated_bytes": 27623039488,
+        "request_peak_reserved_bytes": 29657923584,
+        "request_sampled_peak_device_used_bytes": 31620857856
+      }
+    },
+    {
+      "model": "olmo",
+      "context": 32768,
+      "batch": 2,
+      "Original": {
+        "prefill": {
+          "peak_allocated_bytes": 46656150528,
+          "peak_reserved_bytes": 50839158784,
+          "sampled_peak_device_used_bytes": 52407828480,
+          "maximum_sample_gap_seconds": 0.020552225003484637,
+          "end": {
+            "allocated_bytes": 39576304640.0,
+            "reserved_bytes": 50839158784.0,
+            "device_used_bytes": 52407828480.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            46656150528,
+            46656150528
+          ],
+          "peak_reserved_range_bytes": [
+            50839158784,
+            50839158784
+          ],
+          "sampled_peak_device_range_bytes": [
+            52407828480,
+            52407828480
+          ]
+        },
+        "decode": {
+          "peak_allocated_bytes": 39710840320,
+          "peak_reserved_bytes": 50839158784,
+          "sampled_peak_device_used_bytes": 52407828480,
+          "maximum_sample_gap_seconds": 0.020820391000597738,
+          "end": {
+            "allocated_bytes": 17044503552.0,
+            "reserved_bytes": 50839158784.0,
+            "device_used_bytes": 52407828480.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            39710840320,
+            39710840320
+          ],
+          "peak_reserved_range_bytes": [
+            50839158784,
+            50839158784
+          ],
+          "sampled_peak_device_range_bytes": [
+            52407828480,
+            52407828480
+          ]
+        },
+        "before_request": {
+          "allocated_bytes": 5215627264.0,
+          "reserved_bytes": 5538578432.0,
+          "device_used_bytes": 7107248128.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_start": {
+          "allocated_bytes": 39576304640.0,
+          "reserved_bytes": 50839158784.0,
+          "device_used_bytes": 52407828480.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_components": {
+          "native_cache_storage_bytes": 11827937280.0,
+          "selector_runtime_storage_bytes": 0.0
+        },
+        "prefill_components": {
+          "native_cache_storage_bytes": 34359738368.0,
+          "selector_runtime_storage_bytes": 0.0
+        },
+        "cache_expanded": false,
+        "request_peak_allocated_bytes": 46656150528,
+        "request_peak_reserved_bytes": 50839158784,
+        "request_sampled_peak_device_used_bytes": 52407828480
+      },
+      "Changed": {
+        "prefill": {
+          "peak_allocated_bytes": 48868346880,
+          "peak_reserved_bytes": 54473523200,
+          "sampled_peak_device_used_bytes": 56438554624,
+          "maximum_sample_gap_seconds": 0.020546586005366407,
+          "end": {
+            "allocated_bytes": 41822055424.0,
+            "reserved_bytes": 54473523200.0,
+            "device_used_bytes": 56438554624.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            48868346880,
+            48868346880
+          ],
+          "peak_reserved_range_bytes": [
+            54473523200,
+            54473523200
+          ],
+          "sampled_peak_device_range_bytes": [
+            56438554624,
+            56438554624
+          ]
+        },
+        "decode": {
+          "peak_allocated_bytes": 41956591104,
+          "peak_reserved_bytes": 54473523200,
+          "sampled_peak_device_used_bytes": 56438554624,
+          "maximum_sample_gap_seconds": 0.02065529399260413,
+          "end": {
+            "allocated_bytes": 17100894208.0,
+            "reserved_bytes": 54473523200.0,
+            "device_used_bytes": 56438554624.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            41956591104,
+            41956591104
+          ],
+          "peak_reserved_range_bytes": [
+            54473523200,
+            54473523200
+          ],
+          "sampled_peak_device_range_bytes": [
+            56438554624,
+            56438554624
+          ]
+        },
+        "before_request": {
+          "allocated_bytes": 5236602880.0,
+          "reserved_bytes": 5580521472.0,
+          "device_used_bytes": 7545552896.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_start": {
+          "allocated_bytes": 41822055424.0,
+          "reserved_bytes": 54473523200.0,
+          "device_used_bytes": 56438554624.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_components": {
+          "native_cache_storage_bytes": 11827937280.0,
+          "selector_runtime_storage_bytes": 35414784.0
+        },
+        "prefill_components": {
+          "native_cache_storage_bytes": 34368126976.0,
+          "selector_runtime_storage_bytes": 2216386304.0
+        },
+        "cache_expanded": false,
+        "request_peak_allocated_bytes": 48868346880,
+        "request_peak_reserved_bytes": 54473523200,
+        "request_sampled_peak_device_used_bytes": 56438554624
+      }
+    },
+    {
+      "model": "olmo",
+      "context": 32768,
+      "batch": 4,
+      "Original": {
+        "prefill": {
+          "peak_allocated_bytes": 86955548672,
+          "peak_reserved_bytes": 95065997312,
+          "sampled_peak_device_used_bytes": 96638861312,
+          "maximum_sample_gap_seconds": 0.020726641989313066,
+          "end": {
+            "allocated_bytes": 73936969216.0,
+            "reserved_bytes": 95065997312.0,
+            "device_used_bytes": 96638861312.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            86955548672,
+            86955548672
+          ],
+          "peak_reserved_range_bytes": [
+            95065997312,
+            95065997312
+          ],
+          "sampled_peak_device_range_bytes": [
+            96638861312,
+            96638861312
+          ]
+        },
+        "decode": {
+          "peak_allocated_bytes": 74205771776,
+          "peak_reserved_bytes": 95065997312,
+          "sampled_peak_device_used_bytes": 96638861312,
+          "maximum_sample_gap_seconds": 0.02346782200038433,
+          "end": {
+            "allocated_bytes": 28873367040.0,
+            "reserved_bytes": 95065997312.0,
+            "device_used_bytes": 96638861312.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            74205771776,
+            74205771776
+          ],
+          "peak_reserved_range_bytes": [
+            95065997312,
+            95065997312
+          ],
+          "sampled_peak_device_range_bytes": [
+            96638861312,
+            96638861312
+          ]
+        },
+        "before_request": {
+          "allocated_bytes": 5215627264.0,
+          "reserved_bytes": 5538578432.0,
+          "device_used_bytes": 7111442432.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_start": {
+          "allocated_bytes": 73936969216.0,
+          "reserved_bytes": 95065997312.0,
+          "device_used_bytes": 96638861312.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_components": {
+          "native_cache_storage_bytes": 23655874560.0,
+          "selector_runtime_storage_bytes": 0.0
+        },
+        "prefill_components": {
+          "native_cache_storage_bytes": 68719476736.0,
+          "selector_runtime_storage_bytes": 0.0
+        },
+        "cache_expanded": false,
+        "request_peak_allocated_bytes": 86955548672,
+        "request_peak_reserved_bytes": 95065997312,
+        "request_sampled_peak_device_used_bytes": 96638861312
+      },
+      "Changed": {
+        "prefill": {
+          "peak_allocated_bytes": 91358965760,
+          "peak_reserved_bytes": 99407101952,
+          "sampled_peak_device_used_bytes": 101378424832,
+          "maximum_sample_gap_seconds": 0.020531646005110815,
+          "end": {
+            "allocated_bytes": 78373940736.0,
+            "reserved_bytes": 99407101952.0,
+            "device_used_bytes": 101378424832.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            91358965760,
+            91358965760
+          ],
+          "peak_reserved_range_bytes": [
+            99407101952,
+            99407101952
+          ],
+          "sampled_peak_device_range_bytes": [
+            101378424832,
+            101378424832
+          ]
+        },
+        "decode": {
+          "peak_allocated_bytes": 78642743296,
+          "peak_reserved_bytes": 99407101952,
+          "sampled_peak_device_used_bytes": 101378424832,
+          "maximum_sample_gap_seconds": 0.020788981011719443,
+          "end": {
+            "allocated_bytes": 28965171712.0,
+            "reserved_bytes": 99407101952.0,
+            "device_used_bytes": 101378424832.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            78642743296,
+            78642743296
+          ],
+          "peak_reserved_range_bytes": [
+            99407101952,
+            99407101952
+          ],
+          "sampled_peak_device_range_bytes": [
+            101378424832,
+            101378424832
+          ]
+        },
+        "before_request": {
+          "allocated_bytes": 5236602880.0,
+          "reserved_bytes": 5580521472.0,
+          "device_used_bytes": 7551844352.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_start": {
+          "allocated_bytes": 78373940736.0,
+          "reserved_bytes": 99407101952.0,
+          "device_used_bytes": 101378424832.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_components": {
+          "native_cache_storage_bytes": 23655874560.0,
+          "selector_runtime_storage_bytes": 70828544.0
+        },
+        "prefill_components": {
+          "native_cache_storage_bytes": 68736253952.0,
+          "selector_runtime_storage_bytes": 4399218176.0
+        },
+        "cache_expanded": false,
+        "request_peak_allocated_bytes": 91358965760,
+        "request_peak_reserved_bytes": 99407101952,
+        "request_sampled_peak_device_used_bytes": 101378424832
+      }
+    },
+    {
+      "model": "olmo",
+      "context": 65472,
+      "batch": 1,
+      "Original": {
+        "prefill": {
+          "peak_allocated_bytes": 54146270720,
+          "peak_reserved_bytes": 61819846656,
+          "sampled_peak_device_used_bytes": 63396904960,
+          "maximum_sample_gap_seconds": 0.02054900499933865,
+          "end": {
+            "allocated_bytes": 39542548480.0,
+            "reserved_bytes": 61819846656.0,
+            "device_used_bytes": 63396904960.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            54146270720,
+            54146270720
+          ],
+          "peak_reserved_range_bytes": [
+            61819846656,
+            61819846656
+          ],
+          "sampled_peak_device_range_bytes": [
+            63396904960,
+            63396904960
+          ]
+        },
+        "decode": {
+          "peak_allocated_bytes": 39609950720,
+          "peak_reserved_bytes": 61819846656,
+          "sampled_peak_device_used_bytes": 63396904960,
+          "maximum_sample_gap_seconds": 0.020765991997905076,
+          "end": {
+            "allocated_bytes": 15416911872.0,
+            "reserved_bytes": 61819846656.0,
+            "device_used_bytes": 63396904960.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            39609950720,
+            39609950720
+          ],
+          "peak_reserved_range_bytes": [
+            61819846656,
+            61819846656
+          ],
+          "sampled_peak_device_range_bytes": [
+            63396904960,
+            63396904960
+          ]
+        },
+        "before_request": {
+          "allocated_bytes": 5215627264.0,
+          "reserved_bytes": 5538578432.0,
+          "device_used_bytes": 7115636736.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_start": {
+          "allocated_bytes": 39542548480.0,
+          "reserved_bytes": 61819846656.0,
+          "device_used_bytes": 63396904960.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_components": {
+          "native_cache_storage_bytes": 10200547328.0,
+          "selector_runtime_storage_bytes": 0.0
+        },
+        "prefill_components": {
+          "native_cache_storage_bytes": 34326183936.0,
+          "selector_runtime_storage_bytes": 0.0
+        },
+        "cache_expanded": false,
+        "request_peak_allocated_bytes": 54146270720,
+        "request_peak_reserved_bytes": 61819846656,
+        "request_sampled_peak_device_used_bytes": 63396904960
+      },
+      "Changed": {
+        "prefill": {
+          "peak_allocated_bytes": 60244279808,
+          "peak_reserved_bytes": 74723622912,
+          "sampled_peak_device_used_bytes": 76703334400,
+          "maximum_sample_gap_seconds": 0.021382830003858544,
+          "end": {
+            "allocated_bytes": 41814601728.0,
+            "reserved_bytes": 74723622912.0,
+            "device_used_bytes": 76703334400.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            60244279808,
+            60244279808
+          ],
+          "peak_reserved_range_bytes": [
+            74723622912,
+            74723622912
+          ],
+          "sampled_peak_device_range_bytes": [
+            76703334400,
+            76703334400
+          ]
+        },
+        "decode": {
+          "peak_allocated_bytes": 41882003968,
+          "peak_reserved_bytes": 74723622912,
+          "sampled_peak_device_used_bytes": 76703334400,
+          "maximum_sample_gap_seconds": 0.020722482004202902,
+          "end": {
+            "allocated_bytes": 15472374784.0,
+            "reserved_bytes": 74723622912.0,
+            "device_used_bytes": 76703334400.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            41882003968,
+            41882003968
+          ],
+          "peak_reserved_range_bytes": [
+            74723622912,
+            74723622912
+          ],
+          "sampled_peak_device_range_bytes": [
+            76703334400,
+            76703334400
+          ]
+        },
+        "before_request": {
+          "allocated_bytes": 5236602880.0,
+          "reserved_bytes": 5580521472.0,
+          "device_used_bytes": 7560232960.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_start": {
+          "allocated_bytes": 41814601728.0,
+          "reserved_bytes": 74723622912.0,
+          "device_used_bytes": 76703334400.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_components": {
+          "native_cache_storage_bytes": 10200547328.0,
+          "selector_runtime_storage_bytes": 34485120.0
+        },
+        "prefill_components": {
+          "native_cache_storage_bytes": 34330378240.0,
+          "selector_runtime_storage_bytes": 2246881152.0
+        },
+        "cache_expanded": false,
+        "request_peak_allocated_bytes": 60244279808,
+        "request_peak_reserved_bytes": 74723622912,
+        "request_sampled_peak_device_used_bytes": 76703334400
+      }
+    },
+    {
+      "model": "olmo",
+      "context": 65472,
+      "batch": 2,
+      "Original": {
+        "prefill": {
+          "peak_allocated_bytes": 98655708672,
+          "peak_reserved_bytes": 111660761088,
+          "sampled_peak_device_used_bytes": 113242013696,
+          "maximum_sample_gap_seconds": 0.020739561994560063,
+          "end": {
+            "allocated_bytes": 73869457408.0,
+            "reserved_bytes": 111660761088.0,
+            "device_used_bytes": 113242013696.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            98655708672,
+            98655708672
+          ],
+          "peak_reserved_range_bytes": [
+            111660761088,
+            111660761088
+          ],
+          "sampled_peak_device_range_bytes": [
+            113242013696,
+            113242013696
+          ]
+        },
+        "decode": {
+          "peak_allocated_bytes": 74003993088,
+          "peak_reserved_bytes": 111660761088,
+          "sampled_peak_device_used_bytes": 113242013696,
+          "maximum_sample_gap_seconds": 0.023860814995714463,
+          "end": {
+            "allocated_bytes": 25618184192.0,
+            "reserved_bytes": 111660761088.0,
+            "device_used_bytes": 113242013696.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            74003993088,
+            74003993088
+          ],
+          "peak_reserved_range_bytes": [
+            111660761088,
+            111660761088
+          ],
+          "sampled_peak_device_range_bytes": [
+            113242013696,
+            113242013696
+          ]
+        },
+        "before_request": {
+          "allocated_bytes": 5215627264.0,
+          "reserved_bytes": 5538578432.0,
+          "device_used_bytes": 7119831040.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_start": {
+          "allocated_bytes": 73869457408.0,
+          "reserved_bytes": 111660761088.0,
+          "device_used_bytes": 113242013696.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_components": {
+          "native_cache_storage_bytes": 20401094656.0,
+          "selector_runtime_storage_bytes": 0.0
+        },
+        "prefill_components": {
+          "native_cache_storage_bytes": 68652367872.0,
+          "selector_runtime_storage_bytes": 0.0
+        },
+        "cache_expanded": false,
+        "request_peak_allocated_bytes": 98655708672,
+        "request_peak_reserved_bytes": 111660761088,
+        "request_sampled_peak_device_used_bytes": 113242013696
+      },
+      "Changed": {
+        "prefill": {
+          "peak_allocated_bytes": 110830227456,
+          "peak_reserved_bytes": 137424273408,
+          "sampled_peak_device_used_bytes": 139410276352,
+          "maximum_sample_gap_seconds": 0.020495546006713994,
+          "end": {
+            "allocated_bytes": 78325540864.0,
+            "reserved_bytes": 137424273408.0,
+            "device_used_bytes": 139410276352.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            110830227456,
+            110830227456
+          ],
+          "peak_reserved_range_bytes": [
+            137424273408,
+            137424273408
+          ],
+          "sampled_peak_device_range_bytes": [
+            139410276352,
+            139410276352
+          ]
+        },
+        "decode": {
+          "peak_allocated_bytes": 78460076544,
+          "peak_reserved_bytes": 137424273408,
+          "sampled_peak_device_used_bytes": 139410276352,
+          "maximum_sample_gap_seconds": 0.024471504002576694,
+          "end": {
+            "allocated_bytes": 25708129280.0,
+            "reserved_bytes": 137424273408.0,
+            "device_used_bytes": 139410276352.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            78460076544,
+            78460076544
+          ],
+          "peak_reserved_range_bytes": [
+            137424273408,
+            137424273408
+          ],
+          "sampled_peak_device_range_bytes": [
+            139410276352,
+            139410276352
+          ]
+        },
+        "before_request": {
+          "allocated_bytes": 5236602880.0,
+          "reserved_bytes": 5580521472.0,
+          "device_used_bytes": 7566524416.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_start": {
+          "allocated_bytes": 78325540864.0,
+          "reserved_bytes": 137424273408.0,
+          "device_used_bytes": 139410276352.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_components": {
+          "native_cache_storage_bytes": 20401094656.0,
+          "selector_runtime_storage_bytes": 68969216.0
+        },
+        "prefill_components": {
+          "native_cache_storage_bytes": 68660756480.0,
+          "selector_runtime_storage_bytes": 4426718976.0
+        },
+        "cache_expanded": false,
+        "request_peak_allocated_bytes": 110830227456,
+        "request_peak_reserved_bytes": 137424273408,
+        "request_sampled_peak_device_used_bytes": 139410276352
+      }
+    },
+    {
+      "model": "olmo",
+      "context": 65472,
+      "batch": 4,
+      "Original": {
+        "prefill": null,
+        "decode": {
+          "peak_allocated_bytes": 48167007744,
+          "peak_reserved_bytes": 72555167744,
+          "sampled_peak_device_used_bytes": 74136420352,
+          "maximum_sample_gap_seconds": 0.02686776999325957,
+          "end": {
+            "allocated_bytes": 46019156992.0,
+            "reserved_bytes": 72555167744.0,
+            "device_used_bytes": 74136420352.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            48167007744,
+            48167007744
+          ],
+          "peak_reserved_range_bytes": [
+            72555167744,
+            72555167744
+          ],
+          "sampled_peak_device_range_bytes": [
+            74136420352,
+            74136420352
+          ]
+        },
+        "before_request": {
+          "allocated_bytes": 5215627264.0,
+          "reserved_bytes": 5538578432.0,
+          "device_used_bytes": 7119831040.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_start": {
+          "allocated_bytes": 45983559168.0,
+          "reserved_bytes": 63965233152.0,
+          "device_used_bytes": 65546485760.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_components": {
+          "native_cache_storage_bytes": 40802189312.0,
+          "selector_runtime_storage_bytes": 0.0
+        },
+        "prefill_components": null,
+        "cache_expanded": true,
+        "request_peak_allocated_bytes": 48167007744,
+        "request_peak_reserved_bytes": 72555167744,
+        "request_sampled_peak_device_used_bytes": 74136420352
+      },
+      "Changed": {
+        "prefill": null,
+        "decode": {
+          "peak_allocated_bytes": 50517596160,
+          "peak_reserved_bytes": 74725720064,
+          "sampled_peak_device_used_bytes": 76711723008,
+          "maximum_sample_gap_seconds": 0.02828293498896528,
+          "end": {
+            "allocated_bytes": 46178070528.0,
+            "reserved_bytes": 74725720064.0,
+            "device_used_bytes": 76711723008.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            50517596160,
+            50517596160
+          ],
+          "peak_reserved_range_bytes": [
+            74725720064,
+            74725720064
+          ],
+          "sampled_peak_device_range_bytes": [
+            76711723008,
+            76711723008
+          ]
+        },
+        "before_request": {
+          "allocated_bytes": 5236602880.0,
+          "reserved_bytes": 5580521472.0,
+          "device_used_bytes": 7566524416.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_start": {
+          "allocated_bytes": 48371547648.0,
+          "reserved_bytes": 74723622912.0,
+          "device_used_bytes": 76709625856.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_components": {
+          "native_cache_storage_bytes": 40802189312.0,
+          "selector_runtime_storage_bytes": 137937408.0
+        },
+        "prefill_components": null,
+        "cache_expanded": true,
+        "request_peak_allocated_bytes": 50517596160,
+        "request_peak_reserved_bytes": 74725720064,
+        "request_sampled_peak_device_used_bytes": 76711723008
+      }
+    },
+    {
+      "model": "qwen",
+      "context": 16384,
+      "batch": 1,
+      "Original": {
+        "prefill": {
+          "peak_allocated_bytes": 59327830016,
+          "peak_reserved_bytes": 60280537088,
+          "sampled_peak_device_used_bytes": 62618861568,
+          "maximum_sample_gap_seconds": 0.02062720801040996,
+          "end": {
+            "allocated_bytes": 56023608320.0,
+            "reserved_bytes": 60280537088.0,
+            "device_used_bytes": 62618861568.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            59327830016,
+            59327830016
+          ],
+          "peak_reserved_range_bytes": [
+            60280537088,
+            60280537088
+          ],
+          "sampled_peak_device_range_bytes": [
+            62618861568,
+            62618861568
+          ]
+        },
+        "decode": {
+          "peak_allocated_bytes": 56061547520,
+          "peak_reserved_bytes": 60282634240,
+          "sampled_peak_device_used_bytes": 62620958720,
+          "maximum_sample_gap_seconds": 0.021193327993387356,
+          "end": {
+            "allocated_bytes": 56027803136.0,
+            "reserved_bytes": 60282634240.0,
+            "device_used_bytes": 62620958720.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            56061547520,
+            56061547520
+          ],
+          "peak_reserved_range_bytes": [
+            60282634240,
+            60282634240
+          ],
+          "sampled_peak_device_range_bytes": [
+            62620958720,
+            62620958720
+          ]
+        },
+        "before_request": {
+          "allocated_bytes": 54793254912.0,
+          "reserved_bytes": 55104765952.0,
+          "device_used_bytes": 57443090432.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_start": {
+          "allocated_bytes": 56023608320.0,
+          "reserved_bytes": 60282634240.0,
+          "device_used_bytes": 62620958720.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_components": {
+          "native_cache_storage_bytes": 1232863232.0,
+          "selector_runtime_storage_bytes": 0.0
+        },
+        "prefill_components": {
+          "native_cache_storage_bytes": 1228668928.0,
+          "selector_runtime_storage_bytes": 0.0
+        },
+        "cache_expanded": false,
+        "request_peak_allocated_bytes": 59327830016,
+        "request_peak_reserved_bytes": 60282634240,
+        "request_sampled_peak_device_used_bytes": 62620958720
+      },
+      "Changed": {
+        "prefill": {
+          "peak_allocated_bytes": 60033683456,
+          "peak_reserved_bytes": 60672704512,
+          "sampled_peak_device_used_bytes": 62763565056,
+          "maximum_sample_gap_seconds": 0.020655897998949513,
+          "end": {
+            "allocated_bytes": 56734704640.0,
+            "reserved_bytes": 60672704512.0,
+            "device_used_bytes": 62763565056.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            60033683456,
+            60033683456
+          ],
+          "peak_reserved_range_bytes": [
+            60672704512,
+            60672704512
+          ],
+          "sampled_peak_device_range_bytes": [
+            62763565056,
+            62763565056
+          ]
+        },
+        "decode": {
+          "peak_allocated_bytes": 56767848448,
+          "peak_reserved_bytes": 60674801664,
+          "sampled_peak_device_used_bytes": 62765662208,
+          "maximum_sample_gap_seconds": 0.021064241009298712,
+          "end": {
+            "allocated_bytes": 56063658496.0,
+            "reserved_bytes": 60674801664.0,
+            "device_used_bytes": 62765662208.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            56767848448,
+            56767848448
+          ],
+          "peak_reserved_range_bytes": [
+            60674801664,
+            60674801664
+          ],
+          "sampled_peak_device_range_bytes": [
+            62765662208,
+            62765662208
+          ]
+        },
+        "before_request": {
+          "allocated_bytes": 54819475456.0,
+          "reserved_bytes": 55125737472.0,
+          "device_used_bytes": 57216598016.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_start": {
+          "allocated_bytes": 56734704640.0,
+          "reserved_bytes": 60674801664.0,
+          "device_used_bytes": 62765662208.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_components": {
+          "native_cache_storage_bytes": 1232863232.0,
+          "selector_runtime_storage_bytes": 5991184.0
+        },
+        "prefill_components": {
+          "native_cache_storage_bytes": 1228668928.0,
+          "selector_runtime_storage_bytes": 681232912.0
+        },
+        "cache_expanded": false,
+        "request_peak_allocated_bytes": 60033683456,
+        "request_peak_reserved_bytes": 60674801664,
+        "request_sampled_peak_device_used_bytes": 62765662208
+      }
+    },
+    {
+      "model": "qwen",
+      "context": 16384,
+      "batch": 4,
+      "Original": {
+        "prefill": {
+          "peak_allocated_bytes": 72922740736,
+          "peak_reserved_bytes": 76468453376,
+          "sampled_peak_device_used_bytes": 78810972160,
+          "maximum_sample_gap_seconds": 0.020778695994522423,
+          "end": {
+            "allocated_bytes": 59710441472.0,
+            "reserved_bytes": 76468453376.0,
+            "device_used_bytes": 78810972160.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            72922740736,
+            72922740736
+          ],
+          "peak_reserved_range_bytes": [
+            76468453376,
+            76468453376
+          ],
+          "sampled_peak_device_range_bytes": [
+            78810972160,
+            78810972160
+          ]
+        },
+        "decode": {
+          "peak_allocated_bytes": 59862192128,
+          "peak_reserved_bytes": 76470550528,
+          "sampled_peak_device_used_bytes": 78813069312,
+          "maximum_sample_gap_seconds": 0.020812005997868255,
+          "end": {
+            "allocated_bytes": 59727440384.0,
+            "reserved_bytes": 76470550528.0,
+            "device_used_bytes": 78813069312.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            59862192128,
+            59862192128
+          ],
+          "peak_reserved_range_bytes": [
+            76470550528,
+            76470550528
+          ],
+          "sampled_peak_device_range_bytes": [
+            78813069312,
+            78813069312
+          ]
+        },
+        "before_request": {
+          "allocated_bytes": 54793254912.0,
+          "reserved_bytes": 55104765952.0,
+          "device_used_bytes": 57447284736.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_start": {
+          "allocated_bytes": 59710441472.0,
+          "reserved_bytes": 76470550528.0,
+          "device_used_bytes": 78813069312.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_components": {
+          "native_cache_storage_bytes": 4931452928.0,
+          "selector_runtime_storage_bytes": 0.0
+        },
+        "prefill_components": {
+          "native_cache_storage_bytes": 4914675712.0,
+          "selector_runtime_storage_bytes": 0.0
+        },
+        "cache_expanded": false,
+        "request_peak_allocated_bytes": 72922740736,
+        "request_peak_reserved_bytes": 76470550528,
+        "request_sampled_peak_device_used_bytes": 78813069312
+      },
+      "Changed": {
+        "prefill": {
+          "peak_allocated_bytes": 75658633216,
+          "peak_reserved_bytes": 78905344000,
+          "sampled_peak_device_used_bytes": 81000398848,
+          "maximum_sample_gap_seconds": 0.02079485599824693,
+          "end": {
+            "allocated_bytes": 62463188992.0,
+            "reserved_bytes": 78905344000.0,
+            "device_used_bytes": 81000398848.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            75658633216,
+            75658633216
+          ],
+          "peak_reserved_range_bytes": [
+            78905344000,
+            78905344000
+          ],
+          "sampled_peak_device_range_bytes": [
+            81000398848,
+            81000398848
+          ]
+        },
+        "decode": {
+          "peak_allocated_bytes": 62595680256,
+          "peak_reserved_bytes": 78907441152,
+          "sampled_peak_device_used_bytes": 81002496000,
+          "maximum_sample_gap_seconds": 0.020811785012483597,
+          "end": {
+            "allocated_bytes": 59778921984.0,
+            "reserved_bytes": 78907441152.0,
+            "device_used_bytes": 81002496000.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            62595680256,
+            62595680256
+          ],
+          "peak_reserved_range_bytes": [
+            78907441152,
+            78907441152
+          ],
+          "sampled_peak_device_range_bytes": [
+            81002496000,
+            81002496000
+          ]
+        },
+        "before_request": {
+          "allocated_bytes": 54819475456.0,
+          "reserved_bytes": 55125737472.0,
+          "device_used_bytes": 57220792320.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_start": {
+          "allocated_bytes": 62463188992.0,
+          "reserved_bytes": 78907441152.0,
+          "device_used_bytes": 81002496000.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_components": {
+          "native_cache_storage_bytes": 4931452928.0,
+          "selector_runtime_storage_bytes": 23964736.0
+        },
+        "prefill_components": {
+          "native_cache_storage_bytes": 4914675712.0,
+          "selector_runtime_storage_bytes": 2724931648.0
+        },
+        "cache_expanded": false,
+        "request_peak_allocated_bytes": 75658633216,
+        "request_peak_reserved_bytes": 78907441152,
+        "request_sampled_peak_device_used_bytes": 81002496000
+      }
+    },
+    {
+      "model": "qwen",
+      "context": 16384,
+      "batch": 8,
+      "Original": {
+        "prefill": {
+          "peak_allocated_bytes": 91052095488,
+          "peak_reserved_bytes": 97825849344,
+          "sampled_peak_device_used_bytes": 101277761536,
+          "maximum_sample_gap_seconds": 0.021194649001699872,
+          "end": {
+            "allocated_bytes": 64627857408.0,
+            "reserved_bytes": 97825849344.0,
+            "device_used_bytes": 101277761536.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            91052095488,
+            91052095488
+          ],
+          "peak_reserved_range_bytes": [
+            97825849344,
+            97825849344
+          ],
+          "sampled_peak_device_range_bytes": [
+            101277761536,
+            101277761536
+          ]
+        },
+        "decode": {
+          "peak_allocated_bytes": 64931357696,
+          "peak_reserved_bytes": 97825849344,
+          "sampled_peak_device_used_bytes": 101277761536,
+          "maximum_sample_gap_seconds": 0.02078924600209575,
+          "end": {
+            "allocated_bytes": 64661182976.0,
+            "reserved_bytes": 97825849344.0,
+            "device_used_bytes": 101277761536.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            64931357696,
+            64931357696
+          ],
+          "peak_reserved_range_bytes": [
+            97825849344,
+            97825849344
+          ],
+          "sampled_peak_device_range_bytes": [
+            101277761536,
+            101277761536
+          ]
+        },
+        "before_request": {
+          "allocated_bytes": 54793254912.0,
+          "reserved_bytes": 55104765952.0,
+          "device_used_bytes": 58556678144.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_start": {
+          "allocated_bytes": 64627857408.0,
+          "reserved_bytes": 97825849344.0,
+          "device_used_bytes": 101277761536.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_components": {
+          "native_cache_storage_bytes": 9862905856.0,
+          "selector_runtime_storage_bytes": 0.0
+        },
+        "prefill_components": {
+          "native_cache_storage_bytes": 9829351424.0,
+          "selector_runtime_storage_bytes": 0.0
+        },
+        "cache_expanded": false,
+        "request_peak_allocated_bytes": 91052095488,
+        "request_peak_reserved_bytes": 97825849344,
+        "request_sampled_peak_device_used_bytes": 101277761536
+      },
+      "Changed": {
+        "prefill": {
+          "peak_allocated_bytes": 96496592896,
+          "peak_reserved_bytes": 102678659072,
+          "sampled_peak_device_used_bytes": 105883107328,
+          "maximum_sample_gap_seconds": 0.021101259990246035,
+          "end": {
+            "allocated_bytes": 70105901056.0,
+            "reserved_bytes": 102678659072.0,
+            "device_used_bytes": 105883107328.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            96496592896,
+            96496592896
+          ],
+          "peak_reserved_range_bytes": [
+            102678659072,
+            102678659072
+          ],
+          "sampled_peak_device_range_bytes": [
+            105883107328,
+            105883107328
+          ]
+        },
+        "decode": {
+          "peak_allocated_bytes": 70370817024,
+          "peak_reserved_bytes": 102680756224,
+          "sampled_peak_device_used_bytes": 105885204480,
+          "maximum_sample_gap_seconds": 0.020949932993971743,
+          "end": {
+            "allocated_bytes": 64738046464.0,
+            "reserved_bytes": 102680756224.0,
+            "device_used_bytes": 105885204480.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            70370817024,
+            70370817024
+          ],
+          "peak_reserved_range_bytes": [
+            102680756224,
+            102680756224
+          ],
+          "sampled_peak_device_range_bytes": [
+            105885204480,
+            105885204480
+          ]
+        },
+        "before_request": {
+          "allocated_bytes": 54819475456.0,
+          "reserved_bytes": 55125737472.0,
+          "device_used_bytes": 58330185728.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_start": {
+          "allocated_bytes": 70105901056.0,
+          "reserved_bytes": 102678659072.0,
+          "device_used_bytes": 105883107328.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_components": {
+          "native_cache_storage_bytes": 9862905856.0,
+          "selector_runtime_storage_bytes": 47929472.0
+        },
+        "prefill_components": {
+          "native_cache_storage_bytes": 9829351424.0,
+          "selector_runtime_storage_bytes": 5449863296.0
+        },
+        "cache_expanded": false,
+        "request_peak_allocated_bytes": 96496592896,
+        "request_peak_reserved_bytes": 102680756224,
+        "request_sampled_peak_device_used_bytes": 105885204480
+      }
+    },
+    {
+      "model": "qwen",
+      "context": 32768,
+      "batch": 1,
+      "Original": {
+        "prefill": {
+          "peak_allocated_bytes": 63704324096,
+          "peak_reserved_bytes": 64980254720,
+          "sampled_peak_device_used_bytes": 68432166912,
+          "maximum_sample_gap_seconds": 0.020709666991024278,
+          "end": {
+            "allocated_bytes": 57097473024.0,
+            "reserved_bytes": 64980254720.0,
+            "device_used_bytes": 68432166912.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            63704324096,
+            63704324096
+          ],
+          "peak_reserved_range_bytes": [
+            64980254720,
+            64980254720
+          ],
+          "sampled_peak_device_range_bytes": [
+            68432166912,
+            68432166912
+          ]
+        },
+        "decode": {
+          "peak_allocated_bytes": 57168966656,
+          "peak_reserved_bytes": 64980254720,
+          "sampled_peak_device_used_bytes": 68432166912,
+          "maximum_sample_gap_seconds": 0.020734175996039994,
+          "end": {
+            "allocated_bytes": 57101667840.0,
+            "reserved_bytes": 64980254720.0,
+            "device_used_bytes": 68432166912.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            57168966656,
+            57168966656
+          ],
+          "peak_reserved_range_bytes": [
+            64980254720,
+            64980254720
+          ],
+          "sampled_peak_device_range_bytes": [
+            68432166912,
+            68432166912
+          ]
+        },
+        "before_request": {
+          "allocated_bytes": 54793254912.0,
+          "reserved_bytes": 55104765952.0,
+          "device_used_bytes": 58556678144.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_start": {
+          "allocated_bytes": 57097473024.0,
+          "reserved_bytes": 64980254720.0,
+          "device_used_bytes": 68432166912.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_components": {
+          "native_cache_storage_bytes": 2306605056.0,
+          "selector_runtime_storage_bytes": 0.0
+        },
+        "prefill_components": {
+          "native_cache_storage_bytes": 2302410752.0,
+          "selector_runtime_storage_bytes": 0.0
+        },
+        "cache_expanded": false,
+        "request_peak_allocated_bytes": 63704324096,
+        "request_peak_reserved_bytes": 64980254720,
+        "request_sampled_peak_device_used_bytes": 68432166912
+      },
+      "Changed": {
+        "prefill": {
+          "peak_allocated_bytes": 65091293184,
+          "peak_reserved_bytes": 66611838976,
+          "sampled_peak_device_used_bytes": 69820481536,
+          "maximum_sample_gap_seconds": 0.02112173000932671,
+          "end": {
+            "allocated_bytes": 58492838912.0,
+            "reserved_bytes": 66611838976.0,
+            "device_used_bytes": 69820481536.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            65091293184,
+            65091293184
+          ],
+          "peak_reserved_range_bytes": [
+            66611838976,
+            66611838976
+          ],
+          "sampled_peak_device_range_bytes": [
+            69820481536,
+            69820481536
+          ]
+        },
+        "decode": {
+          "peak_allocated_bytes": 58559537152,
+          "peak_reserved_bytes": 66613936128,
+          "sampled_peak_device_used_bytes": 69822578688,
+          "maximum_sample_gap_seconds": 0.020775085999048315,
+          "end": {
+            "allocated_bytes": 57146509824.0,
+            "reserved_bytes": 66613936128.0,
+            "device_used_bytes": 69822578688.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            58559537152,
+            58559537152
+          ],
+          "peak_reserved_range_bytes": [
+            66613936128,
+            66613936128
+          ],
+          "sampled_peak_device_range_bytes": [
+            69822578688,
+            69822578688
+          ]
+        },
+        "before_request": {
+          "allocated_bytes": 54819475456.0,
+          "reserved_bytes": 55125737472.0,
+          "device_used_bytes": 58334380032.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_start": {
+          "allocated_bytes": 58492838912.0,
+          "reserved_bytes": 66613936128.0,
+          "device_used_bytes": 69822578688.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_components": {
+          "native_cache_storage_bytes": 2306605056.0,
+          "selector_runtime_storage_bytes": 10251024.0
+        },
+        "prefill_components": {
+          "native_cache_storage_bytes": 2302410752.0,
+          "selector_runtime_storage_bytes": 1360775696.0
+        },
+        "cache_expanded": false,
+        "request_peak_allocated_bytes": 65091293184,
+        "request_peak_reserved_bytes": 66613936128,
+        "request_sampled_peak_device_used_bytes": 69822578688
+      }
+    },
+    {
+      "model": "qwen",
+      "context": 32768,
+      "batch": 4,
+      "Original": {
+        "prefill": {
+          "peak_allocated_bytes": 90432518144,
+          "peak_reserved_bytes": 97809072128,
+          "sampled_peak_device_used_bytes": 101260984320,
+          "maximum_sample_gap_seconds": 0.0213106559967855,
+          "end": {
+            "allocated_bytes": 64006043648.0,
+            "reserved_bytes": 97809072128.0,
+            "device_used_bytes": 101260984320.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            90432518144,
+            90432518144
+          ],
+          "peak_reserved_range_bytes": [
+            97809072128,
+            97809072128
+          ],
+          "sampled_peak_device_range_bytes": [
+            101260984320,
+            101260984320
+          ]
+        },
+        "decode": {
+          "peak_allocated_bytes": 64291901440,
+          "peak_reserved_bytes": 97811169280,
+          "sampled_peak_device_used_bytes": 101263081472,
+          "maximum_sample_gap_seconds": 0.020687176991486922,
+          "end": {
+            "allocated_bytes": 64022931968.0,
+            "reserved_bytes": 97811169280.0,
+            "device_used_bytes": 101263081472.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            64291901440,
+            64291901440
+          ],
+          "peak_reserved_range_bytes": [
+            97811169280,
+            97811169280
+          ],
+          "sampled_peak_device_range_bytes": [
+            101263081472,
+            101263081472
+          ]
+        },
+        "before_request": {
+          "allocated_bytes": 54793254912.0,
+          "reserved_bytes": 55104765952.0,
+          "device_used_bytes": 58556678144.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_start": {
+          "allocated_bytes": 64006043648.0,
+          "reserved_bytes": 97811169280.0,
+          "device_used_bytes": 101263081472.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_components": {
+          "native_cache_storage_bytes": 9226420224.0,
+          "selector_runtime_storage_bytes": 0.0
+        },
+        "prefill_components": {
+          "native_cache_storage_bytes": 9209643008.0,
+          "selector_runtime_storage_bytes": 0.0
+        },
+        "cache_expanded": false,
+        "request_peak_allocated_bytes": 90432518144,
+        "request_peak_reserved_bytes": 97811169280,
+        "request_sampled_peak_device_used_bytes": 101263081472
+      },
+      "Changed": {
+        "prefill": {
+          "peak_allocated_bytes": 95870353408,
+          "peak_reserved_bytes": 100782833664,
+          "sampled_peak_device_used_bytes": 103991476224,
+          "maximum_sample_gap_seconds": 0.020944673000485636,
+          "end": {
+            "allocated_bytes": 69476798464.0,
+            "reserved_bytes": 100782833664.0,
+            "device_used_bytes": 103991476224.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            95870353408,
+            95870353408
+          ],
+          "peak_reserved_range_bytes": [
+            100782833664,
+            100782833664
+          ],
+          "sampled_peak_device_range_bytes": [
+            103991476224,
+            103991476224
+          ]
+        },
+        "decode": {
+          "peak_allocated_bytes": 69743585280,
+          "peak_reserved_bytes": 100784930816,
+          "sampled_peak_device_used_bytes": 103993573376,
+          "maximum_sample_gap_seconds": 0.02075273600348737,
+          "end": {
+            "allocated_bytes": 64091665920.0,
+            "reserved_bytes": 100784930816.0,
+            "device_used_bytes": 103993573376.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            69743585280,
+            69743585280
+          ],
+          "peak_reserved_range_bytes": [
+            100784930816,
+            100784930816
+          ],
+          "sampled_peak_device_range_bytes": [
+            103993573376,
+            103993573376
+          ]
+        },
+        "before_request": {
+          "allocated_bytes": 54819475456.0,
+          "reserved_bytes": 55125737472.0,
+          "device_used_bytes": 58334380032.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_start": {
+          "allocated_bytes": 69476798464.0,
+          "reserved_bytes": 100784930816.0,
+          "device_used_bytes": 103993573376.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_components": {
+          "native_cache_storage_bytes": 9226420224.0,
+          "selector_runtime_storage_bytes": 41004096.0
+        },
+        "prefill_components": {
+          "native_cache_storage_bytes": 9209643008.0,
+          "selector_runtime_storage_bytes": 5443102784.0
+        },
+        "cache_expanded": false,
+        "request_peak_allocated_bytes": 95870353408,
+        "request_peak_reserved_bytes": 100784930816,
+        "request_sampled_peak_device_used_bytes": 103993573376
+      }
+    },
+    {
+      "model": "qwen",
+      "context": 32768,
+      "batch": 8,
+      "Original": {
+        "prefill": {
+          "peak_allocated_bytes": 126071519232,
+          "peak_reserved_bytes": 145638817792,
+          "sampled_peak_device_used_bytes": 149103312896,
+          "maximum_sample_gap_seconds": 0.02182625800196547,
+          "end": {
+            "allocated_bytes": 73218611200.0,
+            "reserved_bytes": 145638817792.0,
+            "device_used_bytes": 149103312896.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            126071519232,
+            126071519232
+          ],
+          "peak_reserved_range_bytes": [
+            145638817792,
+            145638817792
+          ],
+          "sampled_peak_device_range_bytes": [
+            149103312896,
+            149103312896
+          ]
+        },
+        "decode": {
+          "peak_allocated_bytes": 73790931968,
+          "peak_reserved_bytes": 145638817792,
+          "sampled_peak_device_used_bytes": 149103312896,
+          "maximum_sample_gap_seconds": 0.020868193998467177,
+          "end": {
+            "allocated_bytes": 73252166144.0,
+            "reserved_bytes": 145638817792.0,
+            "device_used_bytes": 149103312896.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            73790931968,
+            73790931968
+          ],
+          "peak_reserved_range_bytes": [
+            145638817792,
+            145638817792
+          ],
+          "sampled_peak_device_range_bytes": [
+            149103312896,
+            149103312896
+          ]
+        },
+        "before_request": {
+          "allocated_bytes": 54793254912.0,
+          "reserved_bytes": 55104765952.0,
+          "device_used_bytes": 58569261056.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_start": {
+          "allocated_bytes": 73218611200.0,
+          "reserved_bytes": 145638817792.0,
+          "device_used_bytes": 149103312896.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_components": {
+          "native_cache_storage_bytes": 18452840448.0,
+          "selector_runtime_storage_bytes": 0.0
+        },
+        "prefill_components": {
+          "native_cache_storage_bytes": 18419286016.0,
+          "selector_runtime_storage_bytes": 0.0
+        },
+        "cache_expanded": false,
+        "request_peak_allocated_bytes": 126071519232,
+        "request_peak_reserved_bytes": 145638817792,
+        "request_sampled_peak_device_used_bytes": 149103312896
+      },
+      "Changed": {
+        "prefill": {
+          "peak_allocated_bytes": 136916846592,
+          "peak_reserved_bytes": 145661886464,
+          "sampled_peak_device_used_bytes": 148885209088,
+          "maximum_sample_gap_seconds": 0.021438299998408183,
+          "end": {
+            "allocated_bytes": 84131047424.0,
+            "reserved_bytes": 145661886464.0,
+            "device_used_bytes": 148885209088.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            136916846592,
+            136916846592
+          ],
+          "peak_reserved_range_bytes": [
+            145661886464,
+            145661886464
+          ],
+          "sampled_peak_device_range_bytes": [
+            148885209088,
+            148885209088
+          ]
+        },
+        "decode": {
+          "peak_allocated_bytes": 84664620032,
+          "peak_reserved_bytes": 145661886464,
+          "sampled_peak_device_used_bytes": 148885209088,
+          "maximum_sample_gap_seconds": 0.024795224002446048,
+          "end": {
+            "allocated_bytes": 73360626176.0,
+            "reserved_bytes": 145661886464.0,
+            "device_used_bytes": 148885209088.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            84664620032,
+            84664620032
+          ],
+          "peak_reserved_range_bytes": [
+            145661886464,
+            145661886464
+          ],
+          "sampled_peak_device_range_bytes": [
+            148885209088,
+            148885209088
+          ]
+        },
+        "before_request": {
+          "allocated_bytes": 54819475456.0,
+          "reserved_bytes": 55125737472.0,
+          "device_used_bytes": 58349060096.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_start": {
+          "allocated_bytes": 84131047424.0,
+          "reserved_bytes": 145661886464.0,
+          "device_used_bytes": 148885209088.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_components": {
+          "native_cache_storage_bytes": 18452840448.0,
+          "selector_runtime_storage_bytes": 82008192.0
+        },
+        "prefill_components": {
+          "native_cache_storage_bytes": 18419286016.0,
+          "selector_runtime_storage_bytes": 10886205568.0
+        },
+        "cache_expanded": false,
+        "request_peak_allocated_bytes": 136916846592,
+        "request_peak_reserved_bytes": 145661886464,
+        "request_sampled_peak_device_used_bytes": 148885209088
+      }
+    },
+    {
+      "model": "qwen",
+      "context": 65536,
+      "batch": 1,
+      "Original": {
+        "prefill": {
+          "peak_allocated_bytes": 72460449792,
+          "peak_reserved_bytes": 75650564096,
+          "sampled_peak_device_used_bytes": 79117156352,
+          "maximum_sample_gap_seconds": 0.020751475996803492,
+          "end": {
+            "allocated_bytes": 59246267392.0,
+            "reserved_bytes": 75650564096.0,
+            "device_used_bytes": 79117156352.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            72460449792,
+            72460449792
+          ],
+          "peak_reserved_range_bytes": [
+            75650564096,
+            75650564096
+          ],
+          "sampled_peak_device_range_bytes": [
+            79117156352,
+            79117156352
+          ]
+        },
+        "decode": {
+          "peak_allocated_bytes": 59384869888,
+          "peak_reserved_bytes": 75650564096,
+          "sampled_peak_device_used_bytes": 79117156352,
+          "maximum_sample_gap_seconds": 0.020847164996666834,
+          "end": {
+            "allocated_bytes": 59250462208.0,
+            "reserved_bytes": 75650564096.0,
+            "device_used_bytes": 79117156352.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            59384869888,
+            59384869888
+          ],
+          "peak_reserved_range_bytes": [
+            75650564096,
+            75650564096
+          ],
+          "sampled_peak_device_range_bytes": [
+            79117156352,
+            79117156352
+          ]
+        },
+        "before_request": {
+          "allocated_bytes": 54793254912.0,
+          "reserved_bytes": 55104765952.0,
+          "device_used_bytes": 58571358208.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_start": {
+          "allocated_bytes": 59246267392.0,
+          "reserved_bytes": 75650564096.0,
+          "device_used_bytes": 79117156352.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_components": {
+          "native_cache_storage_bytes": 4454088704.0,
+          "selector_runtime_storage_bytes": 0.0
+        },
+        "prefill_components": {
+          "native_cache_storage_bytes": 4449894400.0,
+          "selector_runtime_storage_bytes": 0.0
+        },
+        "cache_expanded": false,
+        "request_peak_allocated_bytes": 72460449792,
+        "request_peak_reserved_bytes": 75650564096,
+        "request_sampled_peak_device_used_bytes": 79117156352
+      },
+      "Changed": {
+        "prefill": {
+          "peak_allocated_bytes": 75188719616,
+          "peak_reserved_bytes": 78089551872,
+          "sampled_peak_device_used_bytes": 81317068800,
+          "maximum_sample_gap_seconds": 0.021361439998145215,
+          "end": {
+            "allocated_bytes": 61991314432.0,
+            "reserved_bytes": 78089551872.0,
+            "device_used_bytes": 81317068800.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            75188719616,
+            75188719616
+          ],
+          "peak_reserved_range_bytes": [
+            78089551872,
+            78089551872
+          ],
+          "sampled_peak_device_range_bytes": [
+            81317068800,
+            81317068800
+          ]
+        },
+        "decode": {
+          "peak_allocated_bytes": 62125121536,
+          "peak_reserved_bytes": 78089551872,
+          "sampled_peak_device_used_bytes": 81317068800,
+          "maximum_sample_gap_seconds": 0.020886528000119142,
+          "end": {
+            "allocated_bytes": 59294419456.0,
+            "reserved_bytes": 78089551872.0,
+            "device_used_bytes": 81317068800.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            62125121536,
+            62125121536
+          ],
+          "peak_reserved_range_bytes": [
+            78089551872,
+            78089551872
+          ],
+          "sampled_peak_device_range_bytes": [
+            81317068800,
+            81317068800
+          ]
+        },
+        "before_request": {
+          "allocated_bytes": 54819475456.0,
+          "reserved_bytes": 55125737472.0,
+          "device_used_bytes": 58353254400.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_start": {
+          "allocated_bytes": 61991314432.0,
+          "reserved_bytes": 78089551872.0,
+          "device_used_bytes": 81317068800.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_components": {
+          "native_cache_storage_bytes": 4454088704.0,
+          "selector_runtime_storage_bytes": 18770704.0
+        },
+        "prefill_components": {
+          "native_cache_storage_bytes": 4449894400.0,
+          "selector_runtime_storage_bytes": 2719861264.0
+        },
+        "cache_expanded": false,
+        "request_peak_allocated_bytes": 75188719616,
+        "request_peak_reserved_bytes": 78089551872,
+        "request_sampled_peak_device_used_bytes": 81317068800
+      }
+    },
+    {
+      "model": "qwen",
+      "context": 65536,
+      "batch": 4,
+      "Original": {
+        "prefill": {
+          "peak_allocated_bytes": 125452072960,
+          "peak_reserved_bytes": 148308492288,
+          "sampled_peak_device_used_bytes": 151775084544,
+          "maximum_sample_gap_seconds": 0.021250297999358736,
+          "end": {
+            "allocated_bytes": 72597026816.0,
+            "reserved_bytes": 148308492288.0,
+            "device_used_bytes": 151775084544.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            125452072960,
+            125452072960
+          ],
+          "peak_reserved_range_bytes": [
+            148308492288,
+            148308492288
+          ],
+          "sampled_peak_device_range_bytes": [
+            151775084544,
+            151775084544
+          ]
+        },
+        "decode": {
+          "peak_allocated_bytes": 73151541248,
+          "peak_reserved_bytes": 148310589440,
+          "sampled_peak_device_used_bytes": 151777181696,
+          "maximum_sample_gap_seconds": 0.021744629004388116,
+          "end": {
+            "allocated_bytes": 72613693952.0,
+            "reserved_bytes": 148310589440.0,
+            "device_used_bytes": 151777181696.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            73151541248,
+            73151541248
+          ],
+          "peak_reserved_range_bytes": [
+            148310589440,
+            148310589440
+          ],
+          "sampled_peak_device_range_bytes": [
+            151777181696,
+            151777181696
+          ]
+        },
+        "before_request": {
+          "allocated_bytes": 54793254912.0,
+          "reserved_bytes": 55104765952.0,
+          "device_used_bytes": 58571358208.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_start": {
+          "allocated_bytes": 72597026816.0,
+          "reserved_bytes": 148310589440.0,
+          "device_used_bytes": 151777181696.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_components": {
+          "native_cache_storage_bytes": 17816354816.0,
+          "selector_runtime_storage_bytes": 0.0
+        },
+        "prefill_components": {
+          "native_cache_storage_bytes": 17799577600.0,
+          "selector_runtime_storage_bytes": 0.0
+        },
+        "cache_expanded": false,
+        "request_peak_allocated_bytes": 125452072960,
+        "request_peak_reserved_bytes": 148310589440,
+        "request_sampled_peak_device_used_bytes": 151777181696
+      },
+      "Changed": {
+        "prefill": {
+          "peak_allocated_bytes": 136291688448,
+          "peak_reserved_bytes": 151552786432,
+          "sampled_peak_device_used_bytes": 154782400512,
+          "maximum_sample_gap_seconds": 0.021262871989165433,
+          "end": {
+            "allocated_bytes": 83503640576.0,
+            "reserved_bytes": 151552786432.0,
+            "device_used_bytes": 154782400512.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            136291688448,
+            136291688448
+          ],
+          "peak_reserved_range_bytes": [
+            151552786432,
+            151552786432
+          ],
+          "sampled_peak_device_range_bytes": [
+            154782400512,
+            154782400512
+          ]
+        },
+        "decode": {
+          "peak_allocated_bytes": 84038862848,
+          "peak_reserved_bytes": 151552786432,
+          "sampled_peak_device_used_bytes": 154782400512,
+          "maximum_sample_gap_seconds": 0.02068061199679505,
+          "end": {
+            "allocated_bytes": 72716277248.0,
+            "reserved_bytes": 151552786432.0,
+            "device_used_bytes": 154782400512.0,
+            "device_total_bytes": 309220868096.0
+          },
+          "peak_allocated_range_bytes": [
+            84038862848,
+            84038862848
+          ],
+          "peak_reserved_range_bytes": [
+            151552786432,
+            151552786432
+          ],
+          "sampled_peak_device_range_bytes": [
+            154782400512,
+            154782400512
+          ]
+        },
+        "before_request": {
+          "allocated_bytes": 54819475456.0,
+          "reserved_bytes": 55125737472.0,
+          "device_used_bytes": 58355351552.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_start": {
+          "allocated_bytes": 83503640576.0,
+          "reserved_bytes": 151552786432.0,
+          "device_used_bytes": 154782400512.0,
+          "device_total_bytes": 309220868096.0
+        },
+        "decode_components": {
+          "native_cache_storage_bytes": 17816354816.0,
+          "selector_runtime_storage_bytes": 75082816.0
+        },
+        "prefill_components": {
+          "native_cache_storage_bytes": 17799577600.0,
+          "selector_runtime_storage_bytes": 10879445056.0
+        },
+        "cache_expanded": false,
+        "request_peak_allocated_bytes": 136291688448,
+        "request_peak_reserved_bytes": 151552786432,
+        "request_sampled_peak_device_used_bytes": 154782400512
+      }
+    }
+  ],
+  "definitions": {
+    "units": "GiB = 2^30 bytes",
+    "live": "median of two measured request endpoints",
+    "peaks": "maximum of two measured requests; individual ranges preserved",
+    "tensor_memory": "PyTorch live allocated bytes; exact phase allocator peak",
+    "reserved": "PyTorch allocator pool including live tensors and retained free blocks",
+    "device": "whole-device HIP memory usage, includes runtime/non-PyTorch allocations; sampled peaks can miss transients",
+    "isolation": "separate processes per model/variant; one warmup plus two measured requests per shape; cache cleared between requests only",
+    "decode": "64 steps; independent memory peak reset after prefill/cache preparation",
+    "allocation": "one MI355X; same pinned model/runtime/precision and trained selector exports; no new timing claim"
+  },
+  "qwen_runtime_unchanged_from": "303195 / 303002; all six inference files",
+  "device_identity_text": "GPU: 0\n    BDF: 0002:00:04.0\n    UUID: 70ff75a3-0000-1000-8086-8d0bd3bf31d6\n    KFD_ID: 24382\n    NODE_ID: 5\n    PARTITION_ID: 0",
+  "input_data_sha256": {
+    "olmo": "e8f6f2eafd5271a16ed66cb9245d0ecd87b096e8b245a58f17326e883358ad3d",
+    "qwen": "255b0110c2d500438f489de52c424eb993bdcd0f2a13a20851cd6a878ac64227"
+  },
+  "scheduler_final_text": "JobID JobName State Elapsed ExitCode NodeList\n----- ------- ----- ------- -------- --------\n303626 qsa-memory-only COMPLETED 00:30:59 0:0 crsuse2-m2m-v3-241"
+}

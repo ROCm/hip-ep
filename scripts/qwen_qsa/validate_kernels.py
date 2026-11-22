@@ -5,6 +5,7 @@
 """Validate native Qwen features, stable indices, incremental pools and attention."""
 # ruff: noqa: E402
 
+import argparse
 import ctypes
 import json
 from pathlib import Path
@@ -25,8 +26,10 @@ def relative(actual, expected):
 
 
 class Kernels:
-    def __init__(self):
-        self.path = WORK / "native-gqa/install/bin/custom_kernels_gfx1151.dll"
+    def __init__(self, install=None):
+        self.path = (
+            install or WORK / "native-gqa/install"
+        ) / "bin/custom_kernels_gfx1151.dll"
         self.dll = ctypes.CDLL(str(self.path))
         self.stream = torch.cuda.current_stream().cuda_stream
 
@@ -42,6 +45,12 @@ class Kernels:
 
 @torch.inference_mode()
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--install", type=Path)
+    parser.add_argument(
+        "--output", type=Path, default=WORK / "native-gqa/kernel-validation.json"
+    )
+    args = parser.parse_args()
     assert native_inference.WORK == WORK
     torch.set_num_threads(2)
     folder = WORK / "selector-fixtures-v1"
@@ -53,7 +62,7 @@ def main():
     assert sha(payload) == PAYLOAD_SHA
     fixture = load_file(folder / "fixtures.safetensors", device="cpu")
     weights = load_file(payload, device="cpu")
-    kernels = Kernels()
+    kernels = Kernels(args.install)
     result = {
         "status": "running",
         "rows": [],
@@ -63,7 +72,8 @@ def main():
         "selector_sha256": PAYLOAD_SHA,
         "validator_sha256": sha(Path(__file__)),
     }
-    path = WORK / "native-gqa/kernel-validation.json"
+    path = args.output
+    path.parent.mkdir(parents=True, exist_ok=True)
     try:
         S, C = receipt["tokens"], 2080
         P = (C + 3) // 4
@@ -146,7 +156,7 @@ def main():
             # boundary, then require exact equality with full-prefill native state.
             incremental_pool = torch.full_like(pool, float("nan"))
             incremental_tail = torch.full_like(tail, float("nan"))
-            prefix = 2051
+            prefix = 1927
             pre = original[:, :prefix].contiguous()
             pre_q = torch.empty(1, prefix, 512, device="cuda", dtype=torch.bfloat16)
             kernels.call(
@@ -199,6 +209,7 @@ def main():
                     "decode_projection_relative_rms": projection_error,
                     "indices_exact": True,
                     "incremental_pool_exact": True,
+                    "incremental_decode_steps": S - prefix,
                 }
             )
             print(result["rows"][-1], flush=True)
@@ -272,7 +283,36 @@ def main():
                     "exact": True,
                 }
             )
+        # Integer-valued BF16 inputs make every dot product and head sum exact.
+        # Nonzero long histories exercise ranking/radix logic beyond tie-only tests.
         generator = torch.Generator(device="cpu").manual_seed(20261127)
+        for past in [32771, 65599]:
+            history, groups = past // 4, (past + 4) // 4
+            cpu_q_rank = torch.randint(-3, 4, (4, 128), generator=generator).float()
+            cpu_pool = torch.randint(-3, 4, (groups, 128), generator=generator).float()
+            expected_scores = (cpu_q_rank @ cpu_pool[:history].T).clamp_min(0).sum(0)
+            winners = torch.argsort(expected_scores, descending=True, stable=True)[:512]
+            expected_ids = torch.cat(
+                [winners.sort().values, torch.tensor([history])]
+            ).int()
+            rank_q = cpu_q_rank.reshape(1, 1, 512).bfloat16().cuda()
+            rank_pool = cpu_pool.reshape(1, groups, 128).bfloat16().cuda()
+            rank_scores = torch.empty(1, 1, groups, device="cuda")
+            rank_ids = torch.empty(1, 1, 513, device="cuda", dtype=torch.int32)
+            kernels.call(
+                "select",
+                [rank_q, rank_pool, rank_scores, rank_ids],
+                [1, 1, past, 0, 1, groups],
+            )
+            assert torch.equal(rank_ids[0, 0].cpu(), expected_ids)
+            result["rows"].append(
+                {
+                    "check": "nonzero_long_stable_ranking",
+                    "position": past,
+                    "historical_groups": history,
+                    "exact": True,
+                }
+            )
         cpu_q = torch.randn(1, S, 24, 256, generator=generator).half()
         cpu_k = torch.randn(1, S, 4, 256, generator=generator).half()
         cpu_v = torch.randn(1, S, 4, 256, generator=generator).half()

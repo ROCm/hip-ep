@@ -1,0 +1,249 @@
+{
+  "default_quality": {
+    "state": "complete",
+    "ppl_documents": 64,
+    "gsm_questions": 128,
+    "protocol_sha256": "2ede6a9bda3555fb34a28008ae70d9e4766e77f353737cdc9d7b61228d934dee",
+    "row_files_sha256": {
+      "ppl": "09526d8a4360c05cb0d6102d3f6933f0741074cc2b4152f10079e14f625d3c59",
+      "gsm8k": "dc534e9e92b627029f08ae6783acfa58225e0143c8fb93aeb9ed0487ccd0673f"
+    },
+    "gsm_correct": 111,
+    "gsm_caps": 18,
+    "training_updates": 0,
+    "targets": 262080,
+    "nll": 1.786527149842939,
+    "ppl": 5.9686880721288516
+  },
+  "matched_native_quality": {
+    "Original": {
+      "state": "complete",
+      "ppl_documents": 64,
+      "gsm_questions": 128,
+      "protocol_sha256": "f06c861179226b46fa307d9079b6d3f0ef2345415a44d71314161f5d22491225",
+      "row_files_sha256": {
+        "ppl": "df8b5f130fe1fc828ac30a1c7e1ffb330bd2a34ff3868baf6f6df35e6779d7de",
+        "gsm8k": "3203f26596f9301bfcd6685ecaad476f51f963af416dca6aa434e0a58afb1cd4"
+      },
+      "gsm_correct": 111,
+      "gsm_caps": 18,
+      "training_updates": 0,
+      "targets": 262080,
+      "nll": 1.786527149842939,
+      "ppl": 5.9686880721288516
+    },
+    "Changed": {
+      "state": "complete",
+      "ppl_documents": 64,
+      "gsm_questions": 128,
+      "protocol_sha256": "ad0d441fdd06f75bb1f5d0729c6ac170d0be4144a876282d0b7bb50f0597cc12",
+      "row_files_sha256": {
+        "ppl": "6874b314eba9836541f52e0afba1c34ab8db5dde18005796a472d46a0ab2b53f",
+        "gsm8k": "f94ca385545a959f3fa95ff6abe8f3ff81a8a6794dcdf51b0d62325e001d9615"
+      },
+      "gsm_correct": 111,
+      "gsm_caps": 18,
+      "training_updates": 0,
+      "targets": 262080,
+      "nll": 1.7869597082874613,
+      "ppl": 5.971270437028778
+    }
+  },
+  "matched_native_comparison": {
+    "state": "complete",
+    "ppl_change_percent": 0.04326520114168453,
+    "gsm_change_percentage_points": 0.0,
+    "gsm_token_sequence_differences": 0,
+    "ppl_gate_passed": true,
+    "gsm_gate_passed": true,
+    "limits": {
+      "ppl_increase_percent": 5,
+      "gsm_drop_percentage_points": 2
+    },
+    "training_updates": 0
+  },
+  "matched_native_performance": [
+    {
+      "batch": 1,
+      "context": 4096,
+      "phases": {
+        "prefill": {
+          "Original": {
+            "mean_seconds": 9.350225833322233,
+            "tokens_s": 438.0642856135859
+          },
+          "Changed": {
+            "mean_seconds": 9.75305516666655,
+            "tokens_s": 419.9709660208917
+          },
+          "throughput_change_percent": -4.130288678373173,
+          "paired_95_interval_percent": [
+            -4.3442054992552155,
+            -3.7549768258038463
+          ]
+        },
+        "decode": {
+          "Original": {
+            "mean_seconds": 5.990478316680917,
+            "tokens_s": 10.683621009325318
+          },
+          "Changed": {
+            "mean_seconds": 5.960668916678212,
+            "tokens_s": 10.737049967819082
+          },
+          "throughput_change_percent": 0.5001015895933492,
+          "paired_95_interval_percent": [
+            0.1387677060437987,
+            0.9185700657370566
+          ]
+        }
+      },
+      "summary_sha256": "d5ec5b5ebd8ae700756e8441aa3f917eef6c2013f774c10cf3b9c5ccde8ca273",
+      "protocol_sha256": "0b46c95a4e51e0d8b865cc4c1017ff30d9de3e40b6c8669d0faa3a4ec0755e9f",
+      "rows_sha256": "b2a261eeed8fe95e257eb1fa6c78eccbe4b78bb830b6895aa03529cc9e07b22e"
+    },
+    {
+      "batch": 1,
+      "context": 16384,
+      "phases": {
+        "prefill": {
+          "Original": {
+            "mean_seconds": 39.3900172500095,
+            "tokens_s": 415.9429506214814
+          },
+          "Changed": {
+            "mean_seconds": 41.23387271665464,
+            "tokens_s": 397.34322586154735
+          },
+          "throughput_change_percent": -4.471700922480637,
+          "paired_95_interval_percent": [
+            -4.565936174551,
+            -4.395793606856346
+          ]
+        },
+        "decode": {
+          "Original": {
+            "mean_seconds": 6.3205876499899505,
+            "tokens_s": 10.125640770142908
+          },
+          "Changed": {
+            "mean_seconds": 6.243741416673099,
+            "tokens_s": 10.250264341360507
+          },
+          "throughput_change_percent": 1.2307721955243656,
+          "paired_95_interval_percent": [
+            0.6583481948524872,
+            1.799725561082477
+          ]
+        }
+      },
+      "summary_sha256": "ac4319b2dac44fa38187525bc48c3f182c1ff50ca85d3fda94b311f5faf2c707",
+      "protocol_sha256": "56ff5328584ce8a4d26cf3034f5c091b05bc65eb86fd93b3e748290e91bf2a80",
+      "rows_sha256": "426c5d2d8a8f46d8a5f7822a6bc056aa26bd512d094e496ec65de584f51853d6"
+    },
+    {
+      "batch": 1,
+      "context": 32768,
+      "phases": {
+        "prefill": {
+          "Original": {
+            "mean_seconds": 85.14496843334443,
+            "tokens_s": 384.8495172753791
+          },
+          "Changed": {
+            "mean_seconds": 93.38946533333122,
+            "tokens_s": 350.8746932327165
+          },
+          "throughput_change_percent": -8.828080202151323,
+          "paired_95_interval_percent": [
+            -9.175820963140236,
+            -8.425321454823354
+          ]
+        },
+        "decode": {
+          "Original": {
+            "mean_seconds": 6.84035271667138,
+            "tokens_s": 9.356242675033192
+          },
+          "Changed": {
+            "mean_seconds": 6.732583983335644,
+            "tokens_s": 9.506008414957988
+          },
+          "throughput_change_percent": 1.600703884310728,
+          "paired_95_interval_percent": [
+            0.22433269877468742,
+            2.9866135455466125
+          ]
+        }
+      },
+      "summary_sha256": "4c336d47e253b7f9143fccbc901b5f05322a9d7d95f84ebcc84764980220c690",
+      "protocol_sha256": "f2a7ecc0ede1dde8d7f6e494fe3bc61502c8ba5b061d10725bcc2fa6adf74dbb",
+      "rows_sha256": "1d57a0fa1e98794a3cb570e7c9451becc802f07973f27b41621fa74f174a7680"
+    }
+  ],
+  "application_memory": {
+    "protocol_sha256": "f4eab57f891ededcbe479442fe9d46b73c9ad243df142827e2f1b03bac7ec1a1",
+    "snapshot_bytes": 445569,
+    "snapshot_sha256": "639b60e402f3339d8c95aa1c445c41a1364c358b2914a4fec8602a0480910f63",
+    "samples": 328,
+    "interval_seconds": 1.0,
+    "scope": "Joint benchmark worker process: Original and Changed sessions co-resident with serially shared KV",
+    "notes": [
+      "RSS and private commitment are distinct; WDDM gauges are driver-reported usage/commitment, not a proven physical residency total.",
+      "Do not add process RSS, WDDM dedicated/shared usage, and system RAM: these can overlap.",
+      "Sampled GPU peaks can miss sub-second spikes. OS process lifetime high-water counters are recorded separately.",
+      "32K sampling begins mid-run; 64K sampler is attached before stage startup. Earlier contexts are not reconstructed.",
+      "External CPU-only sampling adds no CUDA/HIP context or benchmark allocations. It starts partway through 32K and remains active throughout 64K."
+    ],
+    "rows": [
+      {
+        "stage": "qwen-native-perf-32768-b1",
+        "context": 32768,
+        "batch": 1,
+        "coverage": "partial, attached mid-run",
+        "stage_state": "complete",
+        "samples": 312,
+        "first_sample_unix": 1795310790.1131234,
+        "last_sample_unix": 1795311101.0984917,
+        "peak_sampled_rss_tree_bytes": 6817226752,
+        "peak_sampled_private_commit_tree_bytes": 70558609408,
+        "max_worker_lifetime_peak_rss_bytes": 6824828928,
+        "max_worker_lifetime_peak_private_commit_bytes": 70717014016,
+        "minimum_system_ram_available_bytes": 33173106688,
+        "maximum_system_ram_used_bytes": 35305590784,
+        "maximum_sample_gap_seconds": 1.0379016399383545,
+        "gpu_counter_sample_count": 312,
+        "peak_sampled_wddm_dedicated_usage_bytes": 66217385984,
+        "peak_sampled_wddm_shared_usage_bytes": 5897732096,
+        "peak_sampled_wddm_total_committed_bytes": 72115118080
+      }
+    ]
+  },
+  "default_long_quality": [
+    {
+      "context": 16384,
+      "documents": 4,
+      "targets": 4092,
+      "nll": 1.8578494175438307,
+      "ppl": 6.409936840089296
+    },
+    {
+      "context": 32768,
+      "documents": 4,
+      "targets": 4092,
+      "nll": 1.7822027514057774,
+      "ppl": 5.942932814891075
+    }
+  ],
+  "matched_native_long_quality": {
+    "Original": [],
+    "Changed": []
+  },
+  "native_qsa_results": true,
+  "baseline_established": true,
+  "long_quality_manifest_sha256": "44bec8cfc4d4fff985b0f974fcc4e4879406fb80e7d9386b315f83407a188b4d",
+  "timing_manifest_sha256": "3c712f4d4b2a933e3b8957904f442b57bdf30c178592dbd3ff4201799c0e075a",
+  "trained_source_evidence_sha256": "fb3388de9909ce9e48d5866527db0f85b3f6be85aab552c38c55c0f70436833a",
+  "trained_source_raw_sha256": "6599d6500145512992e3621ae4fad410de4fec42acb74b4433dfca57bce05cc7",
+  "report_sha256": "c6fc5fefbfe5c9dd2366299ef25bf4fac8794fd25c6d1d6a1c6193921ed9ac5e"
+}

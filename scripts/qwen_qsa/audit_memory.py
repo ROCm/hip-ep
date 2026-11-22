@@ -61,6 +61,12 @@ def audit_memory():
             if before_start
             else "partial, attached mid-run"
         )
+        if stage["state"] == "failed":
+            coverage = (
+                "startup through failed attempt"
+                if before_start
+                else "partial failed attempt"
+            )
         row = {
             "stage": label,
             "context": int(label.split("-")[-2]),

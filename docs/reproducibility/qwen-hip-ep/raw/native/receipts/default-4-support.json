@@ -1,0 +1,33 @@
+{
+  "status": "passed",
+  "scope": "Four-block architecture/support diagnostic; not the 64-block baseline or accuracy",
+  "layers": 4,
+  "gpu": "AMD Radeon(TM) 8060S Graphics",
+  "torch": "2.13.0+rocm10.0.0",
+  "hip": "7.15.26333",
+  "binary_sha256": {
+    "hipgpu.dll": "83a39be94506598e4cbf88fe4e39eea38540d7004d9c00298f6cfde3f1a4bec1",
+    "custom_kernels_gfx1151.dll": "bca8825b5d7e686068d515ca80d92b48cc69bfe9f154fb52dd6b6f516e4eeb33",
+    "hip-mlir-opt.exe": "360f10f9e5213bbb1515c5aa63e944dbb10d6fc2bd9298f54b0b04776eaa3778",
+    "hip-compiler.exe": "09bf4d7a2850f01fd0a2b7f36e13a96c2421d09abdb1402ba14809ad1bfc6aa4"
+  },
+  "export_onnx_sha256": "64e3b1e322ca4b0af9cd6afe8bd66a44d73d9733a45c10451d21af1114f91a5f",
+  "prefill_tokens": 7,
+  "decode_calls": 1,
+  "capacity": 128,
+  "replay_bit_exact": true,
+  "full_vs_incremental_relative_rms": 0.00048502889694646,
+  "recurrent_state_dtype": "FP32",
+  "finite": true,
+  "retained_state_tensor_count": 6,
+  "source_sha256": {
+    "default_inference.py": "d552bc32d49d5e28c6473e7cccecd86ec1e6c0682d1c420f8e045ac1b5109a91",
+    "export_default.py": "49d8992da64188891c3536bf1191d90ebd5002f75527a75b5a65472d747c1bac",
+    "inspect_native_support.py": "4c88a78377835390b684e0369e26bcc27b81821a64505fdb35a10276d83b51da",
+    "probe_default.py": "7c3078e5a98c1cb5f52bef24cf195ece99c485a5391490d5c0611a8a37284a37",
+    "verify_handoff.py": "7dc4919f44796dc4e0dad6ba738100b85e91ddc58967e09b84657180d68745db"
+  },
+  "training_updates": 0,
+  "selectors_loaded": false,
+  "baseline_established": false
+}

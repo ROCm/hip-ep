@@ -1,0 +1,43 @@
+{
+  "context": 16384,
+  "batch": 1,
+  "pairs": 6,
+  "phases": {
+    "prefill": {
+      "Original": {
+        "mean_seconds": 39.3900172500095,
+        "tokens_s": 415.9429506214814
+      },
+      "Changed": {
+        "mean_seconds": 41.23387271665464,
+        "tokens_s": 397.34322586154735
+      },
+      "throughput_change_percent": -4.471700922480637,
+      "paired_95_interval_percent": [
+        -4.565936174551,
+        -4.395793606856346
+      ]
+    },
+    "decode": {
+      "Original": {
+        "mean_seconds": 6.3205876499899505,
+        "tokens_s": 10.125640770142908
+      },
+      "Changed": {
+        "mean_seconds": 6.243741416673099,
+        "tokens_s": 10.250264341360507
+      },
+      "throughput_change_percent": 1.2307721955243656,
+      "paired_95_interval_percent": [
+        0.6583481948524872,
+        1.799725561082477
+      ]
+    }
+  },
+  "status": "complete",
+  "replay_exact": true,
+  "sessions_unchanged": true,
+  "cache_pointers_unchanged": true,
+  "protocol_sha256": "56ff5328584ce8a4d26cf3034f5c091b05bc65eb86fd93b3e748290e91bf2a80",
+  "rows_sha256": "426c5d2d8a8f46d8a5f7822a6bc056aa26bd512d094e496ec65de584f51853d6"
+}

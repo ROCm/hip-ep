@@ -5,11 +5,12 @@
 """Check the complete Qwen runtime operator, including Lt projection, against CPU."""
 # ruff: noqa: E402
 
+import argparse
 import json
 from pathlib import Path
 
 import native_inference
-from runtime import binding, run, session
+from runtime import INSTALL, binding, run, session
 from selector_reference import token_support
 from verify_handoff import SOURCE, WORK, sha
 
@@ -22,14 +23,21 @@ from safetensors.torch import load_file
 
 @torch.inference_mode()
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output-dir", type=Path, default=WORK / "native-gqa")
+    parser.add_argument(
+        "--kernel-receipt",
+        type=Path,
+        default=WORK / "native-gqa/kernel-validation.json",
+    )
+    args = parser.parse_args()
     assert native_inference.WORK == WORK
     torch.set_num_threads(2)
-    task = WORK / "native-gqa"
-    control = json.loads((task / "kernel-validation.json").read_text())
+    task = args.output_dir
+    task.mkdir(parents=True, exist_ok=True)
+    control = json.loads(args.kernel_receipt.read_text())
     assert control["status"] == "passed"
-    assert (
-        sha(task / "install/bin/custom_kernels_gfx1151.dll") == control["kernel_sha256"]
-    )
+    assert sha(INSTALL / "bin/custom_kernels_gfx1151.dll") == control["kernel_sha256"]
     fixture_path = WORK / "selector-fixtures-v1/fixtures.safetensors"
     assert sha(fixture_path) == control["fixtures_sha256"]
     fixture = load_file(fixture_path)
@@ -126,11 +134,12 @@ def main():
         "rows": rows,
         "training_updates": 0,
         "graph_sha256": sha(path),
-        "kernel_validation_sha256": sha(task / "kernel-validation.json"),
+        "kernel_validation_sha256": sha(args.kernel_receipt),
+        "install": str(INSTALL),
         "validator_sha256": sha(Path(__file__)),
     }
 
-    def call(start, count):
+    def call(start, count, length_override=None, invalid_position=False):
         inputs = {
             name: value[:, start : start + count].reshape(1, count, -1).contiguous()
             for name, value in [("q", q), ("k", k), ("v", v), ("hidden", hidden)]
@@ -144,6 +153,10 @@ def main():
                 start, start + count, device="cuda", dtype=torch.int64
             )[None, None].repeat(3, 1, 1),
         )
+        if length_override is not None:
+            inputs["length"].fill_(length_override)
+        if invalid_position:
+            inputs["positions"][2, 0, 0] += 1
         output = torch.empty(1, count, 6144, device="cuda", dtype=torch.float16)
         run(
             sess,
@@ -156,12 +169,29 @@ def main():
         return output.cpu().reshape(1, count, 24, 256)
 
     try:
+        for label, start, options in [
+            ("decode_without_prefill", 1, {}),
+            ("int32_max_length", 0, {"length_override": 2**31 - 1}),
+            ("invalid_negative_length", 0, {"length_override": -2}),
+            ("noncanonical_position", 0, {"invalid_position": True}),
+        ]:
+            try:
+                call(start, 1, **options)
+            except RuntimeError as exc:
+                assert "inference_compute" in str(exc), str(exc)
+                rows.append({"check": label, "rejected": True, "error": str(exc)})
+            else:
+                raise AssertionError(f"Invalid request accepted: {label}")
+        recovered = call(0, 17)
+        assert recovered.isfinite().all() and call(17, 1).isfinite().all()
+        assert torch.equal(recovered, call(0, 17))
+        rows.append({"check": "error_flag_reset_and_prefill_replay", "exact": True})
         full = call(0, S)
         assert full.isfinite().all()
         assert torch.equal(cache_k[:, :, :S].cpu(), cpu_k.transpose(1, 2))
         assert torch.equal(cache_v[:, :, :S].cpu(), cpu_v.transpose(1, 2))
         outputs = {"full": full}
-        prefix = 2051
+        prefix = 1927
         incremental = [call(0, prefix)[:, -1:]]
         for pos in range(prefix, S):
             incremental.append(call(pos, 1))

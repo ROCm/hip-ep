@@ -1,0 +1,35 @@
+{
+  "status": "passed",
+  "layers": 4,
+  "scope": "Numerical architecture diagnostic against frozen dequantized FP16 HF reference; not full-model quality",
+  "gate_relative_rms": 0.02,
+  "rows": [
+    {
+      "tokens": 1,
+      "relative_rms": 0.0002959987905342132,
+      "max_abs": 0.0078125
+    },
+    {
+      "tokens": 7,
+      "relative_rms": 0.00037399589200504124,
+      "max_abs": 0.015625
+    },
+    {
+      "tokens": 17,
+      "relative_rms": 0.0003880900621879846,
+      "max_abs": 0.015625
+    },
+    {
+      "prefill": 16,
+      "decode": 1,
+      "relative_rms": 0.00032463535899296403
+    }
+  ],
+  "export_onnx_sha256": "64e3b1e322ca4b0af9cd6afe8bd66a44d73d9733a45c10451d21af1114f91a5f",
+  "validator_sha256": "dcc2e9d792d3ce20f70bdcd1572b2f1dbc77c433e13583faa843ec3c49114094",
+  "source_model_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+  "training_updates": 0,
+  "selectors_loaded": false,
+  "native_gqa_gate": "sigmoid",
+  "baseline_established": false
+}

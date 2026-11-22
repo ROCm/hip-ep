@@ -99,3 +99,45 @@ def test_native_qsa_graph_retains_backbone_and_exact_bf16_parameters():
         assert (
             raw == frozen[param.name].contiguous().view(torch.uint8).numpy().tobytes()
         )
+
+
+def test_native_qwen_changes_only_four_nodes_and_frozen_selectors():
+    folder = ROOT / "_local/qwen-qsa/native-gqa/models"
+    if not (folder / "Changed/default.onnx").exists():
+        pytest.skip("Native Qwen exports are not mirrored")
+    variants = {
+        name: onnx.load(folder / name / "default.onnx", load_external_data=False)
+        for name in ["Original", "Changed"]
+    }
+    original, changed = [variants[name].graph for name in ["Original", "Changed"]]
+    assert len(original.node) == len(changed.node)
+    replacements = []
+    for before, after in zip(original.node, changed.node, strict=True):
+        if after.op_type == "QwenQsaGroupQueryAttention":
+            layer = int(after.input[3].split(".")[1])
+            replacements.append(layer)
+            assert after.domain == "com.amd" and len(after.input) == 15
+            assert list(before.output) == list(after.output)
+            assert list(before.input[:7]) == list(after.input[:7])
+            assert after.input[7] == f"/model/layers.{layer}/input_layernorm/output_0"
+            assert after.input[-1] == "position_ids"
+        else:
+            assert before.SerializeToString() == after.SerializeToString()
+    assert replacements == [27, 31, 35, 39]
+    assert sum(node.op_type == "LinearAttention" for node in changed.node) == 48
+    before = {item.name: item.SerializeToString() for item in original.initializer}
+    after = {item.name: item for item in changed.initializer}
+    assert all(after[name].SerializeToString() == raw for name, raw in before.items())
+    selectors = [item for name, item in after.items() if name not in before]
+    assert len(selectors) == 16
+    receipt = json.loads((folder / "Changed/export.json").read_text())
+    for tensor in selectors:
+        assert tensor.data_type == onnx.TensorProto.BFLOAT16
+        descriptor = {item.key: item.value for item in tensor.external_data}
+        with (folder / "Changed" / descriptor["location"]).open("rb") as stream:
+            stream.seek(int(descriptor["offset"]))
+            raw = stream.read(int(descriptor["length"]))
+        assert (
+            hashlib.sha256(raw).hexdigest()
+            == receipt["selector_tensor_sha256"][tensor.name]
+        )
