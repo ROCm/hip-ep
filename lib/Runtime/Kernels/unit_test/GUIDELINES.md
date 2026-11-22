@@ -208,6 +208,10 @@ COVERAGE=N` (any leaf, or the top-level aggregator) builds and runs it.
   f64, i64, i32, i16, i8, u8} and three unsupported pairs, on sizes COVERAGE
   thins (tier1 = 2 sizes, tier2 = 3, tier3 = 4, up to ~1M elements). Outputs
   are compared bit-exactly with a CPU reference.
+- **div** (`Xbf16_Wbf16_Ybf16`): bf16 division over every pair of bf16 special
+  values plus seeded random values, and one unsupported dtype, on sizes
+  COVERAGE thins (tier1 = 2 sizes, tier2 = 3, tier3 = 4). Outputs are
+  compared bit-exactly with an fp32-divide-then-round CPU reference.
 - **gqa/softmax** (`Xfp32_Wbf16_Ybf16`): the decomposed-GQA softmax with bf16
   probabilities, unbiased and with full, broadcast one-row and row-offset bf16
   masks (plus fp16/fp16 and fp32/fp32 mask/output regression cases), and
