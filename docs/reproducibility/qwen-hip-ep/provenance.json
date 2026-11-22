@@ -1,13 +1,15 @@
 {
   "schema_version": 1,
-  "created_utc": "2026-11-22T03:21:29.171024+00:00",
-  "evidence_checkout_commit": "efe78ead59558dd3bc0415f9f8f06cc7cc8cdea7",
-  "packet_tool_commit": "efe78ead59558dd3bc0415f9f8f06cc7cc8cdea7",
+  "created_utc": "2026-11-22T03:44:55.000916+00:00",
+  "evidence_checkout_commit": "8cd94792adeb4146d6e0876e141d88ffdbf88406",
+  "packet_tool_commit": "8cd94792adeb4146d6e0876e141d88ffdbf88406",
   "local_origin_main": "f360f94f80440d08af97f74cb7c09e66f8e31c65",
   "source_reference_commit": "3b0c30ea4976085798a36d22cefa4089bbef6543",
-  "source_checkout_commit": "ceb69431c703640c93896bf08ccc8bb183f9b014",
+  "source_checkout_commit": "c583a8b38e9508753dc6602135485e320c68962e",
   "mi355x_memory_source_commit": "7a9739e32f19588a1879e2b6545053fff469b4da",
-  "packet_script_sha256": "f6505c392f4775016b9bf9183f438bde976bc6d45e987096c600e36349f4afce",
+  "packet_script_sha256": "c13c72084d1ca21f99f003e2ac59dd57c49deddfc9094afce6b6ae82ff207c81",
+  "historical_experiment_script_commit": "efe78ea",
+  "source_line_endings": "Git source reconstructions use repository-normalized bytes; measured Windows source hashes can include CRLF. Original raw protocols and per-probe source snapshots preserve actual execution bytes.",
   "measured_native_source_reconstruction": {
     "include/hip/Dialect/IR/HipBufferize.h": {
       "git_blob": "de26e2dc407c584efec6a16ab3bdfd321681fa34",
@@ -148,6 +150,7 @@
   },
   "build_provenance_limit": "Measured build began at dirty HEAD2a43690; native implementation subsequently committed in7a71b72. Binary hashes and execution receipts are authoritative; final PR merge build is separate and has no inherited performance claims.",
   "errata": [
+    "Historical generic run_stage.py receipts for Qwen hashed the OLMo selector and only snapshotted scripts/qsa. Use the Qwen execution protocols/export/tensor hashes as model identity; the stage selector fields are not Qwen identity. Future runner selects the Qwen payload and snapshots both script directories.",
     "Historical native-support.json recorded unused gqa_back.cpp; compiled implementation is real/gqa.cpp. Inspector corrected without rewriting historical receipt.",
     "32K paired timing memory sampler attached after four measured pairs; 4K/16K timing had no sampler.",
     "Batch4/4K default memory probe completed after1551.55s. Stop attempt found parent already gone; retain as complete, not timing or failure."

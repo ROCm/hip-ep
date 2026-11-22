@@ -2,8 +2,12 @@
   "schema_version": 1,
   "files": {
     "archive.json": {
-      "bytes": 376,
-      "sha256": "4cd940d363afa2efb5943dcc3e02d7dcfb6048d94f7f4be7b226f7ca09877b63"
+      "bytes": 401,
+      "sha256": "69b9d931b7a456250c3fc6c5b4f2367281fcfa4ded622e0d66324f5f3a9f0268"
+    },
+    "environment.json": {
+      "bytes": 4393,
+      "sha256": "6289da0e91e910094096a96fe93c4ef4f5874b543d3b8803053bae19a8ad0421"
     },
     "identity.json": {
       "bytes": 4295,
@@ -14,8 +18,8 @@
       "sha256": "59444cb30fbbf9ec12a038d0d918d6fae8137c77d3aa429ad3bc55915a3ad33c"
     },
     "memory.json": {
-      "bytes": 30809,
-      "sha256": "5698b6727be6e95feb2326b3bd48101c5a9164ae14460a0a7fa03fcf56f67fc0"
+      "bytes": 30876,
+      "sha256": "98ed59cf610c388be3697f7e4dc96434cdd339274b3976eb255d0dc53792481b"
     },
     "performance.csv": {
       "bytes": 1264,
@@ -26,8 +30,8 @@
       "sha256": "ae9deb5c5ee90059bdf280adff8f30315f56bfdbde17c31ee1bf870a89525c23"
     },
     "provenance.json": {
-      "bytes": 8334,
-      "sha256": "28bef1f9d4f633dcea9f9289be674d76a1b2f420888e63843246d83e147e4bd4"
+      "bytes": 8929,
+      "sha256": "66cce484d0736b60f996bd34e0fcdf083790df3c4f7c0ba80c900044db1b1e2f"
     },
     "quality.csv": {
       "bytes": 323,
@@ -76,6 +80,54 @@
     "raw/mi355x/runs/303626/qwen-Original/protocol.json": {
       "bytes": 1686,
       "sha256": "9c08608f4786a5dd379896daff4bf74683faba9dc4c306701d2aaa2af6c7d588"
+    },
+    "raw/native/audit/candidate-build-plan.json": {
+      "bytes": 2737,
+      "sha256": "7be8be3990f03a9241d30145640a0a4a8aa718d950ea1b456e42ed68155592a0"
+    },
+    "raw/native/audit/cleanup-fixture-pids.json": {
+      "bytes": 33,
+      "sha256": "88109e97a2efd459f3937b3c0346b19abcfcc35cca3050cf9600dade8c917365"
+    },
+    "raw/native/audit/git-packet-byte-validation.json": {
+      "bytes": 224,
+      "sha256": "306947e2f45a644f025c6aeefcf32836b27e5cc204fc6f9b9e0a7d82910f3847"
+    },
+    "raw/native/audit/measured-kernel-extended.json": {
+      "bytes": 4410,
+      "sha256": "faba76c11315b1390f7fc1727028ca7ef8f90df84ec2ae9e6f598c8799d15c22"
+    },
+    "raw/native/audit/measured-kernel-final.json": {
+      "bytes": 4410,
+      "sha256": "6a0e024cd7ae4c31eae0d0e778c6187f2d5e221105e8c78cac515aeb8d14f91f"
+    },
+    "raw/native/audit/measured-operator-final/operator-validation.json": {
+      "bytes": 3568,
+      "sha256": "1158c4f1698b0aa68b013266a54e85b69466c23d416b474ac92b1da91fd5e81d"
+    },
+    "raw/native/audit/measured-operator/operator-validation.json": {
+      "bytes": 3576,
+      "sha256": "456bb6c2ca39010119a3de842db67b53d0869d342b88d83744559938b65ff66d"
+    },
+    "raw/native/audit/memory-queue-pause.json": {
+      "bytes": 435,
+      "sha256": "97ce7d2d954353c4b69dce9d06594a83eccaed3a020f803d9799d5083e8ceec3"
+    },
+    "raw/native/audit/performance-reaudit.json": {
+      "bytes": 3977,
+      "sha256": "bf0a5a65398f78df295e57a62628c3a3086722d971573b41db12e61053aaa4d6"
+    },
+    "raw/native/audit/quality-reaudit.json": {
+      "bytes": 229,
+      "sha256": "35e6362e923463244eb93df45dd40770bef455ffae47b3045a86cf58a70b09e7"
+    },
+    "raw/native/audit/resource-control.json": {
+      "bytes": 1760,
+      "sha256": "cd15e78bac3bc3de37e2e4ec1f23e7caa50773f7d0626c1c1420755da89f9f7f"
+    },
+    "raw/native/audit/stage-cleanup-validation.json": {
+      "bytes": 279,
+      "sha256": "a24d2e74eeae14d7e12e8c5df7735fc92d035e0bea60c9857495ab9d463173ce"
     },
     "raw/native/native-gqa/full-model-validation.json": {
       "bytes": 2191,
@@ -182,8 +234,12 @@
       "sha256": "3882344e435560945857fe86c534270b10a3b8549b3f7df27bdc68e17cbafd26"
     },
     "raw/native/receipts/report.json": {
-      "bytes": 9176,
-      "sha256": "bde9ffbee05b1abb0e6163115c20c1535916ddef585cd0a9e032e138a9a63b61"
+      "bytes": 10158,
+      "sha256": "c5208d89da20df40ab8d9c271a974c3ee681cf718661d0f8111cc1713910b64e"
+    },
+    "raw/olmo/environment.json": {
+      "bytes": 3628,
+      "sha256": "59ddada467d27cd826ffe9fddf7e98ea59431f62319657d817429f28bda32a43"
     }
   }
 }

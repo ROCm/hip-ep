@@ -15,15 +15,19 @@ the measured install remains unchanged. No remote update is part of this work.
 | Finding | Resolution |
 |---|---|
 | Seven merge conflicts with local main: GQA host-length/bias ABI, registration, BF16/FP8 import, EP compute tracing/error translation | Preserve upstream arguments/ROCTx/FP8 and QSA child cache/BF16/exception handling; adapt the child dense call to the new argument order |
+| Main's Hipsr parent-edge code assumes a newer LLVM region-successor API than the cached toolchain | Add a parent-edge constructor adapter for both APIs; use the existing successor-region accessor for exit detection |
 | OLMo malformed int32 sequence length could overflow in`length+1-S` before validation | Compute in int64, validate, then narrow; require an error flag before dispatch |
 | OLMo runtime and included kernel ABI headers were missing explicit custom-command dependencies | Track the runtime header and configure-time kernel ABI digest so header edits rebuild their consumers on Windows |
 | Qwen design introduction still described a queued port | Update to integrated status and link measured evidence |
 | Inspector recorded unused`gqa_back.cpp` | Correct future inspector to compiled`gqa.cpp`; retain historical JSON and erratum |
+| Generic Qwen stage receipts hashed the OLMo payload and snapshotted only OLMo scripts | Preserve the historical receipts with an erratum; Qwen execution/export protocols remain the authoritative identity. Future stage runner selects the Qwen payload and snapshots both script directories |
+| Stage interruption could leave child processes outside the timeout/RAM failure paths | Stop owned descendants on any interruption and verify ownership before removing the GPU-stage lock |
 | Existing incremental primitive test covered only13 steps | Extend to137 single-token updates and exact full-prefill pool equality |
 | Existing long ranking controls used only zero-score ties | Add seeded nonzero integer BF16 ranking controls at positions32771/65599 with exact independent stable CPU indices |
 | Qwen error recovery lacked a complete-operator receipt | Add decode-before-prefill, extreme/negative length, bad-position and next-prefill recovery controls |
 | Memory numbers could be mistaken for physical residency or sparse KV savings | Label WDDM commitment, phase sampling limits and full KV retention; export complete/pending/bounded statuses |
 | Final branch commit does not identify the historically measured binary | Preserve binary SHA256, original receipts and explicit source reconstruction/build-provenance limit |
+| Git's automatic line-ending conversion would invalidate raw Windows protocol hashes on another OS | Preserve packet JSON/CSV/raw bytes with scoped attributes and recognize CR as part of its original line ending |
 
 ## Kernel and runtime review
 
@@ -95,3 +99,16 @@ Candidate merge build and audit check results are recorded in
 can establish merge validation; historical611-test results do not qualify the
 merged main revision. Publication must retain all pending memory cells and the
 absence of matched QSA natural-long quality, Qwen BFCL and Qwen SWE-bench.
+
+The expanded measured-binary controls also pass: all four selectors preserve
+exact pool state through 137 decode steps; nonzero long-history rankings match
+stable CPU indices; a single KV append at position 65599 uses the correct cache
+stride; malformed requests are rejected and a subsequent prefill recovers.
+This last primitive append is not a 64K full-model retry or measurement.
+
+The candidate build disables main's unrelated package-wide kernel test executable
+targets after their object paths exceeded CMake's Windows path-length guidance.
+Compiler/unit suites and the dedicated QSA GPU checks remain the validation path.
+During the build, its CPU affinity was reduced to four logical CPUs and priority
+to below normal after the user's fan-noise report. No performance or memory
+measurement runs concurrently with that build.

@@ -1,0 +1,122 @@
+{
+  "status": "passed",
+  "cases": [
+    {
+      "batch": 1,
+      "context": 4096,
+      "phases": {
+        "prefill": {
+          "Original": {
+            "mean_seconds": 9.350225833322233,
+            "tokens_s": 438.0642856135859
+          },
+          "Changed": {
+            "mean_seconds": 9.75305516666655,
+            "tokens_s": 419.9709660208917
+          },
+          "throughput_change_percent": -4.130288678373173,
+          "paired_95_interval_percent": [
+            -4.3442054992552155,
+            -3.7549768258038463
+          ]
+        },
+        "decode": {
+          "Original": {
+            "mean_seconds": 5.990478316680917,
+            "tokens_s": 10.683621009325318
+          },
+          "Changed": {
+            "mean_seconds": 5.960668916678212,
+            "tokens_s": 10.737049967819082
+          },
+          "throughput_change_percent": 0.5001015895933492,
+          "paired_95_interval_percent": [
+            0.1387677060437987,
+            0.9185700657370566
+          ]
+        }
+      },
+      "summary_sha256": "d5ec5b5ebd8ae700756e8441aa3f917eef6c2013f774c10cf3b9c5ccde8ca273",
+      "protocol_sha256": "0b46c95a4e51e0d8b865cc4c1017ff30d9de3e40b6c8669d0faa3a4ec0755e9f",
+      "rows_sha256": "b2a261eeed8fe95e257eb1fa6c78eccbe4b78bb830b6895aa03529cc9e07b22e"
+    },
+    {
+      "batch": 1,
+      "context": 16384,
+      "phases": {
+        "prefill": {
+          "Original": {
+            "mean_seconds": 39.3900172500095,
+            "tokens_s": 415.9429506214814
+          },
+          "Changed": {
+            "mean_seconds": 41.23387271665464,
+            "tokens_s": 397.34322586154735
+          },
+          "throughput_change_percent": -4.471700922480637,
+          "paired_95_interval_percent": [
+            -4.565936174551,
+            -4.395793606856346
+          ]
+        },
+        "decode": {
+          "Original": {
+            "mean_seconds": 6.3205876499899505,
+            "tokens_s": 10.125640770142908
+          },
+          "Changed": {
+            "mean_seconds": 6.243741416673099,
+            "tokens_s": 10.250264341360507
+          },
+          "throughput_change_percent": 1.2307721955243656,
+          "paired_95_interval_percent": [
+            0.6583481948524872,
+            1.799725561082477
+          ]
+        }
+      },
+      "summary_sha256": "ac4319b2dac44fa38187525bc48c3f182c1ff50ca85d3fda94b311f5faf2c707",
+      "protocol_sha256": "56ff5328584ce8a4d26cf3034f5c091b05bc65eb86fd93b3e748290e91bf2a80",
+      "rows_sha256": "426c5d2d8a8f46d8a5f7822a6bc056aa26bd512d094e496ec65de584f51853d6"
+    },
+    {
+      "batch": 1,
+      "context": 32768,
+      "phases": {
+        "prefill": {
+          "Original": {
+            "mean_seconds": 85.14496843334443,
+            "tokens_s": 384.8495172753791
+          },
+          "Changed": {
+            "mean_seconds": 93.38946533333122,
+            "tokens_s": 350.8746932327165
+          },
+          "throughput_change_percent": -8.828080202151323,
+          "paired_95_interval_percent": [
+            -9.175820963140236,
+            -8.425321454823354
+          ]
+        },
+        "decode": {
+          "Original": {
+            "mean_seconds": 6.84035271667138,
+            "tokens_s": 9.356242675033192
+          },
+          "Changed": {
+            "mean_seconds": 6.732583983335644,
+            "tokens_s": 9.506008414957988
+          },
+          "throughput_change_percent": 1.600703884310728,
+          "paired_95_interval_percent": [
+            0.22433269877468742,
+            2.9866135455466125
+          ]
+        }
+      },
+      "summary_sha256": "4c336d47e253b7f9143fccbc901b5f05322a9d7d95f84ebcc84764980220c690",
+      "protocol_sha256": "f2a7ecc0ede1dde8d7f6e494fe3bc61502c8ba5b061d10725bcc2fa6adf74dbb",
+      "rows_sha256": "1d57a0fa1e98794a3cb570e7c9451becc802f07973f27b41621fa74f174a7680"
+    }
+  ]
+}

@@ -91,8 +91,10 @@ def write_report(folder, cases):
     }
     (folder / "matrix.json").write_text(json.dumps(matrix, indent=2) + "\n")
     lines = [
-        "<!-- Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.",
-        "Licensed under the MIT License. -->",
+        "<!--",
+        "Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.",
+        "Licensed under the MIT License.",
+        "-->",
         "# Qwen native memory-only matrix",
         "",
         "One fresh hip-ep session per process, default and frozen QSA measured separately. Each probe runs one full prefill and eight fixed decode inputs, reserving prefix+64 KV slots. No repeated performance benchmark is run. 64K is excluded at the user's request.",

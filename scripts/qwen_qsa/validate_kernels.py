@@ -74,6 +74,7 @@ def main():
     }
     path = args.output
     path.parent.mkdir(parents=True, exist_ok=True)
+    path.with_suffix(".validator.py").write_bytes(Path(__file__).read_bytes())
     try:
         S, C = receipt["tokens"], 2080
         P = (C + 3) // 4
@@ -369,6 +370,31 @@ def main():
                 }
             )
         torch.cuda.synchronize()
+        # A single append checks large cache strides without a 64K model run.
+        # No prefill/history attention or performance/memory measurement is done.
+        high_capacity, high_position = 65600, 65599
+        high_k = torch.full(
+            (1, 4, high_capacity, 256), float("nan"), device="cuda", dtype=torch.float16
+        )
+        high_v = torch.full_like(high_k, float("nan"))
+        one_k, one_v = k[:, :1].contiguous(), v[:, :1].contiguous()
+        kernels.call(
+            "pack_kv",
+            [one_k, one_v, high_k, high_v],
+            [1, 1, high_position, high_capacity],
+        )
+        assert torch.equal(high_k[:, :, high_position].cpu(), one_k[:, 0].cpu())
+        assert torch.equal(high_v[:, :, high_position].cpu(), one_v[:, 0].cpu())
+        assert high_k[:, :, high_position - 1].isnan().all()
+        assert high_v[:, :, high_position - 1].isnan().all()
+        result["rows"].append(
+            {
+                "check": "high_offset_single_kv_append",
+                "capacity": high_capacity,
+                "position": high_position,
+                "exact": True,
+            }
+        )
         result["status"] = "passed"
     except BaseException as exc:
         result.update(status="failed", error=repr(exc))

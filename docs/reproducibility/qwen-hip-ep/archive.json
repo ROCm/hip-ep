@@ -1,7 +1,7 @@
 {
-  "path": "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qwen-qsa\\paper-handoff-v1\\raw-evidence.zip",
-  "bytes": 6245983,
-  "sha256": "951232e36b10439432ffcf795cade55528a7f3228483887a3d477c11ca4bb106",
-  "members": 904,
+  "path": "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qwen-qsa\\paper-handoff-v1\\raw-evidence-20261122T034436105943Z.zip",
+  "bytes": 12374346,
+  "sha256": "349cd2fcdd9516479d387d8944f06e1fd917b7d71b05e5396a476d3033ba220c",
+  "members": 3459,
   "scope": "Local immutable raw evidence; no model weights, no cache binaries. Every member has SHA256 in MANIFEST.json. Not uploaded."
 }

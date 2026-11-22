@@ -1,0 +1,105 @@
+{
+  "unix": 1795318190.7410734,
+  "purpose": "Reduce active PR-build fan/CPU load after user concern; no stale benchmark workers found",
+  "processes": [
+    {
+      "pid": 29732,
+      "name": "ninja.exe",
+      "cpu_affinity": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "priority": "below_normal"
+    },
+    {
+      "pid": 10524,
+      "name": "cl.exe",
+      "cpu_affinity": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "priority": "below_normal"
+    },
+    {
+      "pid": 11064,
+      "name": "cl.exe",
+      "cpu_affinity": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "priority": "below_normal"
+    },
+    {
+      "pid": 3044,
+      "name": "cl.exe",
+      "cpu_affinity": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "priority": "below_normal"
+    },
+    {
+      "pid": 26752,
+      "name": "cl.exe",
+      "cpu_affinity": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "priority": "below_normal"
+    },
+    {
+      "pid": 47800,
+      "name": "cl.exe",
+      "cpu_affinity": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "priority": "below_normal"
+    },
+    {
+      "pid": 25020,
+      "name": "cl.exe",
+      "cpu_affinity": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "priority": "below_normal"
+    },
+    {
+      "pid": 48784,
+      "name": "cl.exe",
+      "cpu_affinity": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "priority": "below_normal"
+    },
+    {
+      "pid": 18268,
+      "name": "cl.exe",
+      "cpu_affinity": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "priority": "below_normal"
+    }
+  ]
+}

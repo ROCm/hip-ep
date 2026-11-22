@@ -1,0 +1,6 @@
+{
+  "status": "passed",
+  "historical_native_quality_audit_bytes_unchanged": true,
+  "cuda_initialized": false,
+  "scope": "Recomputed row-level PPL, GSM answer/prompt/token checks and paired quality; regenerated report"
+}
