@@ -4313,7 +4313,7 @@ def Hip_GqaOp : Hip_DpsOp_AutoReify<"gqa", [AttrSizedOperandSegments, OpStateOpI
 // Frozen OLMo QSA specialization. Q/K already have the backbone's external
 // normalization and RoPE. Selector weights remain BF16. Native per-node state
 // owns pooled selector history and persistent scratch on the EP stream.
-def Hip_QsaGqaOp : Hip_DpsOp<"qsa_gqa", [OpStateOpInterface]> {
+def Hip_QsaGqaOp : Hip_DpsOp_AutoReify<"qsa_gqa", [OpStateOpInterface]> {
   let summary = "Frozen batch-one QSA specialization of GQA";
   let arguments = (ins Hip_ContextType:$ctx,
       Hip_TensorOrMemRef:$query, Hip_TensorOrMemRef:$key,
@@ -4336,7 +4336,7 @@ def Hip_QsaGqaOp : Hip_DpsOp<"qsa_gqa", [OpStateOpInterface]> {
 
 // Qwen has distinct native GQA geometry, three zero-centered selector norms,
 // partial RoPE and a 512-historical-block budget. Keep OLMo's contract separate.
-def Hip_QwenQsaGqaOp : Hip_DpsOp<"qwen_qsa_gqa", [OpStateOpInterface]> {
+def Hip_QwenQsaGqaOp : Hip_DpsOp_AutoReify<"qwen_qsa_gqa", [OpStateOpInterface]> {
   let summary = "Frozen Qwen selector specialization of native GQA";
   let arguments = (ins Hip_ContextType:$ctx,
       Hip_TensorOrMemRef:$query, Hip_TensorOrMemRef:$key,
