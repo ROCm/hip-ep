@@ -1075,7 +1075,9 @@ class TestMatMulNBitsShortK:
 
 
 @pytest.mark.parametrize(
-    "K,N", [(10240, 324), (6144, 2560), (2560, 6144)], ids=["k10240_n324", "k6144", "n6144"]
+    "K,N",
+    [(10240, 324), (6144, 2560), (2560, 6144)],
+    ids=["k10240_n324", "k6144", "n6144"],
 )
 def test_decode_flash_next_lut_shapes(model_runner, K, N):
     """Decode shapes whose DecodeDp4a LUT row was measured for Qwen3.8-Flash-Next."""
