@@ -886,6 +886,8 @@ inline mlir::LogicalResult run(mlir::ModuleOp module,
   // add c++ patterns here
   populatePatchEmbedConvToGemmPattern(
       patterns, mlir::PatternBenefit(kPatchEmbedConvToGemmBenefit));
+  populateMatMulNBitsGroupPattern(
+      patterns, mlir::PatternBenefit(kMatMulNBitsGroupBenefit));
   populateSwigluFusionPattern(patterns,
                               mlir::PatternBenefit(kSwigluFusionBenefit));
   populateGeluFusionPattern(patterns, mlir::PatternBenefit(kGeluFusionBenefit));
@@ -893,8 +895,6 @@ inline mlir::LogicalResult run(mlir::ModuleOp module,
       patterns, mlir::PatternBenefit(kLinearAttentionGroupFoldBenefit));
   populateScaledMaskedSoftmaxFusionPattern(
       patterns, mlir::PatternBenefit(kScaledMaskedSoftmaxFusionBenefit));
-  populateMatMulNBitsGroupPattern(
-      patterns, mlir::PatternBenefit(kMatMulNBitsGroupBenefit));
 
   // pdl patterns here
   if (pdlBuffer.getBufferSize() != 0) {

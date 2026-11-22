@@ -1577,14 +1577,51 @@ void SkipRmsNormOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
-LogicalResult SkipRmsNormOp::verify() {
-  size_t numQuant = getQuantOutputs().size();
+// 0 or 2 quant_outputs with a positive block: an i8 copy shaped like `source`
+// and f32 scales with one entry per quant_block_size run of its last axis.
+// The kernels write both with the source's row stride and no bounds check.
+template <typename OpT>
+static LogicalResult verifyQuantOutputs(OpT op, Value source) {
+  size_t numQuant = op.getQuantOutputs().size();
   if (numQuant != 0 && numQuant != 2)
-    return emitOpError("expected 0 or 2 quant_outputs (a_quant, a_scale), got ")
+    return op.emitOpError(
+               "expected 0 or 2 quant_outputs (a_quant, a_scale), got ")
            << numQuant;
-  if (numQuant == 2 && getQuantBlockSize() <= 0)
-    return emitOpError("quant_outputs require a positive quant_block_size");
+  if (numQuant == 0)
+    return success();
+  int64_t block = op.getQuantBlockSize();
+  if (block <= 0)
+    return op.emitOpError("quant_outputs require a positive quant_block_size");
+  auto src = dyn_cast<ShapedType>(source.getType());
+  auto quant = dyn_cast<ShapedType>(op.getQuantOutputs()[0].getType());
+  auto scale = dyn_cast<ShapedType>(op.getQuantOutputs()[1].getType());
+  if (!src || !src.hasRank() || src.getRank() < 1 || !quant ||
+      !quant.hasRank() || !scale || !scale.hasRank())
+    return op.emitOpError("quant_outputs and the output they copy must be "
+                          "ranked");
+  if (!quant.getElementType().isInteger(8) ||
+      failed(verifyCompatibleShape(quant.getShape(), src.getShape())))
+    return op.emitOpError("a_quant must be i8 shaped like the output it "
+                          "quantizes");
+  SmallVector<int64_t> scaleShape(src.getShape());
+  int64_t width = scaleShape.back();
+  if (!ShapedType::isDynamic(width)) {
+    if (width % block != 0)
+      return op.emitOpError("quantized width ")
+             << width << " is not a multiple of quant_block_size " << block;
+    scaleShape.back() = width / block;
+  }
+  if (!scale.getElementType().isF32() ||
+      failed(verifyCompatibleShape(scale.getShape(), scaleShape)))
+    return op.emitOpError("a_scale must be f32 with one entry per "
+                          "quant_block_size run of the quantized output");
   return success();
+}
+
+LogicalResult SkipRmsNormOp::verify() {
+  if (getOutputs().empty())
+    return emitOpError("expected at least one output");
+  return verifyQuantOutputs(*this, getOutputs()[0]);
 }
 
 //===----------------------------------------------------------------------===//
@@ -1911,18 +1948,6 @@ MutableOperandRange HyperConnectionPreMixOp::getDpsInitsMutable() {
                              1 + getQuantOutputs().size());
 }
 
-// 0 or 2 quant_outputs (int8 copy, f32 group scales) with a positive block.
-template <typename OpT> static LogicalResult verifyQuantOutputs(OpT op) {
-  size_t numQuant = op.getQuantOutputs().size();
-  if (numQuant != 0 && numQuant != 2)
-    return op.emitOpError(
-               "expected 0 or 2 quant_outputs (a_quant, a_scale), got ")
-           << numQuant;
-  if (numQuant == 2 && op.getQuantBlockSize() <= 0)
-    return op.emitOpError("quant_outputs require a positive quant_block_size");
-  return success();
-}
-
 void HyperConnectionPreMixOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
@@ -1930,7 +1955,7 @@ void HyperConnectionPreMixOp::getEffects(
 }
 
 LogicalResult HyperConnectionPreMixOp::verify() {
-  if (failed(verifyQuantOutputs(*this)))
+  if (failed(verifyQuantOutputs(*this, getOutput())))
     return failure();
   SmallVector<Value> dataOperands{getStreams(), getPreMix(), getOutput()};
   llvm::append_range(dataOperands, getQuantOutputs());
@@ -2116,7 +2141,7 @@ LogicalResult HyperConnectionPostMixNormOp::verify() {
     dataOperands.push_back(getStreamMix());
   dataOperands.push_back(getOutputs()[0]);
   dataOperands.push_back(getOutputs()[1]);
-  if (failed(verifyQuantOutputs(*this)))
+  if (failed(verifyQuantOutputs(*this, getOutputs()[1])))
     return failure();
   llvm::append_range(dataOperands, getQuantOutputs());
   if (failed(verifyDpsComputeOp(*this, dataOperands,
@@ -3376,6 +3401,24 @@ LogicalResult MatMulNBitsGroupOp::verify() {
     return emitOpError("K and block_size must be positive");
   if (static_cast<bool>(getAQuant()) != static_cast<bool>(getAScale()))
     return emitOpError("a_quant and a_scale must be given together");
+
+  // Packed zero points hold ceil(k_blocks * bits / 8) bytes per row, whatever
+  // their shape; member i reads rows [row_offsets[i], row_offsets[i] + N[i]).
+  int64_t kBlocks = (getK() + getBlockSize() - 1) / getBlockSize();
+  int64_t zpRowBytes = (kBlocks * getBits() + 7) / 8;
+  for (auto [i, zp] : llvm::enumerate(getZeroPoints())) {
+    auto type = dyn_cast<ShapedType>(zp.getType());
+    if (!type || !type.hasStaticShape())
+      continue;
+    int64_t offset = getRowOffsets() ? (*getRowOffsets())[i] : 0;
+    int64_t end = offset + cast<IntegerAttr>(nAttr[i]).getInt();
+    int64_t rows = type.getNumElements() / zpRowBytes;
+    if (end > rows)
+      return emitOpError("member ")
+             << i << " reads zero-point rows [" << offset << ", " << end
+             << ") of an operand with " << rows << " rows of " << zpRowBytes
+             << " bytes";
+  }
 
   SmallVector<Value> dataOperands;
   dataOperands.push_back(getA());

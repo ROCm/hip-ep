@@ -1755,7 +1755,7 @@ int wrap_dequant_bnb4(RuntimeState *state, void *packed, void *absmax,
                       void *output, int64_t n, int64_t k, int64_t block_size,
                       int64_t quant_type);
 
-// hip.matmul_nbits_group: 1-3 N-bit weights (no bias) that read the same
+// hip.matmul_nbits_group: 1-4 N-bit weights (no bias) that read the same
 // activation A [batch_count x M x K]. Segment s has weight B<s>
 // [N<s> x k_blocks x blob_size], scales<s> [N<s> x k_blocks] and, for
 // asymmetric weights, zero_points<s> (uint8, packed at `bits` bits per

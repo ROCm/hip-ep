@@ -1079,7 +1079,8 @@ def Hip_MatMulNBitsGroupOp : Hip_DpsOp_AutoReify<"matmul_nbits_group",
     through the MatMulNBits kernels.
 
     Optional `quantized(%a_quant, %a_scale)` names a quantized copy of A
-    written by its producer (hip.skip_rms_norm quant_outputs). The runtime
+    written by its producer (the quant_outputs of hip.skip_rms_norm,
+    hip.hyper_connection_pre_mix or hip.hyper_connection_post_mix_norm). The runtime
     reads it instead of quantizing A whenever hip_norm_quant_supported()
     holds for A's shape, the same test the producer used to write it.
 
@@ -1989,6 +1990,11 @@ def Hip_HyperConnectionPostMixNormOp : Hip_DpsOp_AutoReify<
     `outputs` is [residual, normed], both the streams shape. `norm_scale` is
     1-D of length branches * hidden, one hidden-vector per branch.
 
+    Calls with at most 64 (row, branch) pairs and hidden <= 4096, as at
+    decode, reduce the sum of squares in a 1024-thread block; larger calls
+    use 256 threads. The reduction order differs, so `normed` for a given
+    row may differ by one fp16 ulp depending on how many rows the call has.
+
     Optional quantized copy of `normed` over its flattened (branches * hidden)
     row (0 or 2 buffers in `quant_outputs`), with the layout and contract of
     hip.skip_rms_norm's quant_outputs.
@@ -2054,7 +2060,10 @@ def Hip_SkipRmsNormOp :
       quant_outputs[0] = int8 [..., hidden] in the dp4a deinterleaved layout
       quant_outputs[1] = f32  [..., hidden / quant_block_size] group scales
     The runtime fills them only for the shapes hip_norm_quant_supported()
-    accepts; the consumer applies the same test before reading them.
+    accepts; the consumer applies the same test before reading them. The
+    buffers are sized for every row regardless, so for other shapes
+    (prefill, where the consumer quantizes per projection) they are
+    allocated but neither written nor read.
 
     Uses destination-passing style: output buffers are provided as arguments.
 

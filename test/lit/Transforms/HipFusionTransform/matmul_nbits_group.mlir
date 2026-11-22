@@ -572,3 +572,129 @@ func.func @slices_not_split(%ctx: !hip.context, %x: tensor<1x1x64xf16>,
       : tensor<1x1x12xf16> to tensor<1x1x8xf16>
   return %a, %a2, %y2 : tensor<1x1x8xf16>, tensor<1x1x8xf16>, tensor<1x1x12xf16>
 }
+
+// -----
+
+// An fp32 residual with fp16 skip, gamma and output takes the norm's mixed
+// entry, which has no quantized form: the group forms but quantizes itself.
+// CHECK-LABEL: func.func @mixed_norm_not_quantized
+// CHECK:         hip.skip_rms_norm
+// CHECK-NOT:     quant_outs
+// CHECK:         hip.matmul_nbits_group
+// CHECK-NOT:     quantized(
+func.func @mixed_norm_not_quantized(%ctx: !hip.context, %x: tensor<1x1x64xf32>,
+                                    %r: tensor<1x1x64xf16>, %gamma: tensor<64xf16>,
+                                    %bq: tensor<64x2x16xui8>, %sq: tensor<64x2xf16>,
+                                    %bk: tensor<32x2x16xui8>, %sk: tensor<32x2xf16>)
+    -> (tensor<1x1x64xf16>, tensor<1x1x32xf16>) {
+  %ey = tensor.empty() : tensor<1x1x64xf16>
+  %y = hip.skip_rms_norm(%ctx)
+      ins(%x, %r, %gamma : tensor<1x1x64xf32>, tensor<1x1x64xf16>, tensor<64xf16>)
+      outs(%ey : tensor<1x1x64xf16>)
+      {epsilon = 1.0e-05 : f32} : tensor<1x1x64xf16>
+  %eq = tensor.empty() : tensor<1x1x64xf16>
+  %q = hip.matmul_nbits(%ctx) ins(%y, %bq, %sq :
+      tensor<1x1x64xf16>, tensor<64x2x16xui8>, tensor<64x2xf16>)
+      outs(%eq : tensor<1x1x64xf16>)
+      {K = 64 : i64, N = 64 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x1x64xf16>
+  %ek = tensor.empty() : tensor<1x1x32xf16>
+  %k = hip.matmul_nbits(%ctx) ins(%y, %bk, %sk :
+      tensor<1x1x64xf16>, tensor<32x2x16xui8>, tensor<32x2xf16>)
+      outs(%ek : tensor<1x1x32xf16>)
+      {K = 64 : i64, N = 32 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x1x32xf16>
+  return %q, %k : tensor<1x1x64xf16>, tensor<1x1x32xf16>
+}
+
+// -----
+
+// Overlapping slices do not tile the output, so it is kept whole.
+// CHECK-LABEL: func.func @overlapping_slices_not_split
+// CHECK-NOT:     hip.matmul_nbits_group
+// CHECK:         hip.matmul_nbits(
+// CHECK-COUNT-2: tensor.extract_slice
+func.func @overlapping_slices_not_split(%ctx: !hip.context, %x: tensor<1x1x64xf16>,
+                                        %b: tensor<12x2x16xui8>, %s: tensor<12x2xf16>)
+    -> (tensor<1x1x8xf16>, tensor<1x1x8xf16>) {
+  %e = tensor.empty() : tensor<1x1x12xf16>
+  %y = hip.matmul_nbits(%ctx) ins(%x, %b, %s :
+      tensor<1x1x64xf16>, tensor<12x2x16xui8>, tensor<12x2xf16>)
+      outs(%e : tensor<1x1x12xf16>)
+      {K = 64 : i64, N = 12 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x1x12xf16>
+  %a = tensor.extract_slice %y[0, 0, 0] [1, 1, 8] [1, 1, 1]
+      : tensor<1x1x12xf16> to tensor<1x1x8xf16>
+  %c = tensor.extract_slice %y[0, 0, 4] [1, 1, 8] [1, 1, 1]
+      : tensor<1x1x12xf16> to tensor<1x1x8xf16>
+  return %a, %c : tensor<1x1x8xf16>, tensor<1x1x8xf16>
+}
+
+// -----
+
+// Five slices would need five members; a group holds four.
+// CHECK-LABEL: func.func @five_slices_not_split
+// CHECK-NOT:     hip.matmul_nbits_group
+// CHECK:         hip.matmul_nbits(
+// CHECK-COUNT-5: tensor.extract_slice
+func.func @five_slices_not_split(%ctx: !hip.context, %x: tensor<1x1x64xf16>,
+                                 %b: tensor<12x2x16xui8>, %s: tensor<12x2xf16>)
+    -> (tensor<1x1x2xf16>, tensor<1x1x2xf16>, tensor<1x1x2xf16>,
+        tensor<1x1x2xf16>, tensor<1x1x4xf16>) {
+  %e = tensor.empty() : tensor<1x1x12xf16>
+  %y = hip.matmul_nbits(%ctx) ins(%x, %b, %s :
+      tensor<1x1x64xf16>, tensor<12x2x16xui8>, tensor<12x2xf16>)
+      outs(%e : tensor<1x1x12xf16>)
+      {K = 64 : i64, N = 12 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x1x12xf16>
+  %a = tensor.extract_slice %y[0, 0, 0] [1, 1, 2] [1, 1, 1]
+      : tensor<1x1x12xf16> to tensor<1x1x2xf16>
+  %c = tensor.extract_slice %y[0, 0, 2] [1, 1, 2] [1, 1, 1]
+      : tensor<1x1x12xf16> to tensor<1x1x2xf16>
+  %d = tensor.extract_slice %y[0, 0, 4] [1, 1, 2] [1, 1, 1]
+      : tensor<1x1x12xf16> to tensor<1x1x2xf16>
+  %f = tensor.extract_slice %y[0, 0, 6] [1, 1, 2] [1, 1, 1]
+      : tensor<1x1x12xf16> to tensor<1x1x2xf16>
+  %g = tensor.extract_slice %y[0, 0, 8] [1, 1, 4] [1, 1, 1]
+      : tensor<1x1x12xf16> to tensor<1x1x4xf16>
+  return %a, %c, %d, %f, %g : tensor<1x1x2xf16>, tensor<1x1x2xf16>,
+      tensor<1x1x2xf16>, tensor<1x1x2xf16>, tensor<1x1x4xf16>
+}
+
+// -----
+
+// A sibling projection that cannot join a group with the sliced one (its init
+// is sized from the sliced output) does not stop the split.
+// CHECK-LABEL: func.func @split_beside_ungroupable_sibling
+// CHECK:         %[[G:.*]]:2 = hip.matmul_nbits_group(%{{.*}}) ins(%arg1 : tensor<1x?x64xf16>)
+// CHECK-SAME:      weights(%arg2, %arg2 :
+// CHECK-SAME:      N = [8, 4]
+// CHECK-SAME:      row_offsets = array<i64: 0, 8>
+// CHECK:         %[[V:.*]] = hip.matmul_nbits(%{{.*}}) ins(%arg1, %arg4, %arg5 :
+// CHECK:         return %[[G]]#0, %[[G]]#1, %[[V]]
+func.func @split_beside_ungroupable_sibling(
+    %ctx: !hip.context, %x: tensor<1x?x64xf16>,
+    %b: tensor<12x2x16xui8>, %s: tensor<12x2xf16>,
+    %bv: tensor<32x2x16xui8>, %sv: tensor<32x2xf16>)
+    -> (tensor<1x?x8xf16>, tensor<1x?x4xf16>, tensor<1x?x32xf16>) {
+  %c1 = arith.constant 1 : index
+  %m = tensor.dim %x, %c1 : tensor<1x?x64xf16>
+  %e = tensor.empty(%m) : tensor<1x?x12xf16>
+  %y = hip.matmul_nbits(%ctx) ins(%x, %b, %s :
+      tensor<1x?x64xf16>, tensor<12x2x16xui8>, tensor<12x2xf16>)
+      outs(%e : tensor<1x?x12xf16>)
+      {K = 64 : i64, N = 12 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x?x12xf16>
+  %my = tensor.dim %y, %c1 : tensor<1x?x12xf16>
+  %a = tensor.extract_slice %y[0, 0, 0] [1, %my, 8] [1, 1, 1]
+      : tensor<1x?x12xf16> to tensor<1x?x8xf16>
+  %g = tensor.extract_slice %y[0, 0, 8] [1, %my, 4] [1, 1, 1]
+      : tensor<1x?x12xf16> to tensor<1x?x4xf16>
+  %ev = tensor.empty(%my) : tensor<1x?x32xf16>
+  %v = hip.matmul_nbits(%ctx) ins(%x, %bv, %sv :
+      tensor<1x?x64xf16>, tensor<32x2x16xui8>, tensor<32x2xf16>)
+      outs(%ev : tensor<1x?x32xf16>)
+      {K = 64 : i64, N = 32 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x?x32xf16>
+  return %a, %g, %v : tensor<1x?x8xf16>, tensor<1x?x4xf16>, tensor<1x?x32xf16>
+}

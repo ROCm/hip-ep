@@ -118,17 +118,17 @@ bool canMakeAvailableBefore(mlir::Value v, mlir::Operation *point,
   });
 }
 
-/// Every hip.matmul_nbits that reads `root`'s activation and can join its
-/// group, in program order, starting with `root`.
+/// Every groupable hip.matmul_nbits in `op`'s block that reads its activation
+/// with the same grouping attributes, `op` included, in program order.
 llvm::SmallVector<mlir::hip::MatMulNBitsOp>
-collectGroup(mlir::hip::MatMulNBitsOp root) {
+groupCandidates(mlir::hip::MatMulNBitsOp op) {
   llvm::SmallVector<mlir::hip::MatMulNBitsOp> members;
-  mlir::Value a = root.getA();
+  mlir::Value a = op.getA();
   for (mlir::Operation *user : a.getUsers()) {
     auto mm = mlir::dyn_cast<mlir::hip::MatMulNBitsOp>(user);
-    if (!mm || mm.getA() != a || mm->getBlock() != root->getBlock() ||
+    if (!mm || mm.getA() != a || mm->getBlock() != op->getBlock() ||
         llvm::is_contained(members, mm) || !isGroupable(mm) ||
-        !sameGrouping(root, mm))
+        !sameGrouping(op, mm))
       continue;
     members.push_back(mm);
   }
@@ -136,13 +136,16 @@ collectGroup(mlir::hip::MatMulNBitsOp root) {
              [](mlir::hip::MatMulNBitsOp x, mlir::hip::MatMulNBitsOp y) {
                return x->isBeforeInBlock(y);
              });
-  // Only the first member forms the group, so it is formed exactly once and
-  // the result is independent of the order the driver visits the members in.
-  if (members.empty() || members.front() != root)
-    return {};
+  return members;
+}
 
+/// The group the first candidate forms: itself and up to kMaxGroupSize - 1
+/// later candidates whose operands can be made available before it.
+llvm::SmallVector<mlir::hip::MatMulNBitsOp>
+greedyGroup(llvm::ArrayRef<mlir::hip::MatMulNBitsOp> candidates) {
+  mlir::hip::MatMulNBitsOp root = candidates.front();
   llvm::SmallVector<mlir::hip::MatMulNBitsOp> group{root};
-  for (mlir::hip::MatMulNBitsOp mm : llvm::drop_begin(members)) {
+  for (mlir::hip::MatMulNBitsOp mm : llvm::drop_begin(candidates)) {
     if (group.size() == kMaxGroupSize)
       break;
     if (llvm::all_of(mm->getOperands(), [&](mlir::Value v) {
@@ -151,6 +154,36 @@ collectGroup(mlir::hip::MatMulNBitsOp root) {
       group.push_back(mm);
   }
   return group;
+}
+
+/// Every hip.matmul_nbits that reads `root`'s activation and can join its
+/// group, in program order, starting with `root`.
+llvm::SmallVector<mlir::hip::MatMulNBitsOp>
+collectGroup(mlir::hip::MatMulNBitsOp root) {
+  llvm::SmallVector<mlir::hip::MatMulNBitsOp> candidates =
+      groupCandidates(root);
+  // Only the first candidate forms the group, so it is formed exactly once and
+  // the result is independent of the order the driver visits the members in.
+  if (candidates.empty() || candidates.front() != root)
+    return {};
+  return greedyGroup(candidates);
+}
+
+/// Whether MatMulNBitsGroup will put `op` in a group of two or more. Groups
+/// form from the first remaining candidate on, each taking what it can, so a
+/// candidate whose operands cannot move above an earlier one, or one past a
+/// full group with no partner left, stays single.
+bool joinsGroup(mlir::hip::MatMulNBitsOp op) {
+  llvm::SmallVector<mlir::hip::MatMulNBitsOp> remaining = groupCandidates(op);
+  while (remaining.size() >= 2) {
+    llvm::SmallVector<mlir::hip::MatMulNBitsOp> group = greedyGroup(remaining);
+    if (group.size() >= 2 && llvm::is_contained(group, op))
+      return true;
+    llvm::erase_if(remaining, [&](mlir::hip::MatMulNBitsOp mm) {
+      return llvm::is_contained(group, mm);
+    });
+  }
+  return false;
 }
 
 /// The SiLU(gate) * up chain consuming a gate/up pair.
@@ -344,6 +377,20 @@ struct MatMulNBitsGroupReadsNormQuant final
            group.getK() % kQuantBlockSize == 0;
   }
 
+  /// The norm kernel quantizes only on its uniform-fp16 entry; an fp32
+  /// residual with fp16 skip, gamma or output takes the mixed entry, which
+  /// the lowering refuses to give quant_outputs.
+  static bool allF16(mlir::hip::SkipRmsNormOp norm) {
+    auto isF16 = [](mlir::Value v) {
+      auto type = mlir::dyn_cast<mlir::ShapedType>(v.getType());
+      return type && type.getElementType().isF16();
+    };
+    return isF16(norm.getInput()) && isF16(norm.getSkip()) &&
+           isF16(norm.getGamma()) &&
+           (!norm.getBias() || isF16(norm.getBias())) &&
+           llvm::all_of(norm.getOutputs(), isF16);
+  }
+
   /// The producer of `a` if `a` is the result it can quantize and it does not
   /// write a quantized copy yet.
   static mlir::Operation *quantProducer(mlir::Value a) {
@@ -353,7 +400,9 @@ struct MatMulNBitsGroupReadsNormQuant final
     mlir::Operation *op = result.getOwner();
     unsigned idx = result.getResultNumber();
     if (auto norm = mlir::dyn_cast<mlir::hip::SkipRmsNormOp>(op))
-      return norm.getQuantOutputs().empty() && idx == 0 ? op : nullptr;
+      return norm.getQuantOutputs().empty() && idx == 0 && allF16(norm)
+                 ? op
+                 : nullptr;
     if (auto pre = mlir::dyn_cast<mlir::hip::HyperConnectionPreMixOp>(op))
       return pre.getQuantOutputs().empty() && idx == 0 ? op : nullptr;
     if (auto post = mlir::dyn_cast<mlir::hip::HyperConnectionPostMixNormOp>(op))
@@ -661,12 +710,8 @@ struct MatMulNBitsSplitSlicedOutput final
     if (!isGroupable(op))
       return rewriter.notifyMatchFailure(op, "not a groupable projection");
     // Projections sharing the activation group first; the group is split.
-    for (mlir::Operation *user : op.getA().getUsers()) {
-      auto mm = mlir::dyn_cast<mlir::hip::MatMulNBitsOp>(user);
-      if (mm && mm != op && mm.getA() == op.getA() && isGroupable(mm) &&
-          sameGrouping(op, mm))
-        return rewriter.notifyMatchFailure(op, "has sibling projections");
-    }
+    if (joinsGroup(op))
+      return rewriter.notifyMatchFailure(op, "joins a sibling group");
     SplitMember m{op.getB(), op.getScales(),   op.getZeroPoints(), op.getN(),
                   0,         op->getResult(0), op.getOutput(),     {}};
     return splitByColumns(op, m, {}, op, rewriter);

@@ -1162,7 +1162,8 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->matmul_dp4a_scratch));
   }
   if (state->matmul_group_scratch) {
-    HIP_CLEANUP(hipFree(state->matmul_group_scratch));
+    HIP_CLEANUP(
+        hipdnn_ep_state_device_free(state, state->matmul_group_scratch));
   }
 
   // Free the linear-attention chunk-parallel prefill scratch (if allocated).
@@ -2192,12 +2193,14 @@ int hipdnn_ep_state_ensure_matmul_group_scratch(RuntimeState *state,
     if (state->stream) {
       hipStreamSynchronize(state->stream);
     }
-    HIP_CLEANUP(hipFree(state->matmul_group_scratch));
+    HIP_CLEANUP(
+        hipdnn_ep_state_device_free(state, state->matmul_group_scratch));
     state->matmul_group_scratch = nullptr;
     state->matmul_group_scratch_size = 0;
   }
 
-  if (hipMalloc(&state->matmul_group_scratch, alloc_size) != hipSuccess) {
+  if (hipdnn_ep_state_device_alloc(state, &state->matmul_group_scratch,
+                                   alloc_size) != hipSuccess) {
     fprintf(stderr,
             "hipdnn_ep_state_ensure_matmul_group_scratch: hipMalloc failed for "
             "%zu bytes\n",
