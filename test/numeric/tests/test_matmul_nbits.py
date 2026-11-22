@@ -1020,13 +1020,17 @@ class TestMatMulNBitsGroup:
         including a four-member group and an N=1 member."""
         K = 2560
         rng = np.random.default_rng(5)
-        x_info = helper.make_tensor_value_info("X", TensorProto.FLOAT16, [1, seq_len, K])
+        x_info = helper.make_tensor_value_info(
+            "X", TensorProto.FLOAT16, [1, seq_len, K]
+        )
         nodes, inits, outs = [], [], []
         for i, n in enumerate(ns):
             inits += _q4_initializers(rng, f"p{i}", K, n)
             nodes.append(_q4_node(f"p{i}", "X", f"Y{i}", K, n))
             outs.append(
-                helper.make_tensor_value_info(f"Y{i}", TensorProto.FLOAT16, [1, seq_len, n])
+                helper.make_tensor_value_info(
+                    f"Y{i}", TensorProto.FLOAT16, [1, seq_len, n]
+                )
             )
         model = make_model_from_nodes(
             nodes,
