@@ -1869,8 +1869,8 @@ int wrap_dequantize_linear(
 // routing_type: SOFTMAX routes by softmax(router_probs) (or router_weights);
 // SIGMOID_BIAS reads fp32 logits in router_probs, selects the top-k of
 // sigmoid + correction_bias, and weights by the selected sigmoid scores,
-// normalized over k when normalize_routing_weights, times
-// routed_scaling_factor.
+// divided by their sum plus routing_norm_eps when normalize_routing_weights,
+// times routed_scaling_factor.
 #define HIPDNN_EP_QMOE_ROUTING_SOFTMAX 0
 #define HIPDNN_EP_QMOE_ROUTING_SIGMOID_BIAS 1
 
@@ -1901,7 +1901,7 @@ int wrap_qmoe(
     int64_t normalize_routing_weights, int64_t elem_size,
     const void *correction_bias, // (nullable) [num_experts] fp32
     int64_t routing_type,        // HIPDNN_EP_QMOE_ROUTING_*
-    float routed_scaling_factor);
+    float routed_scaling_factor, float routing_norm_eps);
 
 // com.amd QMoE operation wrapper (LatentMoE).
 //
