@@ -45,6 +45,8 @@
 //     ~parity). fp32 activations (W4A32) reach that path through a per-call
 //     fp32->fp16 cast of QKV / RoPE tables and an fp16->fp32 cast of the
 //     output; fused kernels stay fp16-only.
+//   * bf16 runs only on the decomposed pipeline, without RoPE, a quantized
+//     KV cache, head_sink or key_bias.
 //   * Inputs NEITHER path supports (other KV quantization, position ids,
 //     qk_output) are rejected up front.
 //===----------------------------------------------------------------------===//
@@ -1191,7 +1193,7 @@ struct GqaGemmKey {
   bool transA;
   // true = HIP_R_32F C/D layouts (Score GEMM always accumulates fp32)
   bool outputFp32;
-  // true = fp32 A/B inputs (Whisper no_causal); false = fp16
+  // true = fp32 A/B inputs (Whisper no_causal); false = fp16 or bf16
   bool inputFp32;
   // Explicit per-operand batch strides (elements); 0 = default dense stride
   // (m*k for A, n*k for B, n*m for C/D). Non-zero enables the no-expand layout
@@ -1392,7 +1394,7 @@ cache_done:
 }
 
 //===----------------------------------------------------------------------===//
-// 12-step hipBLASLt GQA pipeline (Step 0 + Steps 1-11; fp16 + fp32)
+// 12-step hipBLASLt GQA pipeline (Step 0 + Steps 1-11; fp16, bf16, fp32)
 //===----------------------------------------------------------------------===//
 static int gqa_forward_hipblaslt(
     RuntimeState *state, hipStream_t stream, hipblasLtHandle_t ltHandle,
@@ -2694,7 +2696,7 @@ static int gqa_forward_hipblaslt(
       // the chunk's own row count over the key range actually scored.
       const int scoreBatchStride = static_cast<int>(c * kv_ext);
 
-      // ---- Step 8: Score GEMM (fp16/fp32 in, fp32 out) ----
+      // ---- Step 8: Score GEMM (fp16/bf16/fp32 in, fp32 out) ----
       // A = K: no-expand reads present_key directly, expand reads d_Kexp.
       // B = Q: need_transpose reads d_Qtrans (BNSD), else qSrc
       // (BSHD==BNSD@sq=1).
@@ -2711,9 +2713,9 @@ static int gqa_forward_hipblaslt(
       // read-modify-write over this buffer -- 2.14 GB per head at a 16K prompt
       // -- to deliver a value the softmax was about to read anyway.
 
-      // ---- Step 9: Causal Mask (fp32) + Softmax (fp32 -> fp16/fp32) ----
+      // ---- Step 9: Causal Mask (fp32) + Softmax (fp32 -> probs_dtype) ----
       // S is treated as [B*H, c, kv_span] (head stride c*kv_span) by both
-      // GEMM flavours. softmax dtype follows gemm_fp32.
+      // GEMM flavours. The softmax writes probs_dtype.
       //
       // The built-in causal triangle is applied whenever !no_causal,
       // INDEPENDENTLY of attention_bias. This mirrors the ONNX Attention
@@ -2797,7 +2799,7 @@ static int gqa_forward_hipblaslt(
             static_cast<int>(use_smooth_softmax)));
       }
 
-      // ---- Step 10: Value GEMM (fp16/fp32 in, fp16/fp32 out) ----
+      // ---- Step 10: Value GEMM (fp16/bf16/fp32 in and out) ----
       // A = V: no-expand reads present_value directly, expand reads d_Vexp.
       // C = O: need_transpose writes d_O (BNSD, transposed below); at sq==1 the
       //        GEMM writes straight to output (BSHD==BNSD).
@@ -3658,14 +3660,14 @@ extern "C" int wrap_group_query_attention_v5(
   if (!hip_gqa_ring_device_supported())
     return tq4_error(state, "Ring requires an enabled gfx1151 device");
   if (!fp16_tensors || data_type != HIPDNN_EP_DATATYPE_HALF ||
-      batch_size != 1 || num_heads != 24 ||
-      kv_num_heads != 4 || head_dim != 256 || element_size_bytes != 2 ||
-      seq_len_q < 1 || seq_len_q > HIP_EP_RING_MAX_QUERY_LENGTH ||
-      seq_len_new_kv != seq_len_q || kv_bnsd != 0 || no_causal || do_rotary ||
-      rotary_interleaved || position_ids || cos_cache || sin_cache ||
-      attention_bias || key_bias || head_sink || k_scale || v_scale ||
-      k_quant_type || v_quant_type || softcap != 0 || local_window_size != -1 ||
-      smooth_softmax > 0 || qk_output || output_qk) {
+      batch_size != 1 || num_heads != 24 || kv_num_heads != 4 ||
+      head_dim != 256 || element_size_bytes != 2 || seq_len_q < 1 ||
+      seq_len_q > HIP_EP_RING_MAX_QUERY_LENGTH || seq_len_new_kv != seq_len_q ||
+      kv_bnsd != 0 || no_causal || do_rotary || rotary_interleaved ||
+      position_ids || cos_cache || sin_cache || attention_bias || key_bias ||
+      head_sink || k_scale || v_scale || k_quant_type || v_quant_type ||
+      softcap != 0 || local_window_size != -1 || smooth_softmax > 0 ||
+      qk_output || output_qk) {
     fprintf(
         stderr,
         "TurboQuant GQA contract: B=%lld H=%lld G=%lld D=%lld bytes=%lld "
