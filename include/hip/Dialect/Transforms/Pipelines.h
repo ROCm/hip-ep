@@ -179,6 +179,10 @@ struct RocMlirFusionPipelineOptions
   ListOption<std::string> gemmGemmAccelTypes{
       *this, "gemm-gemm-accel-types",
       llvm::cl::desc("Gemm element types with matrix acceleration")};
+  Option<bool> int4Weights{
+      *this, "int4-weights",
+      llvm::cl::desc("Take packed-int4 weight dequantizes into the kernel"),
+      llvm::cl::init(false)};
   Option<std::string> report{
       *this, "report",
       llvm::cl::desc("Append the fusion report records to this file"),

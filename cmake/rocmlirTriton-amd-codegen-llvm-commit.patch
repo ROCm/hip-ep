@@ -1,0 +1,13 @@
+diff --git a/cmake/triton_amd_codegen.cmake b/cmake/triton_amd_codegen.cmake
+index 8d4c854ce5..3448e2983d 100644
+--- a/cmake/triton_amd_codegen.cmake
++++ b/cmake/triton_amd_codegen.cmake
+@@ -53,7 +53,7 @@ endif()
+ 
+ # Build the AMD code-generation LLVM (AMDGPU target only, static libs).
+ ExternalProject_Add(amd_codegen_llvm
+-  URL "${ROCMLIR_AMD_CODEGEN_LLVM_GIT_REPOSITORY}/archive/refs/heads/${ROCMLIR_AMD_CODEGEN_LLVM_GIT_BRANCH}.tar.gz"
++  URL "${ROCMLIR_AMD_CODEGEN_LLVM_GIT_REPOSITORY}/archive/${ROCMLIR_AMD_CODEGEN_LLVM_GIT_BRANCH}.tar.gz"
+   # GIT_REPOSITORY "${ROCMLIR_AMD_CODEGEN_LLVM_GIT_REPOSITORY}"
+   # GIT_TAG "${ROCMLIR_AMD_CODEGEN_LLVM_GIT_BRANCH}"
+   # GIT_SHALLOW TRUE

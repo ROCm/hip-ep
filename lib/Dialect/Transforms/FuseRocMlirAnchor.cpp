@@ -37,19 +37,103 @@ namespace mlir::hip {
 
 namespace {
 
-enum class Decomposition { None, QLinearConv, QLinearMatMul, DequantizedConv };
+enum class Decomposition {
+  None,
+  QLinearConv,
+  QLinearMatMul,
+  DequantizedConv,
+  Int4Weights
+};
 
 void sortByBlockOrder(SmallVectorImpl<Operation *> &ops) {
   llvm::sort(ops,
              [](Operation *a, Operation *b) { return a->isBeforeInBlock(b); });
 }
 
+bool allEqual(ArrayAttr values, int64_t expected) {
+  return llvm::all_of(values, [&](Attribute a) {
+    return cast<IntegerAttr>(a).getInt() == expected;
+  });
+}
+
+// The weights operand that an anchor's kernel can read as packed int4: the
+// filter of a 1x1 convolution, or the B operand [K, N] of a matmul or gemm
+// that does not transpose it.
+OpOperand *getWeightOperand(Operation *anchor) {
+  if (auto conv = dyn_cast<ConvOp>(anchor)) {
+    if (conv.getGroup() != 1 || !allEqual(conv.getKernelShape(), 1) ||
+        !allEqual(conv.getStrides(), 1) || !allEqual(conv.getPads(), 0) ||
+        !allEqual(conv.getDilations(), 1))
+      return nullptr;
+    return &conv.getWeightsMutable();
+  }
+  if (auto matmul = dyn_cast<MatmulOp>(anchor))
+    return matmul.getTransB() == 0 ? &matmul.getBMutable() : nullptr;
+  if (auto gemm = dyn_cast<GemmOp>(anchor))
+    return gemm.getTransB() == 0 ? &gemm.getInputBMutable() : nullptr;
+  return nullptr;
+}
+
+// The weights dequantize that the kernel can read as 4-bit values: packed
+// INT4 (signless i8 storage) or UINT4 (ui8 storage) of a constant or an
+// argument. Its scale and zero point are per tensor, per output channel (a
+// filter's axis 0, B's axis 1), or, for B, per block of K along axis 0. Two
+// nibbles share a byte along the innermost dimension, so that extent is even.
+DequantizeLinearOp getInt4Weights(Operation *anchor) {
+  OpOperand *operand = getWeightOperand(anchor);
+  if (!operand)
+    return nullptr;
+  auto dq = operand->get().getDefiningOp<DequantizeLinearOp>();
+  if (!dq || !dq->hasOneUse() || !dq.getPackedInt4())
+    return nullptr;
+  bool filter = isa<ConvOp>(anchor);
+  auto weightType = dyn_cast<RankedTensorType>(dq.getResult(0).getType());
+  auto inputType = dyn_cast<RankedTensorType>(dq.getInput().getType());
+  if (!weightType || !inputType || !weightType.hasStaticShape() ||
+      weightType.getRank() != (filter ? 4 : 2) ||
+      weightType.getDimSize(1) % 2 != 0 ||
+      !isa<FloatType>(weightType.getElementType()))
+    return nullptr;
+  Type storage = inputType.getElementType();
+  if (!storage.isSignlessInteger(8) && !storage.isUnsignedInteger(8))
+    return nullptr;
+  int64_t channelAxis = filter ? 0 : 1;
+  int64_t channels = weightType.getDimSize(channelAxis);
+  int64_t blockSize = dq.getBlockSize();
+  SmallVector<int64_t> blockedShape;
+  if (blockSize != 0) {
+    int64_t depth = weightType.getDimSize(0);
+    if (filter || dq.getAxis() != 0 || blockSize < 0 || depth % blockSize != 0)
+      return nullptr;
+    blockedShape = {depth / blockSize, channels};
+  }
+  auto isParam = [&](Value value, Type elementType) {
+    auto type = dyn_cast<RankedTensorType>(value.getType());
+    if (!type || !type.hasStaticShape() || type.getElementType() != elementType)
+      return false;
+    if (blockSize != 0)
+      return type.getShape() == ArrayRef<int64_t>(blockedShape);
+    return type.getNumElements() == 1 ||
+           (type.getRank() == 1 && type.getDimSize(0) == channels &&
+            dq.getAxis() == channelAxis);
+  };
+  if (!isParam(dq.getScale(), weightType.getElementType()))
+    return nullptr;
+  if (Value zp = dq.getZeroPoint(); zp && !isParam(zp, storage))
+    return nullptr;
+  Value weights = dq.getInput();
+  if (!weights.getDefiningOp<ConstantOp>() && !isa<BlockArgument>(weights))
+    return nullptr;
+  return dq;
+}
+
 // The anchors and how each becomes the op that rocMLIR compiles. An i32
 // matmul or convolution has an exact HIP kernel; outlining it asks rocMLIR to
 // compile a non-quantized integer tosa op, which this pipeline does not
 // establish. The i32 accumulator of a quantized anchor is its init, not an
-// input.
-std::optional<Decomposition> getAnchorKind(Operation *op) {
+// input. With `int4Weights`, a float convolution, matmul or gemm of packed-int4
+// weights takes their dequantize into its kernel.
+std::optional<Decomposition> getAnchorKind(Operation *op, bool int4Weights) {
   if (auto conv = dyn_cast<QLinearConvOp>(op))
     return conv->getNumResults() == 1 && planQLinearConv(conv)
                ? std::optional(Decomposition::QLinearConv)
@@ -72,6 +156,8 @@ std::optional<Decomposition> getAnchorKind(Operation *op) {
     if (auto type = dyn_cast<TensorType>(operand.getType());
         type && !type.hasStaticShape())
       return std::nullopt;
+  if (int4Weights && getInt4Weights(op))
+    return Decomposition::Int4Weights;
   return Decomposition::None;
 }
 
@@ -183,6 +269,116 @@ bool holdsQdq(RocMlirElementwiseOp module) {
   });
 }
 
+// A static integer nearest upsample is a repeated read of the input: with
+// asymmetric coordinates and floor rounding, output o copies input o / scale.
+// round_prefer_floor matches that repeat only for scales 1 and 2, because a
+// larger scale rounds some samples in the block to the next input pixel.
+// rocMLIR convolution is 2D or 3D, and only spatial axes may grow. ResizeLayout
+// rejects a resized N, and a resized C on a 5-D input, so a growth there must
+// keep failing in hip.resize rather than start working through this view.
+bool isNearestRepeatResize(ResizeOp resize) {
+  if (!resize.getRuntimeScales().empty())
+    return false;
+  if (resize.getMode() != 0 || resize.getCoordTransform() != 1)
+    return false;
+  int64_t nearest = resize.getNearestMode();
+  if (nearest != 0 && nearest != 2)
+    return false;
+
+  auto inType = dyn_cast<RankedTensorType>(resize.getInput().getType());
+  auto outType = dyn_cast<RankedTensorType>(resize.getResult(0).getType());
+  if (!inType || !outType || !inType.hasStaticShape() ||
+      !outType.hasStaticShape() || inType.getRank() != outType.getRank())
+    return false;
+  if (inType.getRank() != 4 && inType.getRank() != 5)
+    return false;
+
+  bool grew = false;
+  SmallVector<int64_t> ratios;
+  ratios.reserve(inType.getRank());
+  for (auto [axis, dims] :
+       llvm::enumerate(llvm::zip(inType.getShape(), outType.getShape()))) {
+    auto [inDim, outDim] = dims;
+    if (inDim <= 0 || outDim < inDim || outDim % inDim != 0)
+      return false;
+    int64_t ratio = outDim / inDim;
+    if (axis < 2 && ratio != 1)
+      return false;
+    if (ratio > 1)
+      grew = true;
+    if (nearest == 0 && ratio > 2)
+      return false;
+    ratios.push_back(ratio);
+  }
+  if (!grew)
+    return false;
+
+  // The runtime samples with the attribute scale, not out/in. A near-integer
+  // value such as 2.0000004 for an 8 -> 16 resize still grows by 2, but
+  // floor(o / scale) disagrees with the repeat view's o / 2, so reject it.
+  if (ArrayAttr scales = resize.getScalesAttr()) {
+    if (static_cast<int64_t>(scales.size()) != inType.getRank())
+      return false;
+    for (auto [attr, ratio] : llvm::zip(scales.getValue(), ratios)) {
+      double scale = cast<FloatAttr>(attr).getValueAsDouble();
+      if (scale != static_cast<double>(ratio))
+        return false;
+    }
+  }
+  return true;
+}
+
+// [N, C, H, W] -> [N, C, H, 1, W, 1] -> broadcast the new axes to the integer
+// scale -> [N, C, H*scale, W*scale]. Axes with scale 1 are left unchanged.
+Value buildNearestRepeatView(RewriterBase &rewriter, Location loc,
+                             Value context, Value input, Type resultType) {
+  auto inType = cast<RankedTensorType>(input.getType());
+  auto outType = cast<RankedTensorType>(resultType);
+  ArrayRef<int64_t> inShape = inType.getShape();
+  ArrayRef<int64_t> outShape = outType.getShape();
+
+  SmallVector<int64_t> splitShape;
+  SmallVector<int64_t> broadcastShape;
+  SmallVector<ReassociationIndices> reassoc;
+  int64_t axis = 0;
+  for (int64_t i = 0, rank = inType.getRank(); i < rank; ++i) {
+    int64_t scale = outShape[i] / inShape[i];
+    ReassociationIndices group;
+    group.push_back(axis++);
+    splitShape.push_back(inShape[i]);
+    broadcastShape.push_back(inShape[i]);
+    if (scale > 1) {
+      group.push_back(axis++);
+      splitShape.push_back(1);
+      broadcastShape.push_back(scale);
+    }
+    reassoc.push_back(std::move(group));
+  }
+
+  Type elemType = inType.getElementType();
+  auto splitType = RankedTensorType::get(splitShape, elemType);
+  SmallVector<OpFoldResult> splitFolds;
+  for (int64_t dim : splitShape)
+    splitFolds.push_back(rewriter.getIndexAttr(dim));
+  Value split = tensor::ExpandShapeOp::create(rewriter, loc, splitType, input,
+                                              reassoc, splitFolds);
+
+  if (splitShape == broadcastShape)
+    return tensor::CollapseShapeOp::create(rewriter, loc, outType, split,
+                                           reassoc);
+
+  auto shapeType = RankedTensorType::get(
+      {static_cast<int64_t>(broadcastShape.size())}, rewriter.getI64Type());
+  Value shape = arith::ConstantOp::create(
+      rewriter, loc, shapeType,
+      DenseIntElementsAttr::get(shapeType, broadcastShape));
+  Value init = tensor::EmptyOp::create(rewriter, loc, broadcastShape, elemType);
+  Value expanded = ExpandOp::create(rewriter, loc, context, split, shape, init)
+                       ->getResult(0);
+  return tensor::CollapseShapeOp::create(rewriter, loc, outType, expanded,
+                                         reassoc);
+}
+
 // One kernel: an anchor and the modules it takes.
 struct KernelPlan {
   Operation *anchor;
@@ -211,6 +407,7 @@ public:
   Value getContext() const { return context; }
   SetVector<Value> &getOperands() { return operands; }
   SetVector<Operation *> &getOps() { return ops; }
+  ArrayRef<ResizeOp> getNearestUpsamples() const { return nearestUpsamples; }
 
   void setChain(ArrayRef<Operation *> chain);
   // Returns why the region cannot be outlined, or null when it can; `moved`
@@ -223,6 +420,7 @@ private:
   void cloneInlineScalars();
   void absorbInt4Weights();
   void absorbInputProducers(ArrayRef<std::pair<Value, bool>> roots);
+  void absorbNearestUpsamples();
   void absorbOperandFreeProducers();
   void collectRemainingOperands();
   std::optional<SmallVector<Operation *>> readersToMove() const;
@@ -239,6 +437,9 @@ private:
   SetVector<Operation *> ops;
   // What the epilogue reads from outside: the residuals, biases, and scales.
   SmallVector<Value> epilogueInputs;
+  // Nearest upsamples rebuilt as a view inside the kernel. Their results stay
+  // operands of the anchor in main_graph and are mapped at clone time.
+  SmallVector<ResizeOp> nearestUpsamples;
 };
 
 // Each chain value read outside becomes a kernel result, in chain order.
@@ -411,6 +612,36 @@ void KernelRegion::absorbInputProducers(
   operands = std::move(ordered);
 }
 
+// A nearest integer upsample in front of this convolution is a view of the
+// smaller tensor. Pass that tensor in and rebuild the view inside the kernel;
+// leaving hip.resize outside would still write the expanded copy. Only the
+// convolution input is absorbed, and only when that resize has no other user.
+void KernelRegion::absorbNearestUpsamples() {
+  auto conv = dyn_cast<ConvOp>(anchor);
+  if (!conv)
+    return;
+  Value input = conv.getInput();
+  if (!operands.contains(input))
+    return;
+  auto resize = input.getDefiningOp<ResizeOp>();
+  if (!resize || !resize->hasOneUse() || !isNearestRepeatResize(resize))
+    return;
+  if (!llvm::all_of(resize->getUsers(),
+                    [&](Operation *user) { return ops.contains(user); }))
+    return;
+  Value root = resize.getInput();
+  if (!isStaticTensor(root) || !isKernelIOValue(root))
+    return;
+
+  SmallVector<Value> ordered(operands.begin(), operands.end());
+  for (Value &operand : ordered)
+    if (operand == input)
+      operand = root;
+  operands.clear();
+  operands.insert_range(ordered);
+  nearestUpsamples.push_back(resize);
+}
+
 // `ops` is cloned into an IsolatedFromAbove func, so every value it reads has
 // to resolve inside that func: a materialised destination, such as the
 // reshape of an empty that widens a 1-D convolution, travels with the ops that
@@ -434,9 +665,13 @@ void KernelRegion::absorbOperandFreeProducers() {
 }
 
 void KernelRegion::collectRemainingOperands() {
+  DenseSet<Value> rewritten;
+  for (ResizeOp resize : nearestUpsamples)
+    rewritten.insert(resize.getResult(0));
   for (Operation *op : ops)
     for (Value operand : op->getOperands())
-      if (operand != context && !ops.contains(operand.getDefiningOp()))
+      if (operand != context && !rewritten.contains(operand) &&
+          !ops.contains(operand.getDefiningOp()))
         operands.insert(operand);
   // Cloning follows this order, so a producer has to come before its reader.
   ops = topologicalSort(ops);
@@ -489,6 +724,7 @@ const char *KernelRegion::complete(ArrayRef<std::pair<Value, bool>> roots,
   cloneInlineScalars();
   absorbInt4Weights();
   absorbInputProducers(roots);
+  absorbNearestUpsamples();
   absorbOperandFreeProducers();
   collectRemainingOperands();
   if (!llvm::all_of(operands, isKernelIOValue) ||
@@ -541,6 +777,7 @@ struct KernelParts {
   const SetVector<Operation *> &ops;
   ArrayRef<Value> results;
   ArrayRef<Operation *> moved;
+  ArrayRef<ResizeOp> nearestUpsamples;
 };
 
 // `rankOneShape` is the shape operand of every rank-0 promotion in the block,
@@ -581,6 +818,12 @@ RocMlirOp outline(const KernelParts &parts, bool elementwise,
                 ub::PoisonOp::create(rewriter, loc, context.getType()));
     for (auto [index, operand] : llvm::enumerate(operands))
       mapping.map(operand, body->getArgument(index));
+    for (ResizeOp resize : parts.nearestUpsamples) {
+      Value viewed = buildNearestRepeatView(
+          rewriter, resize.getLoc(), mapping.lookup(context),
+          mapping.lookup(resize.getInput()), resize.getResult(0).getType());
+      mapping.map(resize.getResult(0), viewed);
+    }
     for (Operation *op : ops)
       rewriter.clone(*op, mapping);
     func::ReturnOp::create(rewriter, loc,
@@ -648,18 +891,32 @@ RocMlirOp outline(const KernelParts &parts, bool elementwise,
   for (Operation *op : llvm::reverse(ops))
     if (op->use_empty() && (!isa<ConstantOp>(op) || isOpTriviallyDead(op)))
       rewriter.eraseOp(op);
+  // A pointwise epilogue replaces the module, not the convolution. Drop those
+  // intermediates first so an absorbed resize is use_empty. Only a
+  // tensor.empty destination is safe to drop: a side-effecting producer of
+  // the outs() buffer must stay even when its result is unused.
+  for (ResizeOp resize : parts.nearestUpsamples) {
+    if (!resize->use_empty())
+      continue;
+    Value init = resize.getOutput();
+    rewriter.eraseOp(resize);
+    if (auto empty = init.getDefiningOp<tensor::EmptyOp>();
+        empty && empty->use_empty())
+      rewriter.eraseOp(empty);
+  }
   rewriteQuantizedBinaryOps(kernel);
   return dispatch;
 }
 
 class AnchorPlanner {
 public:
-  explicit AnchorPlanner(Block &block) : block(block) {}
+  AnchorPlanner(Block &block, bool int4Weights)
+      : block(block), int4Weights(int4Weights) {}
 
   SmallVector<KernelPlan> plan() {
     SmallVector<KernelPlan> plans;
     for (Operation &op : block)
-      if (std::optional<Decomposition> kind = getAnchorKind(&op))
+      if (std::optional<Decomposition> kind = getAnchorKind(&op, int4Weights))
         plans.push_back({&op, *kind, {}, {}});
     for (KernelPlan &plan : plans)
       planEpilogue(plan);
@@ -887,6 +1144,7 @@ private:
   }
 
   Block &block;
+  bool int4Weights;
   DenseSet<Operation *> taken;
 };
 
@@ -897,6 +1155,108 @@ SmallVector<Operation *> getChain(Operation *anchor,
   SmallVector<Operation *> chain = {anchor};
   llvm::append_range(chain, epilogue);
   return chain;
+}
+
+// Splits the packed-int4 weights dequantize of a planned anchor into the ops
+// its kernel takes, which read the 4-bit weights, and returns them:
+//
+//   (dequantize(w, 1) - dequantize(zp, 1)) * scale
+//
+// The zero point is dequantized outside the kernel, once per inference: it is
+// broadcast over the weights, and rocMLIR cannot pack an i4 value that a
+// broadcast reads. Both differences are of small integers, so the result is
+// exactly the one rounding of (w - zp) * scale. Blocked weights [K, N] are
+// viewed as [K / bs, bs, N] for the broadcast of the [K / bs, N] parameters
+// and viewed back; the dequantize itself is per element.
+SmallVector<Operation *> rewriteInt4Weights(Operation *anchor,
+                                            RewriterBase &rewriter) {
+  DequantizeLinearOp dq = getInt4Weights(anchor);
+  OpOperand *operand = getWeightOperand(anchor);
+  Location loc = dq.getLoc();
+  Value ctx = anchor->getOperand(0);
+  auto weightType = cast<RankedTensorType>(dq.getResult(0).getType());
+  Type elementType = weightType.getElementType();
+  bool filter = isa<ConvOp>(anchor);
+  int64_t blockSize = dq.getBlockSize();
+  int64_t channels = weightType.getDimSize(filter ? 0 : 1);
+  rewriter.setInsertionPoint(dq);
+  auto scalarType = RankedTensorType::get({}, elementType);
+  Value one =
+      emitConstant(rewriter, loc,
+                   DenseElementsAttr::get(
+                       scalarType, rewriter.getFloatAttr(elementType, 1.0)));
+  auto dequantize = [&](Value input, RankedTensorType type) {
+    auto op = DequantizeLinearOp::create(
+        rewriter, loc, TypeRange{type}, ctx, input, one, Value(),
+        emitTensorEmpty(rewriter, loc, type), dq.getAxisAttr(),
+        rewriter.getI64IntegerAttr(0));
+    op.setPackedInt4(true);
+    return op;
+  };
+
+  // The shape the arithmetic runs in, and how a parameter broadcasts into
+  // it: a filter's [C] as [C, 1, 1, 1], B's [N] as [1, N], and B's blocked
+  // [K / bs, N] as [K / bs, 1, N].
+  RankedTensorType computeType = weightType;
+  if (blockSize != 0) {
+    int64_t depth = weightType.getDimSize(0);
+    computeType = RankedTensorType::get(
+        {depth / blockSize, blockSize, channels}, elementType);
+  }
+  auto broadcastable = [&](Value value) -> Value {
+    auto type = cast<RankedTensorType>(value.getType());
+    if (blockSize != 0) {
+      auto expanded = RankedTensorType::get({type.getDimSize(0), 1, channels},
+                                            type.getElementType());
+      return tensor::ExpandShapeOp::create(
+          rewriter, loc, expanded, value,
+          SmallVector<ReassociationIndices>{{0}, {1, 2}});
+    }
+    if (type.getRank() != 1 || type.getDimSize(0) != channels || channels == 1)
+      return value;
+    SmallVector<int64_t> shape(computeType.getRank(), 1);
+    shape[filter ? 0 : 1] = channels;
+    SmallVector<ReassociationIndices> groups = {
+        llvm::to_vector(llvm::seq<int64_t>(computeType.getRank()))};
+    return tensor::ExpandShapeOp::create(
+        rewriter, loc, RankedTensorType::get(shape, type.getElementType()),
+        value, groups);
+  };
+  SmallVector<ReassociationIndices> blockGroups = {{0, 1}, {2}};
+
+  SmallVector<Operation *> kernelOps;
+  DequantizeLinearOp weights = dequantize(dq.getInput(), weightType);
+  kernelOps.push_back(weights);
+  Value value = weights.getResult(0);
+  if (blockSize != 0) {
+    auto view = tensor::ExpandShapeOp::create(rewriter, loc, computeType, value,
+                                              blockGroups);
+    kernelOps.push_back(view);
+    value = view.getResult();
+  }
+  if (Value zp = dq.getZeroPoint()) {
+    auto zpType = cast<RankedTensorType>(zp.getType()).clone(elementType);
+    Value zpFloat = dequantize(zp, zpType).getResult(0);
+    auto sub = SubOp::create(rewriter, loc, TypeRange{computeType}, ctx, value,
+                             broadcastable(zpFloat),
+                             emitTensorEmpty(rewriter, loc, computeType));
+    kernelOps.push_back(sub);
+    value = sub.getResult(0);
+  }
+  auto mul = MulOp::create(rewriter, loc, TypeRange{computeType}, ctx, value,
+                           broadcastable(dq.getScale()),
+                           emitTensorEmpty(rewriter, loc, computeType));
+  kernelOps.push_back(mul);
+  value = mul.getResult(0);
+  if (blockSize != 0) {
+    auto back = tensor::CollapseShapeOp::create(rewriter, loc, weightType,
+                                                value, blockGroups);
+    kernelOps.push_back(back);
+    value = back.getResult();
+  }
+  rewriter.modifyOpInPlace(anchor, [&] { operand->set(value); });
+  rewriter.eraseOp(dq);
+  return kernelOps;
 }
 
 // Replaces a planned QLinear op or convolution of dequantizes with the integer
@@ -978,7 +1338,7 @@ public:
     if (funcOp.getSymName() != "main_graph" || funcOp.isExternal())
       return;
     Block &block = funcOp.getBody().front();
-    AnchorPlanner planner(block);
+    AnchorPlanner planner(block, int4Weights);
     SmallVector<KernelPlan> plans = planner.plan();
     claimed = &planner.getTaken();
     rankOneShape = Value();
@@ -1032,9 +1392,10 @@ public:
 private:
   // A plan is checked on the IR as it is when its turn comes, since an
   // earlier kernel may have moved its readers. A QLinear op or a convolution
-  // of dequantizes is decomposed only after that check passes, so a declined
-  // op keeps its HIP kernel. Without the prologue modules a plan may still
-  // outline; they are then inlined back with the other leftovers.
+  // of dequantizes is decomposed, and int4 weights split, only after that
+  // check passes, so a declined op keeps its HIP kernels. Without the prologue
+  // modules a plan may still outline; they are then inlined back with the other
+  // leftovers.
   LogicalResult outlinePlan(KernelPlan &plan, IRRewriter &rewriter,
                             int &counter) {
     bool keepQdqOut =
@@ -1060,7 +1421,10 @@ private:
     }
 
     SmallVector<Operation *> chain;
-    if (plan.kind == Decomposition::None) {
+    if (plan.kind == Decomposition::Int4Weights) {
+      plan.prologue.insert_range(rewriteInt4Weights(plan.anchor, rewriter));
+      chain = getChain(plan.anchor, plan.epilogue);
+    } else if (plan.kind == Decomposition::None) {
       chain = getChain(plan.anchor, plan.epilogue);
     } else {
       chain = decompose(plan, rewriter);
@@ -1076,7 +1440,8 @@ private:
                  "its kernel cannot be outlined: ")
              << reason;
     outline({region.getEnd(), region.getContext(), region.getOperands(),
-             region.getOps(), region.getResults(), moved},
+             region.getOps(), region.getResults(), moved,
+             region.getNearestUpsamples()},
             /*elementwise=*/false, rewriter, counter, arch, rankOneShape);
     return success();
   }
@@ -1133,7 +1498,7 @@ private:
     }
     ops.insert(module);
     SmallVector<Value> results(module.getResults());
-    outline({module, module.getCtx(), operands, ops, results, {}},
+    outline({module, module.getCtx(), operands, ops, results, {}, {}},
             /*elementwise=*/true, rewriter, counter, arch, rankOneShape);
   }
 
