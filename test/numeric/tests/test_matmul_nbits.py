@@ -1045,6 +1045,57 @@ class TestMatMulNBitsGroup:
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)
 
+    @pytest.mark.parametrize("seq_len", [1, 7])
+    @pytest.mark.parametrize(
+        "K,splits,asym",
+        [
+            (10240, [(320, 4)], False),
+            (2560, [(10240, 6144), (48, 48)], False),
+            (480, [(40, 24)], True),
+        ],
+        ids=["flash_next_hc_gate", "flash_next_in_proj", "zp_odd_blocks"],
+    )
+    def test_split_output(self, model_runner, seq_len, K, splits, asym):
+        """Projections whose outputs are only Split along N become one group
+        member per piece, each reading its rows of the shared weight. K=480 has
+        15 blocks, so each packed zero-point row carries a padding nibble."""
+        rng = np.random.default_rng(17)
+        x_info = helper.make_tensor_value_info(
+            "X", TensorProto.FLOAT16, [1, seq_len, K]
+        )
+        nodes, inits, outs = [], [], []
+        for i, pieces in enumerate(splits):
+            n = sum(pieces)
+            inits += _q4_initializers(rng, f"p{i}", K, n, asym=asym)
+            inits.append(
+                numpy_helper.from_array(
+                    np.array(pieces, dtype=np.int64), name=f"p{i}_split"
+                )
+            )
+            nodes.append(_q4_node(f"p{i}", "X", f"Y{i}", K, n, asym=asym))
+            names = [f"Y{i}_{j}" for j in range(len(pieces))]
+            nodes.append(
+                helper.make_node("Split", [f"Y{i}", f"p{i}_split"], names, axis=-1)
+            )
+            outs += [
+                helper.make_tensor_value_info(
+                    name, TensorProto.FLOAT16, [1, seq_len, p]
+                )
+                for name, p in zip(names, pieces)
+            ]
+        model = make_model_from_nodes(
+            nodes,
+            [x_info],
+            outs,
+            initializers=inits,
+            opset=21,
+            extra_opsets=[helper.make_opsetid("com.microsoft", 1)],
+        )
+        x = rng.uniform(-1, 1, [1, seq_len, K]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)
+
 
 def _make_norm_fed_model(seq_len: int, K: int, kind: str, n_q=0, n_kv=0, N=0):
     """SkipSimplifiedLayerNormalization feeding q/k/v (kind="qkv") or the

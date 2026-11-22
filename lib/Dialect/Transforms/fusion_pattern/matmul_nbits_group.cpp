@@ -296,7 +296,8 @@ struct MatMulNBitsGroup final
         /*a_scale=*/mlir::Value(), outputs, root.getKAttr(),
         rewriter.getArrayAttr(ns), root.getBitsAttr(), root.getBlockSizeAttr(),
         root.getAccuracyLevelAttr(), root.getScaleElemSizeAttr(),
-        rewriter.getI64IntegerAttr(silu ? kEpilogueSiluMul : kEpilogueConcat));
+        rewriter.getI64IntegerAttr(silu ? kEpilogueSiluMul : kEpilogueConcat),
+        /*row_offsets=*/mlir::DenseI64ArrayAttr());
 
     if (!silu) {
       for (auto [i, mm] : llvm::enumerate(group))
@@ -402,12 +403,261 @@ struct MatMulNBitsGroupReadsNormQuant final
   }
 };
 
+/// Whether `slice` keeps every dim of its source but the last whole, with unit
+/// strides and a static range along the last.
+bool isLastAxisSlice(mlir::tensor::ExtractSliceOp slice) {
+  mlir::RankedTensorType src = slice.getSourceType();
+  int64_t rank = src.getRank();
+  if (rank < 1 || slice.getType().getRank() != rank || !slice.hasUnitStride())
+    return false;
+  if (mlir::ShapedType::isDynamic(slice.getStaticOffsets().back()) ||
+      mlir::ShapedType::isDynamic(slice.getStaticSizes().back()))
+    return false;
+  llvm::SmallVector<mlir::OpFoldResult> sizes = slice.getMixedSizes();
+  for (int64_t d = 0; d + 1 < rank; ++d) {
+    if (slice.getStaticOffsets()[d] != 0)
+      return false;
+    if (auto attr = mlir::dyn_cast<mlir::Attribute>(sizes[d])) {
+      if (src.isDynamicDim(d) ||
+          mlir::cast<mlir::IntegerAttr>(attr).getInt() != src.getDimSize(d))
+        return false;
+      continue;
+    }
+    auto dim =
+        mlir::cast<mlir::Value>(sizes[d]).getDefiningOp<mlir::tensor::DimOp>();
+    if (!dim || dim.getSource() != slice.getSource() ||
+        dim.getConstantIndex() != d)
+      return false;
+  }
+  return true;
+}
+
+/// A column range [offset, offset + size) of a projection's output and the
+/// slices that read it.
+struct Piece {
+  int64_t offset;
+  int64_t size;
+  llvm::SmallVector<mlir::tensor::ExtractSliceOp> slices;
+};
+
+/// The column ranges `result` (N columns) is read through, in order, when its
+/// only readers are last-axis slices that together cover [0, N) without
+/// overlap, plus `tensor.dim` of its leading dims. Empty otherwise.
+llvm::SmallVector<Piece> columnPieces(mlir::Value result, int64_t n) {
+  auto type = mlir::dyn_cast<mlir::RankedTensorType>(result.getType());
+  if (!type || type.getRank() < 1)
+    return {};
+  llvm::SmallVector<Piece> pieces;
+  for (mlir::Operation *user : result.getUsers()) {
+    if (auto dim = mlir::dyn_cast<mlir::tensor::DimOp>(user)) {
+      std::optional<int64_t> index = dim.getConstantIndex();
+      if (!index || *index + 1 >= type.getRank())
+        return {};
+      continue;
+    }
+    auto slice = mlir::dyn_cast<mlir::tensor::ExtractSliceOp>(user);
+    if (!slice || !isLastAxisSlice(slice))
+      return {};
+    int64_t offset = slice.getStaticOffsets().back();
+    int64_t size = slice.getStaticSizes().back();
+    auto it = llvm::find_if(pieces, [&](const Piece &p) {
+      return p.offset == offset && p.size == size;
+    });
+    if (it == pieces.end())
+      pieces.push_back({offset, size, {slice}});
+    else
+      it->slices.push_back(slice);
+  }
+  llvm::sort(pieces, [](const Piece &a, const Piece &b) {
+    return a.offset < b.offset;
+  });
+  int64_t next = 0;
+  for (const Piece &p : pieces) {
+    if (p.offset != next || p.size <= 0)
+      return {};
+    next += p.size;
+  }
+  if (pieces.size() < 2 || next != n)
+    return {};
+  return pieces;
+}
+
+/// One member of the group being built.
+struct SplitMember {
+  mlir::Value weight, scales, zeroPoints;
+  int64_t n, rowOffset;
+  mlir::Value result, init;
+  llvm::SmallVector<Piece> pieces; // empty: kept whole
+};
+
+/// Rewrites `op` (a hip.matmul_nbits or a concat hip.matmul_nbits_group) as a
+/// group with one member per column slice of its outputs.
+mlir::LogicalResult splitByColumns(mlir::Operation *op,
+                                   llvm::MutableArrayRef<SplitMember> members,
+                                   mlir::hip::MatMulNBitsGroupOp like,
+                                   mlir::hip::MatMulNBitsOp likeSingle,
+                                   mlir::PatternRewriter &rewriter) {
+  size_t count = 0;
+  bool split = false;
+  for (SplitMember &m : members) {
+    m.pieces = columnPieces(m.result, m.n);
+    split |= !m.pieces.empty();
+    count += m.pieces.empty() ? 1 : m.pieces.size();
+  }
+  if (!split)
+    return rewriter.notifyMatchFailure(op, "no output read in column slices");
+  if (count > kMaxGroupSize)
+    return rewriter.notifyMatchFailure(op, "too many slices for one group");
+
+  mlir::Location loc = op->getLoc();
+  rewriter.setInsertionPoint(op);
+  llvm::SmallVector<mlir::Value> weights, scales, zeroPoints, outputs;
+  llvm::SmallVector<mlir::Attribute> ns;
+  llvm::SmallVector<int64_t> rowOffsets;
+  llvm::SmallVector<mlir::Type> resultTypes;
+  auto addMember = [&](const SplitMember &m, int64_t offset, int64_t n,
+                       mlir::Value init) {
+    weights.push_back(m.weight);
+    scales.push_back(m.scales);
+    if (m.zeroPoints)
+      zeroPoints.push_back(m.zeroPoints);
+    ns.push_back(rewriter.getI64IntegerAttr(n));
+    rowOffsets.push_back(m.rowOffset + offset);
+    outputs.push_back(init);
+    resultTypes.push_back(init.getType());
+  };
+  for (const SplitMember &m : members) {
+    if (m.pieces.empty()) {
+      addMember(m, 0, m.n, m.init);
+      continue;
+    }
+    auto type = mlir::cast<mlir::RankedTensorType>(m.result.getType());
+    llvm::SmallVector<mlir::Value> dynSizes;
+    for (int64_t d = 0; d + 1 < type.getRank(); ++d)
+      if (type.isDynamicDim(d))
+        dynSizes.push_back(
+            mlir::tensor::DimOp::create(rewriter, loc, m.init, d).getResult());
+    for (const Piece &p : m.pieces) {
+      llvm::SmallVector<int64_t> shape(type.getShape());
+      shape.back() = p.size;
+      mlir::Value init = mlir::tensor::EmptyOp::create(
+          rewriter, loc, shape, type.getElementType(), dynSizes);
+      addMember(m, p.offset, p.size, init);
+    }
+  }
+
+  mlir::hip::MatMulNBitsGroupOp groupOp;
+  if (like) {
+    groupOp = mlir::hip::MatMulNBitsGroupOp::create(
+        rewriter, loc, resultTypes, like.getHandle(), like.getA(), weights,
+        scales, zeroPoints, like.getAQuant(), like.getAScale(), outputs,
+        like.getKAttr(), rewriter.getArrayAttr(ns), like.getBitsAttr(),
+        like.getBlockSizeAttr(), like.getAccuracyLevelAttr(),
+        like.getScaleElemSizeAttr(), like.getEpilogueAttr(),
+        rewriter.getDenseI64ArrayAttr(rowOffsets));
+  } else {
+    groupOp = mlir::hip::MatMulNBitsGroupOp::create(
+        rewriter, loc, resultTypes, likeSingle.getHandle(), likeSingle.getA(),
+        weights, scales, zeroPoints, /*a_quant=*/mlir::Value(),
+        /*a_scale=*/mlir::Value(), outputs, likeSingle.getKAttr(),
+        rewriter.getArrayAttr(ns), likeSingle.getBitsAttr(),
+        likeSingle.getBlockSizeAttr(), likeSingle.getAccuracyLevelAttr(),
+        likeSingle.getScaleElemSizeAttr(),
+        rewriter.getI64IntegerAttr(kEpilogueConcat),
+        rewriter.getDenseI64ArrayAttr(rowOffsets));
+  }
+
+  unsigned next = 0;
+  for (const SplitMember &m : members) {
+    if (m.pieces.empty()) {
+      rewriter.replaceAllUsesWith(m.result, groupOp->getResult(next++));
+      continue;
+    }
+    for (const Piece &p : m.pieces) {
+      for (mlir::tensor::ExtractSliceOp slice : p.slices)
+        rewriter.replaceOp(slice, groupOp->getResult(next));
+      ++next;
+    }
+    // Only leading-dim tensor.dim readers remain; the init has the same shape.
+    for (mlir::OpOperand &use : llvm::make_early_inc_range(m.result.getUses()))
+      rewriter.modifyOpInPlace(use.getOwner(), [&] { use.set(m.init); });
+  }
+  rewriter.eraseOp(op);
+  return mlir::success();
+}
+
+/// A projection whose output is consumed only in last-axis slices -- a fused
+/// projection split back into its parts -- writes each slice as its own group
+/// member instead. A strided slice of the full output would otherwise be
+/// copied out before its consumer runs, one memref.copy launch per slice.
+///
+///   Before:
+///     %y = hip.matmul_nbits(%ctx) ins(%x, %B, %S) outs(%e :
+///     tensor<?x?x324xf16>) %a = tensor.extract_slice %y[0, 0, 0] [%d0, %d1,
+///     320] [1, 1, 1] %b = tensor.extract_slice %y[0, 0, 320] [%d0, %d1, 4] [1,
+///     1, 1]
+///   After:
+///     %a, %b = hip.matmul_nbits_group(%ctx) ins(%x) weights(%B, %B)
+///         scales(%S, %S) outs(%ea, %eb : tensor<?x?x320xf16>,
+///         tensor<?x?x4xf16>) {N = [320, 4], row_offsets = array<i64: 0, 320>}
+struct MatMulNBitsSplitSlicedOutput final
+    : public mlir::OpRewritePattern<mlir::hip::MatMulNBitsOp> {
+  using mlir::OpRewritePattern<mlir::hip::MatMulNBitsOp>::OpRewritePattern;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::hip::MatMulNBitsOp op,
+                  mlir::PatternRewriter &rewriter) const override {
+    if (!isGroupable(op))
+      return rewriter.notifyMatchFailure(op, "not a groupable projection");
+    // Projections sharing the activation group first; the group is split.
+    for (mlir::Operation *user : op.getA().getUsers()) {
+      auto mm = mlir::dyn_cast<mlir::hip::MatMulNBitsOp>(user);
+      if (mm && mm != op && mm.getA() == op.getA() && isGroupable(mm) &&
+          sameGrouping(op, mm))
+        return rewriter.notifyMatchFailure(op, "has sibling projections");
+    }
+    SplitMember m{op.getB(), op.getScales(),   op.getZeroPoints(), op.getN(),
+                  0,         op->getResult(0), op.getOutput(),     {}};
+    return splitByColumns(op, m, {}, op, rewriter);
+  }
+};
+
+struct MatMulNBitsGroupSplitSlicedOutputs final
+    : public mlir::OpRewritePattern<mlir::hip::MatMulNBitsGroupOp> {
+  using mlir::OpRewritePattern<mlir::hip::MatMulNBitsGroupOp>::OpRewritePattern;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::hip::MatMulNBitsGroupOp group,
+                  mlir::PatternRewriter &rewriter) const override {
+    if (group.getEpilogue() != kEpilogueConcat ||
+        group->getNumResults() != group.getOutputs().size())
+      return rewriter.notifyMatchFailure(group,
+                                         "not a concat group on tensors");
+    std::optional<llvm::ArrayRef<int64_t>> offsets = group.getRowOffsets();
+    llvm::SmallVector<SplitMember> members;
+    for (auto [i, w] : llvm::enumerate(group.getWeights()))
+      members.push_back(
+          {w,
+           group.getScales()[i],
+           group.getZeroPoints().empty() ? mlir::Value()
+                                         : group.getZeroPoints()[i],
+           mlir::cast<mlir::IntegerAttr>(group.getN()[i]).getInt(),
+           offsets ? (*offsets)[i] : 0,
+           group->getResult(i),
+           group.getOutputs()[i],
+           {}});
+    return splitByColumns(group, members, group, {}, rewriter);
+  }
+};
+
 } // namespace
 
 void populateMatMulNBitsGroupPattern(mlir::RewritePatternSet &patterns,
                                      mlir::PatternBenefit benefit) {
-  patterns.add<MatMulNBitsGroup, MatMulNBitsGroupReadsNormQuant>(
-      patterns.getContext(), benefit);
+  patterns
+      .add<MatMulNBitsGroup, MatMulNBitsGroupReadsNormQuant,
+           MatMulNBitsSplitSlicedOutput, MatMulNBitsGroupSplitSlicedOutputs>(
+          patterns.getContext(), benefit);
 }
 
 } // namespace fusion_transform

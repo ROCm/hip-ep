@@ -3313,6 +3313,23 @@ LogicalResult MatMulNBitsGroupOp::verify() {
     if (!n || n.getInt() <= 0)
       return emitOpError("N entries must be positive integers");
   }
+  if (std::optional<ArrayRef<int64_t>> offsets = getRowOffsets()) {
+    if (offsets->size() != numWeights)
+      return emitOpError("expected one row_offsets entry per weight");
+    for (auto [i, offset] : llvm::enumerate(*offsets)) {
+      if (offset < 0)
+        return emitOpError("row_offsets entries must be non-negative");
+      int64_t end = offset + cast<IntegerAttr>(nAttr[i]).getInt();
+      for (Value v : {getWeights()[i], getScales()[i]}) {
+        auto type = dyn_cast<ShapedType>(v.getType());
+        if (type && type.hasRank() && type.getRank() >= 2 &&
+            !type.isDynamicDim(0) && end > type.getDimSize(0))
+          return emitOpError("member ")
+                 << i << " reads rows [" << offset << ", " << end
+                 << ") of an operand with " << type.getDimSize(0) << " rows";
+      }
+    }
+  }
 
   int64_t epilogue = getEpilogue();
   if (epilogue == 0) {

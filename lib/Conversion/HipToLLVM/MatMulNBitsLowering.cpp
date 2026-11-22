@@ -5,6 +5,9 @@
 
 #include "HipToLLVMUtils.h"
 
+#include <array>
+#include <optional>
+
 namespace mlir {
 namespace hip {
 namespace {
@@ -151,10 +154,24 @@ struct MatMulNBitsGroupOpLowering
     if (nseg < 1 || nseg > kMaxSegments)
       return rewriter.notifyMatchFailure(op, "unsupported segment count");
 
-    auto segmentPtr = [&](ValueRange vals, int64_t i) -> Value {
-      return extractOptionalMemRefPtr(
+    // Bytes per weight row of each per-member operand, for row_offsets.
+    int64_t kBlocks = (op.getK() + op.getBlockSize() - 1) / op.getBlockSize();
+    int64_t rowBytes[3] = {kBlocks * op.getBlockSize() * op.getBits() / 8,
+                           kBlocks * op.getScaleElemSize(),
+                           (kBlocks * op.getBits() + 7) / 8};
+    std::optional<ArrayRef<int64_t>> rowOffsets = op.getRowOffsets();
+    Type i8Type = rewriter.getI8Type();
+    auto segmentPtr = [&](ValueRange vals, int64_t i, int operand) -> Value {
+      Value ptr = extractOptionalMemRefPtr(
           i < static_cast<int64_t>(vals.size()) ? vals[i] : Value(), rewriter,
           loc);
+      if (operand >= 3 || !rowOffsets || i >= nseg ||
+          i >= static_cast<int64_t>(vals.size()) || (*rowOffsets)[i] == 0)
+        return ptr;
+      return LLVM::GEPOp::create(
+          rewriter, loc, ptrType, i8Type, ptr,
+          ArrayRef<LLVM::GEPArg>{(*rowOffsets)[i] * rowBytes[operand]},
+          LLVM::GEPNoWrapFlags::inbounds);
     };
 
     auto AType = cast<MemRefType>(op.getA().getType());
@@ -175,10 +192,11 @@ struct MatMulNBitsGroupOpLowering
         adaptor.getHandle(), getOpStateSlotValue(op, rewriter, loc),
         extractContiguousMemRefPtr(adaptor.getA(), rewriter, loc),
         createI64Const(nseg)};
-    for (ValueRange vals : {weights, scales, zeroPoints, outputs}) {
+    for (auto [operand, vals] : llvm::enumerate(
+             std::array<ValueRange, 4>{weights, scales, zeroPoints, outputs})) {
       for (int64_t i = 0; i < kMaxSegments; ++i) {
         paramTypes.push_back(ptrType);
-        args.push_back(segmentPtr(vals, i));
+        args.push_back(segmentPtr(vals, i, static_cast<int>(operand)));
       }
     }
     for (int64_t i = 0; i < kMaxSegments; ++i) {

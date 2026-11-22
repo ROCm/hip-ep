@@ -124,4 +124,31 @@ module {
   // CHECK-COUNT-11: llvm.mlir.zero : !llvm.ptr
   // CHECK-NOT:   llvm.mlir.zero
   // CHECK:       llvm.call @wrap_matmul_nbits_group(
+
+  func.func @group_row_offsets(%ctx: !hip.context,
+                               %A: memref<1x1x64xf16, 1>,
+                               %B: memref<12x2x16xui8, 1>,
+                               %S: memref<12x2xf16, 1>,
+                               %Z: memref<12xui8, 1>,
+                               %a: memref<1x1x8xf16, 1>,
+                               %b: memref<1x1x4xf16, 1>) {
+    hip.matmul_nbits_group(%ctx) ins(%A : memref<1x1x64xf16, 1>)
+        weights(%B, %B : memref<12x2x16xui8, 1>, memref<12x2x16xui8, 1>)
+        scales(%S, %S : memref<12x2xf16, 1>, memref<12x2xf16, 1>)
+        zero_points(%Z, %Z : memref<12xui8, 1>, memref<12xui8, 1>)
+        outs(%a, %b : memref<1x1x8xf16, 1>, memref<1x1x4xf16, 1>)
+        {K = 64 : i64, N = [8, 4], bits = 4 : i64, block_size = 32 : i64,
+         accuracy_level = 4 : i64, row_offsets = array<i64: 0, 8>}
+    return
+  }
+
+  // The second member starts 8 rows in: 8 x 2 blocks x 16 bytes of weights,
+  // 8 x 2 fp16 scales and 8 x 1 byte of packed zero points. The first member
+  // (row 0) is passed as is.
+  // CHECK-LABEL: llvm.func @group_row_offsets
+  // CHECK:       llvm.getelementptr inbounds %{{.*}}[256] : (!llvm.ptr) -> !llvm.ptr, i8
+  // CHECK:       llvm.getelementptr inbounds %{{.*}}[32] : (!llvm.ptr) -> !llvm.ptr, i8
+  // CHECK:       llvm.getelementptr inbounds %{{.*}}[8] : (!llvm.ptr) -> !llvm.ptr, i8
+  // CHECK-NOT:   llvm.getelementptr
+  // CHECK:       llvm.call @wrap_matmul_nbits_group(
 }

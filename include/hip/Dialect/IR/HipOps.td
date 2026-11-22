@@ -1083,6 +1083,13 @@ def Hip_MatMulNBitsGroupOp : Hip_DpsOp_AutoReify<"matmul_nbits_group",
     reads it instead of quantizing A whenever hip_norm_quant_supported()
     holds for A's shape, the same test the producer used to write it.
 
+    Optional `row_offsets` (one per weight) makes member i read rows
+    [row_offsets[i], row_offsets[i] + N[i]) of `weights[i]`, `scales[i]` and
+    `zero_points[i]` instead of rows [0, N[i]). Several members may name the
+    same weight: a projection whose output is only consumed in column slices
+    becomes one member per slice, each writing its slice as a separate
+    contiguous output.
+
     Example:
     ```mlir
     hip.matmul_nbits_group(%handle) ins(%A : memref<1x1x5120xf16, 1>)
@@ -1112,7 +1119,8 @@ def Hip_MatMulNBitsGroupOp : Hip_DpsOp_AutoReify<"matmul_nbits_group",
     I64Attr:$block_size,
     I64Attr:$accuracy_level,
     DefaultValuedAttr<I64Attr, "2">:$scale_elem_size, // 2=fp16, 4=fp32
-    DefaultValuedAttr<I64Attr, "0">:$epilogue          // 0=concat, 1=silu_mul
+    DefaultValuedAttr<I64Attr, "0">:$epilogue,         // 0=concat, 1=silu_mul
+    OptionalAttr<DenseI64ArrayAttr>:$row_offsets       // first weight row per member
   );
 
   let assemblyFormat = [{
