@@ -15,6 +15,7 @@ the measured install remains unchanged. No remote update is part of this work.
 | Finding | Resolution |
 |---|---|
 | Seven merge conflicts with local main: GQA host-length/bias ABI, registration, BF16/FP8 import, EP compute tracing/error translation | Preserve upstream arguments/ROCTx/FP8 and QSA child cache/BF16/exception handling; adapt the child dense call to the new argument order |
+| Main's DPS interface now requires explicit result-shape reification | Move both QSA operations to the shared `Hip_DpsOp_AutoReify` family, matching ordinary GQA |
 | Main's Hipsr parent-edge code assumes a newer LLVM region-successor API than the cached toolchain | Add a parent-edge constructor adapter for both APIs; use the existing successor-region accessor for exit detection |
 | OLMo malformed int32 sequence length could overflow in`length+1-S` before validation | Compute in int64, validate, then narrow; require an error flag before dispatch |
 | Mock QSA stubs returned an unsupported-operation code that lowering could discard | Set the mock's host-backed error flag as well; validate the complete mock source with MSVC syntax checking |
@@ -29,6 +30,7 @@ the measured install remains unchanged. No remote update is part of this work.
 | Memory numbers could be mistaken for physical residency or sparse KV savings | Label WDDM commitment, phase sampling limits and full KV retention; export complete/pending/bounded statuses |
 | Final branch commit does not identify the historically measured binary | Preserve binary SHA256, original receipts and explicit source reconstruction/build-provenance limit |
 | Git's automatic line-ending conversion would invalidate raw Windows protocol hashes on another OS | Preserve packet JSON/CSV/raw bytes with scoped attributes and recognize CR as part of its original line ending |
+| Text-fixing hooks would rewrite frozen raw evidence, including valid JSON without a final newline | Exclude only the packet's `raw/` tree from mutating whitespace/BOM/line-ending hooks; keep large-file and other checks active |
 
 ## Kernel and runtime review
 
@@ -95,11 +97,21 @@ attention, full-model numerical/replay/dispatch controls and matched quality.
 Historical receipts remain under`raw/` and in the local raw archive; their hashes
 are not rewritten to match new scripts.
 
-Candidate merge build and audit check results are recorded in
-`candidate-validation.json` when available. Only a passed candidate build/check
-can establish merge validation; historical611-test results do not qualify the
-merged main revision. Publication must retain all pending memory cells and the
-absence of matched QSA natural-long quality, Qwen BFCL and Qwen SWE-bench.
+The merged candidate at source commit
+`b70ce2829ad58d145ee0cb6be942d0c3a51df573` passes **736 compiler lit tests**
+(nine unsupported), **eight CPU unit tests** (six default plus BF16 mapping and
+constant externalization), and the expanded kernel, complete-operator and
+full-model controls. [candidate-validation.json](candidate-validation.json)
+binds these checks to source/binary hashes, commands, logs and raw receipts.
+The export-invariance suite also passes six CPU tests.
+
+On the candidate, full-support outputs are bit-exact between variants; sparse
+full-vs-cached relative RMS is 0.082021%, first-pruning continuity is 0.106473%,
+and replay is exact. Original has 20 forwards/20 EP dispatches; Changed has
+39/39. Cache pointers remain stable. These establish correctness of the merge;
+the archived performance/accuracy campaign belongs to the measured binaries.
+Publication must retain all pending memory cells and the absence of matched
+QSA natural-long quality, Qwen BFCL and Qwen SWE-bench.
 
 The expanded measured-binary controls also pass: all four selectors preserve
 exact pool state through 137 decode steps; nonzero long-history rankings match
@@ -110,6 +122,9 @@ This last primitive append is not a 64K full-model retry or measurement.
 The candidate build disables main's unrelated package-wide kernel test executable
 targets after their object paths exceeded CMake's Windows path-length guidance.
 Compiler/unit suites and the dedicated QSA GPU checks remain the validation path.
+The long local Windows path also requires short, matching MorphiZen internal
+target IDs; the final build recipe records these cache overrides. They leave
+the output DLL name and measured installation unchanged.
 During the build, its CPU affinity was reduced to four logical CPUs and priority
 to below normal after the user's fan-noise report. No performance or memory
 measurement runs concurrently with that build.

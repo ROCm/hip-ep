@@ -10,13 +10,15 @@ repos:
     rev: v5.0.0
     hooks:
     -   id: trailing-whitespace
-        exclude: \.patch$
+        exclude: (\.patch$|^docs/reproducibility/qwen-hip-ep/raw/)
     -   id: end-of-file-fixer
-        exclude: \.patch$
+        exclude: (\.patch$|^docs/reproducibility/qwen-hip-ep/raw/)
     -   id: check-yaml
     -   id: check-added-large-files
     -   id: fix-byte-order-marker
+        exclude: ^docs/reproducibility/qwen-hip-ep/raw/
     -   id: mixed-line-ending
+        exclude: ^docs/reproducibility/qwen-hip-ep/raw/
     -   id: check-merge-conflict
 -   repo: local
     hooks:

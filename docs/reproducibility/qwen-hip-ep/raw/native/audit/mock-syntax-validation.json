@@ -1,0 +1,7 @@
+{
+  "status": "passed",
+  "scope": "MSVC C++17 syntax check of complete mock source with QSA error-flag propagation; no mock inference campaign",
+  "source_sha256": "1daf97c9d9a69fe20658ed252e9295d55cfe5617cb66d8f9656f0178da5c06e1",
+  "command_file": "_local/qwen-qsa/audit/mock-syntax.cmd",
+  "log": "_local/qwen-qsa/audit/mock-syntax.log"
+}

@@ -1,0 +1,114 @@
+{
+  "status": "passed",
+  "rows": [
+    {
+      "check": "decode_without_prefill",
+      "rejected": true,
+      "error": "Error in execution: Non-zero status code returned while running OLMoHipEP_8671566249562752745_0 node. Name:'OLMoHipEP_OLMoHipEP_8671566249562752745_0_0' Status Message: inference_compute (allocator) failed with code: -1"
+    },
+    {
+      "check": "int32_max_length",
+      "rejected": true,
+      "error": "Error in execution: Non-zero status code returned while running OLMoHipEP_8671566249562752745_0 node. Name:'OLMoHipEP_OLMoHipEP_8671566249562752745_0_0' Status Message: inference_compute (allocator) failed with code: -1"
+    },
+    {
+      "check": "invalid_negative_length",
+      "rejected": true,
+      "error": "Error in execution: Non-zero status code returned while running OLMoHipEP_8671566249562752745_0 node. Name:'OLMoHipEP_OLMoHipEP_8671566249562752745_0_0' Status Message: inference_compute (allocator) failed with code: -1"
+    },
+    {
+      "check": "noncanonical_position",
+      "rejected": true,
+      "error": "Error in execution: Non-zero status code returned while running OLMoHipEP_8671566249562752745_0 node. Name:'OLMoHipEP_OLMoHipEP_8671566249562752745_0_0' Status Message: inference_compute (allocator) failed with code: 1"
+    },
+    {
+      "check": "error_flag_reset_and_prefill_replay",
+      "exact": true
+    },
+    {
+      "path": "full",
+      "position": 2051,
+      "relative_rms": 0.00020762017811648548
+    },
+    {
+      "path": "cached",
+      "position": 2051,
+      "relative_rms": 0.00020761997438967228
+    },
+    {
+      "path": "full",
+      "position": 2052,
+      "relative_rms": 0.0002057944075204432
+    },
+    {
+      "path": "cached",
+      "position": 2052,
+      "relative_rms": 0.00020579426200129092
+    },
+    {
+      "path": "full",
+      "position": 2053,
+      "relative_rms": 0.00020869303261861205
+    },
+    {
+      "path": "cached",
+      "position": 2053,
+      "relative_rms": 0.0002086929598590359
+    },
+    {
+      "path": "full",
+      "position": 2054,
+      "relative_rms": 0.00020738040620926768
+    },
+    {
+      "path": "cached",
+      "position": 2054,
+      "relative_rms": 0.00020737989689223468
+    },
+    {
+      "path": "full",
+      "position": 2055,
+      "relative_rms": 0.00020640302682295442
+    },
+    {
+      "path": "cached",
+      "position": 2055,
+      "relative_rms": 0.00020640309958253056
+    },
+    {
+      "path": "full",
+      "position": 2056,
+      "relative_rms": 0.00020698092703241855
+    },
+    {
+      "path": "cached",
+      "position": 2056,
+      "relative_rms": 0.00020698083972092718
+    },
+    {
+      "path": "full",
+      "position": 2059,
+      "relative_rms": 0.0002054779470199719
+    },
+    {
+      "path": "cached",
+      "position": 2059,
+      "relative_rms": 0.0002054775832220912
+    },
+    {
+      "path": "full",
+      "position": 2063,
+      "relative_rms": 0.00020798957848455757
+    },
+    {
+      "path": "cached",
+      "position": 2063,
+      "relative_rms": 0.00020798952027689666
+    }
+  ],
+  "training_updates": 0,
+  "graph_sha256": "ff3786e45fe1fa677fcdea2a7ff244b15bebaa22338b474bcb4601158e303db7",
+  "kernel_validation_sha256": "c4bd7525548ab8e09f6153e7db1ebedca99d5bea2563f3969b98b147bca7d3d8",
+  "install": "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qwen-qsa\\pr-candidate\\native-gqa\\install",
+  "validator_sha256": "132aafa6f70109d2f7667dcf23d47942b20c511515c993b33238b3ed23599527"
+}

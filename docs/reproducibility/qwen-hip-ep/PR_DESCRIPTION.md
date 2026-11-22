@@ -21,8 +21,12 @@ timings, checksum manifest and local raw archive descriptor. Explicitly record
 memory coverage, the failed/canceled64K attempt, limited accuracy coverage and
 precision/generation/statistics differences from the MI355X source campaign.
 
-Validation: see [AUDIT.md](AUDIT.md),`candidate-validation.json` and the hashed
-historical receipts. The implementation is qualified for gfx1151/wave32; shape
+Validation: 736 compiler lit tests pass (nine unsupported), eight CPU unit tests
+pass, six CPU export tests pass, and the expanded kernel/operator/full-model
+controls pass on the merged candidate. Full-support equality and replay are
+exact; both variants retain one EP dispatch per forward and stable cache
+pointers. See [AUDIT.md](AUDIT.md),[candidate-validation.json](candidate-validation.json)
+and the hashed historical receipts. The implementation is qualified for gfx1151/wave32; shape
 guards do not establish full-model performance or memory support at all bounds.
 The local PR branch resolves conflicts against local`origin/main` while preserving
 upstream GQA host-length/bias handling, FP8 import and ROCTx tracing. No branch,

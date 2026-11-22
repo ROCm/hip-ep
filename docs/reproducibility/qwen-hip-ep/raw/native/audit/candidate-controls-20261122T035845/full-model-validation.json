@@ -1,0 +1,68 @@
+{
+  "status": "passed",
+  "training_updates": 0,
+  "rows": [
+    {
+      "check": "full_support_exact",
+      "prefix": 1,
+      "relative_rms": 0.0,
+      "max_absolute": 0.0
+    },
+    {
+      "check": "full_support_exact",
+      "prefix": 17,
+      "relative_rms": 0.0,
+      "max_absolute": 0.0
+    },
+    {
+      "check": "full_support_exact",
+      "prefix": 513,
+      "relative_rms": 0.0,
+      "max_absolute": 0.0
+    },
+    {
+      "check": "full_support_exact",
+      "prefix": 2047,
+      "relative_rms": 0.0,
+      "max_absolute": 0.0
+    },
+    {
+      "check": "sparse_full_vs_cached",
+      "prefix": 4092,
+      "decode": 4,
+      "replay_exact": true,
+      "relative_rms": 0.0008202095050364733,
+      "max_absolute": 0.015625
+    },
+    {
+      "check": "first_pruning_continuity",
+      "relative_rms": 0.0010647347662597895,
+      "max_absolute": 0.0234375
+    }
+  ],
+  "binary_sha256": {
+    "hipgpu.dll": "5622ada1f8310a445e38e19e783319f29cdc5a332f4e105d944697543dfc6917",
+    "custom_kernels_gfx1151.dll": "51f402b04d98cb4dbbb1e5117c458326f7838eae341d1a8f8da4cd4879697622",
+    "hip-mlir-opt.exe": "1db63b868ac983769c290a297bee577743add9af23f03574dfeb8adaa7e002a3",
+    "hip-compiler.exe": "c2f757b9a891e350158c25c93e216b822403370678f775e873ba083953065017"
+  },
+  "validator_sha256": "cc5f396a6bc48baf36600fdde714fb70272fdfdd19ec89b360a36ba15da59c5c",
+  "kernel_validation_sha256": "c4bd7525548ab8e09f6153e7db1ebedca99d5bea2563f3969b98b147bca7d3d8",
+  "install": "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qwen-qsa\\pr-candidate\\native-gqa\\install",
+  "Original": {
+    "forward_calls": 20,
+    "ep_node_dispatches": 20,
+    "dispatches_per_forward": 1,
+    "cache_pointers_unchanged": true,
+    "graph_sha256": "c200a4c9a0d94c195ea78dada12fadd0df6cc8227e1ea5ad88e8a6bd32dec616",
+    "profile_sha256": "982c0f81f3367436728e9a9fb0d5d411c65e3f4f40cc12ec6b3f977646def9b1"
+  },
+  "Changed": {
+    "forward_calls": 39,
+    "ep_node_dispatches": 39,
+    "dispatches_per_forward": 1,
+    "cache_pointers_unchanged": true,
+    "graph_sha256": "c1ce2a4c6f7950d16d4cce186af47a760bd3fa949b71ef07b9df583b0f21e680",
+    "profile_sha256": "34a9a16dd41c52639963f0a3f3eda141b0135e9356c2c0791dc6805650c25232"
+  }
+}
