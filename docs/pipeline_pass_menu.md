@@ -138,7 +138,7 @@ the selected perfConfig string are printed only with `--verbose`.
 | `hip-infer-loop-body-shapes` | module | Rank-establish unranked tensors inside outlined loop bodies. |
 | `outline-onnx-to-hipdnn` | module | Outline subgraphs targeted at hipDNN graph compilation. |
 | `convert-onnx-to-hip` | module | Pattern-match ONNX ops by name → HIP dialect; lower both constant sweeps to policy-neutral `hip.constant`; legalize GatherBlockQuantized (INT4 packing, unsigned, quantize_axis). Pre-lowering folds run first on ONNX IR, among them the `onnx.Attention` mask fold (sliding window and key-padding bias, `AttentionWindowFold.cpp`) and the sigmoid + correction-bias QMoE routing fold (`QMoEConversion.cpp`). |
-| `hip-fold-into-conv` | func.func | Fold neighbouring constant ops into a `hip.conv`'s parameters. Output side: a constant per-channel affine map `y = s*x + t` folds into the filter and bias of the `hip.conv` producing its input, directly or through a `hip.add` of two convs (the shift goes into one bias). The map comes from an inference `hip.batch_norm` with constant parameters, a `hip.mul` by a constant that broadcasts along the channel axis only (`[C,1,1]`, `[1,C,1,1]`, scalar; e.g. a layer scale), or a `hip.add` of such a constant. Needs a static channel dim only; batch and spatial dims may be dynamic. Every intermediate result must have the next op as its only consumer apart from `tensor.dim` shape queries. Reads inline and file-backed constants only; a fold that needs memory-address-backed weights is skipped, as is one whose rounded weights would not be finite. A batch norm not fed by a conv stays `hip.batch_norm` (one kernel). |
+| `hip-fold-into-conv` | func.func | Fold neighbouring constant ops into a `hip.conv`'s parameters. Output side: a constant per-channel affine map `y = s*x + t` folds into the filter and bias of the `hip.conv` producing its input, directly or through a `hip.add` of two convs (the shift goes into one bias). The map comes from an inference `hip.batch_norm` with constant parameters, a `hip.mul` by a constant that broadcasts along the channel axis only (`[C,1,1]`, `[1,C,1,1]`, scalar; e.g. a layer scale), or a `hip.add` of such a constant. Needs a static channel dim only; batch and spatial dims may be dynamic. Every intermediate result must have the next op as its only consumer apart from `tensor.dim` shape queries. Reads inline and file-backed constants only; a fold that needs memory-address-backed weights is skipped, as is one whose rounded weights would not be finite. A batch norm not fed by a conv stays `hip.batch_norm` (one kernel). Input side: a `hip.pad` with a constant zero fill and constant non-negative amounts on the spatial dims only, read only by the conv's input (and by `tensor.dim`), folds into the conv's per-side `pads`, so asymmetric pads fold too. |
 | `hip-externalize-constants` | module | Validate explicit serialization order, append unordered carriers deterministically, plan/serialize, then replace `hip.constant` using the existing inline/full/streaming/hybrid metadata contract. Direct threshold default: 0. |
 | `hip-fold-constant-extracts` | func.func | Resolve constant-index `tensor.extract` of vectors assembled with `tensor.insert_slice` (ONNX shape vectors) to the `from_elements` operand or integer constant element they read. |
 | `hip-infer-shapes` | module | Refine `?` dims on HIP DPS result types via `ReifyRankedShapedTypeOpInterface`. |
@@ -252,10 +252,11 @@ ONNX → HIP  (buildOnnxToHipPipeline)
   «slot: AfterOnnxLoopOutline»  (after Loop / Scan / If outlining)
   [outline-onnx-to-hipdnn + compile-hipdnn-graphs]   (BUILD_HIPDNN_GRAPH=ON only)
   convert-onnx-to-hip
-  func.func(hip-fold-into-conv)      (hip.batch_norm and per-channel hip.mul /
-                                      hip.add into hip.conv; shared with the
-                                      rocMLIR head, so it runs before any conv
-                                      rewrite or kernel outlining)
+  func.func(hip-fold-into-conv)      (hip.batch_norm, per-channel hip.mul /
+                                      hip.add and zero hip.pad into hip.conv;
+                                      shared with the rocMLIR head, so it runs
+                                      before any conv rewrite or kernel
+                                      outlining)
   «slot: AfterConvertOnnxToHip»  (supported hip.constant producer boundary)
   func.func(hip-decompose-conv-transpose)  (rank-3 -> rank-4 hip.conv before
                                            the MIOpen lowering; rocmlir-pipeline

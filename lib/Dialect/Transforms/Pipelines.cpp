@@ -453,10 +453,11 @@ void mlir::hip::buildOnnxToHipPipelineHead(OpPassManager &pm,
   pm.addPass(createConvertOnnxToHipPass());
 
   // Fold constant per-channel affine maps (inference BatchNorm, per-channel
-  // mul / add) into the producing convolutions while the conv -> add -> affine
-  // chain is still as converted: this head is shared with the rocMLIR flow, so
-  // it runs before any conv rewrite or kernel outlining there. It also folds
-  // the ops a frontend plugin emitted in the AfterOnnxLoopOutline slot.
+  // mul / add) into the producing convolutions, and zero pads into the
+  // consuming ones, while the pad -> conv -> add -> affine chains are still as
+  // converted: this head is shared with the rocMLIR flow, so it runs before
+  // any conv rewrite or kernel outlining there. It also folds the ops a
+  // frontend plugin emitted in the AfterOnnxLoopOutline slot.
   pm.addNestedPass<func::FuncOp>(createFoldIntoConvPass());
 
   // Plugin slot: AfterConvertOnnxToHip. The most common slot for
