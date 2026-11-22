@@ -4,7 +4,8 @@ Standalone `hipcc`-only test for the fused FA-2 WMMA prefill kernels against
 an INT8 KV cache (dequantized once into an fp16 scratch buffer, then run
 through the same fp16 prefill kernels -- exercises the runtime path). No
 CMake, no EP build. Entirely self-contained: inputs are generated in-process,
-no python, no data files, no `unit_test/common/`.
+no Python input generator or data files. Timing and input utilities
+come from `unit_test/common/`.
 
 ```
 make test        OFFLOAD=--offload-arch=%GFX% HIP_SDK=%HIP_SDK% [COVERAGE=1|2|3]

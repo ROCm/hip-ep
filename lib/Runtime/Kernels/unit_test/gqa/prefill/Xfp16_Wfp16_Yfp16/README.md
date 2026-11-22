@@ -125,9 +125,8 @@ preserves the suite input seed, sink/smooth/mask attributes, CPU reference and
 production route. An absent or ambiguous match returns nonzero; custom shape
 flags cannot be combined with this selector.
 
-Selected config diagnostics are captured on the untimed correctness call.
-The shared timer runs with configuration logging disabled; CPU reference,
-config selection and sampling policy are unchanged.
+Configuration diagnostics are opt-in; see the logging note below.
+CPU reference and configuration selection are unchanged.
 
 Online configuration logging is disabled by default (`unlogged` in CSV).
 Use `HIPDNN_UT_GQA_DIAGNOSTIC=1` only for a separate diagnostic run.
