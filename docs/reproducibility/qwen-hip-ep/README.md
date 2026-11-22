@@ -84,8 +84,27 @@ PPL increases0.0432652%. All128 GSM8K generated token sequences are identical;
 these requests reach at most666 tokens and **never prune**. GSM8K therefore checks
 the full-support path, not long-context sparse answer quality. The4K PPL test
 does exercise pruning. Default-only natural long-document quality is available;
-matched QSA natural-long quality, Qwen BFCLv4 and Qwen SWE-bench are unmeasured.
+matched QSA natural-long quality and Qwen SWE-bench are unmeasured.
+The separate50-case Qwen BFCLv4 pilot is described below.
 The earlier OLMo BFCL result is a128-item pilot, not the full BFCLv4 score.
+
+<!-- QWEN_BFCL_PILOT_STATUS_BEGIN -->
+The [paired50-case Qwen BFCLv4 component pilot](../../experiments/qwen-qsa-bfcl-v4-50.md) is complete: **default26/50 (52.0%) versus QSA24/50 (48.0%)**. The fixed selection covers26 single-turn and24 multi-turn cases across17 components. It is not the official overall BFCLv4 score.
+
+QSA reaches sparse pruning in24/50 cases. Default/QSA have0/0 capped responses across294/283 generation calls. The report and raw JSON/CSV retain prompt/response distributions, declared versus observed turns, generation steps, cap flags and pruning coverage. All100 variant rows were independently rescored with official checkers, and every request was independently retokenized. This diagnostic remains nongating.
+<!-- QWEN_BFCL_PILOT_STATUS_END -->
+
+The pilot uses BFCL's prompting interface: official Python-call system
+instructions and Qwen's actual chat template, with thinking disabled. Official
+AST, relevance and multi-turn checkers score the raw responses. Outputs receive
+the official parser's processing, with no manual format repair. Multi-turn
+success uses the official trajectory/state checks. Selection and prompts were
+frozen before inference.
+BFCL's `MAXIMUM_STEP_LIMIT=20` setting and pinned handler stopping semantics
+are retained. Forced-quit events remain in the raw inference logs, separately
+from the1,024-token response-cap flags.
+The pinned handler checks `count > 20` after execution, so a stopped turn can
+contain21 model calls; the per-turn CSV preserves the actual count.
 
 ## Memory interpretation and coverage
 
@@ -133,7 +152,7 @@ is retained in the raw record and is not a throughput measurement or a failure.
 | [identity.json](identity.json) | Model revision, payload/tensor/data hashes, frozen layers and representations |
 | [environment.json](environment.json) | Historical workstation inventory, software versions and memory-accounting caveats |
 | [performance.json](performance.json), [performance.csv](performance.csv) | Native raw-summary metrics, intervals, MI355X reference and comparison restrictions |
-| [quality.json](quality.json), [quality.csv](quality.csv) | Native denominators, PPL and answer counts |
+| [quality.json](quality.json), [quality.csv](quality.csv) | Native PPL/GSM denominators and answers; separate BFCL50 summary after audit |
 | [memory.json](memory.json), [memory.csv](memory.csv) | All18 cells, byte units, phase peaks and incomplete status |
 | [provenance.json](provenance.json) | Measured binary/source relationship, local references and historical errata |
 | [candidate-validation.json](candidate-validation.json) | Merged candidate source/binary hashes, commands, logs and passing correctness controls |
@@ -151,6 +170,11 @@ hashes and local origins are recorded. The ZIP stays local and is outside Git;
 copy it together with this packet when handing data to another machine.
 The packet's `.gitattributes` preserves original evidence bytes across Git
 checkouts, including Windows protocol line endings used by recorded hashes.
+Portable BFCL rows use checksum-indexed gzip byte chunks under
+`raw/native/bfcl-v4-50/row-parts/`; `rows-parts.json` lists their order.
+Decompress and concatenate them to restore the exact original `rows.jsonl`.
+The verifier checks every part and the reconstructed file. The local raw archive
+also retains the original unchunked JSONL and all request/response records.
 
 The measured build began at dirty HEAD2a43690; its implementation was subsequently
 committed in7a71b72. Binary hashes and historical execution protocols identify the
@@ -187,6 +211,11 @@ protocol hashes are included under `raw/mi355x/`. It uses one warmup and two
 and20ms device-HBM polling. The native cold8-decode probes use100ms WDDM commitment.
 These memory gauges and workloads require separate labels in any combined figure.
 
+The BFCL runner uses the WSL user's `~/.cache/hip-ep-qsa-bfcl/bin/python` by
+default. Set `QWEN_BFCL_CPU_PYTHON` to select another isolated Linux CPU
+environment with the recorded dependencies. Existing prompt profiles are
+checked for equality rather than overwritten when preparing a resumed run.
+
 ## Reproduce or validate
 
 Packet verification is CPU-only and uses the Python standard library:
@@ -212,9 +241,9 @@ remain available for an explicitly requested new campaign.
 
 ## Remaining work
 
-No hip-ep runs or implementation changes are queued under the accepted scope.
-The selected memory comparison and local audit are complete. Matched QSA
-natural-long quality, Qwen BFCLv4, Qwen SWE-bench and a new merged-candidate
+The50-case BFCLv4 pilot, selected memory comparison and local audit are complete.
+No hip-ep jobs remain queued. Matched QSA
+natural-long quality, Qwen SWE-bench and a new merged-candidate
 performance/accuracy campaign remain unmeasured and are not scheduled. The
 canceled memory shapes and64K attempt are not outstanding work.
 

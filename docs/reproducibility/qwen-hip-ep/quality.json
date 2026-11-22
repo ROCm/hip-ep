@@ -64,5 +64,363 @@
       }
     }
   },
-  "scope": "64 x 4096 PPL windows; 128 GSM8K questions. GSM requests <=666 tokens never reach first pruning at position2052. QSA natural-long quality, Qwen BFCL and Qwen SWE-bench not measured."
+  "native_bfcl_v4_pilot": {
+    "status": "complete",
+    "benchmark": "BFCL v4 stratified 50-case component pilot",
+    "official_overall_score": false,
+    "acceptance_gate_enabled": false,
+    "cases": 50,
+    "variant_rows": 100,
+    "variants": {
+      "Original": {
+        "correct": 26,
+        "cases": 50,
+        "accuracy_percent": 52,
+        "generation_calls": 294,
+        "cases_with_caps": 0,
+        "capped_generations": 0,
+        "context_budget_reduced_generations": 0,
+        "pruning_eligible_cases": 24,
+        "pruning_eligible_generations": 268,
+        "actual_qsa_pruning_cases": 0,
+        "declared_turns": {
+          "count": 50,
+          "minimum": 1,
+          "median": 1.0,
+          "mean": 2.72,
+          "p95": 6.0,
+          "maximum": 7,
+          "total": 136
+        },
+        "observed_turns": {
+          "count": 50,
+          "minimum": 1,
+          "median": 1.0,
+          "mean": 2.64,
+          "p95": 6.0,
+          "maximum": 7,
+          "total": 132
+        },
+        "generation_calls_per_case": {
+          "count": 50,
+          "minimum": 1,
+          "median": 1.0,
+          "mean": 5.88,
+          "p95": 15.549999999999997,
+          "maximum": 33,
+          "total": 294
+        },
+        "prompt_tokens_per_generation": {
+          "count": 294,
+          "minimum": 431,
+          "median": 7417.5,
+          "mean": 7541.071428571428,
+          "p95": 11977.049999999997,
+          "maximum": 17407,
+          "total": 2217075
+        },
+        "completion_tokens_per_generation": {
+          "count": 294,
+          "minimum": 4,
+          "median": 23.0,
+          "mean": 48.75170068027211,
+          "p95": 163.69999999999993,
+          "maximum": 749,
+          "total": 14333
+        },
+        "completion_tokens_per_case": {
+          "count": 50,
+          "minimum": 11,
+          "median": 99.5,
+          "mean": 286.66,
+          "p95": 952.4499999999998,
+          "maximum": 2028,
+          "total": 14333
+        },
+        "input_plus_output_tokens_per_generation": {
+          "count": 294,
+          "minimum": 475,
+          "median": 7461.0,
+          "mean": 7589.8231292517,
+          "p95": 11989.549999999997,
+          "maximum": 17450,
+          "total": 2231408
+        }
+      },
+      "Changed": {
+        "correct": 24,
+        "cases": 50,
+        "accuracy_percent": 48,
+        "generation_calls": 283,
+        "cases_with_caps": 0,
+        "capped_generations": 0,
+        "context_budget_reduced_generations": 0,
+        "pruning_eligible_cases": 24,
+        "pruning_eligible_generations": 257,
+        "actual_qsa_pruning_cases": 24,
+        "declared_turns": {
+          "count": 50,
+          "minimum": 1,
+          "median": 1.0,
+          "mean": 2.72,
+          "p95": 6.0,
+          "maximum": 7,
+          "total": 136
+        },
+        "observed_turns": {
+          "count": 50,
+          "minimum": 1,
+          "median": 1.0,
+          "mean": 2.44,
+          "p95": 6.0,
+          "maximum": 6,
+          "total": 122
+        },
+        "generation_calls_per_case": {
+          "count": 50,
+          "minimum": 1,
+          "median": 1.0,
+          "mean": 5.66,
+          "p95": 20.549999999999997,
+          "maximum": 22,
+          "total": 283
+        },
+        "prompt_tokens_per_generation": {
+          "count": 283,
+          "minimum": 431,
+          "median": 7333,
+          "mean": 7481.795053003533,
+          "p95": 15038.999999999998,
+          "maximum": 15795,
+          "total": 2117348
+        },
+        "completion_tokens_per_generation": {
+          "count": 283,
+          "minimum": 4,
+          "median": 25,
+          "mean": 49.113074204947,
+          "p95": 124.79999999999995,
+          "maximum": 738,
+          "total": 13899
+        },
+        "completion_tokens_per_case": {
+          "count": 50,
+          "minimum": 11,
+          "median": 115.5,
+          "mean": 277.98,
+          "p95": 936.5999999999999,
+          "maximum": 2741,
+          "total": 13899
+        },
+        "input_plus_output_tokens_per_generation": {
+          "count": 283,
+          "minimum": 475,
+          "median": 7352,
+          "mean": 7530.90812720848,
+          "p95": 15071.199999999997,
+          "maximum": 15848,
+          "total": 2131247
+        }
+      }
+    },
+    "categories": [
+      {
+        "category": "simple_python",
+        "cases": 2,
+        "default_correct": 1,
+        "qsa_correct": 1
+      },
+      {
+        "category": "simple_java",
+        "cases": 2,
+        "default_correct": 2,
+        "qsa_correct": 2
+      },
+      {
+        "category": "simple_javascript",
+        "cases": 2,
+        "default_correct": 2,
+        "qsa_correct": 2
+      },
+      {
+        "category": "multiple",
+        "cases": 2,
+        "default_correct": 2,
+        "qsa_correct": 2
+      },
+      {
+        "category": "parallel",
+        "cases": 2,
+        "default_correct": 1,
+        "qsa_correct": 1
+      },
+      {
+        "category": "parallel_multiple",
+        "cases": 2,
+        "default_correct": 2,
+        "qsa_correct": 2
+      },
+      {
+        "category": "irrelevance",
+        "cases": 2,
+        "default_correct": 1,
+        "qsa_correct": 1
+      },
+      {
+        "category": "live_simple",
+        "cases": 2,
+        "default_correct": 2,
+        "qsa_correct": 2
+      },
+      {
+        "category": "live_multiple",
+        "cases": 2,
+        "default_correct": 1,
+        "qsa_correct": 1
+      },
+      {
+        "category": "live_parallel",
+        "cases": 2,
+        "default_correct": 1,
+        "qsa_correct": 1
+      },
+      {
+        "category": "live_parallel_multiple",
+        "cases": 2,
+        "default_correct": 2,
+        "qsa_correct": 2
+      },
+      {
+        "category": "live_irrelevance",
+        "cases": 2,
+        "default_correct": 2,
+        "qsa_correct": 2
+      },
+      {
+        "category": "live_relevance",
+        "cases": 2,
+        "default_correct": 1,
+        "qsa_correct": 1
+      },
+      {
+        "category": "multi_turn_base",
+        "cases": 6,
+        "default_correct": 3,
+        "qsa_correct": 1
+      },
+      {
+        "category": "multi_turn_miss_func",
+        "cases": 6,
+        "default_correct": 1,
+        "qsa_correct": 0
+      },
+      {
+        "category": "multi_turn_miss_param",
+        "cases": 6,
+        "default_correct": 1,
+        "qsa_correct": 0
+      },
+      {
+        "category": "multi_turn_long_context",
+        "cases": 6,
+        "default_correct": 1,
+        "qsa_correct": 3
+      }
+    ],
+    "accuracy_change_percentage_points": -4,
+    "paired_stratified_bootstrap_95_interval_percentage_points": [
+      -12.0,
+      4.0
+    ],
+    "bootstrap_resamples": 10000,
+    "bootstrap_seed": 42,
+    "outcome_disagreement_pairs": 6,
+    "initial_prompt_tokens": {
+      "count": 50,
+      "minimum": 431,
+      "median": 1814.5,
+      "mean": 3900.06,
+      "p95": 9052.65,
+      "maximum": 10552,
+      "total": 195003
+    },
+    "declared_turn_histogram": {
+      "1": 26,
+      "3": 5,
+      "5": 8,
+      "2": 2,
+      "4": 2,
+      "6": 6,
+      "7": 1
+    },
+    "function_count": {
+      "count": 50,
+      "minimum": 1,
+      "median": 4.5,
+      "mean": 13.04,
+      "p95": 32.0,
+      "maximum": 36,
+      "total": 652
+    },
+    "protocol_sha256": "41a5a1662dc1155592cfe25a9b75378b0f0a75eb6af446f044d28b286ce056fb",
+    "manifest_sha256": "44389ecac70f1713d9ce33a55d5191a6444bcd5dfc6a16d6ff3efc313e87442e",
+    "rows_sha256": "df0d071d2770c6f225e0af6268e7f16c5d3e79de7bae7dcaabc0faf40dde76ae",
+    "audit_sha256": "4fcb3be644f37912b6ccb9e8b90d13ee0a64a56dc3c7d823cb91d64d90795cde",
+    "training_updates": 0
+  },
+  "native_bfcl_workload_audit": {
+    "status": "passed",
+    "cases": 50,
+    "variant_rows": 100,
+    "complete": true,
+    "generations": 577,
+    "capped_generations": 0,
+    "actual_qsa_pruned_generations": 257,
+    "every_prompt_retokenized": true,
+    "every_completion_decoded": true,
+    "official_metadata_token_counts_match": true,
+    "gpu_initialized": false,
+    "rows_sha256": "df0d071d2770c6f225e0af6268e7f16c5d3e79de7bae7dcaabc0faf40dde76ae",
+    "rows_prefix_bytes": 25019681,
+    "protocol_sha256": "41a5a1662dc1155592cfe25a9b75378b0f0a75eb6af446f044d28b286ce056fb",
+    "observed_turn_records": 254,
+    "official_step_limited_case_ids": {
+      "Original": [
+        "multi_turn_miss_func_178",
+        "multi_turn_miss_param_39"
+      ],
+      "Changed": [
+        "multi_turn_miss_func_71",
+        "multi_turn_miss_func_194",
+        "multi_turn_miss_param_87"
+      ]
+    },
+    "official_step_limited_cases": {
+      "Original": 2,
+      "Changed": 3
+    },
+    "groups_by_frozen_initial_prompt": {
+      "Original": {
+        "initially_pruned": {
+          "cases": 24,
+          "correct": 6
+        },
+        "initially_full_support": {
+          "cases": 26,
+          "correct": 20
+        }
+      },
+      "Changed": {
+        "initially_pruned": {
+          "cases": 24,
+          "correct": 4
+        },
+        "initially_full_support": {
+          "cases": 26,
+          "correct": 20
+        }
+      }
+    }
+  },
+  "scope": "64 x 4096 PPL windows; 128 GSM8K questions. GSM requests <=666 tokens never reach first pruning at position2052. BFCL is a separate 50-case component pilot when present, not an official overall score. QSA natural-long quality and Qwen SWE-bench remain unmeasured."
 }

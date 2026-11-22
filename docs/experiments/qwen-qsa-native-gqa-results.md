@@ -143,7 +143,7 @@ The native wave32 integration and feature/index/cache/numerical controls above a
 
 Prefill and decode use independent fixed-token phase timers, identical session/head/cache work, exact-shape warmups and balanced paired trials. Only completed, audited shapes in the performance table establish measured throughput or support; remaining batch/long-context candidates require actual memory and correctness checks.
 
-No further hip-ep benchmarks are scheduled. Matched QSA natural-long quality, Qwen BFCLv4 and Qwen SWE-bench remain unmeasured; they are coverage limits, not active jobs. The local merged PR candidate has separate correctness checks and no new performance/accuracy campaign. See the [audit and paper handoff](../reproducibility/qwen-hip-ep/README.md) for its validation receipts, the selected memory pair and complete raw evidence. The branch and results remain local; nothing has been pushed or published.
+The [paired50-case BFCLv4 component pilot](qwen-qsa-bfcl-v4-50.md) is complete: default26/50 versus QSA24/50. Prompt/response lengths, turns, cap counts and actual pruning coverage accompany the scores. This is not the official overall BFCLv4 score. No further hip-ep benchmarks are scheduled. The official step bound stops2/3 default/QSA cases; per-turn token/call records are retained. Matched QSA natural-long quality and Qwen SWE-bench remain unmeasured. The local merged PR candidate has separate correctness checks and no new performance/accuracy campaign. See the [audit and paper handoff](../reproducibility/qwen-hip-ep/README.md) for its validation receipts, the selected memory pair and complete raw evidence. The branch and results remain local; nothing has been pushed or published.
 
 ## Evidence and reproduction
 

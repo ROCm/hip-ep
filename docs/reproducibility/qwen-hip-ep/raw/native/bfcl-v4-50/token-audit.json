@@ -1,0 +1,54 @@
+{
+  "status": "passed",
+  "cases": 50,
+  "variant_rows": 100,
+  "complete": true,
+  "generations": 577,
+  "capped_generations": 0,
+  "actual_qsa_pruned_generations": 257,
+  "every_prompt_retokenized": true,
+  "every_completion_decoded": true,
+  "official_metadata_token_counts_match": true,
+  "gpu_initialized": false,
+  "rows_sha256": "df0d071d2770c6f225e0af6268e7f16c5d3e79de7bae7dcaabc0faf40dde76ae",
+  "rows_prefix_bytes": 25019681,
+  "protocol_sha256": "41a5a1662dc1155592cfe25a9b75378b0f0a75eb6af446f044d28b286ce056fb",
+  "observed_turn_records": 254,
+  "official_step_limited_case_ids": {
+    "Original": [
+      "multi_turn_miss_func_178",
+      "multi_turn_miss_param_39"
+    ],
+    "Changed": [
+      "multi_turn_miss_func_71",
+      "multi_turn_miss_func_194",
+      "multi_turn_miss_param_87"
+    ]
+  },
+  "official_step_limited_cases": {
+    "Original": 2,
+    "Changed": 3
+  },
+  "groups_by_frozen_initial_prompt": {
+    "Original": {
+      "initially_pruned": {
+        "cases": 24,
+        "correct": 6
+      },
+      "initially_full_support": {
+        "cases": 26,
+        "correct": 20
+      }
+    },
+    "Changed": {
+      "initially_pruned": {
+        "cases": 24,
+        "correct": 4
+      },
+      "initially_full_support": {
+        "cases": 26,
+        "correct": 20
+      }
+    }
+  }
+}

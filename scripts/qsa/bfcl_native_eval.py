@@ -21,7 +21,7 @@ import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-TASK = ROOT / "_local/qsa/native-gqa/bfcl-v4"
+TASK = Path(os.environ.get("HIP_EP_BFCL_TASK", ROOT / "_local/qsa/native-gqa/bfcl-v4"))
 SOURCE = ROOT / "_local/qsa/benchmarks/gorilla"
 REVISION = "6ea57973c7a6097fd7c5915698c54c17c5b1b6c8"
 os.environ["BFCL_PROJECT_ROOT"] = str(TASK)

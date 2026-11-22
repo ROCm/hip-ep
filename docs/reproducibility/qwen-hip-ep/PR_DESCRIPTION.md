@@ -16,6 +16,8 @@ by+0.50%/+1.23%/+1.60%, while prefill decreases4.13%/4.47%/8.83%. PPL changes
 generations. Full KV storage is retained and QSA adds workspace. These measurements
 belong to the preserved pre-merge binaries, not the new merge build.
 
+The paired50-case BFCLv4 component pilot scores default26/50 versus QSA24/50. The report records actual prompt/response lengths, turns, generation steps, cap counts and sparse-pruning coverage; it is not the official BFCLv4 overall score.
+
 Include a portable JSON/CSV paper packet, compressed raw quality rows, raw paired
 timings, checksum manifest and local raw archive descriptor. Explicitly record
 memory coverage, the failed/canceled64K attempt, limited accuracy coverage and
