@@ -3055,15 +3055,6 @@ static int getOrTuneDp4aMConfig(
     return best;
 }
 
-// Public entry: W4A8 dp4a GEMV for M rows (M == 1 is the decode path).
-//   A          : fp16 activations [M, K] (row-major, batch==1)
-//   B          : packed int4 weights [N, K/2]
-//   scales     : fp16 [N, k_blocks]
-//   zp_u8      : pre-unpacked uint8 zero points [N, k_blocks] or nullptr (sym)
-//   out        : fp16 [M, N]
-//   a_qb_scratch/a_scale_scratch : per-session scratch, caller-sized to
-//       >= M*K bytes and >= M*k_blocks floats respectively.
-// Returns hip status (hipSuccess on success). K must be a multiple of 32.
 // Short-K dp4a GEMV (M == 1, K <= 512): a row's K/32 chunks go to that many
 // consecutive lanes, so one wave computes 32 / (K/32) columns. The general
 // kernel gives every column a whole wave and a chunk per lane, which at K=320
@@ -3199,6 +3190,15 @@ static bool launchDp4aShortK(hipStream_t stream, const int8_t* a_qb,
     }
 }
 
+// Public entry: W4A8 dp4a GEMV for M rows (M == 1 is the decode path).
+//   A          : fp16 activations [M, K] (row-major, batch==1)
+//   B          : packed int4 weights [N, K/2]
+//   scales     : fp16 [N, k_blocks]
+//   zp_u8      : pre-unpacked uint8 zero points [N, k_blocks] or nullptr (sym)
+//   out        : fp16 [M, N]
+//   a_qb_scratch/a_scale_scratch : per-session scratch, caller-sized to
+//       >= M*K bytes and >= M*k_blocks floats respectively.
+// Returns hip status (hipSuccess on success). K must be a multiple of 32.
 extern "C" int hip_matmul_nbits_dp4a(
     void* stream_v,
     const void* A, const void* B, const void* scales, const void* zp_u8,
