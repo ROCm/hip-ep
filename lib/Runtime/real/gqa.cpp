@@ -3189,6 +3189,15 @@ int wrap_group_query_attention_host_length(
             (long long)data_type);
     return -1;
   }
+  // The lowering derives both from the query type; a mismatch would run the
+  // wrong kernels and GEMM types without an error.
+  if (element_size_bytes != (data_type == HIPDNN_EP_DATATYPE_FLOAT ? 4 : 2)) {
+    fprintf(stderr,
+            "wrap_group_query_attention: element size %lld does not match "
+            "query dtype %lld\n",
+            (long long)element_size_bytes, (long long)data_type);
+    return -1;
+  }
   // bf16 runs only on the decomposed pipeline (bf16 hipBLASLt GEMMs + bf16
   // softmax output). RoPE, the quantized KV cache, the per-head sink and the
   // fp16 key_bias row are fp16-typed there, so reject them rather than
