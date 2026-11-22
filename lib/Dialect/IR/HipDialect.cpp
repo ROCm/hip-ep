@@ -2818,11 +2818,21 @@ LogicalResult ScaledMaskedSoftmaxOp::verify() {
       failed(
           verifyCompatibleShape(inputType.getShape(), outputType.getShape())))
     return emitOpError("output must match the input shape and element type");
-  for (Value ids : {getRowIds(), getColIds()}) {
+  int64_t rank = inputType.getRank();
+  for (auto [ids, axis] :
+       {std::pair(getRowIds(), rank - 2), std::pair(getColIds(), rank - 1)}) {
     auto idsType = dyn_cast<ShapedType>(ids.getType());
     if (!idsType || !idsType.hasRank() || idsType.getRank() != 1 ||
         !idsType.getElementType().isInteger(64))
       return emitOpError("row_ids and col_ids must be rank-1 i64");
+    // Where's broadcast rule: an id vector spans its scores axis or is 1 long.
+    int64_t len = idsType.getDimSize(0);
+    int64_t extent = inputType.getDimSize(axis);
+    if (!ShapedType::isDynamic(len) && !ShapedType::isDynamic(extent) &&
+        len != 1 && len != extent)
+      return emitOpError("id vector of length ")
+             << len << " neither broadcasts nor matches scores axis " << axis
+             << " of size " << extent;
   }
   return success();
 }

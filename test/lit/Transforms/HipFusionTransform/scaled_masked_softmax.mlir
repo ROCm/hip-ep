@@ -215,3 +215,31 @@ func.func @decline_arbitrary_mask(%ctx: !hip.context, %scores: tensor<2x4x8xf16>
        outs(%e3 : tensor<2x4x8xf16>) -> tensor<2x4x8xf16>
   return %p : tensor<2x4x8xf16>
 }
+
+// -----
+
+// i32 ids would need a widening the kernel does not do; the op takes i64 only.
+// CHECK-LABEL: func.func @decline_i32_ids
+// CHECK-NOT: hip.scaled_masked_softmax
+// CHECK: hip.miopen.softmax
+func.func @decline_i32_ids(%ctx: !hip.context, %scores: tensor<2x4x8xf16>,
+                           %rows: tensor<4xi32>, %cols: tensor<8xi32>)
+    -> tensor<2x4x8xf16> {
+  %scale = hip.constant {value = dense<1.250000e-01> : tensor<f16>} : tensor<f16>
+  %fill = hip.constant {value = dense<-6.550400e+04> : tensor<f16>} : tensor<f16>
+  %e0 = tensor.empty() : tensor<2x4x8xf16>
+  %s = hip.mul(%ctx) ins(%scores, %scale : tensor<2x4x8xf16>, tensor<f16>)
+       outs(%e0 : tensor<2x4x8xf16>) -> tensor<2x4x8xf16>
+  %r = tensor.expand_shape %rows [[0, 1]] output_shape [4, 1] : tensor<4xi32> into tensor<4x1xi32>
+  %c = tensor.expand_shape %cols [[0, 1]] output_shape [1, 8] : tensor<8xi32> into tensor<1x8xi32>
+  %e1 = tensor.empty() : tensor<4x8xui8>
+  %m = hip.equal(%ctx) ins(%r, %c : tensor<4x1xi32>, tensor<1x8xi32>)
+       outs(%e1 : tensor<4x8xui8>) : tensor<4x8xui8>
+  %e2 = tensor.empty() : tensor<2x4x8xf16>
+  %w = hip.where(%ctx) ins(%m, %s, %fill : tensor<4x8xui8>, tensor<2x4x8xf16>, tensor<f16>)
+       outs(%e2 : tensor<2x4x8xf16>) : tensor<2x4x8xf16>
+  %e3 = tensor.empty() : tensor<2x4x8xf16>
+  %p = hip.miopen.softmax(%ctx) ins(%w : tensor<2x4x8xf16>)
+       outs(%e3 : tensor<2x4x8xf16>) -> tensor<2x4x8xf16>
+  return %p : tensor<2x4x8xf16>
+}
