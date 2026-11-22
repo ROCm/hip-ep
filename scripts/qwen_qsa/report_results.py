@@ -9,12 +9,63 @@ import json
 import math
 from pathlib import Path
 
+from audit_performance import audit_performance
 from evaluate_default import answer
 from verify_handoff import ROOT, SOURCE, WORK, sha
 
 
 def load(path):
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def compare_native_quality(quality):
+    if not all(item["state"] == "complete" for item in quality.values()):
+        return {"state": "pending"}
+    folder = WORK / "native-gqa/quality"
+    protocols = {
+        variant: load(folder / variant / "protocol.json") for variant in quality
+    }
+    original, changed = protocols["Original"], protocols["Changed"]
+    differences = {
+        key
+        for key in original.keys() | changed.keys()
+        if original.get(key) != changed.get(key)
+    }
+    assert differences == {"variant", "selectors_loaded", "export_onnx_sha256"}
+    rows = {
+        variant: {
+            row["index"]: row
+            for row in map(
+                json.loads,
+                (folder / variant / "gsm8k.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines(),
+            )
+        }
+        for variant in quality
+    }
+    token_differences = sum(
+        rows["Original"][i]["generated_token_ids"]
+        != rows["Changed"][i]["generated_token_ids"]
+        for i in range(128)
+    )
+    ppl_change = 100 * (quality["Changed"]["ppl"] / quality["Original"]["ppl"] - 1)
+    gsm_change = (
+        100
+        * (quality["Changed"]["gsm_correct"] - quality["Original"]["gsm_correct"])
+        / 128
+    )
+    limits = original["quality_gates_for_later_matched_qsa"]
+    return {
+        "state": "complete",
+        "ppl_change_percent": ppl_change,
+        "gsm_change_percentage_points": gsm_change,
+        "gsm_token_sequence_differences": token_differences,
+        "ppl_gate_passed": ppl_change <= limits["ppl_increase_percent"],
+        "gsm_gate_passed": gsm_change >= -limits["gsm_drop_percentage_points"],
+        "limits": limits,
+        "training_updates": 0,
+    }
 
 
 def audit_quality(folder=None, variant="Original", export_folder=None):
@@ -132,8 +183,8 @@ def audit_quality(folder=None, variant="Original", export_folder=None):
     return receipt
 
 
-def audit_long_quality():
-    folder = WORK / "long-quality-default"
+def audit_long_quality(folder=None, variant="Original", export_folder=None):
+    folder = folder or WORK / "long-quality-default"
     if not (folder / "rows.jsonl").exists():
         return []
     protocol_path = folder / "protocol.json"
@@ -143,7 +194,7 @@ def audit_long_quality():
     assert sha(data / "manifest.json") == protocol["dataset_manifest_sha256"]
     assert sha(data / "documents.json") == protocol["documents_sha256"]
     assert protocol["documents_sha256"] == manifest["documents_sha256"]
-    exported = load(WORK / "default-rtn-w4a16-64/export.json")
+    exported = load((export_folder or WORK / "default-rtn-w4a16-64") / "export.json")
     assert protocol["export_onnx_sha256"] == exported["onnx_sha256"]
     assert protocol["export_data_sha256"] == exported["data_sha256"]
     documents = load(data / "documents.json")
@@ -153,7 +204,7 @@ def audit_long_quality():
     assert len({(r["context"], r["index"]) for r in rows}) == len(rows)
     for row in rows:
         assert row["protocol_sha256"] == sha(protocol_path)
-        assert row["variant"] == "Original" and row["training_updates"] == 0
+        assert row["variant"] == variant and row["training_updates"] == 0
         assert row["context"] in manifest["contexts"] and 0 <= row["index"] < 4
         document = documents[row["index"]]
         for name in ["document_sha256", "window_sha256"]:
@@ -210,6 +261,16 @@ def main():
         )
         for variant in ["Original", "Changed"]
     }
+    comparison = compare_native_quality(native_quality)
+    performance = audit_performance()
+    native_long_quality = {
+        variant: audit_long_quality(
+            WORK / "native-gqa/long-quality" / variant,
+            variant,
+            WORK / "native-gqa/models" / variant,
+        )
+        for variant in ["Original", "Changed"]
+    }
     trained_path = SOURCE / "docs/reproducibility/qwen-trained-performance.json"
     trained = load(trained_path)
     assert trained["state"] == "passed" and trained["job"] == "303195"
@@ -240,7 +301,7 @@ def main():
         "",
         "## Current evidence",
         "",
-        "Fresh 64-block native default quality is complete and independently audited. Four-block architecture diagnostics pass native HIP and frozen Hugging Face numerical controls. Native QSA integration passes kernel, complete-operator and full-model numerical/dispatch controls; matched dataset accuracy and performance are still pending.",
+        "Fresh 64-block native default quality is complete and independently audited. Four-block architecture diagnostics pass native HIP and frozen Hugging Face numerical controls. Native QSA integration passes kernel, complete-operator and full-model numerical/dispatch controls. Matched 4K PPL/GSM results are below; long-document QSA accuracy and performance remain separate qualifications.",
         "",
         "Work is isolated on `codex/qwen-native-qsa`, created after OLMo accuracy report commit `7e0e1e3`. The earlier OLMo branch, binaries and results are preserved. The source sparse-attn project is read-only. Training, fine-tuning, recovery training, distillation, learned calibration and selector updates are zero.",
         "",
@@ -366,6 +427,33 @@ def main():
             f"| PPL, 64 × 4K | {native_cell('Original', 'ppl')} | {native_cell('Changed', 'ppl')} |",
             f"| GSM8K, 128 questions | {native_cell('Original', 'gsm')} | {native_cell('Changed', 'gsm')} |",
         ]
+        if comparison["state"] == "complete":
+            assert comparison["ppl_gate_passed"] and comparison["gsm_gate_passed"]
+            lines += [
+                "",
+                f"**Matched quality gates pass:** PPL changes by {comparison['ppl_change_percent']:+.6f}% against the 5% limit; GSM changes by {comparison['gsm_change_percentage_points']:+.2f} percentage points against the 2-point drop limit. Default/QSA retain {native_quality['Original']['gsm_caps']}/{native_quality['Changed']['gsm_caps']} capped generations. Generated GSM token sequences differ on {comparison['gsm_token_sequence_differences']}/128 questions. This GSM pilot stays entirely within the native full-support dense path; it does not measure quality after sparse pruning. The 4K PPL test exercises sparse pruning.",
+            ]
+    if performance:
+        lines += [
+            "",
+            "## Matched native performance",
+            "",
+            "Full-session wall timings use two exact-shape warmup pairs and six balanced measured pairs, with a common 64-token teacher-forced continuation. Both variants include the same final-position output head and resident cache work. Model loading, input/output/binding allocation, recurrent-state zeroing and sampling are outside phase timers. Intervals are 10,000 paired bootstrap resamples and describe within-run variation.",
+            "",
+            "| Batch | Prefix | Phase | Default tok/s | QSA tok/s | Change, paired 95% interval |",
+            "|---:|---:|---|---:|---:|---:|",
+        ]
+        for row in performance:
+            for phase in ["prefill", "decode"]:
+                values = row["phases"][phase]
+                low, high = values["paired_95_interval_percent"]
+                lines.append(
+                    f"| {row['batch']} | {row['context'] // 1024}K | {phase} | {values['Original']['tokens_s']:.2f} | {values['Changed']['tokens_s']:.2f} | {values['throughput_change_percent']:+.2f}% [{low:+.2f}, {high:+.2f}] |"
+                )
+        lines += [
+            "",
+            "Every listed row has finite outputs, exact warmup replay, unchanged sessions/cache addresses, and independently audited paired raw trials and statistics. Shapes without a completed receipt remain unqualified.",
+        ]
     lines += [
         "",
         "## Separate locked long-context inputs",
@@ -390,6 +478,33 @@ def main():
             "",
             "All listed long-context default outputs were finite and pass document, protocol, row-count and target-count audits. This four-document diagnostic is not a corpus-wide accuracy claim.",
         ]
+    if any(native_long_quality.values()):
+        lines += [
+            "",
+            "| Matched natural-document prefix | Default suffix PPL | QSA suffix PPL | Change |",
+            "|---|---:|---:|---:|",
+        ]
+        for context in [16384, 32768]:
+            values = {
+                variant: next((r for r in rows if r["context"] == context), None)
+                for variant, rows in native_long_quality.items()
+            }
+            cells = {
+                variant: f"{row['ppl']:.6f}" if row else "Pending"
+                for variant, row in values.items()
+            }
+            change = (
+                f"{100 * (values['Changed']['ppl'] / values['Original']['ppl'] - 1):+.4f}%"
+                if all(values.values())
+                else "Pending"
+            )
+            lines.append(
+                f"| {context // 1024}K, four documents / 4,092 targets | {cells['Original']} | {cells['Changed']} | {change} |"
+            )
+        lines += [
+            "",
+            "Matched long-context scores use the same native binaries and unchanged backbone bytes, with all frozen document identities, output finiteness and suffix target counts audited. Four nested documents are a diagnostic, with no 64K quality or population-wide claim.",
+        ]
     lines += [
         "",
         "## Updated MI355X trained reference",
@@ -412,9 +527,9 @@ def main():
         "",
         "## Quality and performance work remaining",
         "",
-        "The native wave32 integration and feature/index/cache/numerical controls above are complete. Only layers 27/31/35/39 are replaced, using the frozen Qwen projection, three zero-centered norms, token-key normalization before four-token FP32 pooling, partial 64-coordinate RoPE, stable 512 historical-block selection and one causal current block. Full KV storage, selected-address reads and all Gated DeltaNet/default work are preserved. Finish the matched PPL/GSM campaign and separate long-document quality runs before drawing accuracy conclusions.",
+        "The native wave32 integration and feature/index/cache/numerical controls above are complete. Only layers 27/31/35/39 are replaced, using the frozen Qwen projection, three zero-centered norms, token-key normalization before four-token FP32 pooling, partial 64-coordinate RoPE, stable 512 historical-block selection and one causal current block. Full KV storage, selected-address reads and all Gated DeltaNet/default work are preserved. The matched 4K PPL/GSM campaign is complete; long-document quality is qualified only where completed matched rows appear above.",
         "",
-        "Prefill and decode will be measured independently with a fixed common teacher-forced decode stream, identical session/head/cache work, exact-shape warmups, balanced paired trials and uncertainty. Start with feasible batch-one shapes, expanding only after actual support/memory tests. No native Qwen speedup, slowdown or feasible long-context/batch limit has been measured yet.",
+        "Prefill and decode use independent fixed-token phase timers, identical session/head/cache work, exact-shape warmups and balanced paired trials. Only completed, audited shapes in the performance table establish measured throughput or support; remaining batch/long-context candidates require actual memory and correctness checks.",
         "",
         "## Evidence and reproduction",
         "",
@@ -432,8 +547,11 @@ def main():
             {
                 "default_quality": quality,
                 "matched_native_quality": native_quality,
+                "matched_native_comparison": comparison,
+                "matched_native_performance": performance,
                 "default_long_quality": long_quality,
-                "native_qsa_results": False,
+                "matched_native_long_quality": native_long_quality,
+                "native_qsa_results": comparison["state"] == "complete",
                 "baseline_established": quality["state"] == "complete",
                 "long_quality_manifest_sha256": sha(long_manifest_path),
                 "timing_manifest_sha256": sha(timing_path),

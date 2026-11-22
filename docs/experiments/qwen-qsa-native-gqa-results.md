@@ -6,7 +6,7 @@ Licensed under the MIT License.
 
 ## Current evidence
 
-Fresh 64-block native default quality is complete and independently audited. Four-block architecture diagnostics pass native HIP and frozen Hugging Face numerical controls. Native QSA integration passes kernel, complete-operator and full-model numerical/dispatch controls; matched dataset accuracy and performance are still pending.
+Fresh 64-block native default quality is complete and independently audited. Four-block architecture diagnostics pass native HIP and frozen Hugging Face numerical controls. Native QSA integration passes kernel, complete-operator and full-model numerical/dispatch controls. Matched 4K PPL/GSM results are below; long-document QSA accuracy and performance remain separate qualifications.
 
 Work is isolated on `codex/qwen-native-qsa`, created after OLMo accuracy report commit `7e0e1e3`. The earlier OLMo branch, binaries and results are preserved. The source sparse-attn project is read-only. Training, fine-tuning, recovery training, distillation, learned calibration and selector updates are zero.
 
@@ -77,8 +77,21 @@ The validated implementation is committed as `7a71b72` on `codex/qwen-native-qsa
 
 | Metric | Matched native default | Matched native QSA |
 |---|---:|---:|
-| PPL, 64 × 4K | Pending | Pending |
-| GSM8K, 128 questions | Pending | Pending |
+| PPL, 64 × 4K | 5.968688 | 5.971270 |
+| GSM8K, 128 questions | 111/128 (86.72%) | 111/128 (86.72%) |
+
+**Matched quality gates pass:** PPL changes by +0.043265% against the 5% limit; GSM changes by +0.00 percentage points against the 2-point drop limit. Default/QSA retain 18/18 capped generations. Generated GSM token sequences differ on 0/128 questions. This GSM pilot stays entirely within the native full-support dense path; it does not measure quality after sparse pruning. The 4K PPL test exercises sparse pruning.
+
+## Matched native performance
+
+Full-session wall timings use two exact-shape warmup pairs and six balanced measured pairs, with a common 64-token teacher-forced continuation. Both variants include the same final-position output head and resident cache work. Model loading, input/output/binding allocation, recurrent-state zeroing and sampling are outside phase timers. Intervals are 10,000 paired bootstrap resamples and describe within-run variation.
+
+| Batch | Prefix | Phase | Default tok/s | QSA tok/s | Change, paired 95% interval |
+|---:|---:|---|---:|---:|---:|
+| 1 | 4K | prefill | 438.06 | 419.97 | -4.13% [-4.34, -3.75] |
+| 1 | 4K | decode | 10.68 | 10.74 | +0.50% [+0.14, +0.92] |
+
+Every listed row has finite outputs, exact warmup replay, unchanged sessions/cache addresses, and independently audited paired raw trials and statistics. Shapes without a completed receipt remain unqualified.
 
 ## Separate locked long-context inputs
 
@@ -109,9 +122,9 @@ These are BF16 MI355X results, not hip-ep measurements or a forecast. The source
 
 ## Quality and performance work remaining
 
-The native wave32 integration and feature/index/cache/numerical controls above are complete. Only layers 27/31/35/39 are replaced, using the frozen Qwen projection, three zero-centered norms, token-key normalization before four-token FP32 pooling, partial 64-coordinate RoPE, stable 512 historical-block selection and one causal current block. Full KV storage, selected-address reads and all Gated DeltaNet/default work are preserved. Finish the matched PPL/GSM campaign and separate long-document quality runs before drawing accuracy conclusions.
+The native wave32 integration and feature/index/cache/numerical controls above are complete. Only layers 27/31/35/39 are replaced, using the frozen Qwen projection, three zero-centered norms, token-key normalization before four-token FP32 pooling, partial 64-coordinate RoPE, stable 512 historical-block selection and one causal current block. Full KV storage, selected-address reads and all Gated DeltaNet/default work are preserved. The matched 4K PPL/GSM campaign is complete; long-document quality is qualified only where completed matched rows appear above.
 
-Prefill and decode will be measured independently with a fixed common teacher-forced decode stream, identical session/head/cache work, exact-shape warmups, balanced paired trials and uncertainty. Start with feasible batch-one shapes, expanding only after actual support/memory tests. No native Qwen speedup, slowdown or feasible long-context/batch limit has been measured yet.
+Prefill and decode use independent fixed-token phase timers, identical session/head/cache work, exact-shape warmups and balanced paired trials. Only completed, audited shapes in the performance table establish measured throughput or support; remaining batch/long-context candidates require actual memory and correctness checks.
 
 ## Evidence and reproduction
 
