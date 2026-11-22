@@ -56,6 +56,59 @@ func.func @gqa_bf16(%ctx: !hip.context, %q: memref<1x4x256xbf16, 1>,
 
 // -----
 
+// The physical-width entry (v5, chosen here by a dynamic cache width) takes
+// data_type last too, after the four widths and fp16_tensors.
+
+// CHECK-LABEL: llvm.func @gqa_v5_f16
+// CHECK-DAG: %[[DT:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK-DAG: %[[FP16:.*]] = llvm.mlir.constant(1 : i32) : i32
+// CHECK: llvm.call @wrap_group_query_attention_v5({{.*}}, %[[FP16]], %[[DT]]) : ({{.*}}, !llvm.ptr, i64, i64, i64, i64, i64, i64, i32, i64) -> i32
+func.func @gqa_v5_f16(%ctx: !hip.context, %q: memref<1x4x256xf16, 1>,
+    %k: memref<1x4x128xf16, 1>, %v: memref<1x4x128xf16, 1>,
+    %past_k: memref<1x2x4x?xf16, 1>, %past_v: memref<1x2x4x?xf16, 1>,
+    %seqlens_k: memref<1x1xi32, 1>, %total: memref<i32, 1>,
+    %out: memref<1x4x256xf16, 1>,
+    %pk: memref<1x2x8x?xf16, 1>, %pv: memref<1x2x8x?xf16, 1>) {
+  hip.gqa(%ctx)
+      ins(%q, %k, %v, %past_k, %past_v, %seqlens_k, %total :
+          memref<1x4x256xf16, 1>, memref<1x4x128xf16, 1>, memref<1x4x128xf16, 1>,
+          memref<1x2x4x?xf16, 1>, memref<1x2x4x?xf16, 1>,
+          memref<1x1xi32, 1>, memref<i32, 1>)
+      outs(%out, %pk, %pv :
+           memref<1x4x256xf16, 1>, memref<1x2x8x?xf16, 1>, memref<1x2x8x?xf16, 1>)
+      {num_heads = 4 : i64, kv_num_heads = 2 : i64, scale = 0.125 : f32,
+       softcap = 0.000000e+00 : f32, do_rotary = 0 : i64,
+       rotary_interleaved = 0 : i64}
+  return
+}
+
+// -----
+
+// CHECK-LABEL: llvm.func @gqa_v5_bf16
+// CHECK-DAG: %[[DT:.*]] = llvm.mlir.constant(2 : i64) : i64
+// CHECK-DAG: %[[FP16:.*]] = llvm.mlir.constant(0 : i32) : i32
+// CHECK: llvm.call @wrap_group_query_attention_v5({{.*}}, %[[FP16]], %[[DT]]) : ({{.*}}, !llvm.ptr, i64, i64, i64, i64, i64, i64, i32, i64) -> i32
+func.func @gqa_v5_bf16(%ctx: !hip.context, %q: memref<1x4x256xbf16, 1>,
+    %k: memref<1x4x128xbf16, 1>, %v: memref<1x4x128xbf16, 1>,
+    %past_k: memref<1x2x4x?xbf16, 1>, %past_v: memref<1x2x4x?xbf16, 1>,
+    %seqlens_k: memref<1x1xi32, 1>, %total: memref<i32, 1>,
+    %out: memref<1x4x256xbf16, 1>,
+    %pk: memref<1x2x8x?xbf16, 1>, %pv: memref<1x2x8x?xbf16, 1>) {
+  hip.gqa(%ctx)
+      ins(%q, %k, %v, %past_k, %past_v, %seqlens_k, %total :
+          memref<1x4x256xbf16, 1>, memref<1x4x128xbf16, 1>, memref<1x4x128xbf16, 1>,
+          memref<1x2x4x?xbf16, 1>, memref<1x2x4x?xbf16, 1>,
+          memref<1x1xi32, 1>, memref<i32, 1>)
+      outs(%out, %pk, %pv :
+           memref<1x4x256xbf16, 1>, memref<1x2x8x?xbf16, 1>, memref<1x2x8x?xbf16, 1>)
+      {num_heads = 4 : i64, kv_num_heads = 2 : i64, scale = 0.125 : f32,
+       softcap = 0.000000e+00 : f32, do_rotary = 0 : i64,
+       rotary_interleaved = 0 : i64}
+  return
+}
+
+// -----
+
 // CHECK-LABEL: llvm.func @gqa_f32
 // CHECK: %[[DT:.*]] = llvm.mlir.constant(0 : i64) : i64
 // CHECK: llvm.call @wrap_group_query_attention_host_length({{.*}}, %[[DT]]) : ({{.*}}, !llvm.ptr, i64, i64, i64) -> i32

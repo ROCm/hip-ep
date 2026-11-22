@@ -950,7 +950,8 @@ int wrap_group_query_attention_host_length(
     int64_t data_type);
 
 // Physical-width ABI with compiler-proven FP16 tensor types and the same
-// optional host-length contract as dense GQA.
+// optional host-length contract as dense GQA. data_type is last, as in the
+// dense entries, and is forwarded to them; the quantized cache requires HALF.
 int wrap_group_query_attention_v5(
     RuntimeState *state, int op_state_slot,
     // Inputs 1-7 (core GQA)
@@ -974,7 +975,7 @@ int wrap_group_query_attention_v5(
     int64_t seq_len_new_kv, int32_t has_host_length, int32_t host_length_value,
     void *key_bias, int64_t key_bias_batch, int64_t key_bias_len,
     int64_t past_key_width, int64_t past_value_width, int64_t present_key_width,
-    int64_t present_value_width, int32_t fp16_tensors);
+    int64_t present_value_width, int32_t fp16_tensors, int64_t data_type);
 
 int wrap_group_query_attention_ring_f16(
     RuntimeState *state, int op_state_slot,

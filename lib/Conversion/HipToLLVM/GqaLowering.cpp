@@ -307,8 +307,9 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
           getMemRefDimSize(kbType, 1, adaptor.getKeyBias(), rewriter, loc);
     }
 
-    // Dense arguments plus the packed-width and FP16 contract.
-    SmallVector<Type, 53> paramTypes = {
+    // Dense arguments, then the packed-width and FP16 contract (v5 only), then
+    // data_type last for every callee.
+    SmallVector<Type, 54> paramTypes = {
         ptrType, // state
         i32Type, // op_state_slot
         // Inputs (14 pointers - some may be nullptr)
@@ -361,8 +362,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         // Key bias (3 values)
         ptrType, // key_bias
         i64Type, // key_bias_batch
-        i64Type, // key_bias_len
-        i64Type  // data_type (query element type, HIPDNN_EP_DATATYPE_*)
+        i64Type  // key_bias_len
     };
 
     bool fp16Tensors = true;
@@ -375,13 +375,14 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
       paramTypes.append(4, i64Type);
       paramTypes.push_back(i32Type);
     }
+    paramTypes.push_back(i64Type); // data_type (HIPDNN_EP_DATATYPE_*)
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, widthABI ? "wrap_group_query_attention_v5" : callee,
         paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 53> args = {
+    SmallVector<Value, 54> args = {
         statePtr,
         // Per-instance op-state slot (threaded by --assign-op-state-slots)
         getOpStateSlotValue(op, rewriter, loc),
@@ -400,7 +401,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         elemSizeVal, attnBiasBatchVal, attnBiasNumHeadsVal, kvBnsdVal,
         seqLenNewKVVal, hasHostLength, hostLength,
         // Key bias (3 values)
-        keyBiasPtr, keyBiasBatchVal, keyBiasLenVal, dataTypeVal};
+        keyBiasPtr, keyBiasBatchVal, keyBiasLenVal};
 
     if (widthABI) {
       args.push_back(cacheWidth(op.getPastKey(), adaptor.getPastKey()));
@@ -412,6 +413,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
           rewriter, loc, i32Type,
           rewriter.getI32IntegerAttr(fp16Tensors ? 1 : 0)));
     }
+    args.push_back(dataTypeVal);
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 
     rewriter.eraseOp(op);

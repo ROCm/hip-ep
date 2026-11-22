@@ -661,7 +661,7 @@ int wrap_group_query_attention_v5(
     int64_t seq_len_new_kv, int32_t has_host_length, int32_t host_length_value,
     void *key_bias, int64_t key_bias_batch, int64_t key_bias_len,
     int64_t past_key_width, int64_t past_value_width, int64_t present_key_width,
-    int64_t present_value_width, int32_t fp16_tensors) {
+    int64_t present_value_width, int32_t fp16_tensors, int64_t data_type) {
   (void)fp16_tensors;
   (void)past_key_width;
   (void)past_value_width;
@@ -677,7 +677,7 @@ int wrap_group_query_attention_v5(
       v_quant_type, kv_cache_bit_width, no_causal, batch_size, seq_len_q,
       seq_len_kv, past_buf_seq, head_dim, element_size_bytes, attn_bias_batch,
       attn_bias_num_heads, kv_bnsd, seq_len_new_kv, has_host_length,
-      host_length_value, key_bias, key_bias_batch, key_bias_len);
+      host_length_value, key_bias, key_bias_batch, key_bias_len, data_type);
 }
 
 int wrap_multi_head_attention(

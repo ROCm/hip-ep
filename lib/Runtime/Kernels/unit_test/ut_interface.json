@@ -485,6 +485,53 @@
       "gaps": []
     },
     {
+      "leaf": "gqa/softmax/Xfp32_Wbf16_Ybf16",
+      "package_executable": "hipdnn-kernel-ut-gqa-softmax-xfp32-wbf16-ybf16.exe",
+      "source": "test_gqa_softmax.cpp",
+      "capabilities": {
+        "coverage": true,
+        "timing": "shared",
+        "mode": "label_only",
+        "rank": false
+      },
+      "suite": {
+        "args": ["--coverage"],
+        "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
+      },
+      "custom": {
+        "selected_by": "any flag other than --coverage",
+        "params": [
+          {"name": "batch", "flag": "--batch", "make": "BATCH", "type": "int", "exe_default": 1, "make_default": 1, "description": "Batch B."},
+          {"name": "heads", "flag": "--heads", "make": "HEADS", "type": "int", "exe_default": 8, "make_default": 8, "description": "Query heads H; the scores are [B*H, queries, keys]."},
+          {"name": "queries", "flag": "--queries", "make": "QUERIES", "type": "int", "exe_default": 16, "make_default": 16, "description": "Query rows; one softmax per (head, query)."},
+          {"name": "keys", "flag": "--keys", "make": "KEYS", "type": "int", "exe_default": 1000, "make_default": 1000, "description": "Keys, the softmax length."},
+          {"name": "mask", "flag": "--mask", "make": "MASK", "type": "string", "choices": ["none", "full", "key_row", "chunk"], "exe_default": "full", "make_default": "full", "description": "none calls hip_gqa_softmax_f32_to_bf16; the others call the biased entry with a full [B, H, q, k] mask, a one-row [1, H, 1, k + 3] mask at column offset 3, or a [B, 1, 2q, k] mask from row offset q."},
+          {"name": "mask_dtype", "flag": "--mask-dtype", "make": "MASK_DTYPE", "type": "string", "choices": ["bf16", "f16", "f32"], "exe_default": "bf16", "make_default": "bf16", "description": "Mask dtype; ignored for mask none."},
+          {"name": "out_dtype", "flag": "--out-dtype", "make": "OUT_DTYPE", "type": "string", "choices": ["bf16", "f16", "f32"], "exe_default": "bf16", "make_default": "bf16", "description": "Probability dtype; mask none writes bf16 only."},
+          {"name": "smooth", "flag": "--smooth", "make": "SMOOTH", "type": "int", "exe_default": 0, "make_default": 0, "description": "1 adds the smooth-softmax term exp(-max) to the sum."},
+          {"name": "seed", "flag": "--seed", "make": "SEED", "type": "int", "exe_default": 1, "make_default": 1, "description": "Seed of the scores and the mask."}
+        ],
+        "constraints": [
+          "unknown, incomplete or out-of-range arguments exit 2"
+        ],
+        "checks": [
+          "batch >= 1",
+          "heads >= 1",
+          "queries >= 1",
+          "keys >= 1",
+          "smooth == 0 or smooth == 1",
+          "seed >= 0",
+          "mask != 'none' or out_dtype == 'bf16'",
+          "batch * heads * 2 * queries * (keys + 3) <= 67108864"
+        ]
+      },
+      "examples": [
+        {"name": "suite_tier1", "coverage": 1},
+        {"name": "prefill_chunk_128_rows_2k_keys", "values": {"heads": 16, "queries": 128, "keys": 2048, "mask": "chunk"}}
+      ],
+      "gaps": []
+    },
+    {
       "leaf": "qmoe/Xfp16_Wu4_Yfp16",
       "package_executable": "hipdnn-kernel-ut-qmoe-xfp16-wu4-yfp16.exe",
       "source": "test_qmoe.cpp",
