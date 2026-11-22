@@ -33,11 +33,11 @@ struct InvalidTimingShare : std::runtime_error {
 // is not a cap on total iterations. It must not be raised by a sweep driver.
 //
 // Excluded warm-up batches run until warmup_ms of GPU time (at least one
-// call). A measurement then takes one round per group that stops at the call
-// goal (after the GPU-time floor) or at the GPU-time goal, whichever comes
-// first, with at least one call per group. It ends there when the spread of
-// the five group means is within max_spread. Otherwise every group continues
-// to the full GPU-time goal and min_calls_per_group, keeping earlier batches.
+// call). Confirm fills every group to its share of the full GPU-time goal
+// and min_calls_per_group. Screen and standard first stop at the call goal
+// (after the GPU-time floor) or GPU-time goal, whichever comes first, with
+// at least one call per group. If their spread exceeds max_spread, every
+// group continues to the full goal and min_calls_per_group, retaining batches.
 struct Policy {
   Preset preset = Preset::Confirm;
   double target_ms = 10000.0;
@@ -277,7 +277,11 @@ std::vector<Result> measureInterleaved(const Policy& policy, size_t candidates,
     }
   };
   const uint64_t call_goal = policy.call_goal / kGroups + (policy.call_goal % kGroups != 0);
-  for (size_t group = 0; group < kGroups; ++group) fill(group, 1, call_goal);
+  // Confirm retains the full GPU-time goal regardless of the call goal.
+  // Screen and standard keep their original v3 call/duration race.
+  for (size_t group = 0; group < kGroups; ++group)
+    fill(group, policy.preset == Preset::Confirm ? policy.min_calls_per_group : 1,
+         policy.preset == Preset::Confirm ? kNoCallGoal : call_goal);
   bool converged = true;
   for (auto& result : results) {
     summarize(result, policy);

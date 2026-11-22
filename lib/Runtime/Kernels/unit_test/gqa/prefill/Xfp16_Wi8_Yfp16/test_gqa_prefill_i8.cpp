@@ -31,6 +31,7 @@
 
 #include <hip/hip_runtime.h>
 #include "../../../common/hip_adaptive_timing.h"
+#include "../../../common/ut_gqa_input_binding.h"
 #include "../../../common/ut_gpu_execution_scope.h"
 #include <memory>
 #include "../../../common/ut_gqa_rank_input.h"
@@ -136,7 +137,9 @@ inline std::string besideExe(const std::string& name) {
 inline std::vector<std::string> captureLogLines(
     const char* env_var, const std::string& tmp_name,
     const std::function<void()>& fn) {
-  // Timing callers keep capture disabled after the first config fetch.
+  // Normal measurements leave production configuration logging disabled.
+  // A separate diagnostic process observes routes without poisoning timing.
+  if (!std::getenv("HIPDNN_UT_GQA_DIAGNOSTIC")) { fn(); return {}; }
   if (!env_var) { fn(); return {}; }
   const char* leaf_stderr = std::getenv("HIPDNN_KERNEL_UT_STDERR");
   const bool redirect = !leaf_stderr || !leaf_stderr[0];
@@ -400,6 +403,7 @@ struct Case {
   // and every output must be finite.
   int pad = 0;
   float pad_value = -INFINITY;
+  int window = 0, sink = 0, smooth = 0;
 };
 
 // results.csv shape: the parameters that tell any two cases apart.
@@ -409,6 +413,9 @@ static std::string case_shape(const Case& c) {
                   "_sq" + std::to_string(c.sq);
   if (c.pad > 0) s += "_lpad" + std::to_string(c.pad);
   if (c.pad > 0 && std::isinf(c.pad_value)) s += "_ninf";
+  if (c.window > 0) s += "_win" + std::to_string(c.window);
+  if (c.sink) s += "_sink";
+  if (c.smooth) s += "_smooth";
   return s;
 }
 
@@ -459,7 +466,7 @@ static void cpu_reference_i8(const std::vector<float>& Q,
                              const std::vector<float>& vscale,
                              const std::vector<float>& kb,  // [B,sq] or empty
                              std::vector<float>& O, int B, int H, int G, int D,
-                             int sq, int max_seq, float scale) {
+                             int sq, int max_seq, float scale, int window = 0, int sink = 0, int smooth = 0) {
   const int HPG = H / G;
   forEachBH(B, H, [&](int b, int hq) {
       std::vector<float> s(sq);
@@ -467,9 +474,10 @@ static void cpu_reference_i8(const std::vector<float>& Q,
       const float* ks = &kscale[(size_t)hkv * D];
       const float* vs = &vscale[(size_t)hkv * D];
       for (int i = 0; i < sq; ++i) {
+        const int lo = window > 0 ? std::max(0, i + 1 - window) : 0;
         const float* q = &Q[((size_t)(b * sq + i) * H + hq) * D];
         float m = -1e30f;
-        for (int k = 0; k <= i; ++k) {
+        for (int k = lo; k <= i; ++k) {
           const int8_t* kp = &K_i8[((size_t)(b * G + hkv) * max_seq + k) * D];
           float dot = 0.0f;
           for (int e = 0; e < D; ++e) dot += q[e] * ((float)kp[e] * ks[e]);
@@ -477,11 +485,13 @@ static void cpu_reference_i8(const std::vector<float>& Q,
           if (s[k] > m) m = s[k];
         }
         float l = 0.0f;
-        for (int k = 0; k <= i; ++k) { s[k] = std::exp(s[k] - m); l += s[k]; }
+        for (int k = lo; k <= i; ++k) { s[k] = std::exp(s[k] - m); l += s[k]; }
+        if (sink) l += std::exp(0.25f - m);
+        else if (smooth) l += std::exp(-m);
         const float inv = l > 0.0f ? 1.0f / l : 0.0f;
         float* o = &O[((size_t)(b * sq + i) * H + hq) * D];
         for (int e = 0; e < D; ++e) o[e] = 0.0f;
-        for (int k = 0; k <= i; ++k) {
+        for (int k = lo; k <= i; ++k) {
           const int8_t* vp = &V_i8[((size_t)(b * G + hkv) * max_seq + k) * D];
           const float w = s[k] * inv;
           for (int e = 0; e < D; ++e) o[e] += w * ((float)vp[e] * vs[e]);
@@ -497,15 +507,16 @@ static void cpu_reference_fp16(const std::vector<float>& Q,
                                const std::vector<float>& kb,
                                std::vector<float>& O,
                                int B, int H, int G, int D, int sq, int max_seq,
-                               float scale) {
+                               float scale, int window = 0, int sink = 0, int smooth = 0) {
   const int HPG = H / G;
   forEachBH(B, H, [&](int b, int hq) {
       std::vector<float> s(sq);
       const int hkv = hq / HPG;
       for (int i = 0; i < sq; ++i) {
+        const int lo = window > 0 ? std::max(0, i + 1 - window) : 0;
         const float* q = &Q[((size_t)(b * sq + i) * H + hq) * D];
         float m = -1e30f;
-        for (int k = 0; k <= i; ++k) {
+        for (int k = lo; k <= i; ++k) {
           const float* kp = &K[((size_t)(b * G + hkv) * max_seq + k) * D];
           float dot = 0.0f;
           for (int e = 0; e < D; ++e) dot += q[e] * kp[e];
@@ -513,11 +524,13 @@ static void cpu_reference_fp16(const std::vector<float>& Q,
           if (s[k] > m) m = s[k];
         }
         float l = 0.0f;
-        for (int k = 0; k <= i; ++k) { s[k] = std::exp(s[k] - m); l += s[k]; }
+        for (int k = lo; k <= i; ++k) { s[k] = std::exp(s[k] - m); l += s[k]; }
+        if (sink) l += std::exp(0.25f - m);
+        else if (smooth) l += std::exp(-m);
         const float inv = l > 0.0f ? 1.0f / l : 0.0f;
         float* o = &O[((size_t)(b * sq + i) * H + hq) * D];
         for (int e = 0; e < D; ++e) o[e] = 0.0f;
-        for (int k = 0; k <= i; ++k) {
+        for (int k = lo; k <= i; ++k) {
           const float* vp = &V[((size_t)(b * G + hkv) * max_seq + k) * D];
           const float w = s[k] * inv;
           for (int e = 0; e < D; ++e) o[e] += w * vp[e];
@@ -544,7 +557,7 @@ struct Result {
 
 static Result run_case(const Case& c, int iters, unsigned seed, const hipdnn_ep_test::timing::RankRow* rank_row = nullptr) {
   hipdnn_ep_test::timing::CaseScope timing_case("gqa/prefill/Xfp16_Wi8_Yfp16", case_shape(c), "hip_gqa_flash_prefill");
-  const UtGqaShape rank_shape{c.B, c.H, c.G, c.D, c.sq, c.sq, 0, 1, 64};
+  const UtGqaShape rank_shape{c.B, c.H, c.G, c.D, c.sq, c.sq, c.window, 1, 64};
   if (rank_row && std::getenv("HIPDNN_UT_RANK_CATALOG")) {
 #ifdef HIPDNN_UT_RANK_GQA_ADAPTER
     hipdnn_ep_test::timing::printGqaCatalog(rank_shape);
@@ -643,9 +656,15 @@ static Result run_case(const Case& c, int iters, unsigned seed, const hipdnn_ep_
   HIP_CHECK(hipMemcpy(V_i8.data(), dV8, kn, hipMemcpyDeviceToHost));
   admission->finish();  // quantization/readback is complete; CPU reference has no GPU lease
   const std::vector<float> Kb = make_key_bias(c);
+  gqaInputBinding(case_shape(c).c_str(), "Q_fp16", Qh);
+  gqaInputBinding(case_shape(c).c_str(), "K_readback_i8", K_i8);
+  gqaInputBinding(case_shape(c).c_str(), "V_readback_i8", V_i8);
+  gqaInputBinding(case_shape(c).c_str(), "Kscale_fp32", kscale);
+  gqaInputBinding(case_shape(c).c_str(), "Vscale_fp32", vscale);
+  gqaInputBinding(case_shape(c).c_str(), "key_bias_fp32", Kb);
   std::vector<float> ref_i8(qn), ref_fp16(qn);
-  cpu_reference_i8(Qf, K_i8, V_i8, kscale, vscale, Kb, ref_i8, B, H, G, D, sq, max_seq, scale);
-  cpu_reference_fp16(Qf, Kf_bnsd, Vf_bnsd, Kb, ref_fp16, B, H, G, D, sq, max_seq, scale);
+  cpu_reference_i8(Qf, K_i8, V_i8, kscale, vscale, Kb, ref_i8, B, H, G, D, sq, max_seq, scale, c.window, c.sink, c.smooth);
+  cpu_reference_fp16(Qf, Kf_bnsd, Vf_bnsd, Kb, ref_fp16, B, H, G, D, sq, max_seq, scale, c.window, c.sink, c.smooth);
   admission = std::make_unique<hipdnn_ep_test::GpuExecutionScope>(
       [] { HIP_CHECK(hipDeviceSynchronize()); });
   __half* dKb = nullptr;
@@ -658,10 +677,16 @@ static Result run_case(const Case& c, int iters, unsigned seed, const hipdnn_ep_
   }
   const int kb_stride = B > 1 ? skv : 0;
   // Only the unified entry takes a key bias.
+  __half* dSink = nullptr;
+  if (c.sink) {
+    std::vector<__half> sink(H, __float2half(0.25f));
+    HIP_CHECK(hipMalloc(&dSink, sink.size() * sizeof(__half)));
+    HIP_CHECK(hipMemcpy(dSink, sink.data(), sink.size() * sizeof(__half), hipMemcpyHostToDevice));
+  }
   auto prefill = [&](const void* k, const void* v, void* o, int kv_rows) {
-    if (dKb)
+    if (dKb || c.window || c.sink || c.smooth)
       return hip_gqa_flash_prefill(nullptr, dQ, k, v, o, B, H, G, sq, skv, D,
-                                   kv_rows, past_len, scale, -1, nullptr, H, 0,
+                                   kv_rows, past_len, scale, c.window, dSink, H, c.smooth,
                                    dKb, kb_stride);
     return hip_gqa_flash_prefill_v2(nullptr, dQ, k, v, o, B, H, G, sq, skv, D,
                                     kv_rows, past_len, scale);
@@ -681,7 +706,7 @@ static Result run_case(const Case& c, int iters, unsigned seed, const hipdnn_ep_
       rc = hip_gqa_dequant_kv_i8_to_fp16(nullptr, v, dVf16, dVsc, B, sq, G, D, rows, max_seq);
       if (rc) return rc;
       return hip_gqa_flash_prefill_v3_configured(nullptr, dQ, dKf16, dVf16, dO8,
-        B, H, G, sq, skv, D, max_seq, past_len, scale, -1, nullptr, H, 0,
+        B, H, G, sq, skv, D, max_seq, past_len, scale, c.window, dSink, H, c.smooth,
         selected.hb, selected.qw, selected.mt, selected.bkv, selected.nd, dKb, kb_stride);
     };
     auto validate = [&]() {
@@ -699,7 +724,7 @@ static Result run_case(const Case& c, int iters, unsigned seed, const hipdnn_ep_
     hipdnn_ep_test::rotatedMeanMs(nullptr, 0, rank_kv, [&](int i) {
       return rank_launch(rank_kv.k(i), rank_kv.v(i), rank_kv.rows());
     }, "dequant_KV+hip_gqa_flash_prefill_v3_configured", &options);
-    hipFree(dQ); hipFree(dKbshd); hipFree(dVbshd); hipFree(dK8); hipFree(dV8); hipFree(dKf16); hipFree(dVf16); hipFree(dKbnsd); hipFree(dVbnsd); hipFree(dKsc); hipFree(dVsc); hipFree(dO8); hipFree(dO16); hipFree(dKb);
+    hipFree(dQ); hipFree(dKbshd); hipFree(dVbshd); hipFree(dK8); hipFree(dV8); hipFree(dKf16); hipFree(dVf16); hipFree(dKbnsd); hipFree(dVbnsd); hipFree(dKsc); hipFree(dVsc); hipFree(dO8); hipFree(dO16); hipFree(dKb); hipFree(dSink);
     Result result{}; result.c = c; result.pass = true; return result;
 #endif
   }
@@ -716,7 +741,7 @@ static Result run_case(const Case& c, int iters, unsigned seed, const hipdnn_ep_
     if (hip_gqa_autotune_mode(policy) !=
         static_cast<int>(hipdnn_ep::GqaAutotuneMode::Online)) {
       const hipdnn_ep::GqaPrefillRequest request{
-          prefill_variant(D), B, H, G, D, sq, skv, /*window=*/0};
+          prefill_variant(D), B, H, G, D, sq, skv, c.window};
       hipdnn_ep::GqaPrefillResult selected;
       hip_gqa_autotune_resolve_prefill(policy, &request, &selected);
       selected_config = selected.config;
@@ -740,8 +765,8 @@ static Result run_case(const Case& c, int iters, unsigned seed, const hipdnn_ep_
     if (!lookup_config.empty()) {
       return hip_gqa_flash_prefill_v3_configured(
           nullptr, dQ, dKf16, dVf16, dO8, B, H, G, sq, skv, D, max_seq,
-          past_len, scale, /*local_window_size=*/-1, /*head_sink=*/nullptr, H,
-          /*smooth_softmax=*/0, selected_config.hb, selected_config.qw,
+          past_len, scale, /*local_window_size=*/c.window, /*head_sink=*/dSink, H,
+          /*smooth_softmax=*/c.smooth, selected_config.hb, selected_config.qw,
           selected_config.mt, selected_config.bkv, selected_config.nd,
           dKb, kb_stride);
     }
@@ -824,7 +849,7 @@ static Result run_case(const Case& c, int iters, unsigned seed, const hipdnn_ep_
   hipFree(dQ); hipFree(dKbshd); hipFree(dVbshd); hipFree(dK8); hipFree(dV8);
   hipFree(dKf16); hipFree(dVf16); hipFree(dKbnsd); hipFree(dVbnsd);
   hipFree(dKsc); hipFree(dVsc); hipFree(dO8); hipFree(dO16);
-  if (dKb) hipFree(dKb);
+  if (dKb) hipFree(dKb); hipFree(dSink);
   admission->finish();
 
   // Compare the query rows that have a real key: row i of batch b sees keys
@@ -937,6 +962,7 @@ int main(int argc, char** argv) {
           const auto it = fields.find(name); return it == fields.end() ? fallback : it->second;
         };
         Case c{"rank", value("B"), value("H"), value("G"), value("D"), value("sq"), 0};
+        c.window = value("win"); c.sink = value("sink"); c.smooth = value("smooth");
         if (c.B <= 0 || c.H <= 0 || c.G <= 0 || c.H % c.G || c.D <= 0 ||
             case_shape(c) != rows[i].shape)
           throw std::invalid_argument("UT rank: malformed or unsupported GQA shape");
@@ -962,6 +988,11 @@ int main(int argc, char** argv) {
     else if (a == "--g") { next(single.G); have_single = true; }
     else if (a == "--d") { next(single.D); have_single = true; }
     else if (a == "--sq") { next(single.sq); have_single = true; }
+    else if (a == "--b") { next(single.B); have_single = true; }
+    else if (a == "--window") { next(single.window); have_single = true; }
+    else if (a == "--sink") { next(single.sink); have_single = true; }
+    else if (a == "--smooth") { next(single.smooth); have_single = true; }
+    else if (a == "--pad") { next(single.pad); have_single = true; }
   }
 
   int dev = 0; HIP_CHECK(hipGetDevice(&dev));
@@ -1005,10 +1036,16 @@ int main(int argc, char** argv) {
     for (size_t li = 0; li < n_sqs; ++li)
       full_cases.push_back({"lpad-llama-3.1-8b", 2, 32, 8, 128, sqs[li],
                             sqs[li] / 4 + 1});
-    printf("coverage=%d -> running %zu typical length(s) x %zu categorical "
-           "case(s) = %zu gqa_prefill_i8 cases\n",
-           coverage_tier, n_sqs, full_cases.size() / n_sqs,
-           full_cases.size());
+    full_cases.push_back({"native-i8-d256", 1, 12, 2, 256, 256});
+    Case properties{"i8-window-sink-smooth", 1, 16, 4, 64, 256};
+    properties.window = 127; properties.sink = 1; properties.smooth = 1;
+    full_cases.push_back(properties);
+    properties.sink = 0; properties.smooth = 1; full_cases.push_back(properties);
+    properties.smooth = 0; properties.sink = 1; full_cases.push_back(properties);
+    Case window128{"i8-d128-window-pad", 2, 16, 4, 128, 256};
+    window128.window = 127; window128.pad = 32; full_cases.push_back(window128);
+    printf("coverage=%d -> running %zu gqa_prefill_i8 cases; %zu prompt representatives plus fixed property representatives\n",
+           coverage_tier, full_cases.size(), n_sqs);
 
     for (const Case& fc : full_cases)
       results.push_back(run_case(fc, iters, seed));

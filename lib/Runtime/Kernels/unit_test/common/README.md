@@ -14,7 +14,10 @@ counts are in `UT_TIMING` records.
 
 Excluded warm-up batches first run until the preset's warm-up GPU time (at least
 one complete call); they also estimate the call cost. Each measurement then uses
-five groups. A first round fills every group until it
+five groups. For `confirm`, every group retains at least 2,000 valid GPU ms
+and two complete calls, giving at least 10,000 valid GPU ms overall. The
+call goal and spread cannot stop `confirm` before that duration. For
+`screen` and `standard`, a first round fills every group until it
 reaches its share of the call goal (once it also has its share of the GPU-time
 floor) or its share of the GPU-time goal, whichever comes first, with at least
 one complete call per group. The measurement ends there when the spread of the
@@ -28,7 +31,7 @@ of the GPU-time goal and at least two complete calls (ten in total).
 | `standard` (default) | 10 ms | 1,000 | 10 ms | 1,000 ms (2,000 ms) | 3% |
 | `confirm` | 25 ms | 10,000 | 100 ms | 10,000 ms (20,000 ms) | 1% |
 
-Short calls therefore stop at the call goal, mid-size calls at the GPU-time
+For `screen` and `standard`, short calls stop at the call goal, mid-size calls at the GPU-time
 goal, and calls longer than a group's share of the goal after five calls when
 those agree, or after ten when they do not. A noisy short call keeps the full
 GPU-time goal. A measurement whose spread still exceeds the limit at the full goal
@@ -266,3 +269,8 @@ sample is still returned to the policy and counted against the warm-up or
 measurement allowance; no measured sample, measurement retry threshold, batch cap
 or timing preset is relaxed. Persistent
 invalid durations still fail the cell. HIP API errors continue to propagate.
+
+GQA drivers emit `UT_INPUT_BITS` outside event timing. The byte count and
+FNV1a64 checksum bind host upload buffers; INT8 prefill also binds the actual
+quantized device bytes read back for its CPU reference. Source-bound poison and
+operand-rotation transformations remain part of the input preparation.

@@ -351,7 +351,9 @@
           {"name": "window", "flag": "--window", "make": null, "type": "int", "exe_default": 0, "description": "Sliding window; <=0 is full attention."},
           {"name": "head_sink", "flag": "--sink", "make": null, "type": "int", "exe_default": 0, "description": "1 adds a per-head sink."},
           {"name": "smooth_softmax", "flag": "--smooth", "make": null, "type": "int", "exe_default": 0, "description": "1 uses smooth softmax (no explicit sink)."},
-          {"name": "pad", "flag": "--pad", "make": null, "type": "int", "exe_default": 0, "description": ">0: key_bias marks batch b's first b*pad keys as left padding."}
+          {"name": "pad", "flag": "--pad", "make": null, "type": "int", "exe_default": 0, "description": ">0: key_bias marks batch b's first b*pad keys as left padding."},
+          {"name": "copy", "flag": "--copy", "make": "COPY", "type": "int", "required": false, "exe_default": 0, "make_default": 0, "description": "1 invokes the existing fused history copy plus decode API; requires B1/D128/HPG4,5,6,8 and positive history.", "choices": [0, 1]},
+          {"name": "splits", "flag": "--splits", "make": "SPLITS", "type": "int", "required": false, "exe_default": 0, "make_default": 0, "description": "COPY split count, 0 uses the production heuristic; otherwise within max_splits."}
         ],
         "checks": ["num_heads % kv_num_heads == 0", "total_seq <= max_seq"]
       },
@@ -384,7 +386,11 @@
           {"name": "kv_num_heads", "flag": "--g", "make": "G", "type": "int", "exe_default": 10, "make_default": 8, "description": "KV heads (groups); H must be a multiple of G."},
           {"name": "head_dim", "flag": "--d", "make": "D", "type": "int", "exe_default": 128, "make_default": 128, "description": "Head dimension."},
           {"name": "max_seq", "flag": "--max-seq", "make": "MAX_SEQ", "type": "int", "exe_default": 8192, "make_default": 4096, "description": "KV cache capacity."},
-          {"name": "total_seq", "flag": "--total", "make": "TOTAL", "type": "int", "exe_default": 8192, "make_default": 2048, "description": "Effective KV length; at most max_seq."}
+          {"name": "total_seq", "flag": "--total", "make": "TOTAL", "type": "int", "exe_default": 8192, "make_default": 2048, "description": "Effective KV length; at most max_seq."},
+          {"name": "window", "flag": "--window", "make": "WINDOW", "type": "int", "required": false, "exe_default": 0, "make_default": 0, "description": "Positive local window, 0 disables."},
+          {"name": "sink", "flag": "--sink", "make": "SINK", "type": "int", "required": false, "exe_default": 0, "make_default": 0, "description": "1 supplies a per-head sink of 0.25 for property validation.", "choices": [0, 1]},
+          {"name": "smooth", "flag": "--smooth", "make": "SMOOTH", "type": "int", "required": false, "exe_default": 0, "make_default": 0, "description": "Smooth softmax flag; a sink takes precedence.", "choices": [0, 1]},
+          {"name": "pad", "flag": "--pad", "make": "PAD", "type": "int", "required": false, "exe_default": 0, "make_default": 0, "description": "Left padding count for each successive batch, represented by key bias."}
         ],
         "checks": ["num_heads % kv_num_heads == 0", "total_seq <= max_seq"]
       },
@@ -458,7 +464,12 @@
           {"name": "num_heads", "flag": "--h", "make": "H", "type": "int", "exe_default": 40, "make_default": 32, "description": "Query heads. Batch is always 1."},
           {"name": "kv_num_heads", "flag": "--g", "make": "G", "type": "int", "exe_default": 10, "make_default": 8, "description": "KV heads (groups); H must be a multiple of G."},
           {"name": "head_dim", "flag": "--d", "make": "D", "type": "int", "exe_default": 128, "make_default": 128, "description": "Head dimension."},
-          {"name": "seq_q", "flag": "--sq", "make": "SQ", "type": "int", "exe_default": 2048, "make_default": 512, "description": "Prompt tokens (no past)."}
+          {"name": "seq_q", "flag": "--sq", "make": "SQ", "type": "int", "exe_default": 2048, "make_default": 512, "description": "Prompt tokens (no past)."},
+          {"name": "b", "flag": "--b", "make": "B", "type": "int", "required": false, "exe_default": 1, "make_default": 1, "description": "Batch size."},
+          {"name": "window", "flag": "--window", "make": "WINDOW", "type": "int", "required": false, "exe_default": 0, "make_default": 0, "description": "Positive local window, 0 disables."},
+          {"name": "sink", "flag": "--sink", "make": "SINK", "type": "int", "required": false, "exe_default": 0, "make_default": 0, "description": "1 supplies a per-head sink of 0.25 for property validation.", "choices": [0, 1]},
+          {"name": "smooth", "flag": "--smooth", "make": "SMOOTH", "type": "int", "required": false, "exe_default": 0, "make_default": 0, "description": "Smooth softmax flag; a sink takes precedence.", "choices": [0, 1]},
+          {"name": "pad", "flag": "--pad", "make": "PAD", "type": "int", "required": false, "exe_default": 0, "make_default": 0, "description": "Left padding count for each successive batch, represented by key bias."}
         ],
         "checks": ["num_heads % kv_num_heads == 0"]
       },

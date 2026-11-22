@@ -128,3 +128,7 @@ flags cannot be combined with this selector.
 Selected config diagnostics are captured on the untimed correctness call.
 The shared timer runs with configuration logging disabled; CPU reference,
 config selection and sampling policy are unchanged.
+
+Online configuration logging is disabled by default (`unlogged` in CSV).
+Use `HIPDNN_UT_GQA_DIAGNOSTIC=1` only for a separate diagnostic run.
+Lookup/rank retain explicit configurations; use rank output for LUT refresh.

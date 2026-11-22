@@ -29,6 +29,7 @@
 #include "../../../common/ut_gqa_rank_input.h"
 #include <hip/hip_runtime.h>
 #include "../../../common/hip_adaptive_timing.h"
+#include "../../../common/ut_gqa_input_binding.h"
 #ifdef HIPDNN_UT_GPU_PHASE_HEADER
 #include HIPDNN_UT_GPU_PHASE_HEADER
 #elif !defined(HIPDNN_UT_GPU_PHASE_LINKED)
@@ -140,7 +141,9 @@ inline std::string besideExe(const std::string& name) {
 inline std::vector<std::string> captureLogLines(
     const char* env_var, const std::string& tmp_name,
     const std::function<void()>& fn) {
-  // Timing callers keep capture disabled after the first config fetch.
+  // Normal measurements leave production configuration logging disabled.
+  // A separate diagnostic process observes routes without poisoning timing.
+  if (!std::getenv("HIPDNN_UT_GQA_DIAGNOSTIC")) { fn(); return {}; }
   if (!env_var) { fn(); return {}; }
   const char* leaf_stderr = std::getenv("HIPDNN_KERNEL_UT_STDERR");
   const bool redirect = !leaf_stderr || !leaf_stderr[0];
@@ -628,6 +631,11 @@ static bool run_case(const Case& c, int iters, const hipdnn_ep_test::timing::Ran
   std::vector<__half> Qh(qn), Kh(kn), Vh(kn);
   for (size_t i = 0; i < qn; ++i) Qh[i] = __float2half(Qf[i]);
   for (size_t i = 0; i < kn; ++i) { Kh[i] = __float2half(Kf[i]); Vh[i] = __float2half(Vf[i]); }
+  gqaInputBinding(case_shape(c).c_str(), "Q_fp16", Qh);
+  gqaInputBinding(case_shape(c).c_str(), "K_upload_fp16", Kh);
+  gqaInputBinding(case_shape(c).c_str(), "V_upload_fp16", Vh);
+  gqaInputBinding(case_shape(c).c_str(), "sink_fp16", sinkh);
+  gqaInputBinding(case_shape(c).c_str(), "key_bias_fp32", Kb);
 
   __half *dQ, *dK, *dV, *dO, *dSink;
   hipdnn_ep_test::GpuExecutionScope gpu_execution([] { HIP_CHECK(hipDeviceSynchronize()); });

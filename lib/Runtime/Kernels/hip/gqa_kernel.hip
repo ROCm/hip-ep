@@ -1745,7 +1745,8 @@ struct FlashDecodeCopyArgs {
 
 template <int D, int HPG, KvDtype FMT = KvDtype::kF16, bool HAS_KB = false,
           bool COPY = false, bool PAGED = false>
-__device__ __forceinline__ void gqa_flash_decode_body(
+__global__ void __launch_bounds__(HPG * WAVE_SIZE)
+gqa_flash_decode_kernel(
     const __half* __restrict__ Q_roped,    // [B, 1, H, D] (BSHD with sq=1)
     const std::conditional_t<FMT == KvDtype::kI8, int8_t, __half>* __restrict__ Kcache,  // [B, G, max_seq, D]
     const std::conditional_t<FMT == KvDtype::kI8, int8_t, __half>* __restrict__ Vcache,  // [B, G, max_seq, D]
@@ -1759,7 +1760,17 @@ __device__ __forceinline__ void gqa_flash_decode_body(
     int K_SPLITS,  // runtime split-K count (was a template param)
     const __half* __restrict__ key_bias,  // [B, key_bias_stride] or null
     int key_bias_stride,
-    FlashDecodeCopyArgs cp, GqaPagedArgs pg = {}) {
+    std::conditional_t<PAGED, GqaPagedArgs, FlashDecodeCopyArgs> args) {
+  // Keep one scalar definition directly in the global template. The last
+  // argument keeps the dense COPY ABI and becomes page metadata only for Page.
+  const FlashDecodeCopyArgs cp = [&] {
+    if constexpr (PAGED) return FlashDecodeCopyArgs{};
+    else return args;
+  }();
+  const GqaPagedArgs pg = [&] {
+    if constexpr (PAGED) return args;
+    else return GqaPagedArgs{};
+  }();
   constexpr bool KV_I8 = (FMT == KvDtype::kI8);
   using KVt = std::conditional_t<KV_I8, int8_t, __half>;
   static_assert(!COPY || (!KV_I8 && HPG > 1),
@@ -2168,29 +2179,6 @@ __device__ __forceinline__ void gqa_flash_decode_body(
   }
 }
 
-
-template <int D, int HPG, KvDtype FMT = KvDtype::kF16, bool HAS_KB = false,
-          bool COPY = false>
-__global__ void __launch_bounds__(HPG * WAVE_SIZE)
-gqa_flash_decode_kernel(
-    const __half* __restrict__ Q_roped,    // [B, 1, H, D] (BSHD with sq=1)
-    const std::conditional_t<FMT == KvDtype::kI8, int8_t, __half>* __restrict__ Kcache,  // [B, G, max_seq, D]
-    const std::conditional_t<FMT == KvDtype::kI8, int8_t, __half>* __restrict__ Vcache,  // [B, G, max_seq, D]
-    const float* __restrict__ k_scale,     // [G, D] per-channel; FMT==kI8 only
-    const float* __restrict__ v_scale,     // [G, D] per-channel; FMT==kI8 only
-    float* __restrict__ partials,          // [B, H, K_SPLITS, D+2]
-    int H, int G, int max_seq,
-    float scale,
-    const int* __restrict__ seqlens_k,
-    int local_window_size,
-    int K_SPLITS,  // runtime split-K count (was a template param)
-    const __half* __restrict__ key_bias,  // [B, key_bias_stride] or null
-    int key_bias_stride,
-    FlashDecodeCopyArgs cp) {
-  gqa_flash_decode_body<D, HPG, FMT, HAS_KB, COPY>(Q_roped, Kcache, Vcache,
-      k_scale, v_scale, partials, H, G, max_seq, scale, seqlens_k,
-      local_window_size, K_SPLITS, key_bias, key_bias_stride, cp);
-}
 
 //===----------------------------------------------------------------------===//
 // D=96 Split-K Decode Kernel (scalar, fp16 KV)
@@ -5595,13 +5583,6 @@ extern "C" int hip_gqa_fused_decode(
 
 // Paged launch adapters instantiate the same bodies as the dense kernels.
 // The public entry has already validated metadata and appended K/V on stream.
-template <int D, int HPG>
-__global__ void __launch_bounds__(HPG * WAVE_SIZE) paged_decode_split(
-    const __half* q, const __half* k, const __half* v, float* partial,
-    int H, int G, float scale, int window, int splits, GqaPagedArgs pg) {
-  gqa_flash_decode_body<D,HPG,KvDtype::kF16,false,false,true>(q,k,v,nullptr,
-      nullptr,partial,H,G,1,scale,nullptr,window,splits,nullptr,0,{},pg);
-}
 template <int D>
 __global__ void __launch_bounds__(D) paged_decode_reduce(
     const float* partial, __half* o, int H, int splits, GqaPagedArgs pg) {
@@ -5610,9 +5591,10 @@ __global__ void __launch_bounds__(D) paged_decode_reduce(
 template <int D, int HPG>
 static void launchPagedDecode(hipStream_t stream, const hip_paged_attention_f16_desc& d,
     const void* q, float* partial, float scale, GqaPagedArgs pg, int splits) {
-  paged_decode_split<D,HPG><<<dim3(d.batch*d.kv_num_heads,splits),HPG*WAVE_SIZE,0,stream>>>(
+  gqa_flash_decode_kernel<D,HPG,KvDtype::kF16,false,false,true><<<dim3(d.batch*d.kv_num_heads,splits),HPG*WAVE_SIZE,0,stream>>>(
       static_cast<const __half*>(q),static_cast<const __half*>(d.k_pool),
-      static_cast<const __half*>(d.v_pool),partial,d.num_heads,d.kv_num_heads,scale,d.local_window_size,splits,pg);
+      static_cast<const __half*>(d.v_pool),nullptr,nullptr,partial,d.num_heads,
+      d.kv_num_heads,1,scale,nullptr,d.local_window_size,splits,nullptr,0,pg);
 }
 template <int D>
 static void dispatchPagedDecode(hipStream_t stream, const hip_paged_attention_f16_desc& d,

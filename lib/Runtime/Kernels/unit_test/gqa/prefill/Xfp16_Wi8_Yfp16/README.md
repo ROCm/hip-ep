@@ -15,7 +15,7 @@ make clean
 | Target | Meaning |
 |---|---|
 | `test` | Coverage-tiered sweep -- see "Shape coverage" below. |
-| `test_custom` | One shape from `H=`, `G=`, `D=`, `SQ=` (B is always 1 here, in-process rng). |
+| `test_custom` | One shape from `H=`, `G=`, `D=`, `SQ=` (in-process rng; `B` defaults to 1). |
 | `clean` | Removes `out/`. |
 
 ## Shape coverage (3 tiers)
@@ -23,15 +23,13 @@ make clean
 `test_gqa_prefill_i8.cpp`'s `main()` has 9 named geometries (MHA d64, MHA
 d128, GQA2 d128, llama-3.2-1b, llama-3.1-8b, psu_orc_211, gpt-oss-20b,
 llama-3-70b, phi-3-mini d96), which run in full at **every** `COVERAGE` tier.
-There is no head_dim 256 geometry: production `real/gqa.cpp` accepts an INT8
-KV cache only at head_dim 64, 96 and 128 and rejects d256 before any kernel
-launch, so the leaf stays inside that range. Crossed with the geometries is a
+The native API additionally exercises D256. The EP wrapper in
+`real/gqa.cpp` still rejects INT8 D256 before kernel dispatch. Crossed with the geometries is a
 typical prompt-length list: tier3 (default) =
 `{128, 256, 512, 1024, 2048}`, tier2 = `{256, 1024}`, tier1 = `{512}` alone.
 `COVERAGE=1|2|3` (`make test COVERAGE=N` or env `HIPDNN_UT_COVERAGE`) only
-picks which of those lengths run. At startup the exe prints `coverage=N ->
-running <n> typical length(s) x 9 categorical case(s) = <n*9>
-gqa_prefill_i8 cases`. No human edits a shape list -- there is no
+picks which of those lengths run. Fixed D256 and attribute representatives also run at every tier.
+Startup reports the total case count. No human edits a shape list -- there is no
 `shapes.csv` or `gen_data.py` in this leaf.
 
 This leaf runs *every* named shape (including the `H=64` ones) at *every*
@@ -54,3 +52,11 @@ fp16 prefill that runs on the dequantized cache
 -- see `unit_test/README.md`.
 
 CI passes `OFFLOAD`/`HIP_SDK` explicitly; there is no personal default.
+
+Regression property support uses the existing shared timer and public APIs.
+`test_custom` also accepts `B=1`, `WINDOW=0`, `SINK=0`, `SMOOTH=0`, `PAD=0`. The matching executable flags are `--b`, `--window`, `--sink`, `--smooth`, `--pad`.
+The native low-level API also supports D256; the model EP wrapper rejects INT8 D256 before dispatch. These scopes are reported separately. Window/sink/smooth representatives retain the original quantization references and tolerances. Unsupported prefill attribute combinations must be declined.
+
+Online configuration logging is disabled by default (`unlogged` in CSV).
+Use `HIPDNN_UT_GQA_DIAGNOSTIC=1` only for a separate diagnostic run.
+Lookup/rank retain explicit configurations; use rank output for LUT refresh.
