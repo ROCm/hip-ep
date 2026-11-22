@@ -45,3 +45,9 @@ repos:
         language: python
         additional_dependencies: [licenseheaders==0.8.8]
         types: [file]
+    -   id: kernel-ut-interface
+        name: kernel UT interface record
+        entry: python lib/Runtime/Kernels/unit_test/common/test_ut_interface.py
+        language: python
+        files: ^lib/Runtime/Kernels/unit_test/
+        pass_filenames: false

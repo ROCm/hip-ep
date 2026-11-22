@@ -40,7 +40,10 @@
 #include "mlir/Transforms/Passes.h"
 
 #include "llvm/ADT/Sequence.h"
+#include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/SourceMgr.h"
@@ -50,9 +53,21 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <memory>
 #include <sstream>
+
+#if defined(ENABLE_ROCMLIRTRITON) && defined(HIPDNN_EP_LINK_HIP_HOST) &&       \
+    defined(HIPDNN_HIP_RUNTIME_LIB)
+// File scope, and each declaration is extern. Inside extern "C" { }, a const
+// object is still a definition, so GCC rejects the missing initializer and
+// the unknown array bound. Inside the anonymous namespace below, extern "C"
+// stays a member of that namespace and misses the generated blob.
+extern "C" const unsigned char *const kRocmlirProblemCacheBlobs[];
+extern "C" const size_t kRocmlirProblemCacheBlobSizes[];
+extern "C" const size_t kRocmlirProblemCacheBlobCount;
+#endif
 
 namespace hip::compiler {
 
@@ -82,10 +97,78 @@ bool rocMlirPipelineRequested() {
 #endif
 }
 
+#ifdef ENABLE_ROCMLIRTRITON
+// HIPDNN_EP_ROCMLIR_PRE_FUSION_DUMP=<dir> writes the IR that the rocMLIR
+// fusion reads, one file per compiled graph. The first line records the
+// fusion options in --hip-rocmlir-fusion syntax, so that hip-mlir-opt can
+// replay the same fusion without a GPU.
+void dumpPreFusionIR(mlir::ModuleOp module,
+                     const mlir::hip::FuseRocMlirAnchorPassOptions &fuseOpts) {
+  std::string dir = hip_get_env("HIPDNN_EP_ROCMLIR_PRE_FUSION_DUMP");
+  if (dir.empty())
+    return;
+  static std::atomic<unsigned> sDumpSeq{0};
+  if (std::error_code ec = llvm::sys::fs::create_directories(dir)) {
+    llvm::errs() << "[CompilerDriver] cannot create " << dir << ": "
+                 << ec.message() << "\n";
+    return;
+  }
+  llvm::SmallString<256> path(dir);
+  llvm::sys::path::append(
+      path, "pre-fusion." + std::to_string(sDumpSeq.fetch_add(1)) + ".mlir");
+  std::error_code ec;
+  llvm::raw_fd_ostream os(path, ec);
+  if (ec) {
+    llvm::errs() << "[CompilerDriver] cannot open " << path << ": "
+                 << ec.message() << "\n";
+    return;
+  }
+  os << "// hip-rocmlir-fusion: arch=" << fuseOpts.arch
+     << " gemm-gemm-accel-types="
+     << llvm::join(fuseOpts.gemmGemmAccelTypes, ",")
+     << " int4-weights=" << (fuseOpts.int4Weights ? "true" : "false") << "\n";
+  module->print(os);
+}
+#endif
+
 OnnxDialectKind onnxDialectKind() {
   return hipsrPipelineRequested() ? OnnxDialectKind::Modeled
                                   : OnnxDialectKind::Stub;
 }
+} // namespace
+
+namespace {
+// FNV-1a over the shipped LUT bytes. The model cache key is the graph, so two
+// compiles that pick different perfConfigs must not share an artifact. The
+// provider consults only the embedded tools/problem-cache/lut/*.fb; hashing
+// those bytes makes a changed table fail the recorded/current check the same
+// way a changed autotune space does. hip-rocmlir-compiler's --problem-cache
+// is not part of this string: the provider never reads it.
+#if defined(ENABLE_ROCMLIRTRITON) && defined(HIPDNN_EP_LINK_HIP_HOST) &&       \
+    defined(HIPDNN_HIP_RUNTIME_LIB)
+std::string shippedProblemCacheFingerprint() {
+  uint64_t hash = 14695981039346656037ull;
+  for (size_t blob = 0; blob < kRocmlirProblemCacheBlobCount; ++blob) {
+    const unsigned char *bytes = kRocmlirProblemCacheBlobs[blob];
+    const size_t size = kRocmlirProblemCacheBlobSizes[blob];
+    if (!bytes || size == 0)
+      continue;
+    for (size_t i = 0; i < size; ++i) {
+      hash ^= bytes[i];
+      hash *= 1099511628211ull;
+    }
+  }
+  static constexpr char kHex[] = "0123456789abcdef";
+  std::string hex(16, '0');
+  for (int nibble = 15; nibble >= 0; --nibble) {
+    hex[static_cast<size_t>(nibble)] = kHex[hash & 0xfu];
+    hash >>= 4;
+  }
+  return hex;
+}
+#else
+std::string shippedProblemCacheFingerprint() { return {}; }
+#endif
 } // namespace
 
 std::string rocMlirArtifactTarget() {
@@ -97,13 +180,19 @@ std::string rocMlirArtifactTarget() {
       rocMlirPipelineRequested()) {
     std::string target = mlir::hip::resolveRocMlirArch();
     // Which perfConfig each kernel was tuned to is baked into the embedded
-    // HSACO, so an artifact built with the default configs must not be reused
-    // once tuning is requested -- the cache is keyed on the graph alone, and
-    // the knob would silently appear to do nothing. Folding the mode into the
-    // target string puts it under the recorded-vs-current check below.
+    // HSACO. Autotune runs unless HIP_ROCMLIR_SKIP_BENCHMARKING is set, so
+    // the target string records the space and the shipped LUT that supplied
+    // tiles before the search. An artifact built with the other setting, or
+    // against other LUT bytes, must not be reused: the cache is keyed on the
+    // graph alone. Skip-benchmarking does not consult the LUT, so it has no
+    // +lut= suffix.
     mlir::hip::AutotuneSpace space;
-    if (!target.empty() && mlir::hip::rocMlirAutotuneFromEnv(space))
+    if (!target.empty() && mlir::hip::rocMlirAutotuneFromEnv(space)) {
       target += std::string("+autotune=") + mlir::hip::autotuneSpaceName(space);
+      const std::string lut = shippedProblemCacheFingerprint();
+      if (!lut.empty())
+        target += "+lut=" + lut;
+    }
     return target;
   }
 #endif
@@ -394,7 +483,7 @@ bool CompilerDriver::runMLIRPasses(
     COMPILER_DEBUG_LOG("[CompilerDriver] HIPDNN_EP_HIPSR set\n");
   } else if (rocMlirPipelineRequested()) {
 #ifdef ENABLE_ROCMLIRTRITON
-    // rocMLIR sits between the ONNX->HIP head and its tail: fuse-rocmlir
+    // rocMLIR sits between the ONNX->HIP head and its tail: the rocMLIR fusion
     // needs tensor-level HIP IR, and each kernel's compiled binary has to be
     // embedded in its hip.rocmlir dispatch before the tail bufferizes that op
     // like any other DPS op. Embedding is not a pass, so the head runs here
@@ -408,10 +497,10 @@ bool CompilerDriver::runMLIRPasses(
     {
       mlir::PassManager headPm(module.getContext());
       // Same handle plumbing as the default arm below. rocMLIR only claims
-      // the subgraphs fuse-rocmlir anchors on; everything else still wants
-      // the hipDNN graph passes, and CompilerAPI needs the compiled graphs to
-      // register. Dropping them here would silently move the rest of the
-      // model off hipDNN the moment HIPDNN_EP_ROCMLIR was set.
+      // the subgraphs the rocMLIR fusion anchors on; everything else still
+      // wants the hipDNN graph passes, and CompilerAPI needs the compiled
+      // graphs to register. Dropping them here would silently move the rest of
+      // the model off hipDNN the moment HIPDNN_EP_ROCMLIR was set.
       if (hipdnnHandle_) {
         compiledGraphs_ =
             std::make_shared<llvm::StringMap<mlir::hip::OwnedGraph>>();
@@ -427,11 +516,27 @@ bool CompilerDriver::runMLIRPasses(
       headPm.addNestedPass<mlir::func::FuncOp>(
           mlir::hip::createDecomposeConvTransposePass());
       headPm.addPass(mlir::createCanonicalizerPass());
-      headPm.addNestedPass<mlir::func::FuncOp>(
-          mlir::hip::createFuseROCMlirPass());
-      headPm.addPass(mlir::func::createDuplicateFunctionEliminationPass());
+      mlir::hip::FuseRocMlirAnchorPassOptions fuseOpts;
+      fuseOpts.arch = mlir::hip::resolveRocMlirArch();
+      std::vector<std::string> accelTypes = mlir::hip::getRocMlirGemmAccelTypes(
+          *module.getContext(), fuseOpts.arch);
+      fuseOpts.gemmGemmAccelTypes.assign(accelTypes.begin(), accelTypes.end());
+      // Autotuning skips the perfConfigs under which rocMLIR cannot pack an
+      // i4 filter; the default perfConfig is one of them for f32.
+      mlir::hip::AutotuneSpace int4Space;
+      fuseOpts.int4Weights = mlir::hip::rocMlirAutotuneFromEnv(int4Space);
       if (mlir::failed(headPm.run(module))) {
-        error_message = "ONNX->HIP + fuse-rocmlir passes failed";
+        error_message = "ONNX->HIP passes before the rocMLIR fusion failed";
+        return false;
+      }
+      dumpPreFusionIR(module, fuseOpts);
+      mlir::PassManager fusePm(module.getContext());
+      // HIPDNN_EP_ROCMLIR_FUSION_REPORT=<file> appends one JSON line per
+      // kernel, to compare the kernels of two fusion pipelines.
+      mlir::hip::addRocMlirFusionPasses(
+          fusePm, fuseOpts, hip_get_env("HIPDNN_EP_ROCMLIR_FUSION_REPORT"));
+      if (mlir::failed(fusePm.run(module))) {
+        error_message = "rocMLIR fusion passes failed";
         return false;
       }
     }
@@ -442,12 +547,29 @@ bool CompilerDriver::runMLIRPasses(
       embedOpts.log = &llvm::errs();
       embedOpts.logPrefix = "[CompilerDriver/rocmlir]";
     }
+    embedOpts.strictElementwise = !hip_get_env("HIPDNN_EP_STRICT").empty();
+    std::string fusionReport = hip_get_env("HIPDNN_EP_ROCMLIR_FUSION_REPORT");
+    auto reportHipPath = [&](llvm::StringRef kernel, llvm::StringRef reason) {
+      std::error_code error;
+      std::unique_ptr<llvm::raw_fd_ostream> file;
+      if (fusionReport != "-")
+        file = std::make_unique<llvm::raw_fd_ostream>(fusionReport, error,
+                                                      llvm::sys::fs::OF_Append);
+      if (error)
+        return;
+      llvm::raw_ostream &os = file ? *file : llvm::errs();
+      os << llvm::json::Value(llvm::json::Object{
+                {"kind", "fallback"}, {"name", kernel}, {"reason", reason}})
+         << "\n";
+    };
+    if (!fusionReport.empty())
+      embedOpts.onHipPath = reportHipPath;
 
-    // Opt-in: without this the embed falls back to position 0 of the tuning
-    // space, which rocMLIR picks for applicability rather than speed. Tuning
-    // compiles and times every candidate, so it costs far more than a session
-    // creation normally should -- hence off unless asked for. Declared in this
-    // scope because embedOpts only holds function_refs into it.
+    // On unless HIP_ROCMLIR_SKIP_BENCHMARKING is set. Without a usable
+    // device the embed would fall back to position 0 of the tuning space,
+    // which rocMLIR picks for applicability rather than speed, so that case
+    // fails the compile. Declared in this scope because embedOpts only holds
+    // function_refs into it.
     std::optional<mlir::hip::RocMlirAutotuner> autotuner;
     mlir::hip::AutotuneSpace autotuneSpace;
     if (mlir::hip::rocMlirAutotuneFromEnv(autotuneSpace)) {
@@ -456,6 +578,9 @@ bool CompilerDriver::runMLIRPasses(
       mlir::hip::rocMlirAutotuneBenchmarkFromEnv(autotuneOpts.benchmark);
       autotuneOpts.log = embedOpts.log;
       autotuneOpts.logPrefix = "[CompilerDriver/rocmlir-autotune]";
+      // problemCachePath stays empty. The provider uses the shipped LUT only.
+      // --problem-cache and HIP_ROCMLIR_PROBLEM_CACHE are read by
+      // hip-rocmlir-compiler, which is what replaces that table.
       autotuner.emplace(embedOpts.arch, autotuneOpts);
       // Refuse rather than fall back to the default perfConfig. By this point
       // rocMlirArtifactTarget() has already stamped +autotune=<space> into the
@@ -465,9 +590,9 @@ bool CompilerDriver::runMLIRPasses(
       // runtime or no visible device, which the autotuner has already
       // described on the log.
       if (!autotuner->isUsable()) {
-        error_message = "HIPDNN_EP_ROCMLIR_AUTOTUNE was set, but autotuning "
-                        "could not reach a HIP device; unset it to compile "
-                        "with the default perfConfig";
+        error_message = "rocMLIR autotune could not reach a HIP device; set "
+                        "HIP_ROCMLIR_SKIP_BENCHMARKING=1 to compile with the "
+                        "default perfConfig";
         return false;
       }
       autotuner->installInto(embedOpts);
