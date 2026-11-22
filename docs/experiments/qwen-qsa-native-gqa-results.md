@@ -90,8 +90,22 @@ Full-session wall timings use two exact-shape warmup pairs and six balanced meas
 |---:|---:|---|---:|---:|---:|
 | 1 | 4K | prefill | 438.06 | 419.97 | -4.13% [-4.34, -3.75] |
 | 1 | 4K | decode | 10.68 | 10.74 | +0.50% [+0.14, +0.92] |
+| 1 | 16K | prefill | 415.94 | 397.34 | -4.47% [-4.57, -4.40] |
+| 1 | 16K | decode | 10.13 | 10.25 | +1.23% [+0.66, +1.80] |
+| 1 | 32K | prefill | 384.85 | 350.87 | -8.83% [-9.18, -8.43] |
+| 1 | 32K | decode | 9.36 | 9.51 | +1.60% [+0.22, +2.99] |
 
 Every listed row has finite outputs, exact warmup replay, unchanged sessions/cache addresses, and independently audited paired raw trials and statistics. Shapes without a completed receipt remain unqualified.
+
+## Application memory while running
+
+A separate CPU-only sampler reads OS process/system and Windows PDH GPU memory gauges every second without creating a GPU context. The worker holds Original and Changed sessions together, sharing KV serially; these are joint application footprints, not isolated per-variant allocations. The 32K trace attaches mid-run; 64K sampling starts before application startup. Sampled peaks can miss sub-second spikes.
+
+| Prefix | Coverage | Peak process RSS GiB | Peak private commitment GiB | Peak WDDM dedicated usage GiB | Peak WDDM shared usage GiB | Minimum system RAM available GiB |
+|---|---|---:|---:|---:|---:|---:|
+| 32K | partial, attached mid-run | 6.35 | 65.71 | 61.67 | 5.49 | 30.89 |
+
+WDDM values are driver-reported usage/commitment; they are not a proven physical-residency total. Process RSS, private commitment, GPU dedicated/shared gauges and system RAM overlap and must not be added. Raw timestamped samples, OS lifetime high-water counters, per-request completion markers and immutable source/snapshot identities are retained under `_local/qwen-qsa/memory-v1/`. Memory sampling begins after the earlier uninstrumented trials and partway through 32K; 64K has the observer throughout both variants.
 
 ## Separate locked long-context inputs
 

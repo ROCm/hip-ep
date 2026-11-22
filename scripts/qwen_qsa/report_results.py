@@ -9,6 +9,7 @@ import json
 import math
 from pathlib import Path
 
+from audit_memory import audit_memory
 from audit_performance import audit_performance
 from evaluate_default import answer
 from verify_handoff import ROOT, SOURCE, WORK, sha
@@ -263,6 +264,7 @@ def main():
     }
     comparison = compare_native_quality(native_quality)
     performance = audit_performance()
+    memory = audit_memory()
     native_long_quality = {
         variant: audit_long_quality(
             WORK / "native-gqa/long-quality" / variant,
@@ -454,6 +456,37 @@ def main():
             "",
             "Every listed row has finite outputs, exact warmup replay, unchanged sessions/cache addresses, and independently audited paired raw trials and statistics. Shapes without a completed receipt remain unqualified.",
         ]
+    if memory:
+        lines += [
+            "",
+            "## Application memory while running",
+            "",
+            "A separate CPU-only sampler reads OS process/system and Windows PDH GPU memory gauges every second without creating a GPU context. The worker holds Original and Changed sessions together, sharing KV serially; these are joint application footprints, not isolated per-variant allocations. The 32K trace attaches mid-run; 64K sampling starts before application startup. Sampled peaks can miss sub-second spikes.",
+            "",
+            "| Prefix | Coverage | Peak process RSS GiB | Peak private commitment GiB | Peak WDDM dedicated usage GiB | Peak WDDM shared usage GiB | Minimum system RAM available GiB |",
+            "|---|---|---:|---:|---:|---:|---:|",
+        ]
+        for row in memory["rows"]:
+            fields = [
+                "peak_sampled_rss_tree_bytes",
+                "peak_sampled_private_commit_tree_bytes",
+                "peak_sampled_wddm_dedicated_usage_bytes",
+                "peak_sampled_wddm_shared_usage_bytes",
+                "minimum_system_ram_available_bytes",
+            ]
+            cells = [
+                f"{row[field] / 2**30:.2f}" if row[field] is not None else "Unavailable"
+                for field in fields
+            ]
+            lines.append(
+                f"| {row['context'] // 1024}K | {row['coverage']} | "
+                + " | ".join(cells)
+                + " |"
+            )
+        lines += [
+            "",
+            "WDDM values are driver-reported usage/commitment; they are not a proven physical-residency total. Process RSS, private commitment, GPU dedicated/shared gauges and system RAM overlap and must not be added. Raw timestamped samples, OS lifetime high-water counters, per-request completion markers and immutable source/snapshot identities are retained under `_local/qwen-qsa/memory-v1/`. Memory sampling begins after the earlier uninstrumented trials and partway through 32K; 64K has the observer throughout both variants.",
+        ]
     lines += [
         "",
         "## Separate locked long-context inputs",
@@ -549,6 +582,7 @@ def main():
                 "matched_native_quality": native_quality,
                 "matched_native_comparison": comparison,
                 "matched_native_performance": performance,
+                "application_memory": memory,
                 "default_long_quality": long_quality,
                 "matched_native_long_quality": native_long_quality,
                 "native_qsa_results": comparison["state"] == "complete",
