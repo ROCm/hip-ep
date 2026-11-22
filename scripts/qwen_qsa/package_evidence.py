@@ -481,6 +481,8 @@ def main():
             for variant, row in quality.items()
         ],
     )
+    campaign_path = work / "memory-campaign.json"
+    memory_campaign = load(campaign_path) if campaign_path.exists() else {}
     memory_cases, memory_rows = [], []
     for context in [4096, 16384, 32768]:
         for batch in [1, 4, 8]:
@@ -498,7 +500,11 @@ def main():
                         "variant": variant,
                         "batch": batch,
                         "context": context,
-                        "status": "pending",
+                        "status": (
+                            "canceled_user"
+                            if memory_campaign.get("status") == "stopped_user"
+                            else "pending"
+                        ),
                     }
                 )
                 if case_path.exists():
@@ -522,6 +528,7 @@ def main():
         {
             "schema_version": 1,
             "cases": memory_cases,
+            "campaign": memory_campaign,
             "status_counts": {
                 state: sum(case["status"] == state for case in memory_cases)
                 for state in sorted({case["status"] for case in memory_cases})

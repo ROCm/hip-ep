@@ -10,10 +10,10 @@ protocols, validation receipts and explicit missing results. The branch is local
 neither these results nor the code have been pushed or published by this audit.
 
 **Audit status:** the merged candidate passes 736 compiler tests, eight CPU unit
-tests and the dedicated kernel/operator/full-model controls. Memory coverage is
-currently four completed cells out of eighteen; fourteen remain pending. Use
-only completed, matched cells for paper results. At this audit snapshot, the
-remaining probes are paused at a case boundary and have no completed peaks.
+tests and the dedicated kernel/operator/full-model controls. The selected memory
+comparison is batch1/4K, with both variants complete. The user canceled the
+remaining memory campaign. Four completed cells are retained in total; the
+interrupted batch8/4K default probe and all unrun cells are marked canceled.
 
 Start with [AUDIT.md](AUDIT.md) for review findings and
 [PR_DESCRIPTION.md](PR_DESCRIPTION.md) for the proposed pull request. The stacked
@@ -91,7 +91,7 @@ The earlier OLMo BFCL result is a128-item pilot, not the full BFCLv4 score.
 
 Use [memory.json](memory.json) or [memory.csv](memory.csv) for every combination
 of batches1/4/8, prefixes4096/16384/32768 and both variants. Every cell has an
-explicit status. Pending and bounded/failed attempts must not be treated as
+explicit status. Canceled and bounded/failed attempts must not be treated as
 successful peaks. The human-readable
 [memory report](../../experiments/qwen-qsa-memory.md) shows the captured matrix.
 For a peak-comparison table, filter CSV rows to `phase=overall` and
@@ -99,10 +99,11 @@ For a peak-comparison table, filter CSV rows to `phase=overall` and
 batch/context. Other phases and incomplete lower bounds remain available for
 diagnostics. The JSON `status_counts` field summarizes coverage at export time.
 
-The live campaign writes `_local/qwen-qsa/memory-only-v1/matrix.json` after each
-probe. Read that file for results collected after this packet's timestamp. The
-packet remains an audit snapshot; regenerate it when the queue completes or is
-stopped at a probe boundary to include later results and a new immutable archive.
+The campaign is stopped, with no remaining memory probes scheduled. Its scope
+decision is retained in `memory.json` under `campaign` and in the raw archive.
+Use batch1/4K for the selected comparison. The already completed batch4/4K pair
+remains available as supplementary evidence; the interrupted batch8/4K probe
+contains only observed lower bounds, not a completed configuration peak.
 
 These are memory-only probes: one fresh model/session process per variant, one
 prefill, eight fixed decode calls, capacity=prefix+64, no performance repetitions.

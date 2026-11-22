@@ -110,7 +110,7 @@ full-vs-cached relative RMS is 0.082021%, first-pruning continuity is 0.106473%,
 and replay is exact. Original has 20 forwards/20 EP dispatches; Changed has
 39/39. Cache pointers remain stable. These establish correctness of the merge;
 the archived performance/accuracy campaign belongs to the measured binaries.
-Publication must retain all pending memory cells and the absence of matched
+Publication must retain canceled memory-cell statuses and the absence of matched
 QSA natural-long quality, Qwen BFCL and Qwen SWE-bench.
 
 The expanded measured-binary controls also pass: all four selectors preserve

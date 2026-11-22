@@ -637,90 +637,200 @@
       "variant": "Original",
       "batch": 8,
       "context": 4096,
-      "status": "pending"
+      "status": "canceled_user",
+      "returncode": null,
+      "elapsed_seconds": 1677.9431583881378,
+      "error": "User reduced memory scope to one configuration; worker stopped during prefill. Elapsed time is the last observed sample, not a completion time.",
+      "memory": {
+        "overall": {
+          "samples": 12420,
+          "peak_rss_bytes": 3171995648,
+          "peak_private_commit_bytes": 34992336896,
+          "worker_lifetime_peak_rss_bytes": 3167612928,
+          "worker_lifetime_peak_private_commit_bytes": 34995154944,
+          "peak_gpu_dedicated_bytes": 37853794304,
+          "peak_gpu_shared_bytes": 311721984,
+          "peak_gpu_committed_bytes": 37950734336,
+          "minimum_system_ram_available_bytes": 40143671296
+        },
+        "model_load": {
+          "samples": 139,
+          "peak_rss_bytes": 3171995648,
+          "peak_private_commit_bytes": 21673881600,
+          "worker_lifetime_peak_rss_bytes": 3167612928,
+          "worker_lifetime_peak_private_commit_bytes": 21672960000,
+          "peak_gpu_dedicated_bytes": 21037486080,
+          "peak_gpu_shared_bytes": 311721984,
+          "peak_gpu_committed_bytes": 21047218176,
+          "minimum_system_ram_available_bytes": 40143671296
+        },
+        "prefill": {
+          "samples": 12261,
+          "peak_rss_bytes": 829140992,
+          "peak_private_commit_bytes": 34992336896,
+          "worker_lifetime_peak_rss_bytes": 3167612928,
+          "worker_lifetime_peak_private_commit_bytes": 34995154944,
+          "peak_gpu_dedicated_bytes": 37853794304,
+          "peak_gpu_shared_bytes": 96940032,
+          "peak_gpu_committed_bytes": 37950734336,
+          "minimum_system_ram_available_bytes": 40854810624
+        },
+        "process_start": {
+          "samples": 1,
+          "peak_rss_bytes": 6316032,
+          "peak_private_commit_bytes": 1302528,
+          "worker_lifetime_peak_rss_bytes": 4251648,
+          "worker_lifetime_peak_private_commit_bytes": 921600,
+          "peak_gpu_dedicated_bytes": null,
+          "peak_gpu_shared_bytes": null,
+          "peak_gpu_committed_bytes": null,
+          "minimum_system_ram_available_bytes": 43542884352
+        },
+        "ready": {
+          "samples": 3,
+          "peak_rss_bytes": 629657600,
+          "peak_private_commit_bytes": 19158695936,
+          "worker_lifetime_peak_rss_bytes": 3167612928,
+          "worker_lifetime_peak_private_commit_bytes": 21672960000,
+          "peak_gpu_dedicated_bytes": 21536452608,
+          "peak_gpu_shared_bytes": 9732096,
+          "peak_gpu_committed_bytes": 21546184704,
+          "minimum_system_ram_available_bytes": 43024777216
+        },
+        "runtime_import": {
+          "samples": 16,
+          "peak_rss_bytes": 452972544,
+          "peak_private_commit_bytes": 1139015680,
+          "worker_lifetime_peak_rss_bytes": 448589824,
+          "worker_lifetime_peak_private_commit_bytes": 1138163712,
+          "peak_gpu_dedicated_bytes": null,
+          "peak_gpu_shared_bytes": null,
+          "peak_gpu_committed_bytes": null,
+          "minimum_system_ram_available_bytes": 43082141696
+        }
+      },
+      "worker_result": null,
+      "protocol_sha256": "3d5d6c2cc8238196fce768060a8673d3248f66fb5f530031040997f49c5ded33",
+      "samples_sha256": "a702bc7a15a7936bbe0cbbda20a7734674b4eff52503bd790bf234505823178e",
+      "source_sha256": {
+        "memory_probe_worker.py": "3f1543954d6593bd3314644cdac3ac2ead2281f70b1b7d0f9aa5d014d7160d51",
+        "run_memory_matrix.py": "46b43ffc21c39029c2125f80a25ed6c43e77200444ce6e3616e358a753ebfdd0",
+        "sample_memory.py": "3909c071411dc468ecbb452680df6a38890791118f0e44b776d58ff69bada5ea",
+        "native_inference.py": "41dddd8e41a55591dd9271210ac7e9ba85dbdd7b37b16c52642ab5c3ea87081f"
+      }
     },
     {
       "variant": "Changed",
       "batch": 8,
       "context": 4096,
-      "status": "pending"
+      "status": "canceled_user"
     },
     {
       "variant": "Original",
       "batch": 1,
       "context": 16384,
-      "status": "pending"
+      "status": "canceled_user"
     },
     {
       "variant": "Changed",
       "batch": 1,
       "context": 16384,
-      "status": "pending"
+      "status": "canceled_user"
     },
     {
       "variant": "Original",
       "batch": 4,
       "context": 16384,
-      "status": "pending"
+      "status": "canceled_user"
     },
     {
       "variant": "Changed",
       "batch": 4,
       "context": 16384,
-      "status": "pending"
+      "status": "canceled_user"
     },
     {
       "variant": "Original",
       "batch": 8,
       "context": 16384,
-      "status": "pending"
+      "status": "canceled_user"
     },
     {
       "variant": "Changed",
       "batch": 8,
       "context": 16384,
-      "status": "pending"
+      "status": "canceled_user"
     },
     {
       "variant": "Original",
       "batch": 1,
       "context": 32768,
-      "status": "pending"
+      "status": "canceled_user"
     },
     {
       "variant": "Changed",
       "batch": 1,
       "context": 32768,
-      "status": "pending"
+      "status": "canceled_user"
     },
     {
       "variant": "Original",
       "batch": 4,
       "context": 32768,
-      "status": "pending"
+      "status": "canceled_user"
     },
     {
       "variant": "Changed",
       "batch": 4,
       "context": 32768,
-      "status": "pending"
+      "status": "canceled_user"
     },
     {
       "variant": "Original",
       "batch": 8,
       "context": 32768,
-      "status": "pending"
+      "status": "canceled_user"
     },
     {
       "variant": "Changed",
       "batch": 8,
       "context": 32768,
-      "status": "pending"
+      "status": "canceled_user"
     }
   ],
+  "campaign": {
+    "status": "stopped_user",
+    "recorded_utc": "2026-11-22T04:42:55.448872+00:00",
+    "reason": "User reduced memory measurements to one configuration and canceled the remaining campaign.",
+    "selected_comparison": {
+      "batch": 1,
+      "context": 4096,
+      "variants": [
+        "Original",
+        "Changed"
+      ]
+    },
+    "supplementary_completed_comparison": {
+      "batch": 4,
+      "context": 4096
+    },
+    "interrupted": {
+      "batch": 8,
+      "context": 4096,
+      "variant": "Original",
+      "status": "canceled_user"
+    },
+    "remaining_work": "None; pause after local evidence packaging.",
+    "stopped_process_ids": [
+      5720,
+      40164,
+      50220
+    ],
+    "gpu_lock_released": true
+  },
   "status_counts": {
-    "complete": 4,
-    "pending": 14
+    "canceled_user": 14,
+    "complete": 4
   },
   "mi355x_reference": "raw/mi355x/memory-summary.json",
   "cross_platform_memory_warning": "MI355X job303626 uses one warmup and two64-decode requests, PyTorch allocation/reservation peaks and20ms device-HBM sampling. Native uses one cold8-decode request and100ms WDDM commitment. Do not compare these as the same memory metric.",
