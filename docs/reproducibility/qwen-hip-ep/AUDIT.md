@@ -17,6 +17,7 @@ the measured install remains unchanged. No remote update is part of this work.
 | Seven merge conflicts with local main: GQA host-length/bias ABI, registration, BF16/FP8 import, EP compute tracing/error translation | Preserve upstream arguments/ROCTx/FP8 and QSA child cache/BF16/exception handling; adapt the child dense call to the new argument order |
 | Main's Hipsr parent-edge code assumes a newer LLVM region-successor API than the cached toolchain | Add a parent-edge constructor adapter for both APIs; use the existing successor-region accessor for exit detection |
 | OLMo malformed int32 sequence length could overflow in`length+1-S` before validation | Compute in int64, validate, then narrow; require an error flag before dispatch |
+| Mock QSA stubs returned an unsupported-operation code that lowering could discard | Set the mock's host-backed error flag as well; validate the complete mock source with MSVC syntax checking |
 | OLMo runtime and included kernel ABI headers were missing explicit custom-command dependencies | Track the runtime header and configure-time kernel ABI digest so header edits rebuild their consumers on Windows |
 | Qwen design introduction still described a queued port | Update to integrated status and link measured evidence |
 | Inspector recorded unused`gqa_back.cpp` | Correct future inspector to compiled`gqa.cpp`; retain historical JSON and erratum |

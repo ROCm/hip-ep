@@ -140,6 +140,10 @@ measured stack. The final PR merge build is separate; **do not attribute old
 timings to its new binary hashes**. Historical receipts are preserved, including
 the reconnaissance inspector's unused`gqa_back.cpp` filename; the inspector now
 records the compiled`real/gqa.cpp` implementation.
+Historical generic stage receipts also recorded the OLMo selector hash for Qwen
+commands. Those fields are retained as an erratum, not used as Qwen identity;
+use `identity.json`, the Qwen export receipts and per-execution protocols instead.
+The stage runner now selects the correct payload and snapshots Qwen scripts.
 
 ## Joining with MI355X
 

@@ -10,19 +10,23 @@
 #include <cstring>
 
 extern "C" int wrap_qwen_qsa_group_query_attention(
-    RuntimeState *, int, void *, void *, void *, void *, void *, void *, void *,
+    RuntimeState *state, int, void *, void *, void *, void *, void *, void *,
     void *, void *, void *, void *, void *, void *, void *, void *, void *,
-    void *, void *, int64_t, int64_t, int64_t, int64_t) {
+    void *, void *, void *, int64_t, int64_t, int64_t, int64_t) {
   fprintf(stderr, "QwenQsaGroupQueryAttention requires the real HIP runtime\n");
+  if (void *flag = hipdnn_ep_state_get_error_flag_device_ptr(state))
+    *static_cast<int *>(flag) = -1;
   return -1;
 }
 
-int wrap_qsa_group_query_attention(RuntimeState *, int, void *, void *, void *,
+int wrap_qsa_group_query_attention(RuntimeState *state, int, void *, void *,
                                    void *, void *, void *, void *, void *,
                                    void *, void *, void *, void *, void *,
-                                   void *, void *, void *, int64_t, int64_t,
-                                   int64_t) {
+                                   void *, void *, void *, void *, int64_t,
+                                   int64_t, int64_t) {
   fprintf(stderr, "QsaGroupQueryAttention requires the real HIP runtime\n");
+  if (void *flag = hipdnn_ep_state_get_error_flag_device_ptr(state))
+    *static_cast<int *>(flag) = -1;
   return -1;
 }
 
