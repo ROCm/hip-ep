@@ -24,8 +24,8 @@
 namespace hip {
 namespace fusion_transform {
 
-void populateScaledMaskedSoftmaxFusionPattern(
-    mlir::RewritePatternSet &patterns, mlir::PatternBenefit benefit);
+void populateScaledMaskedSoftmaxFusionPattern(mlir::RewritePatternSet &patterns,
+                                              mlir::PatternBenefit benefit);
 
 } // namespace fusion_transform
 } // namespace hip

@@ -2815,8 +2815,8 @@ LogicalResult ScaledMaskedSoftmaxOp::verify() {
   if (!elemType.isF16() && !elemType.isF32())
     return emitOpError("input must be f16 or f32");
   if (!outputType.hasRank() || outputType.getElementType() != elemType ||
-      failed(verifyCompatibleShape(inputType.getShape(),
-                                   outputType.getShape())))
+      failed(
+          verifyCompatibleShape(inputType.getShape(), outputType.getShape())))
     return emitOpError("output must match the input shape and element type");
   for (Value ids : {getRowIds(), getColIds()}) {
     auto idsType = dyn_cast<ShapedType>(ids.getType());

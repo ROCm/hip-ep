@@ -104,14 +104,12 @@ extern "C" int hip_miopen_softmax(void *state, const void *input, void *output,
 // scores after the scale and the row_ids[r] == col_ids[c] mask (masked
 // elements take `fill`). The ids stay on the device; the kernel compares them
 // per element, so nothing here reads device memory.
-extern "C" int hip_scaled_masked_softmax(void *state, const void *input,
-                                         const void *row_ids,
-                                         const void *col_ids, void *output,
-                                         int64_t outer, int64_t rows,
-                                         int64_t cols, int64_t row_ids_len,
-                                         int64_t col_ids_len,
-                                         int64_t elem_size_bytes, float scale,
-                                         float fill) {
+extern "C" int
+hip_scaled_masked_softmax(void *state, const void *input, const void *row_ids,
+                          const void *col_ids, void *output, int64_t outer,
+                          int64_t rows, int64_t cols, int64_t row_ids_len,
+                          int64_t col_ids_len, int64_t elem_size_bytes,
+                          float scale, float fill) {
   RuntimeState *st = static_cast<RuntimeState *>(state);
   OP_PROFILE(
       "scaled_masked_softmax",
