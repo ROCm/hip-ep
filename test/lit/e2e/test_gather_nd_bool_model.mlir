@@ -1,9 +1,10 @@
 // RUN: hip-mlir-opt %s --hipdnn-pipeline | FileCheck %s
 
-// Test bool GatherND E2E full pipeline.
-// A bool (i1) tensor is stored as one byte per element and reaches the
-// runtime as HIPDNN_EP_DATATYPE_UINT8 (7). bf16 LLMs gather rows of a bool
-// attention mask this way (here a 512 x 512 mask with batch_dims = 1).
+// Test bool (i1) GatherND E2E full pipeline.
+// A bool element is one byte holding 0 or 1, so hip.gather_nd on i1 data
+// lowers to wrap_gather_nd with HIPDNN_EP_DATATYPE_UINT8 (7) and runs the
+// byte-copy kernel. bf16 LLMs gather rows of a bool attention mask (here a
+// 512 x 512 mask with batch_dims = 1).
 //
 // Verifies the complete hipdnn-pipeline:
 // 1. convert-onnx-to-hip: onnx.GatherND -> hip.gather_nd
