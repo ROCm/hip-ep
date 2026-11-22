@@ -9,6 +9,12 @@ gfx1151, Windows**. It includes the frozen selector identity, raw measurements,
 protocols, validation receipts and explicit missing results. The branch is local;
 neither these results nor the code have been pushed or published by this audit.
 
+**Audit status:** the merged candidate passes 736 compiler tests, eight CPU unit
+tests and the dedicated kernel/operator/full-model controls. Memory coverage is
+currently four completed cells out of eighteen; fourteen remain pending. Use
+only completed, matched cells for paper results. At this audit snapshot, the
+remaining probes are paused at a case boundary and have no completed peaks.
+
 Start with [AUDIT.md](AUDIT.md) for review findings and
 [PR_DESCRIPTION.md](PR_DESCRIPTION.md) for the proposed pull request. The stacked
 change also contains the preceding OLMo implementation and its experiments;
@@ -53,6 +59,9 @@ Kernel controls at longer positions do not establish full-model memory capacity.
 
 ## Completed Qwen results
 
+These are preserved measured-binary results. The merged candidate has separate
+correctness checks and has not inherited a performance or accuracy campaign.
+
 Throughput is tokens/second; positive change means faster. Two warmup pairs and
 six balanced measured pairs per context used64 common teacher-forced decode
 inputs, synchronized phase timers, final-position head and unchanged session/cache
@@ -89,6 +98,11 @@ For a peak-comparison table, filter CSV rows to `phase=overall` and
 `status=complete`, and compare a pair only when both variants completed the same
 batch/context. Other phases and incomplete lower bounds remain available for
 diagnostics. The JSON `status_counts` field summarizes coverage at export time.
+
+The live campaign writes `_local/qwen-qsa/memory-only-v1/matrix.json` after each
+probe. Read that file for results collected after this packet's timestamp. The
+packet remains an audit snapshot; regenerate it when the queue completes or is
+stopped at a probe boundary to include later results and a new immutable archive.
 
 These are memory-only probes: one fresh model/session process per variant, one
 prefill, eight fixed decode calls, capacity=prefix+64, no performance repetitions.
@@ -127,10 +141,12 @@ is retained in the raw record and is not a throughput measurement or a failure.
 
 The raw ZIP includes memory traces/events/source snapshots, failure records,
 ORT dispatch profiles, build/validation receipts, OLMo evidence, MI355X source
-records and a measured-source reconstruction. `MANIFEST.json` inside it hashes
-every member. Model weights, compiled caches and large model exports are excluded;
-their hashes and local origins are recorded. The ZIP stays local and is outside
-Git; copy it together with this packet when handing data to another machine.
+records and measured/candidate source overlays. It also preserves the frozen BF16
+selector, locked test/GSM8K inputs, tokenizer/config metadata, the small measured
+ONNX graphs and the export topology template. `MANIFEST.json` inside it hashes
+every member. Large backbone weights and compiled caches are excluded; their
+hashes and local origins are recorded. The ZIP stays local and is outside Git;
+copy it together with this packet when handing data to another machine.
 The packet's `.gitattributes` preserves original evidence bytes across Git
 checkouts, including Windows protocol line endings used by recorded hashes.
 

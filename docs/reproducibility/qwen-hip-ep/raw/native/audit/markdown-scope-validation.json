@@ -1,0 +1,19 @@
+{
+  "status": "passed",
+  "candidate_source_commit": "b70ce2829ad58d145ee0cb6be942d0c3a51df573",
+  "markdown_paths": [
+    "README.md",
+    "docs/design/olmo-qsa-native-gqa.md",
+    "docs/design/olmo-qsa-port.md",
+    "docs/design/qwen-qsa-native-gqa.md",
+    "docs/experiments/olmo-qsa-agent-accuracy.md",
+    "docs/experiments/olmo-qsa-native-gqa-results.md",
+    "docs/experiments/olmo-qsa-results.md",
+    "docs/experiments/qwen-qsa-memory.md",
+    "docs/experiments/qwen-qsa-native-gqa-results.md",
+    "docs/reproducibility/qwen-hip-ep/AUDIT.md",
+    "docs/reproducibility/qwen-hip-ep/PR_DESCRIPTION.md",
+    "docs/reproducibility/qwen-hip-ep/README.md"
+  ],
+  "scope": "PR Markdown diff contains only QSA documentation and hip-ep README; unrelated dirty root files were not staged"
+}

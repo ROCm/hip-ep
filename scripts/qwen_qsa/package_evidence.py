@@ -171,6 +171,10 @@ def verify(folder):
                 assert (
                     len(raw) == expected["bytes"] and digest(raw) == expected["sha256"]
                 ), name
+            assert (
+                digest(archive.read("packet-tools/package_evidence.py"))
+                == load(folder / "provenance.json")["packet_script_sha256"]
+            )
         print("Local raw archive and every member checksum verified.")
     else:
         print(
@@ -215,6 +219,7 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     args.archive.parent.mkdir(parents=True, exist_ok=True)
     raw_files = {}
+    raw_files["packet-tools/package_evidence.py"] = Path(__file__).read_bytes()
 
     def capture(path, name, portable=False, compressed=False):
         if not path.exists():
@@ -232,6 +237,21 @@ def main():
         capture(path, "native/receipts/" + path.name, portable=True)
     for path in work.glob("*.log"):
         capture(path, "native/logs/" + path.name)
+    for name in ["build-command.json", "build.cmd"]:
+        capture(
+            work / "pr-candidate/native-gqa" / name,
+            "native/candidate-build/" + name,
+            portable=name.endswith(".json"),
+        )
+    for variant in ["Original", "Changed"]:
+        capture(
+            work / "native-gqa/models" / variant / "default.onnx",
+            "native/measured-graphs/" + variant + "/default.onnx",
+        )
+    capture(
+        root.parent / "hip-ep-turboquant/models/qwen-original/text.onnx",
+        "native/template/text.onnx",
+    )
     for path in [
         source / "HIP_EP_QWEN_HANDOFF.md",
         source / "QWEN_METHODS.md",
@@ -265,6 +285,8 @@ def main():
                 ".cmd",
             ]:
                 continue
+            if "model-cache" in path.parts:
+                continue
             name = "native/" + path.relative_to(work).as_posix()
             name = name.replace(
                 "native/native-gqa/paired-performance/", "native/performance/"
@@ -276,7 +298,10 @@ def main():
                 or path.name.endswith("validation.json")
             )
             if "/audit/" in name and path.suffix == ".json":
-                portable = True
+                portable = (
+                    "ort-profiles" not in path.parts
+                    and path.stat().st_size < 450 * 1024
+                )
             if "/quality/" in name and path.suffix not in [".json", ".jsonl"]:
                 portable = False
             capture(
@@ -340,6 +365,23 @@ def main():
     source_raw = source / "runs/303195/performance.jsonl"
     assert digest(source_raw.read_bytes()) == mi355["raw_sha256"]
     handoff = load(work / "handoff-verification.json")
+    selector_manifest = load(source / "docs/reproducibility/qwen-hip-ep-manifest.json")
+    payload = source / selector_manifest["portable_export"]["path"]
+    assert digest(payload.read_bytes()) == handoff["selector_sha256"]
+    capture(payload, "source-inputs/" + selector_manifest["portable_export"]["path"])
+    for name in ["test.json", "gsm8k.json"]:
+        path = source / "data/qwen-selector-v1" / name
+        assert digest(path.read_bytes()) == handoff["data_sha256"][name]
+        capture(path, "source-inputs/data/qwen-selector-v1/" + name)
+    snapshot = Path(handoff["backbone"]["snapshot"])
+    for name in [
+        "config.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+        "generation_config.json",
+    ]:
+        capture(snapshot / name, "native/model-metadata/" + name)
     identity = {
         key: handoff[key]
         for key in [
@@ -499,7 +541,7 @@ def main():
     native_paths = [
         name
         for name in git(root, "diff", "--name-only", "1c9a454...7a71b72").splitlines()
-        if name.startswith(("lib/", "include/", "morphizen/"))
+        if name.startswith(("lib/", "include/", "morphizen/", "backend-mlir-compiler/"))
     ]
     source_map = {}
     for name in native_paths:
@@ -519,6 +561,31 @@ def main():
             raw_files["historical-experiment-source/" + name] = subprocess.check_output(
                 ["git", "-C", str(root), "show", script_commit + ":" + name]
             )
+    candidate_source = None
+    candidate_checkout = work / "pr-worktree"
+    if (candidate_checkout / ".git").exists():
+        candidate_source = {
+            "commit": git(candidate_checkout, "rev-parse", "HEAD"),
+            "base_commit": git(candidate_checkout, "rev-parse", "origin/main"),
+            "files": {},
+        }
+        for name in git(
+            candidate_checkout, "diff", "--name-only", "origin/main...HEAD"
+        ).splitlines():
+            path = candidate_checkout / name
+            if path.is_file() and name.startswith(
+                (
+                    "lib/",
+                    "include/",
+                    "morphizen/",
+                    "scripts/",
+                    "backend-mlir-compiler/",
+                    "test/",
+                )
+            ):
+                data = path.read_bytes()
+                raw_files["candidate-source/" + name] = data
+                candidate_source["files"][name] = digest(data)
     put(
         out / "provenance.json",
         {
@@ -532,6 +599,7 @@ def main():
             "mi355x_memory_source_commit": mi355_memory["source_commit"],
             "packet_script_sha256": digest(Path(__file__).read_bytes()),
             "historical_experiment_script_commit": script_commit,
+            "candidate_source_overlay": candidate_source,
             "source_line_endings": "Git source reconstructions use repository-normalized bytes; measured Windows source hashes can include CRLF. Original raw protocols and per-probe source snapshots preserve actual execution bytes.",
             "measured_native_source_reconstruction": source_map,
             "build_provenance_limit": "Measured build began at dirty HEAD2a43690; native implementation subsequently committed in7a71b72. Binary hashes and execution receipts are authoritative; final PR merge build is separate and has no inherited performance claims.",
@@ -566,7 +634,7 @@ def main():
             "bytes": args.archive.stat().st_size,
             "sha256": digest(args.archive.read_bytes()),
             "members": len(raw_files),
-            "scope": "Local immutable raw evidence; no model weights, no cache binaries. Every member has SHA256 in MANIFEST.json. Not uploaded.",
+            "scope": "Local immutable raw evidence with frozen selector, locked evaluation inputs and graph metadata; excludes backbone weights and cache binaries. Every member has SHA256 in MANIFEST.json. Not uploaded.",
         },
     )
     names = [
