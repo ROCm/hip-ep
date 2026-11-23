@@ -23,6 +23,11 @@ def Hipsr_Dialect : Dialect {
   // Lets the dialect parse/print `!hipsr.context`.
   let useDefaultTypePrinterParser = 1;
 
+  // Op formats print inherent attributes through attr-dict. LLVM marks this
+  // opt-out deprecated, so those formats need explicit bindings or prop-dict
+  // before it is removed.
+  let useStrictPropertiesInAssemblyFormat = 0;
+
   let extraClassDeclaration = [{
     /// Returns a cached memory-mapped view of the file at `path`, loading it on
     /// first use. The buffer lives for the dialect's lifetime (no eviction --
