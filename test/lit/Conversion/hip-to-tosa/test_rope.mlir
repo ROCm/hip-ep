@@ -18,9 +18,9 @@ func.func @rope_bsh_position_ids(
     %sin: tensor<16x2xf16>, %init: tensor<2x3x8xf16>)
     -> tensor<2x3x8xf16> attributes {rock.kernel} {
   %result = hip.rope(%ctx)
-      ins(%input, %position_ids, %cos, %sin :
-          tensor<2x3x8xf16>, tensor<2x3xi64>, tensor<16x2xf16>,
-          tensor<16x2xf16>)
+      ins(%input, %cos, %sin :
+          tensor<2x3x8xf16>, tensor<16x2xf16>, tensor<16x2xf16>)
+      position_ids(%position_ids : tensor<2x3xi64>)
       outs(%init : tensor<2x3x8xf16>)
       {interleaved = 0 : i64, num_heads = 2 : i64,
        rotary_embedding_dim = 4 : i64}
