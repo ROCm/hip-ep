@@ -48,6 +48,7 @@ LEAVES := cast/Xany_Yany_bf16 \
 	qmoe/Xfp16_Wu4_Yfp16 \
 	group_norm/Xfp16_Wfp16_Yfp16 group_norm/Xbf16_Wbf16_Ybf16 \
 	group_norm/Xfp32_Wfp32_Yfp32 group_norm/Xfp64_Wfp64_Yfp64 \
+	elementwise_bcast/Xany_Wany_Yany \
 	qmoe_ragged_mm/Xfp16_Wu4_Yfp16
 
 ARCH  := $(patsubst --offload-arch=%,%,$(OFFLOAD))

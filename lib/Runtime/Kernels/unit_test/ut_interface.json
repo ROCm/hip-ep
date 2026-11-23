@@ -817,6 +817,44 @@
       ],
       "devices": ["gfx1151"],
       "gaps": []
+    },
+    {
+      "leaf": "elementwise_bcast/Xany_Wany_Yany",
+      "package_executable": "hipdnn-kernel-ut-elementwise-bcast-xany-wany-yany.exe",
+      "source": "test_elementwise_bcast.cpp",
+      "capabilities": {
+        "coverage": true,
+        "timing": "shared",
+        "mode": "label_only",
+        "rank": false
+      },
+      "suite": {
+        "args": ["--coverage"],
+        "coverage_default": "3"
+      },
+      "custom": {
+        "selected_by": "any of --n --c --h --w --lhs --rhs --op --dtype --align; the four extents are then required",
+        "make_args": "ARGS",
+        "params": [
+          {"name": "n", "flag": "--n", "type": "int", "required": true, "description": "Output batch extent, >= 1."},
+          {"name": "c", "flag": "--c", "type": "int", "required": true, "description": "Output channel extent, >= 1."},
+          {"name": "h", "flag": "--h", "type": "int", "required": true, "description": "Output height, >= 1."},
+          {"name": "w", "flag": "--w", "type": "int", "required": true, "description": "Output width, >= 1."},
+          {"name": "lhs", "flag": "--lhs", "type": "enum", "choices": ["full", "n", "c", "h", "w", "scalar"], "exe_default": "full", "description": "Shape of the left operand: full is the output's shape; n, c, h or w keeps only that axis (a per-axis bias or scale); scalar has one element."},
+          {"name": "rhs", "flag": "--rhs", "type": "enum", "choices": ["full", "n", "c", "h", "w", "scalar"], "exe_default": "c", "description": "Shape of the right operand, as for lhs."},
+          {"name": "op", "flag": "--op", "type": "enum", "choices": ["add", "mul", "min", "max"], "exe_default": "add", "description": "Operation."},
+          {"name": "dtype", "flag": "--dtype", "type": "enum", "choices": ["fp32", "fp16", "bf16"], "exe_default": "fp16", "description": "Element type of both operands and the output."},
+          {"name": "align", "flag": "--align", "type": "enum", "choices": ["aligned", "dense", "output"], "exe_default": "aligned", "description": "aligned: every buffer 16-byte aligned; dense: the operand with the output's shape one element off a 16-byte boundary; output: the output one element off."}
+        ],
+        "constraints": ["n, c, h and w are >= 1", "an axis that neither operand keeps has the extent 1", "the output has fewer than 2^32 elements", "unknown, duplicate, incomplete or unsupported arguments exit 2"],
+        "checks": ["n >= 1 and c >= 1 and h >= 1 and w >= 1"]
+      },
+      "examples": [
+        {"name": "suite_tier1", "coverage": 1},
+        {"name": "per_channel_56x56_fp16", "values": {"n": 8, "c": 256, "h": 56, "w": 56, "lhs": "full", "rhs": "c", "op": "add", "dtype": "fp16"}}
+      ],
+      "devices": ["gfx1151"],
+      "gaps": []
     }
   ]
 }

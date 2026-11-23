@@ -1096,6 +1096,59 @@ __global__ void ew_bcast4d_fast_kernel(const T *__restrict__ lhs,
   *reinterpret_cast<uint4 *>(output + t) = o.raw;
 }
 
+// =====================================================================
+// Per-channel fast path
+//
+// One operand has the output's shape and the other varies along a single axis
+// -- a per-channel bias or scale on [N, C, P]. The fast path above handles it
+// only when every extent below the channel axis is a power of two; a feature
+// map of 56x56, 28x28 or 7x7 pixels is not, and falls to the general kernel's
+// four divisions per element on one-element accesses.
+//
+// Here each thread again owns V contiguous output elements, and since the
+// pixel extent is a multiple of V they all belong to one channel. The channel
+// is (t / inner) % extent, both divisions by launch constants, so the host
+// turns each into a multiply-high and a shift: one channel lookup per 16
+// bytes moved, as cheap as the flat kernel.
+// =====================================================================
+
+// Division by a launch constant: n / d == umulhi(n, mul) >> shr for every
+// n < 2^31 (mul == 0: d is a power of two and the division is a shift).
+struct EwFastDiv {
+  uint32_t mul;
+  uint32_t shr;
+};
+
+__device__ __forceinline__ uint32_t ew_fast_div(uint32_t n, EwFastDiv d) {
+  return d.mul ? (__umulhi(n, d.mul) >> d.shr) : (n >> d.shr);
+}
+
+template <typename T, int V>
+__global__ void ew_channel_bcast_kernel(const T *__restrict__ dense,
+                                        const T *__restrict__ channel,
+                                        T *__restrict__ output,
+                                        uint32_t num_vectors, int op,
+                                        EwFastDiv inner, EwFastDiv extent_div,
+                                        uint32_t extent, int channel_is_lhs) {
+  const uint32_t v = blockIdx.x * blockDim.x + threadIdx.x;
+  if (v >= num_vectors)
+    return;
+  const uint32_t t = v * (uint32_t)V;
+  const uint32_t q = ew_fast_div(t, inner);
+  const uint32_t c = q - ew_fast_div(q, extent_div) * extent;
+  const float cv = ew_to_float(channel[c]);
+
+  EwVec<T, V> a, o;
+  a.raw = *reinterpret_cast<const uint4 *>(dense + t);
+#pragma unroll
+  for (int i = 0; i < V; ++i) {
+    const float x = ew_to_float(a.e[i]);
+    o.e[i] = ew_cast<T>(channel_is_lhs ? ew_apply(op, cv, x)
+                                       : ew_apply(op, x, cv));
+  }
+  *reinterpret_cast<uint4 *>(output + t) = o.raw;
+}
+
 } // namespace
 
 namespace {
@@ -1200,6 +1253,71 @@ bool ew_bcast4d_fast_meta(const uint32_t out[4], const Bcast4DMeta &meta,
          ew_build_terms(out, meta.rstride, vec, fast.rhs);
 }
 
+// Host side of EwFastDiv (the conv kernel's construction): exact for every
+// numerator below 2^31.
+EwFastDiv ew_make_fast_div(uint32_t d) {
+  if (d < 1)
+    d = 1;
+  uint32_t l = 0;
+  while ((1ull << l) < d)
+    ++l; // ceil(log2(d))
+  if ((1ull << l) == d)
+    return EwFastDiv{0u, l};
+  const uint32_t p = 31 + l;
+  return EwFastDiv{static_cast<uint32_t>(((1ull << p) + d - 1) / d), p - 32};
+}
+
+// Whether one operand has the output's shape and the other a single non-unit
+// axis equal to the output's (and every other axis 1), with whole vectors per
+// channel and 16-byte aligned dense buffers. On success `channel_is_lhs`,
+// `axis` and `inner` (the output elements per channel step) describe it.
+bool ew_channel_bcast_meta(const int64_t *lhs_shape4, const int64_t *rhs_shape4,
+                           const int64_t *out_shape4, int vec, const void *lhs,
+                           const void *rhs, const void *output, int64_t n,
+                           int &channel_is_lhs, int &axis, uint32_t &inner) {
+  // The fast divisions are exact below 2^31.
+  if (n >= (int64_t{1} << 31) || n % vec != 0)
+    return false;
+  auto same = [&](const int64_t *s) {
+    for (int d = 0; d < 4; ++d)
+      if (s[d] != out_shape4[d])
+        return false;
+    return true;
+  };
+  auto single_axis = [&](const int64_t *s, int &ax) {
+    ax = -1;
+    for (int d = 0; d < 4; ++d) {
+      if (s[d] == 1)
+        continue;
+      if (s[d] != out_shape4[d] || ax >= 0)
+        return false;
+      ax = d;
+    }
+    return ax >= 0;
+  };
+  const void *dense = nullptr;
+  if (same(lhs_shape4) && single_axis(rhs_shape4, axis)) {
+    channel_is_lhs = 0;
+    dense = lhs;
+  } else if (same(rhs_shape4) && single_axis(lhs_shape4, axis)) {
+    channel_is_lhs = 1;
+    dense = rhs;
+  } else {
+    return false;
+  }
+  int64_t in = 1;
+  for (int d = axis + 1; d < 4; ++d)
+    in *= out_shape4[d];
+  if (in % vec != 0)
+    return false;
+  const uintptr_t bytes = 16;
+  if ((reinterpret_cast<uintptr_t>(dense) % bytes) != 0 ||
+      (reinterpret_cast<uintptr_t>(output) % bytes) != 0)
+    return false;
+  inner = static_cast<uint32_t>(in);
+  return true;
+}
+
 } // namespace
 
 // Returns 0 on success, -2 when the output volume exceeds the 32-bit index
@@ -1302,6 +1420,49 @@ extern "C" int hip_elementwise_binary_bcast(void *stream, const void *lhs,
               "failed: %s\n",
               hipGetErrorString(ferr));
     return static_cast<int>(ferr);
+  }
+
+  int channel_is_lhs = 0, channel_axis = 0;
+  uint32_t channel_inner = 1;
+  if (vec && ew_channel_bcast_meta(lhs_shape4, rhs_shape4, out_shape4, vec,
+                                   lhs, rhs, output, out_vol, channel_is_lhs,
+                                   channel_axis, channel_inner)) {
+    const uint32_t num_vectors = n / (uint32_t)vec;
+    const int cgrid =
+        static_cast<int>((num_vectors + kBlockSize - 1) / kBlockSize);
+    const uint32_t extent = static_cast<uint32_t>(out_shape4[channel_axis]);
+    const EwFastDiv inner_div = ew_make_fast_div(channel_inner);
+    const EwFastDiv extent_div = ew_make_fast_div(extent);
+    const void *dense = channel_is_lhs ? rhs : lhs;
+    const void *channel = channel_is_lhs ? lhs : rhs;
+    if (hip_dtype == HIP_DTYPE_FLOAT16)
+      hipLaunchKernelGGL((ew_channel_bcast_kernel<__half, 8>), dim3(cgrid),
+                         dim3(kBlockSize), 0, hip_stream,
+                         static_cast<const __half *>(dense),
+                         static_cast<const __half *>(channel),
+                         static_cast<__half *>(output), num_vectors, op,
+                         inner_div, extent_div, extent, channel_is_lhs);
+    else if (hip_dtype == HIP_DTYPE_BFLOAT16)
+      hipLaunchKernelGGL((ew_channel_bcast_kernel<__hip_bfloat16, 8>),
+                         dim3(cgrid), dim3(kBlockSize), 0, hip_stream,
+                         static_cast<const __hip_bfloat16 *>(dense),
+                         static_cast<const __hip_bfloat16 *>(channel),
+                         static_cast<__hip_bfloat16 *>(output), num_vectors,
+                         op, inner_div, extent_div, extent, channel_is_lhs);
+    else
+      hipLaunchKernelGGL((ew_channel_bcast_kernel<float, 4>), dim3(cgrid),
+                         dim3(kBlockSize), 0, hip_stream,
+                         static_cast<const float *>(dense),
+                         static_cast<const float *>(channel),
+                         static_cast<float *>(output), num_vectors, op,
+                         inner_div, extent_div, extent, channel_is_lhs);
+    hipError_t cerr = hipGetLastError();
+    if (cerr != hipSuccess)
+      fprintf(stderr,
+              "[custom_kernels] hip_elementwise_binary_bcast channel path "
+              "launch failed: %s\n",
+              hipGetErrorString(cerr));
+    return static_cast<int>(cerr);
   }
 
   switch (hip_dtype) {
