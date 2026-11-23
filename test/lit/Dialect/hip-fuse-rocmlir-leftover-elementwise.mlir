@@ -599,7 +599,8 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x10x10xf16>,
 // -----
 
 // hip_transpose handles at most eight dimensions, so a rank-nine result
-// transpose stays in the kernel.
+// transpose stays in the kernel. The compute ops are rank two, so the rank-four
+// limit of the HIP fallback does not keep the transpose by itself.
 
 // CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
 // CHECK-SAME: -> tensor<1x1x1x1x1x1x1x32x32xf16>
@@ -610,19 +611,49 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x10x10xf16>,
 // CHECK-NOT: hip.transpose
 // CHECK: return
 
-func.func @main_graph(%ctx: !hip.context, %x: tensor<1x1x1x1x1x1x1x32x32xf16>,
-                      %y: tensor<1x1x1x1x1x1x1x32x32xf16>)
+func.func @main_graph(%ctx: !hip.context, %x: tensor<32x32xf16>,
+                      %y: tensor<32x32xf16>)
     -> tensor<1x1x1x1x1x1x1x32x32xf16> {
-  %ae = tensor.empty() : tensor<1x1x1x1x1x1x1x32x32xf16>
-  %a = hip.add(%ctx) ins(%x, %y : tensor<1x1x1x1x1x1x1x32x32xf16>, tensor<1x1x1x1x1x1x1x32x32xf16>)
-      outs(%ae : tensor<1x1x1x1x1x1x1x32x32xf16>) -> tensor<1x1x1x1x1x1x1x32x32xf16>
-  %me = tensor.empty() : tensor<1x1x1x1x1x1x1x32x32xf16>
-  %m = hip.mul(%ctx) ins(%a, %a : tensor<1x1x1x1x1x1x1x32x32xf16>, tensor<1x1x1x1x1x1x1x32x32xf16>)
-      outs(%me : tensor<1x1x1x1x1x1x1x32x32xf16>) -> tensor<1x1x1x1x1x1x1x32x32xf16>
+  %ae = tensor.empty() : tensor<32x32xf16>
+  %a = hip.add(%ctx) ins(%x, %y : tensor<32x32xf16>, tensor<32x32xf16>)
+      outs(%ae : tensor<32x32xf16>) -> tensor<32x32xf16>
+  %me = tensor.empty() : tensor<32x32xf16>
+  %m = hip.mul(%ctx) ins(%a, %a : tensor<32x32xf16>, tensor<32x32xf16>)
+      outs(%me : tensor<32x32xf16>) -> tensor<32x32xf16>
+  %e = tensor.expand_shape %m [[0, 1, 2, 3, 4, 5, 6, 7], [8]]
+      output_shape [1, 1, 1, 1, 1, 1, 1, 32, 32]
+      : tensor<32x32xf16> into tensor<1x1x1x1x1x1x1x32x32xf16>
   %te = tensor.empty() : tensor<1x1x1x1x1x1x1x32x32xf16>
-  %t = hip.transpose(%ctx) ins(%m : tensor<1x1x1x1x1x1x1x32x32xf16>)
+  %t = hip.transpose(%ctx) ins(%e : tensor<1x1x1x1x1x1x1x32x32xf16>)
       outs(%te : tensor<1x1x1x1x1x1x1x32x32xf16>) {perm = [0, 1, 2, 3, 4, 5, 6, 8, 7]} : tensor<1x1x1x1x1x1x1x32x32xf16>
   return %t : tensor<1x1x1x1x1x1x1x32x32xf16>
+}
+
+// -----
+
+// hip.silu has no HIP runtime entry, so a peel that would leave it alone as a
+// HIP op keeps the transpose in the kernel instead.
+
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
+// CHECK-SAME: -> tensor<1x32x4x32xf16>
+// CHECK: hip.silu
+// CHECK: hip.transpose
+// CHECK: return
+// CHECK-LABEL: func.func @main_graph
+// CHECK: hip.rocmlir
+// CHECK-NOT: hip.transpose
+// CHECK-NOT: hip.silu
+// CHECK: return
+
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x4x32x32xf16>)
+    -> tensor<1x32x4x32xf16> {
+  %se = tensor.empty() : tensor<1x4x32x32xf16>
+  %s = hip.silu(%ctx) ins(%x : tensor<1x4x32x32xf16>)
+      outs(%se : tensor<1x4x32x32xf16>) -> tensor<1x4x32x32xf16>
+  %te = tensor.empty() : tensor<1x32x4x32xf16>
+  %t = hip.transpose(%ctx) ins(%s : tensor<1x4x32x32xf16>)
+      outs(%te : tensor<1x32x4x32xf16>) {perm = [0, 3, 1, 2]} : tensor<1x32x4x32xf16>
+  return %t : tensor<1x32x4x32xf16>
 }
 
 // -----

@@ -320,12 +320,15 @@ The peeled transposes are:
 - an input transpose, with the static reshapes before it, of a module input;
   the kernel reads the transposed tensor.
 
-The HIP transpose copies whole bytes, so a transpose of a sub-byte element (an
-`i1` mask) stays in the kernel. The remaining ops form the module again, and the
-conditions above apply once more. A module keeps its transposes when no compute
-op is left, or when the remaining ops would launch only once and run as HIP ops
-on a type other than f16 and f32, which the HIP elementwise kernels may not
-cover.
+The HIP transpose copies whole bytes and handles at most eight dimensions, so a
+transpose of a sub-byte element (an `i1` mask) or of rank above eight stays in
+the kernel. The remaining ops form the module again, and the conditions above
+apply once more. The remainder can end up as HIP ops: when it saves no launch,
+or when a peeled transpose leaves a result that only moves an argument. The
+HIP elementwise kernels cover f16 and f32 up to rank four, and `hip.silu` has
+no HIP runtime entry. A module therefore keeps its transposes when no compute
+op is left, or when any remaining compute op has an operand or result outside
+f16 and f32 up to rank four, or is a `hip.silu`.
 
 A module input that comes from a chain of static, unit-stride slices and static
 reshapes, with at least one slice, would otherwise run as a strided copy before
