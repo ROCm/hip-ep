@@ -732,10 +732,41 @@ private:
   }
 
   void commitInline(ConstantPlan &plan) {
+    auto intType = dyn_cast<IntegerType>(plan.type.getElementType());
+    if (intType && !intType.isSignless()) {
+      commitInlineGlobal(plan);
+      return;
+    }
     OpBuilder builder(plan.op);
     auto constant =
         arith::ConstantOp::create(builder, plan.op.getLoc(), plan.value);
     plan.op.getResult().replaceAllUsesWith(constant.getResult());
+    plan.op.erase();
+  }
+
+  // arith.constant rejects signed and unsigned integer element types, so these
+  // are emitted as what arith.constant bufferizes to: a read-only global.
+  void commitInlineGlobal(ConstantPlan &plan) {
+    MemRefType memrefType =
+        MemRefType::get(plan.type.getShape(), plan.type.getElementType());
+    // Built before the global exists, so insert() uniques against the rest of
+    // the module rather than against the new global itself.
+    if (!symbolTable)
+      symbolTable.emplace(module);
+    OpBuilder moduleBuilder(module.getContext());
+    auto global = memref::GlobalOp::create(
+        moduleBuilder, plan.op.getLoc(), "hip_inline_constant",
+        moduleBuilder.getStringAttr("private"), memrefType, plan.value,
+        /*constant=*/true, moduleBuilder.getI64IntegerAttr(kConstantAlignment));
+    symbolTable->insert(global, module.getBody()->begin());
+
+    OpBuilder builder(plan.op);
+    auto getGlobal = memref::GetGlobalOp::create(
+        builder, plan.op.getLoc(), memrefType, global.getSymName());
+    auto tensor = bufferization::ToTensorOp::create(
+        builder, plan.op.getLoc(), plan.type, getGlobal,
+        /*restrict=*/builder.getUnitAttr(), /*writable=*/nullptr);
+    plan.op.getResult().replaceAllUsesWith(tensor.getResult());
     plan.op.erase();
   }
 
@@ -784,6 +815,7 @@ private:
   int64_t totalBlobSize = 0;
   int64_t partialBlobSize = 0;
   std::vector<ConstantPlan> plans;
+  std::optional<SymbolTable> symbolTable;
 };
 
 struct ExternalizeConstantsPass

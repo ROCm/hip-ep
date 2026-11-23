@@ -15,8 +15,7 @@ The dynamic-sequence-length runtime path SEGVs on gfx1151 if a compiler pass rou
 Concrete consequences:
 
 - **Build, install, and run tests on the gfx1151 remote.** Local-machine test passes are not authoritative.
-- **The CLAUDE.md "gfx1151 dynseqlen host-scalar SEGV" gotcha** explains the actual fix (separate runtime-owned host scratch buffer); this doc only explains why the architecture matters.
-- **Vulkan baseline numbers and the 8B Llama DYN-vs-FIX baseline in CLAUDE.md were collected on gfx1151.** Running them on a different arch will give different numbers and is not comparable.
+- **The "Host reads of GPU values" invariant in CLAUDE.md** describes the actual fix (`hip-materialize-host-scalars` redirects tiny host-written shape buffers to host-mapped scratch); this doc only explains why the architecture matters.
 
 ## SSH to a Windows host with default OpenSSH
 
@@ -66,7 +65,7 @@ This split is the single biggest workflow speed-up. SSH per command is slow; sha
 
 ## Driving GPU benchmarks from a remote shell
 
-Rules from CLAUDE.md ("Python Performance Tests") apply, plus two SSH-specific gotchas:
+Rules from CLAUDE.md ("Benchmarking") apply, plus two SSH-specific gotchas:
 
 1. **Don't background the SSH command** if it owns a `model_benchmark.exe` child. Killing the SSH session leaves the child running on the GPU, blocking the next benchmark. Always foreground with a long timeout.
 2. **Always quote the whole remote command**, including the env var assignments. `ssh host "set X=Y && tool ..."` runs `set` and `tool` in one cmd; without the outer quotes only the local shell sees the assignment.
@@ -103,24 +102,14 @@ Sub-tools that the env adds to PATH (lit, ninja, sccache, gh, ctest) work withou
 
 ## Git on Windows: cygwin contamination warning
 
-If `install/build/CMakeCache.txt` contains `GIT_EXECUTABLE:FILEPATH=C:/cygwin/bin/git.exe` (left over from a prior cygwin-era configure), `FetchContent` dependency clones will fail at fetch time:
+If the build tree's `CMakeCache.txt` (`../build/<repo>/` by default, see `build.py --build_dir`) contains `GIT_EXECUTABLE:FILEPATH=C:/cygwin/bin/git.exe` (left over from a prior cygwin-era configure), `FetchContent` dependency clones will fail at fetch time:
 
 ```
 git-remote-https.exe: error while loading shared libraries: cygcrypto-3.dll: cannot open shared object file
 ```
 
-This is hard to debug because the rest of the build looks normal. Fix: wipe `install/build/` and reconfigure so cmake re-detects the system `git.exe` (typically `C:\Program Files\Git\cmd\git.exe`).
+This is hard to debug because the rest of the build looks normal. Fix: wipe the build tree and reconfigure so cmake re-detects the system `git.exe` (typically `C:\Program Files\Git\cmd\git.exe`).
 
-## OGA build (`build.py --build-oga`) — defensive measures in place
+## OGA build
 
-`build_oga()` in `build.py` defends against several non-obvious snags. Each defense has an inline comment explaining the snag it protects against. Quick reference:
-
-| Defense | Snag it protects against |
-|---|---|
-| `PYBIND11_FINDPYTHON=ON` cmake flag | OGA vendors pybind11 v2.13.6 which uses removed `distutils.sysconfig` on Python 3.12+ |
-| `Python_EXECUTABLE=<sys.executable>` (forward-slash path, no `3` suffix) | Stops cmake from auto-picking the wrong-ABI Python from PATH |
-| Tolerate `PyPackageBuild` non-zero exit, then run `python -m pip wheel` manually | OGA's wheel-packaging ninja step emits a malformed `cmd /C "... && -m pip wheel ."` (missing `python` before `-m`). The artifacts you actually need are built BEFORE this failure |
-| Copy `onnxruntime.dll` + `onnxruntime_providers_shared.dll` into `install/dist/bin/` after install | Otherwise Windows DLL search picks `C:\Windows\System32\onnxruntime.dll` (often v1.17 = API 17), and OGA built against ORT 1.24 (API 24) crashes immediately |
-| `setuptools`, `wheel`, `packaging`, `requests` in `environment.yml` | OGA's dep fetcher imports `requests`; without it, build aborts before reaching cmake |
-
-If `--build-oga` fails on a fresh env, walk through `build_oga()`'s comments in order — the failure is almost always one of these.
+`build.py` does not build onnxruntime-genai (OGA). Build it separately as described in [quick_start.md, "3. Build OGA (onnxruntime-genai)"](quick_start.md#3-build-oga-onnxruntime-genai).

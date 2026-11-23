@@ -7,11 +7,11 @@
 # site/index.md, and used by site/docs/benchmarks/index.md to resolve the
 # display name for every benchmark row.
 #
-# Scope, decided for v1: generative language models only -- eight text and
-# eight vision-language, sixteen in total. The release validation suite also
-# covers Whisper and single-graph vision models; those are deliberately not
-# published on this site, so do not re-add a tier here without also adding the
-# page sections and the benchmark rows to match.
+# Scope, decided for v1: generative language models only -- thirteen text and
+# twelve vision-language, twenty-five in total for v0.5.3. The release
+# validation suite also covers Whisper and single-graph vision models; those
+# are deliberately not published on this site, so do not re-add a tier here
+# without also adding the page sections and the benchmark rows to match.
 #
 # This is the curated model set used by the site's release snapshot. Add a
 # model only when its public identity, family page, and benchmark row can be
@@ -149,6 +149,66 @@ llm:
       The largest dense model in the matrix. Included because a 70B dense
       decoder is where memory planning stops being an implementation detail.
 
+  - id: laguna-xs-2.1
+    family: laguna
+    name: Laguna XS 2.1
+    hf: poolside/Laguna-XS-2.1
+    params: 33B total, 3B active
+    arch: Sparse mixture of experts
+    task: Text generation, coding
+    precision: int4 RTN, group 128
+    quant: int4 RTN
+    status: New this release
+
+  - id: laguna-s-2.1
+    family: laguna
+    name: Laguna S 2.1
+    hf: poolside/Laguna-S-2.1
+    params: 118B total, 8B active
+    arch: Sparse mixture of experts
+    task: Text generation, coding
+    precision: int4 RTN, group 128
+    quant: int4 RTN
+    status: New this release
+    tagline: >-
+      Added in v0.5.3. A 118B MoE coding model that still fits the same Strix
+      Halo validation path as the rest of the matrix.
+
+  - id: nemotron-3.5-lightning-30b-a3b
+    family: nemotron
+    name: Nemotron 3.5 Lightning 30B-A3B
+    hf: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
+    params: 30B total, 3B active
+    arch: Hybrid Mamba-2 + sparse mixture of experts
+    task: Text generation, agentic
+    precision: int4 RTN
+    quant: int4 RTN
+    status: New this release
+
+  - id: nemotron-3-super-120b-a12b
+    family: nemotron
+    name: Nemotron 3 Super 120B-A12B
+    hf: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+    params: 120B total, 12B active
+    arch: Hybrid LatentMoE (Mamba-2 + MoE + attention)
+    task: Text generation, agentic
+    precision: int4 RTN, quantized MoE
+    quant: int4 QMoE
+    status: New this release
+
+  - id: step-3.5-flash
+    family: step
+    name: Step 3.5 Flash
+    hf: stepfun-ai/Step-3.5-Flash
+    params: 196B total, 11B active
+    arch: Sparse mixture of experts
+    task: Text generation, reasoning
+    precision: int4 RTN, group 128
+    quant: int4 RTN
+    status: New this release
+    tagline: >-
+      Added in v0.5.3. A 196B MoE that activates about 11B parameters per token.
+
 vlm:
   - id: qwen3.5-9b
     family: qwen
@@ -171,6 +231,17 @@ vlm:
     precision: int4 text decoder, group 32; fp16 vision encoder
     quant: int4
     status: Validated
+
+  - id: qwen3.5-122b-a10b
+    family: qwen
+    name: Qwen3.5 122B-A10B
+    hf: Qwen/Qwen3.5-122B-A10B
+    params: 122B total, 10B active
+    arch: Sparse mixture of experts + vision encoder
+    task: Image understanding, text generation
+    precision: int4 text decoder, group 32; fp16 vision encoder
+    quant: int4
+    status: New this release
 
   - id: qwen3.6-27b
     family: qwen
@@ -216,6 +287,20 @@ vlm:
       Added in v0.4.0. A model that did not exist when the compiler was
       designed, brought up without a new operator library.
 
+  - id: qwen3.8-flash-next
+    family: qwen
+    name: Qwen3.8 Flash-Next
+    hf: Qwen/Qwen3.8-Flash-Next
+    params: 125B total, 6B active
+    arch: Hybrid Gated DeltaNet + QSA + sparse MoE + n-gram embedding
+    task: Image understanding, text generation
+    precision: int4 RTN text decoder, group 32; fp8 n-gram embedding; fp16 vision encoder
+    quant: int4 RTN
+    status: New this release
+    tagline: >-
+      Added in v0.5.3. Hybrid attention, a sparse MoE, and an off-accelerator
+      n-gram embedding table in one compiled graph.
+
   - id: gemma-3-4b-it
     family: gemma
     name: Gemma 3 4B IT
@@ -230,6 +315,17 @@ vlm:
       The small end of the matrix. Vision plus text at 4B, fast enough that the
       model stops being the bottleneck.
 
+  - id: gemma-4-e4b-it
+    family: gemma
+    name: Gemma 4 E4B IT
+    hf: google/gemma-4-E4B-it
+    params: 4.5B effective, 8B with embeddings
+    arch: Dense transformer + vision encoder
+    task: Image understanding, text generation
+    precision: uint4 AWQ text decoder; fp16 vision encoder
+    quant: uint4 AWQ
+    status: New this release
+
   - id: gemma-4-12b-it
     family: gemma
     name: Gemma 4 12B IT
@@ -240,9 +336,8 @@ vlm:
     precision: int4 k-quant, block 32
     quant: int4 k-quant
     # Demoted at the v0.5.1 bump for the same reason as Qwen3.8 27B above: new
-    # in v0.4.0, and v0.5.1 added no models at all -- the matrix is the same
-    # sixteen. If a release ever does add one, this is the field to set, and
-    # last release's winners come back down here in the same change.
+    # in v0.4.0, and later releases keep the Validated label unless the model
+    # is actually new in that snapshot.
     status: Validated
 
   - id: gemma-4-26b-a4b-it
@@ -255,3 +350,17 @@ vlm:
     precision: int4 weights, quantized MoE
     quant: int4 QMoE
     status: Validated
+
+  - id: mistral-small-4-119b-2603
+    family: mistral
+    name: Mistral Small 4 119B
+    hf: mistralai/Mistral-Small-4-119B-2603
+    params: 119B total, 6.5B active
+    arch: Sparse mixture of experts + vision encoder
+    task: Image understanding, text generation
+    precision: int4 RTN text decoder, group 128; fp16 vision encoder
+    quant: int4 RTN
+    status: New this release
+    tagline: >-
+      Added in v0.5.3. A multimodal MoE that puts Mistral into the same size
+      class as the matrix's other 100B+ entries.

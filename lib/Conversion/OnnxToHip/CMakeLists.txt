@@ -67,6 +67,10 @@ add_library(OnnxToHip STATIC
   GatedDeltaNetConversion.cpp
   DynamicSparseAttentionConversion.cpp
   SparseAttentionIndexerConversion.cpp
+  IndexerRotaryFold.cpp
+  IndexerCountsFold.cpp
+  DsaPrologueFold.cpp
+  QsaPairFold.cpp
   RangeConversion.cpp
   FastGeluFusion.cpp
   ErfGeluFusion.cpp
@@ -110,6 +114,7 @@ add_library(OnnxToHip STATIC
   AbsConversion.cpp
   SizeConversion.cpp
   NonZeroConversion.cpp
+  NonMaxSuppressionConversion.cpp
   ConcatConversion.cpp
   PoolConversion.cpp
   ResizeConversion.cpp
@@ -117,6 +122,7 @@ add_library(OnnxToHip STATIC
   QLinearMatMulConversion.cpp
   UpsampleConversion.cpp
   GridSampleConversion.cpp
+  RoiAlignConversion.cpp
   GlobalPoolConversion.cpp
   FlattenConversion.cpp
   DepthToSpaceConversion.cpp
@@ -126,6 +132,7 @@ add_library(OnnxToHip STATIC
   ConvIntegerConversion.cpp
   MatMulIntegerConversion.cpp
   LoopOutline.cpp
+  ScanOutline.cpp
   IfOutline.cpp
   ReluConversion.cpp
   ImageScalerConversion.cpp
@@ -151,6 +158,7 @@ target_link_libraries(OnnxToHip PUBLIC
   MLIRPass
   MLIRFuncDialect
   MLIRArithDialect
+  MLIRSCFDialect
   MLIRTensorDialect
   MLIRLinalgDialect
   MLIRMemRefDialect

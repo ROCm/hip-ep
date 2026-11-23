@@ -14,17 +14,19 @@
 // Follows opaque RuntimeState pattern - extracts stream internally
 int wrap_hipMemcpyAsync(RuntimeState *state, void *dst_ptr, const void *src_ptr,
                         size_t size_bytes) {
-  OP_PROFILE_CPU("memcpy_d2d", state);
+  OP_PROFILE_CPU_SHAPE(
+      "memcpy_d2d", [&] { return std::to_string(size_bytes) + "B"; }, state);
   if (!state) {
     fprintf(stderr, "wrap_hipMemcpyAsync: null state\n");
     return -1;
   }
+  // An empty tensor is a null pointer with a zero byte count. Copying
+  // nothing is a no-op; a null pointer with a positive size is not.
+  if (size_bytes == 0)
+    return 0;
   if (!dst_ptr || !src_ptr) {
     fprintf(stderr, "wrap_hipMemcpyAsync: null pointer\n");
     return -1;
-  }
-  if (size_bytes == 0) {
-    return 0; // No-op for zero-sized copy
   }
 
   // Extract stream from opaque RuntimeState using accessor function
@@ -223,7 +225,9 @@ void hipdnn_ep_readback_scalar(RuntimeState *state, void *host_dst,
   // CPU-only profiling: like readback_i32 this issues a hipStreamSynchronize;
   // its cost is host-side GPU-drain time. Profiling it attributes the
   // Range/Expand/Pad/Loop shape-readback sync overhead.
-  OP_PROFILE_CPU("readback_scalar", state);
+  OP_PROFILE_CPU_SHAPE(
+      "readback_scalar", [&] { return std::to_string(num_bytes) + "B"; },
+      state);
   if (!state || !host_dst || !device_scalar || num_bytes <= 0) {
     fprintf(stderr, "hipdnn_ep_readback_scalar: invalid argument\n");
     return;
@@ -251,7 +255,8 @@ void hipdnn_ep_readback_scalar(RuntimeState *state, void *host_dst,
 
 int wrap_copy_d2h(RuntimeState *state, void *dst_ptr, const void *src_ptr,
                   int64_t size_bytes) {
-  OP_PROFILE_CPU("copy_d2h", state);
+  OP_PROFILE_CPU_SHAPE(
+      "copy_d2h", [&] { return std::to_string(size_bytes) + "B"; }, state);
   if (!state || !dst_ptr || !src_ptr || size_bytes < 0) {
     fprintf(stderr, "wrap_copy_d2h: invalid argument\n");
     return -1;

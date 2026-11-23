@@ -15,6 +15,7 @@
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Interfaces/InferTypeOpInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "mlir/Interfaces/ViewLikeInterface.h"
 
 #include "llvm/ADT/StringRef.h"
 
@@ -31,6 +32,19 @@
 // Generated header for the `OpStateOpInterface` C++ interface class. Must
 // precede HipOps.h.inc — stateful ops reference `OpStateOpInterface::Trait`.
 #include "hip/Dialect/IR/HipOpStateInterface.h.inc"
+
+// Generated header for `ElementMoveOpInterface`. Must precede HipOps.h.inc.
+#include "hip/Dialect/IR/HipElementMoveInterface.h.inc"
+
+namespace mlir {
+class DialectRegistry;
+namespace hip {
+/// Attaches ElementMoveOpInterface to the tensor view ops
+/// (insert_slice, extract_slice, expand_shape, collapse_shape). Defined in
+/// lib/Dialect/IR/HipElementMoveInterface.cpp.
+void registerElementMoveExternalModels(DialectRegistry &registry);
+} // namespace hip
+} // namespace mlir
 
 namespace mlir {
 namespace hip {

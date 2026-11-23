@@ -40,4 +40,24 @@ module {
     // CHECK: llvm.call @wrap_top_k({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, !llvm.ptr, i64, i64) -> i32
     return
   }
+
+  func.func @topk_static_1d_bf16(
+      %ctx: !hip.context,
+      %x: memref<16xbf16, 1>,
+      %k: memref<i64, 1>,
+      %values: memref<4xbf16, 1>,
+      %indices: memref<4xi64, 1>) {
+    // CHECK-LABEL: llvm.func @topk_static_1d_bf16
+
+    hip.top_k(%ctx)
+        ins(%x, %k : memref<16xbf16, 1>, memref<i64, 1>)
+        outs(%values, %indices : memref<4xbf16, 1>, memref<4xi64, 1>)
+        {axis = 0 : i64, largest = true, sorted = true}
+
+    // HIPDNN_EP_DATATYPE_BFLOAT16 = 2. The runtime rejects dtypes the kernel
+    // does not implement.
+    // CHECK: [[DT:%[0-9]+]] = llvm.mlir.constant(2 : i64) : i64
+    // CHECK-NEXT: llvm.call @wrap_top_k({{.*}}, [[DT]]) :
+    return
+  }
 }
