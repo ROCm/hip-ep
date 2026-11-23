@@ -115,12 +115,13 @@ int wrap_layer_normalization(RuntimeState *state, void *input, void *scale,
 
 // Residual add fused with LayerNormalization over the last axis:
 //   sum = input + skip [+ bias];  y = LN(sum) * gamma [+ beta]
-// `input_skip_bias_sum` receives the sum when non-null.
+// `input_skip_bias_sum` receives the sum when non-null. A skip with fewer
+// elements than input holds the trailing rows and repeats over the input.
 int wrap_skip_layer_norm(RuntimeState *state, void *input, void *skip,
                          void *gamma, void *beta, void *bias, void *output,
                          void *input_skip_bias_sum, int64_t input_num_elements,
-                         int64_t gamma_num_elements, int64_t element_size_bytes,
-                         float epsilon) {
+                         int64_t skip_num_elements, int64_t gamma_num_elements,
+                         int64_t element_size_bytes, float epsilon) {
   OP_PROFILE(
       "skip_layernorm",
       [&] {
@@ -160,15 +161,40 @@ int wrap_skip_layer_norm(RuntimeState *state, void *input, void *skip,
     return -1;
   }
 
-  int64_t outer = input_num_elements / gamma_num_elements;
-  RUNTIME_DEBUG_LOG("[REAL] wrap_skip_layer_norm: outer=%lld, norm_size=%lld, "
-                    "elem_size=%lld, eps=%e, beta=%s, bias=%s, sum=%s\n",
-                    (long long)outer, (long long)gamma_num_elements,
-                    (long long)element_size_bytes, (double)epsilon,
-                    beta ? "yes" : "null", bias ? "yes" : "null",
-                    input_skip_bias_sum ? "yes" : "null");
+  if (input_num_elements == 0)
+    return 0;
+  if (skip_num_elements <= 0 || skip_num_elements % gamma_num_elements != 0 ||
+      input_num_elements % skip_num_elements != 0) {
+    fprintf(stderr,
+            "[REAL] wrap_skip_layer_norm: skip_num(%lld) does not tile "
+            "input_num(%lld) in rows of %lld\n",
+            (long long)skip_num_elements, (long long)input_num_elements,
+            (long long)gamma_num_elements);
+    return -1;
+  }
 
-  return hip_skip_layer_norm(hipdnn_ep_state_get_stream(state), input, skip,
-                             gamma, beta, bias, output, input_skip_bias_sum,
-                             outer, gamma_num_elements, epsilon, hip_dtype);
+  int64_t outer = input_num_elements / gamma_num_elements;
+  int64_t skip_rows = skip_num_elements / gamma_num_elements;
+  RUNTIME_DEBUG_LOG(
+      "[REAL] wrap_skip_layer_norm: outer=%lld, skip_rows=%lld, "
+      "norm_size=%lld, elem_size=%lld, eps=%e, beta=%s, bias=%s, "
+      "sum=%s\n",
+      (long long)outer, (long long)skip_rows, (long long)gamma_num_elements,
+      (long long)element_size_bytes, (double)epsilon, beta ? "yes" : "null",
+      bias ? "yes" : "null", input_skip_bias_sum ? "yes" : "null");
+
+  void *stream = hipdnn_ep_state_get_stream(state);
+  int64_t block_bytes = skip_num_elements * element_size_bytes;
+  for (int64_t row = 0; row < outer; row += skip_rows) {
+    int64_t offset = (row / skip_rows) * block_bytes;
+    int rc = hip_skip_layer_norm(
+        stream, static_cast<char *>(input) + offset, skip, gamma, beta, bias,
+        static_cast<char *>(output) + offset,
+        input_skip_bias_sum ? static_cast<char *>(input_skip_bias_sum) + offset
+                            : nullptr,
+        skip_rows, gamma_num_elements, epsilon, hip_dtype);
+    if (rc != 0)
+      return rc;
+  }
+  return 0;
 }

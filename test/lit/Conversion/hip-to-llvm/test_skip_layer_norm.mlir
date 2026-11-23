@@ -2,7 +2,9 @@
 // Licensed under the MIT License.
 
 // hip.skip_layer_norm lowers to one llvm.call @wrap_skip_layer_norm; absent
-// beta / bias / sum operands become null pointers.
+// beta / bias / sum operands become null pointers. The skip's element count
+// is passed next to the input's, so the runtime can repeat a skip that holds
+// only the trailing rows.
 
 // RUN: hip-mlir-opt %s --convert-hip-to-llvm | FileCheck %s
 
@@ -24,7 +26,7 @@ module {
         outs(%output, %sum : memref<1x128x768xf16, 1>, memref<1x128x768xf16, 1>)
         {epsilon = 9.99999974E-6 : f32}
     // CHECK: llvm.mlir.constant(9.99999974E-6 : f32) : f32
-    // CHECK: llvm.call @wrap_skip_layer_norm({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32) -> i32
+    // CHECK: llvm.call @wrap_skip_layer_norm({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, f32) -> i32
     return
   }
 

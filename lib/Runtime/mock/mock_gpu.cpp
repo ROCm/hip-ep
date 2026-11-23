@@ -3237,8 +3237,8 @@ int wrap_layer_normalization(RuntimeState *state, void *input, void *scale,
 int wrap_skip_layer_norm(RuntimeState *state, void *input, void *skip,
                          void *gamma, void *beta, void *bias, void *output,
                          void *input_skip_bias_sum, int64_t input_num_elements,
-                         int64_t gamma_num_elements, int64_t element_size_bytes,
-                         float epsilon) {
+                         int64_t skip_num_elements, int64_t gamma_num_elements,
+                         int64_t element_size_bytes, float epsilon) {
   (void)input;
   (void)skip;
   (void)gamma;
@@ -3249,11 +3249,12 @@ int wrap_skip_layer_norm(RuntimeState *state, void *input, void *skip,
   }
 
   MOCK_PRINT("[MOCK] wrap_skip_layer_norm(input_num_elements=%lld, "
-             "gamma_num_elements=%lld, element_size_bytes=%lld, epsilon=%f, "
-             "beta=%s, bias=%s, sum=%s)\n",
-             (long long)input_num_elements, (long long)gamma_num_elements,
-             (long long)element_size_bytes, epsilon, beta ? "yes" : "null",
-             bias ? "yes" : "null", input_skip_bias_sum ? "yes" : "null");
+             "skip_num_elements=%lld, gamma_num_elements=%lld, "
+             "element_size_bytes=%lld, epsilon=%f, beta=%s, bias=%s, sum=%s)\n",
+             (long long)input_num_elements, (long long)skip_num_elements,
+             (long long)gamma_num_elements, (long long)element_size_bytes,
+             epsilon, beta ? "yes" : "null", bias ? "yes" : "null",
+             input_skip_bias_sum ? "yes" : "null");
 
   return 0;
 }

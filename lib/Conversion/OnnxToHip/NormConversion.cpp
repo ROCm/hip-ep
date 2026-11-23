@@ -21,7 +21,6 @@
 //                                                          layer_norm)
 //   - onnx.Custom(EmbedLayerNormalization)              -> gather + add +
 //   layer_norm
-//   - onnx.LayerNormalization(onnx.Add(a, b))           -> hip.skip_layer_norm
 //   - onnx.LayerNormalization (standard, opset 17+)     -> hip.layer_norm
 //   - onnx.InstanceNormalization                        -> hip.instance_norm
 //   - onnx.BatchNormalization (inference)               -> hip.batch_norm
@@ -732,7 +731,9 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
 
 /// True when hip.skip_layer_norm can take these operands: f16 or f32
 /// throughout, `skip` and the result typed like `input`, and gamma / beta /
-/// bias each a static vector of the (static) hidden size.
+/// bias each a static vector of the (static) hidden size. Equal dynamic types
+/// do not prove equal extents; the spec's other legal skip, [1, S, H] against
+/// [B, S, H], holds the trailing rows, and the runtime repeats it.
 static bool canUseSkipLayerNorm(mlir::Value input, mlir::Value skip,
                                 mlir::Value gamma, mlir::Value beta,
                                 mlir::Value bias, mlir::Type outputType) {

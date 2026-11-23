@@ -75,7 +75,7 @@ __device__ inline void ln_store_stat(void *p, int64_t i, bool half, float v) {
 }
 
 // Row element i: x[i], or round(x[i] + skip[i] [+ bias[i]]) for the residual
-// form.
+// form: fp32 adds in ORT's order, one rounding.
 template <typename T>
 __device__ inline float ln_elem(const T *x, const T *skip, const T *bias,
                                 int64_t i) {

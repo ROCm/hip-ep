@@ -365,7 +365,7 @@ struct LayerNormOpLowering : public ConvertOpToLLVMPattern<LayerNormOp> {
 //                           outs(%output, [%sum])
 //   -> wrap_skip_layer_norm(state, input, skip, gamma, beta_or_null,
 //        bias_or_null, output, sum_or_null, input_num_elements,
-//        gamma_num_elements, element_size_bytes, epsilon)
+//        skip_num_elements, gamma_num_elements, element_size_bytes, epsilon)
 struct SkipLayerNormOpLowering
     : public ConvertOpToLLVMPattern<SkipLayerNormOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -385,6 +385,7 @@ struct SkipLayerNormOpLowering
                        : LLVM::ZeroOp::create(rewriter, loc, ptrType);
 
     auto inputType = cast<MemRefType>(op.getInput().getType());
+    auto skipType = cast<MemRefType>(op.getSkip().getType());
     auto gammaType = cast<MemRefType>(op.getGamma().getType());
     unsigned elementSizeBytes = inputType.getElementTypeBitWidth() / 8;
 
@@ -398,6 +399,7 @@ struct SkipLayerNormOpLowering
         ptrType, // output
         ptrType, // input_skip_bias_sum (may be null)
         i64Type, // input_num_elements
+        i64Type, // skip_num_elements
         i64Type, // gamma_num_elements
         i64Type, // element_size_bytes
         f32Type  // epsilon
@@ -418,6 +420,7 @@ struct SkipLayerNormOpLowering
         extractContiguousMemRefPtr(outputs[0], rewriter, loc),
         sumPtr,
         computeNumElements(inputType, adaptor.getInput(), rewriter, loc),
+        computeNumElements(skipType, adaptor.getSkip(), rewriter, loc),
         computeNumElements(gammaType, adaptor.getGamma(), rewriter, loc),
         LLVM::ConstantOp::create(rewriter, loc, i64Type,
                                  rewriter.getI64IntegerAttr(elementSizeBytes)),

@@ -28,16 +28,19 @@
 //
 // A same-shape hip.add that produces the norm input becomes
 // hip.skip_layer_norm. Later users of that add, in the same block and after
-// the norm, read the sum the kernel writes. A broadcasting add is left alone.
+// the norm, read the sum the kernel writes. A broadcasting add, or one whose
+// dynamic extents are not proven equal, is left alone.
 //
 //===----------------------------------------------------------------------===//
 
 #include "layer_norm_fusion.hpp"
 
 #include "fusion_utils.hpp"
+#include "runtime_shape.hpp"
 
 #include "hip/Dialect/IR/HipDialect.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -45,6 +48,7 @@
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 
 #include "llvm/ADT/APFloat.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 
 #include <optional>
@@ -233,6 +237,38 @@ Value matchInvStd(Value v, llvm::SmallVectorImpl<Operation *> &chain,
   return matchReciprocalSqrt(compute, chain, seen);
 }
 
+/// Points the tensor.dim queries of a chain value at x. A chain value of x's
+/// rank has x's extents except on the reduced axis, which its type states as
+/// a static 1. A packed value of another rank keeps its queries, and so the
+/// ops that compute it.
+void retargetChainShapeQueries(mlir::PatternRewriter &rewriter, Value from,
+                               Value x) {
+  if (from.getType() == x.getType()) {
+    retargetShapeQueries(rewriter, from, x);
+    return;
+  }
+  auto fromType = mlir::dyn_cast<mlir::RankedTensorType>(from.getType());
+  auto xType = mlir::cast<mlir::RankedTensorType>(x.getType());
+  if (!fromType || fromType.getRank() != xType.getRank())
+    return;
+  mlir::OpBuilder::InsertionGuard guard(rewriter);
+  for (mlir::OpOperand &use : llvm::make_early_inc_range(from.getUses())) {
+    auto dim = mlir::dyn_cast<mlir::tensor::DimOp>(use.getOwner());
+    if (!dim)
+      continue;
+    std::optional<int64_t> index = dim.getConstantIndex();
+    if (!index || *index < 0 || *index >= fromType.getRank())
+      continue;
+    if (fromType.isDynamicDim(*index)) {
+      rewriter.modifyOpInPlace(dim, [&] { use.set(x); });
+    } else {
+      rewriter.setInsertionPoint(dim);
+      rewriter.replaceOpWithNewOp<mlir::arith::ConstantIndexOp>(
+          dim, fromType.getDimSize(*index));
+    }
+  }
+}
+
 bool operandIs(Value operand, Value visible, Value compute);
 
 /// The operand of a binary HIP op that is not the norm result. The norm side
@@ -275,9 +311,11 @@ mlir::LogicalResult fuseLayerNorm(Operation *root, Value rawD, Value rawA,
   keep(chain, seen, sub);
 
   Value x = definingCompute(sub.getLhs(), chain, seen);
+  // The LayerNorm runtime reads any 2-byte element as fp16, so bf16 stays
+  // unfused.
   auto xType = mlir::dyn_cast<mlir::RankedTensorType>(x.getType());
   if (!xType || xType.getRank() < 1 ||
-      !mlir::isa<mlir::FloatType>(xType.getElementType()) ||
+      !(xType.getElementType().isF16() || xType.getElementType().isF32()) ||
       xType.isDynamicDim(xType.getRank() - 1))
     return rewriter.notifyMatchFailure(root, "x type");
   int64_t rank = xType.getRank();
@@ -399,7 +437,9 @@ mlir::LogicalResult fuseLayerNorm(Operation *root, Value rawD, Value rawA,
   }
   if (!outInit)
     outInit = mlir::tensor::EmptyOp::create(
-        rewriter, last->getLoc(), xType.getShape(), xType.getElementType());
+        rewriter, last->getLoc(),
+        mlir::tensor::getMixedSizes(rewriter, last->getLoc(), x),
+        xType.getElementType());
 
   mlir::OperationState state(last->getLoc(), "hip.layer_norm");
   llvm::SmallVector<Value> operands = {ctx, x, gamma};
@@ -418,7 +458,7 @@ mlir::LogicalResult fuseLayerNorm(Operation *root, Value rawD, Value rawA,
 
   for (Operation *op : chain)
     if (op && op != last && op->getNumResults() == 1)
-      retargetShapeQueries(rewriter, op->getResult(0), x);
+      retargetChainShapeQueries(rewriter, op->getResult(0), x);
   for (Operation *&op : chain)
     if (op == last)
       op = nullptr;
@@ -550,6 +590,9 @@ struct ResidualLayerNormFusion
     Value rhs = definingCompute(add.getRhs(), pack, seen);
     if (lhs.getType() != resultType || rhs.getType() != resultType)
       return rewriter.notifyMatchFailure(ln, "Add broadcasts");
+    if (!sameRuntimeShape(lhs, rhs))
+      return rewriter.notifyMatchFailure(
+          ln, "dynamic dimensions are not known to match");
     if (!canUseSkip(lhs, rhs, ln.getScale(), ln.getBias(), resultType))
       return rewriter.notifyMatchFailure(ln, "unsupported types");
 
@@ -573,9 +616,10 @@ struct ResidualLayerNormFusion
           add.getOutput().getType() == resultType)
         sumInit = add.getOutput();
       else
-        sumInit = mlir::tensor::EmptyOp::create(rewriter, ln.getLoc(),
-                                                resultType.getShape(),
-                                                resultType.getElementType());
+        sumInit = mlir::tensor::EmptyOp::create(
+            rewriter, ln.getLoc(),
+            mlir::tensor::getMixedSizes(rewriter, ln.getLoc(), lhs),
+            resultType.getElementType());
     }
 
     llvm::SmallVector<Value> operands = {ln.getCtx(), lhs, rhs, ln.getScale()};
