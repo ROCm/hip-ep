@@ -241,6 +241,38 @@ class TestGather:
         )
         compare_outputs(actual, expected, atol=0)
 
+    @pytest.mark.parametrize(
+        "dtype,data_shape,axis,index",
+        [
+            # Scalar index into a size-2 innermost axis (a slice, not a gather).
+            (np.float32, [2, 3, 33, 35, 2], 4, np.array(1, dtype=np.int64)),
+            (np.float16, [2, 3, 33, 35, 2], -1, np.array(-2, dtype=np.int64)),
+            # Middle axis, int32 index.
+            (np.float32, [4, 6, 1024], 1, np.array(4, dtype=np.int32)),
+            # One-element 1-D index keeps the axis.
+            (np.float16, [5, 4096], 0, np.array([3], dtype=np.int64)),
+            # Results under the slice threshold stay hip.gather.
+            (np.float32, [2, 3, 17, 19, 2], 4, np.array(1, dtype=np.int64)),
+            (np.float32, [9], 0, np.array(-1, dtype=np.int64)),
+        ],
+    )
+    def test_gather_constant_index(self, model_runner, dtype, data_shape, axis, index):
+        """A constant single index lowers to a slice of the gathered axis."""
+        tp = helper.np_dtype_to_tensor_dtype(np.dtype(dtype))
+        rank = len(data_shape)
+        ax = axis % rank
+        out_shape = data_shape[:ax] + list(index.shape) + data_shape[ax + 1 :]
+        data = helper.make_tensor_value_info("data", tp, data_shape)
+        output = helper.make_tensor_value_info("output", tp, out_shape)
+        idx_init = numpy_helper.from_array(index, name="index")
+        node = helper.make_node("Gather", ["data", "index"], ["output"], axis=axis)
+        model = make_model_from_nodes([node], [data], [output], initializers=[idx_init])
+
+        rng = np.random.default_rng(5)
+        x = rng.uniform(-1, 1, data_shape).astype(dtype)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
     @pytest.mark.parametrize("seq_len", SEQ_LENS)
     def test_gather_embedding_gpt_oss_shape(self, model_runner, seq_len):
         """Embedding lookup: [201088, 2880] f16 gather by [1, S] i64.
