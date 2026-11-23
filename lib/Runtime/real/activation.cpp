@@ -63,15 +63,28 @@ extern "C" int hip_softmax_typed(RuntimeState *state, const void *input,
         return std::string(b);
       },
       st);
+  // The generated graph drops this return value, so a nonzero status also
+  // goes to the device error flag, which inference_compute reads after the
+  // stream sync. Otherwise a rejected call leaves the output unwritten and
+  // the inference reports success.
+  auto finish = [&](int status) {
+    if (status != 0)
+      hipdnn_ep_state_set_error_flag(state, status);
+    return status;
+  };
+
+  // An empty tensor has nothing to normalize; its buffers may be null.
+  if (rows == 0 || cols == 0)
+    return 0;
   if (!state || !input || !output) {
     fprintf(stderr, "[REAL] hip_softmax_typed: null argument\n");
-    return -1;
+    return finish(-1);
   }
-  if (rows <= 0 || cols <= 0 || rows > INT_MAX || cols > INT_MAX) {
+  if (rows < 0 || cols < 0 || rows > INT_MAX || cols > INT_MAX) {
     fprintf(stderr,
             "[REAL] hip_softmax_typed: invalid dims rows=%lld cols=%lld\n",
             (long long)rows, (long long)cols);
-    return -1;
+    return finish(-1);
   }
 
   void *stream = hipdnn_ep_state_get_stream(st);
@@ -89,16 +102,16 @@ extern "C" int hip_softmax_typed(RuntimeState *state, const void *input,
   const int c = static_cast<int>(cols);
   switch (data_type) {
   case HIPDNN_EP_DATATYPE_FLOAT:
-    return hip_softmax_row_2d_fp32(stream, input, output, r, c);
+    return finish(hip_softmax_row_2d_fp32(stream, input, output, r, c));
   case HIPDNN_EP_DATATYPE_HALF:
-    return hip_softmax_row_2d(stream, input, output, r, c);
+    return finish(hip_softmax_row_2d(stream, input, output, r, c));
   case HIPDNN_EP_DATATYPE_BFLOAT16:
-    return hip_softmax_row_2d_bf16(stream, input, output, r, c);
+    return finish(hip_softmax_row_2d_bf16(stream, input, output, r, c));
   default:
     fprintf(stderr,
             "[REAL] hip_softmax_typed: unsupported data_type=%s(%lld)\n",
             hipdnn_ep_datatype_name(data_type), (long long)data_type);
-    return -1;
+    return finish(-1);
   }
 }
 

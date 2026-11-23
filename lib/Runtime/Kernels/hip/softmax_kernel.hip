@@ -48,6 +48,7 @@
 #include <hip/hip_bf16.h>
 #include <hip/hip_fp16.h>
 
+#include <climits>
 #include <cstdint>
 #include <initializer_list>
 
@@ -438,7 +439,12 @@ int pick_vec_bytes(const void* in, const void* out, int cols, int elem_bytes) {
 template <typename T>
 int launch_softmax(void* stream_ptr, const void* input, void* output, int rows,
                    int cols) {
-  if (!input || !output || rows <= 0 || cols <= 0)
+  if (rows == 0 || cols == 0)
+    return 0;
+  // The fallback kernel steps its int column index by the block size, so a
+  // width within one block of INT_MAX would overflow it.
+  if (!input || !output || rows < 0 || cols < 0 ||
+      cols > INT_MAX - kMaxThreads)
     return -1;
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
   (void)hipGetLastError();
