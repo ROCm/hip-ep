@@ -45,8 +45,11 @@ Loading those rows per element inside the kernel spills registers (the kernel
 already uses 256 VGPRs) and halves its speed. Instead, the generated code
 object also holds `<name>_fixup`, which recomputes those at most 12 positions
 per output channel as a direct convolution from the filter store, with the
-same epilogue, and the runtime launches it right after the conv kernel. The
-vendored headers stay byte-identical to upstream.
+same epilogue, and the runtime launches it right after the conv kernel. One
+32-lane group computes one (position, output channel) pair and splits the
+input channels across its lanes; a serial channel loop per thread would cost
+about as much as the conv kernel at a few hundred channels. The vendored
+headers stay byte-identical to upstream.
 
 hiprtc is resolved at call time, like the HIP runtime in
 `RocMlirKernelCompiler.cpp`, so it adds no load-time dependency. The headers

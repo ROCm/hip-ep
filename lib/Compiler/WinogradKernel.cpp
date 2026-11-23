@@ -165,7 +165,10 @@ buildWinogradKernelSource(int64_t n, int64_t c, int64_t h, int64_t w, int64_t k,
   // instead spills registers and halves the speed, so `<name>_fixup`
   // recomputes those at most 12 positions per output channel directly, with
   // the same epilogue, after the main kernel. The filter comes from the
-  // store: g, or T = G g with g0 = T0, g1 = T1 - T2, g2 = T3.
+  // store: g, or T = G g with g0 = T0, g1 = T1 - T2, g2 = T3. One 32-lane
+  // group takes one (position, channel) pair and splits the input channels,
+  // so the store reads stay contiguous; a serial channel loop per thread costs
+  // about as much as the conv kernel itself at a few hundred channels.
   std::string fixupParams = params;
   std::string fixupCall = hasBias                ? "winograd_post{}(v, b[k])"
                           : activation != "none" ? "winograd_post{}(v)"
@@ -178,7 +181,8 @@ buildWinogradKernelSource(int64_t n, int64_t c, int64_t h, int64_t w, int64_t k,
           "  const half* u = static_cast<const half*>(p1);\n"
           "  {7}"
           "  half* y = static_cast<half*>(p{8});\n"
-          "  const int t = blockIdx.x * blockDim.x + threadIdx.x;\n"
+          "  const int lane = threadIdx.x % 32;\n"
+          "  const int t = blockIdx.x * (blockDim.x / 32) + threadIdx.x / 32;\n"
           "  const int pos = t / K, k = t % K;\n"
           "  if (pos >= 12) return;\n"
           "  int n, h, w;\n"
@@ -190,7 +194,7 @@ buildWinogradKernelSource(int64_t n, int64_t c, int64_t h, int64_t w, int64_t k,
           "    return static_cast<float>(u[((i * 3 + j) * K + k) * C + c]); "
           "};\n"
           "  float acc = 0.f;\n"
-          "  for (int c = 0; c < C; ++c)\n"
+          "  for (int c = lane; c < C; c += 32)\n"
           "    for (int r = 0; r < 3; ++r) {{\n"
           "      const int ih = h + r - 1;\n"
           "      if (ih < 0 || ih >= H) continue;\n"
@@ -202,6 +206,9 @@ buildWinogradKernelSource(int64_t n, int64_t c, int64_t h, int64_t w, int64_t k,
           "+ c) * H + ih) * W + iw]);\n"
           "      }\n"
           "    }\n"
+          "  for (int off = 16; off > 0; off /= 2)\n"
+          "    acc += __shfl_down(acc, off, 32);\n"
+          "  if (lane != 0) return;\n"
           "  const half v = static_cast<half>(acc);\n"
           "  y[((static_cast<long>(n) * K + k) * H + h) * W + w] = {10};\n"
           "}\n",

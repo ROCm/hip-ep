@@ -156,8 +156,9 @@ int wrap_winograd_conv(RuntimeState *state, int32_t op_state_slot,
   hipError_t err =
       launch(ws->main, grid_size, block_size, kernargs, size, stream);
   if (err == hipSuccess) {
-    constexpr int64_t kFixupBlock = 256;
-    const int64_t fixupGrid = (12 * K + kFixupBlock - 1) / kFixupBlock;
+    // One 32-lane group per (corner position, output channel) pair.
+    constexpr int64_t kFixupBlock = 256, kGroupsPerBlock = kFixupBlock / 32;
+    const int64_t fixupGrid = (12 * K + kGroupsPerBlock - 1) / kGroupsPerBlock;
     err = launch(ws->fixup, fixupGrid, kFixupBlock, kernargs, size, stream);
   }
   if (err != hipSuccess) {
