@@ -4,9 +4,9 @@
 ##
 name: Windows GPU Test
 
-# Runs the perf / smoke / OGA / L2 suites on the self-hosted AMD GPU box
-# against the gpu-test-package and hip-python-package artifacts of the same
-# run.
+# Runs the perf / smoke / OGA / GenAI accuracy suites on the self-hosted AMD
+# GPU box against the gpu-test-package and hip-python-package artifacts of the
+# same run.
 #
 # docs_only still runs this job, on a hosted runner, and skips the suites.
 # The required check is gpu_test / test. A skipped caller never reports
@@ -29,7 +29,7 @@ jobs:
   test:
     runs-on: ${{ inputs.docs_only && 'ubuntu-latest' || 'StrixHalo' }}
     # Never cancel an in-progress GPU run: queue newer runs of the same ref
-    # behind it instead of killing the long-running perf / OGA / L2 suites.
+    # behind it instead of killing the long-running perf / OGA / accuracy suites.
     # The self-hosted StrixHalo runner already serializes physically, so
     # this group only adds explicit logical queueing for clarity. A
     # documentation run uses its own group so it does not wait on that queue.
@@ -61,7 +61,6 @@ jobs:
           taskkill /f /im onnxruntime_perf_test.exe >nul 2>&1 || ver >nul
           taskkill /f /im model_benchmark.exe >nul 2>&1 || ver >nul
           if exist gpu-test-package rd /s /q gpu-test-package
-          if exist l2-results rd /s /q l2-results
           if exist oga-results rd /s /q oga-results
           if exist oga-smoke-venv rd /s /q oga-smoke-venv
           if exist oga-smoke-results rd /s /q oga-smoke-results
@@ -71,6 +70,12 @@ jobs:
           if exist main-perf-baseline rd /s /q main-perf-baseline
           if exist gpu-perf-results rd /s /q gpu-perf-results
           if exist perf-gate rd /s /q perf-gate
+          if exist hip-ep-src rd /s /q hip-ep-src
+          if exist genai-accuracy-work rd /s /q genai-accuracy-work
+          if exist genai-accuracy-results rd /s /q genai-accuracy-results
+          if exist genai-accuracy-baseline rd /s /q genai-accuracy-baseline
+          if exist genai-accuracy-summary.md del /q genai-accuracy-summary.md
+          if exist genai-accuracy-regressions.txt del /q genai-accuracy-regressions.txt
 
       - name: Download GPU test package
         if: ${{ !inputs.docs_only && success() }}
@@ -518,136 +523,133 @@ jobs:
           exit $failed
 
       # -----------------------------------------------------------------------
-      # L2 accuracy test: compare MorphiZen EP vs CPU output for each model
-      # in l2-test-models/. Skipped gracefully when directory does not exist.
+      # GenAI accuracy: hipdnn-accuracy-test PPL_VLM on Qwen3.8-Flash-Next
+      # through the AMDGPU (HIP) EP, gated against the latest main run. The
+      # framework, venv, HF cache and the 124 GB model persist under
+      # runner.workspace/genai-accuracy; only the first run downloads the
+      # model. See test/genai_accuracy/README.md.
       # -----------------------------------------------------------------------
-      - name: Run L2 accuracy tests
+      - name: Checkout GenAI accuracy script
         if: ${{ !inputs.docs_only && always() }}
-        timeout-minutes: 10
-        shell: cmd
-        run: |
-          setlocal enabledelayedexpansion
-          set PATH=%CD%\gpu-test-package\bin;%PATH%
-          rem The EP DLL is now hipgpu.dll; hip-onnx-runner's legacy default name
-          rem is onnxruntime_morphizen_ep.dll, so point it at the new DLL.
-          set MORPHIZEN_EP_LIB=%CD%\gpu-test-package\bin\hipgpu.dll
-          set L2_MODEL_DIR=${{ runner.workspace }}\l2-test-models
-          if not exist "%L2_MODEL_DIR%" (
-            echo [SKIP] L2 model directory not found: %L2_MODEL_DIR%
-            exit /b 0
-          )
-          set FOUND=0
-          for /r "%L2_MODEL_DIR%" %%M in (*.onnx) do set FOUND=1
-          if "!FOUND!"=="0" (
-            echo [SKIP] No .onnx models found in %L2_MODEL_DIR%
-            exit /b 0
-          )
-          cd gpu-test-package\bin
-          set FAILED=0
-          for /r "%L2_MODEL_DIR%" %%M in (*.onnx) do (
-            set "MDIR=%%~dpM"
-            set "REL=!MDIR:%L2_MODEL_DIR%\=!"
-            set "OUT=..\..\l2-results\!REL!%%~nM.txt"
-            mkdir "..\..\l2-results\!REL!" 2>nul
-            echo === L2 test: !REL!%%~nxM ===
-            rd /s /q "%%~nM_o_dump" 2>nul
-            rd /s /q "%%~nM_cpu_o_dump" 2>nul
-            hip-onnx-runner.exe -m "%%M" -d 2 -s 42 > "!OUT!" 2>&1
-            if errorlevel 1 (
-              echo [ERROR] EP inference failed>> "!OUT!"
-              type "!OUT!"
-              set FAILED=1
-            ) else (
-              hip-onnx-runner.exe -m "%%M" -d 2 -s 42 -n >> "!OUT!" 2>&1
-              if errorlevel 1 (
-                echo [ERROR] CPU inference failed>> "!OUT!"
-                type "!OUT!"
-                set FAILED=1
-              ) else (
-                hip-onnx-runner.exe -L "%%~nM_o_dump,%%~nM_cpu_o_dump" >> "!OUT!" 2>&1
-                type "!OUT!"
-              )
-            )
-          )
-          exit /b !FAILED!
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: hip-ep-src
+          sparse-checkout: test/genai_accuracy
 
-      - name: Publish L2 results
+      - name: Prepare GenAI accuracy (framework, venv, model)
+        if: ${{ !inputs.docs_only && always() }}
+        timeout-minutes: 300
+        shell: pwsh
+        run: |
+          python hip-ep-src\test\genai_accuracy\run_genai_accuracy.py prepare `
+            --package-dir gpu-test-package `
+            --cache-root "${{ runner.workspace }}\genai-accuracy"
+          exit $LASTEXITCODE
+
+      - name: Run GenAI accuracy (Qwen3.8-Flash-Next PPL_VLM)
+        if: ${{ !inputs.docs_only && always() }}
+        timeout-minutes: 120
+        shell: pwsh
+        run: |
+          python hip-ep-src\test\genai_accuracy\run_genai_accuracy.py run `
+            --package-dir gpu-test-package `
+            --cache-root "${{ runner.workspace }}\genai-accuracy" `
+            --work-dir genai-accuracy-work `
+            --results-dir genai-accuracy-results
+          exit $LASTEXITCODE
+
+      - name: Upload GenAI accuracy results
+        if: ${{ !inputs.docs_only && always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: genai-accuracy-results
+          path: genai-accuracy-results/
+          if-no-files-found: ignore
+
+      # Baseline: genai-accuracy-results of the latest successful main push
+      # run. PRs and merge groups fail when perplexity rises more than the
+      # tolerance; pushes only report.
+      - name: Publish and gate GenAI accuracy results
         if: ${{ !inputs.docs_only && always() }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $l2Dir = "l2-results"
-          if (-not (Test-Path $l2Dir)) {
-            Write-Host "No L2 results to publish (directory not found)"
-            return
-          }
-          $files = Get-ChildItem $l2Dir -Recurse -Filter "*.txt" -ErrorAction SilentlyContinue
-          if (-not $files) {
-            Write-Host "No L2 result files found"
-            return
-          }
-
-          $runUrl = "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          $rawSha = if ("${{ github.event_name }}" -eq "pull_request") { "${{ github.event.pull_request.head.sha }}" } else { "${{ github.sha }}" }
-          $sha = $rawSha.Substring(0, 7)
+          $ErrorActionPreference = "Continue"
+          $repo = "${{ github.repository }}"
+          $eventName = "${{ github.event_name }}"
           $prNumber = "${{ github.event.pull_request.number }}"
-          $threshold = 0.01
-          $l2Root = (Resolve-Path $l2Dir).Path
-
-          $tableRows = ""
-          foreach ($f in $files) {
-            $rel = $f.FullName.Substring($l2Root.Length).TrimStart('\', '/')
-            $model = $rel -replace '\.txt$', '' -replace '\\', '/'
-            $content = Get-Content $f.FullName -Raw
-            $l2Match = [regex]::Match($content, 'Combined L2 \(stacked diffs\):\s+([\d.eE+-]+)\s+\(total_elems:\s+(\d+),.*?skipped_nonfinite:\s+(\d+)\)')
-            $errMatch = [regex]::Match($content, '\[ERROR\]\s*(.+)')
-            if ($l2Match.Success) {
-              $l2val = [double]$l2Match.Groups[1].Value
-              $elems = $l2Match.Groups[2].Value
-              $skipped = $l2Match.Groups[3].Value
-              $tableRows += "| $model | $l2val | $elems | $skipped |`n"
-            } elseif ($errMatch.Success) {
-              $reason = $errMatch.Groups[1].Value.Trim()
-              $tableRows += "| $model | $reason | - | - |`n"
-            } else {
-              $tableRows += "| $model | error | - | - |`n"
-            }
+          $baselineDir = "genai-accuracy-baseline"
+          if (Test-Path -LiteralPath $baselineDir) {
+            Remove-Item -LiteralPath $baselineDir -Recurse -Force
           }
 
-          $header = "## L2 Accuracy Results (EP vs CPU)`n`n" +
-                    "| Model | Combined L2 | Total Elems | Skipped NaN/Inf |`n" +
-                    "|-------|------------|------------|----------------|`n"
-          $footer = "`nThreshold: $threshold | Run: [${{ github.run_number }}]($runUrl) - Commit: ``$sha``"
-          $summary = $header + $tableRows + $footer
+          $baselineNote = ""
+          $runsJson = gh run list -R $repo --workflow "Windows Build" --branch main --event push --status success --limit 20 --json databaseId,headSha,url 2>$null
+          if ($LASTEXITCODE -eq 0 -and $runsJson) {
+            foreach ($run in @($runsJson | ConvertFrom-Json)) {
+              if ("$($run.databaseId)" -eq "${{ github.run_id }}") { continue }
+              $artsJson = gh api "repos/$repo/actions/runs/$($run.databaseId)/artifacts" 2>$null
+              if ($LASTEXITCODE -ne 0 -or -not $artsJson) { continue }
+              $art = @(($artsJson | ConvertFrom-Json).artifacts) | Where-Object { $_.name -eq "genai-accuracy-results" -and -not $_.expired } | Select-Object -First 1
+              if (-not $art) { continue }
+              New-Item -ItemType Directory -Force -Path $baselineDir | Out-Null
+              gh run download $run.databaseId -R $repo -n genai-accuracy-results -D $baselineDir 2>$null
+              $resultPath = "$baselineDir/result.json"
+              if ((Test-Path -LiteralPath $resultPath) -and (Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json).success) {
+                $baselineNote = "run [$($run.databaseId)]($($run.url)) - ``$($run.headSha.Substring(0, 7))``"
+                Write-Host "GenAI accuracy baseline: run $($run.databaseId)"
+                break
+              }
+              Remove-Item -LiteralPath $baselineDir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+          } else {
+            Write-Host "WARNING: gh run list failed, no GenAI accuracy baseline"
+          }
+          if (-not $baselineNote) { $baselineNote = "none found" }
 
-          Write-Host $summary
+          $reportArgs = @(
+            "hip-ep-src\test\genai_accuracy\run_genai_accuracy.py", "report",
+            "--current", "genai-accuracy-results/result.json",
+            "--baseline-note", $baselineNote,
+            "--summary-out", "genai-accuracy-summary.md",
+            "--regressions-out", "genai-accuracy-regressions.txt"
+          )
+          if (Test-Path -LiteralPath "$baselineDir/result.json") {
+            $reportArgs += @("--baseline", "$baselineDir/result.json")
+          }
+          python @reportArgs
+          if ($LASTEXITCODE -ne 0) { Write-Host "ERROR: report failed"; exit 1 }
+
+          $summary = Get-Content -LiteralPath "genai-accuracy-summary.md" -Raw
           Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
 
-          if ("${{ github.event_name }}" -eq "pull_request" -and $prNumber) {
-            $marker = "<!-- morphizen-l2-results -->"
+          if ($eventName -eq "pull_request" -and $prNumber) {
+            $marker = "<!-- morphizen-genai-accuracy-results -->"
             $body = "$marker`n$summary"
-
-            $commentsJson = gh api "repos/${{ github.repository }}/issues/$prNumber/comments" 2>$null
-            $ghOk = ($LASTEXITCODE -eq 0)
-            $existing = $null
-            if ($ghOk -and $commentsJson) {
-              $comments = $commentsJson | ConvertFrom-Json
-              $found = $comments | Where-Object { $_.body -and $_.body.StartsWith($marker) } | Select-Object -First 1
-              if ($found) { $existing = $found.id }
-            }
-
-            if ($ghOk -and $existing) {
-              Write-Host "Updating existing L2 PR comment $existing"
-              gh api --method PATCH "repos/${{ github.repository }}/issues/comments/$existing" `
-                -f body="$body"
-              if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: Failed to update L2 PR comment" }
-            } elseif ($ghOk) {
-              Write-Host "Creating new L2 PR comment"
-              gh pr comment $prNumber -R "${{ github.repository }}" --body "$body"
-              if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: Failed to create L2 PR comment" }
+            $commentsJson = gh api "repos/$repo/issues/$prNumber/comments" 2>$null
+            if ($LASTEXITCODE -eq 0) {
+              $existing = $null
+              if ($commentsJson) {
+                $found = ($commentsJson | ConvertFrom-Json) | Where-Object { $_.body -and $_.body.StartsWith($marker) } | Select-Object -First 1
+                if ($found) { $existing = $found.id }
+              }
+              if ($existing) {
+                gh api --method PATCH "repos/$repo/issues/comments/$existing" -f body="$body" | Out-Null
+              } else {
+                gh pr comment $prNumber -R $repo --body "$body"
+              }
+              if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: failed to post GenAI accuracy PR comment" }
             } else {
-              Write-Host "WARNING: gh api unreachable, skipping L2 PR comment"
+              Write-Host "WARNING: gh api unreachable, skipping GenAI accuracy PR comment"
+            }
+          }
+
+          if (Test-Path -LiteralPath "genai-accuracy-regressions.txt") {
+            Get-Content -LiteralPath "genai-accuracy-regressions.txt" | Write-Host
+            if ($eventName -eq "pull_request" -or $eventName -eq "merge_group") {
+              Write-Host "ERROR: GenAI accuracy regressed vs main"
+              exit 1
             }
           }
 

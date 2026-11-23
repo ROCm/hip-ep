@@ -90,6 +90,11 @@ See [test/e2e/README.md](e2e/) for running the suite and GPU setup.
 
 See [test/numeric/README.md](numeric/) for backends, CLI options, and the "Bring your own ONNX" pattern.
 
+### GenAI Accuracy (`test/genai_accuracy/`)
+- **End-to-end model accuracy**: hipdnn-accuracy-test PPL_VLM on Qwen3.8-Flash-Next through the AMDGPU EP, run by the Windows GPU workflow and gated against `main`.
+
+See [test/genai_accuracy/README.md](genai_accuracy/README.md) for pins, pass criteria, and local runs.
+
 ### Kernel compile-time guards (`test/kernel_guards/`)
 - **GPU-free checks on device-kernel source**: `LdsBarrierArchGate` compiles the `HIPDNN_LDS_BARRIER` gate in `lib/Runtime/Kernels/include/hip_arch_compat.h` for gfx9 to gfx12 and checks the barrier each architecture emits.
 

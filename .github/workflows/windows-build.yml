@@ -54,7 +54,7 @@ jobs:
     with:
       docs_only: ${{ needs.build_required.outputs.run == 'false' }}
     # A callee's GITHUB_TOKEN is capped by the caller job, and the GPU job
-    # posts perf / L2 results as PR comments.
+    # posts perf / GenAI accuracy results as PR comments.
     permissions:
       contents: read
       pull-requests: write
