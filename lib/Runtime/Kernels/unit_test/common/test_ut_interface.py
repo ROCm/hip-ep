@@ -21,6 +21,8 @@ LEGACY_GAPS = {
     'gather_block_quantized/Xi64_Wu8_Yfp16': {'custom_shape', 'shared_timer', 'arch_default'},
     'gather_block_quantized/Xi64_Wfp8_Yfp16': {'custom_shape', 'shared_timer', 'arch_default'},
     'cast/Xany_Yany_bf16': {'custom_shape', 'shared_timer', 'arch_default'},
+    'gather_nd/Xi64_Wu8_Yu8': {'custom_shape', 'shared_timer', 'arch_default'},
+    'gqa/softmax/Xfp32_Wbf16_Ybf16': {'custom_shape', 'shared_timer', 'arch_default'},
 }
 
 
