@@ -137,3 +137,8 @@ add_test(NAME MatMulNBitsAutotuneUnitTest COMMAND test-matmul-nbits-autotune)
 set_tests_properties(MatMulNBitsAutotuneUnitTest PROPERTIES
     ENVIRONMENT "HIPDNN_EP_MATMUL_NBITS_ARCH=gfx1151")
 set_target_properties(test-matmul-nbits-autotune PROPERTIES FOLDER "runtime-tests")
+
+# The K-quant, Q8_1 and token-major GQA custom kernels, on a GPU.
+if(NOT BUILD_MOCK_RUNTIME)
+  add_subdirectory(custom_kernels)
+endif()

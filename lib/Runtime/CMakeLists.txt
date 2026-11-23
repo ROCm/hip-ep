@@ -239,6 +239,8 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
             ${CMAKE_CURRENT_SOURCE_DIR}/real/cache_utils.h
             ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/hip/autotune/gqa/gqa_autotune.h
             ${CMAKE_CURRENT_SOURCE_DIR}/real/zp_unpack_cache.h
+            ${CMAKE_CURRENT_SOURCE_DIR}/real/kquant_contract.h
+            ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/include/kquant_abi.h
             ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/include/hip_custom_kernels.h)
     else()
         list(APPEND COMPILE_FLAGS "-I" "${CMAKE_CURRENT_SOURCE_DIR}/mock")
@@ -355,6 +357,8 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/div.cpp runtime_div.bc)
     compile_to_bitcode(real/linear_attention.cpp runtime_linear_attention.bc)
     compile_to_bitcode(real/gated_delta_net.cpp runtime_gated_delta_net.bc)
+    compile_to_bitcode(real/kquant.cpp runtime_kquant.bc)
+    compile_to_bitcode(real/token_major_gqa.cpp runtime_token_major_gqa.bc)
     compile_to_bitcode(real/dynamic_sparse_attention.cpp
                        runtime_dynamic_sparse_attention.bc)
     compile_to_bitcode(real/sparse_attention_indexer.cpp
@@ -464,6 +468,8 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_div.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_linear_attention.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gated_delta_net.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_kquant.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_token_major_gqa.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_dynamic_sparse_attention.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_sparse_attention_indexer.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_transpose.bc

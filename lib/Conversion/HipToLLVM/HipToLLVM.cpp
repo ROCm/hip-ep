@@ -345,6 +345,7 @@ populateLoweringPatterns(LLVMTypeConverter &typeConverter,
   populateGemmLoweringPatterns(typeConverter, patterns);
   populateLinearAttentionLoweringPatterns(typeConverter, patterns);
   populateGatedDeltaNetLoweringPatterns(typeConverter, patterns);
+  populateKQuantLoweringPatterns(typeConverter, patterns);
   populateDynamicSparseAttentionLoweringPatterns(typeConverter, patterns);
   populateSparseAttentionIndexerLoweringPatterns(typeConverter, patterns);
   populateGraphLoweringPatterns(typeConverter, patterns);
