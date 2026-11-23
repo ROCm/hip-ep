@@ -25,8 +25,9 @@ namespace {
 // A window axis whose extents match is copied.  Dynamic prefix dims and
 // dynamic window dims are read from the memref descriptor.  The kernel
 // recovers per-axis scale from those extents, unless the op carries
-// `scales`; then the window's scales go to wrap_resize_scaled (0 for an
-// unused window slot, which keeps the extent ratio).
+// `scales` or `runtime_scales`; then the window's scales go to
+// wrap_resize_scaled (0 for an unused window slot, which keeps the extent
+// ratio).
 //
 // Runtime ABI:
 //   wrap_resize(state, input, output,
@@ -98,8 +99,13 @@ struct ResizeOpLowering : public ConvertOpToLLVMPattern<ResizeOp> {
     Value statePtr = adaptor.getCtx();
     Value inputPtr =
         extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
-    Value outputPtr =
-        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
+    // A packed concat slot is a subview: same base as the concat buffer, with
+    // a non-zero descriptor offset. The kernel writes densely from the pointer
+    // it is given, so that offset has to be applied here.
+    Value outputPtr = extractMemRefDataPtr(adaptor.getOutput(), outputType,
+                                           getTypeConverter(), rewriter, loc);
+    if (!outputPtr)
+      return rewriter.notifyMatchFailure(op, "resize output pointer");
 
     Value inputDesc = adaptor.getInput();
     Value outputDesc = adaptor.getOutput();
@@ -157,7 +163,20 @@ struct ResizeOpLowering : public ConvertOpToLLVMPattern<ResizeOp> {
     addI64(nearest);
 
     const char *callee = kWrapResize;
-    if (ArrayAttr scales = op.getScalesAttr()) {
+    ValueRange runtimeScales = adaptor.getRuntimeScales();
+    if (!runtimeScales.empty()) {
+      if (static_cast<int64_t>(runtimeScales.size()) != launch->spatialRank)
+        return rewriter.notifyMatchFailure(
+            op, "runtime_scales length != spatial_rank");
+      Type f64Type = rewriter.getF64Type();
+      Value unused = LLVM::ConstantOp::create(rewriter, loc, f64Type,
+                                              rewriter.getF64FloatAttr(0.0));
+      for (int64_t i : llvm::seq<int64_t>(3)) {
+        paramTypes.push_back(f64Type);
+        args.push_back(i < launch->spatialRank ? runtimeScales[i] : unused);
+      }
+      callee = kWrapResizeScaled;
+    } else if (ArrayAttr scales = op.getScalesAttr()) {
       if (static_cast<int64_t>(scales.size()) != outputType.getRank())
         return rewriter.notifyMatchFailure(op, "scales length != rank");
       Type f64Type = rewriter.getF64Type();

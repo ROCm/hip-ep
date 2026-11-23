@@ -203,6 +203,28 @@ static memref::ExpandShapeOp findSingleExpandShape(Value root, Value retVal) {
   return expand;
 }
 
+/// The output-allocator callback can rebuild a rank-increasing expand when
+/// every reassociation group holds at most one dynamic extent. A
+/// memref.reshape that splits one runtime extent into several, such as
+/// [?x4] viewed as [?x?x4], is not that case: its result sizes are only
+/// known at the reshape, so the compute buffer must stay internal and the
+/// returned view is copied into a graph-rank output.
+static bool expandAbiCoversReturn(memref::AllocOp allocOp, Value retVal) {
+  memref::ExpandShapeOp expand =
+      findSingleExpandShape(allocOp.getResult(), retVal);
+  if (!expand)
+    return false;
+  auto externalType = expand.getResultType();
+  if (externalType.getRank() <= allocOp.getType().getRank())
+    return false;
+  return llvm::none_of(expand.getReassociationIndices(),
+                       [&](ArrayRef<int64_t> group) {
+                         return llvm::count_if(group, [&](int64_t dim) {
+                                  return externalType.isDynamicDim(dim);
+                                }) > 1;
+                       });
+}
+
 /// A rank-increasing expand can split one internal dynamic dimension into
 /// multiple external dynamic dimensions. The existing abi_groups lowering
 /// cannot reconstruct those individual extents from their product. Allocate
@@ -361,6 +383,12 @@ struct UseOutputAllocatorPass
     // values print in order in phase 2.
     SmallVector<std::pair<memref::AllocOp, int64_t>> outputs;
     funcOp.walk([&](memref::AllocOp allocOp) {
+      // An alloc inside a loop or branch region runs once per iteration (or
+      // only on one path) and reaches the return through region results, so
+      // it cannot be the graph output buffer itself. Phase 3 copies the
+      // region result into a single hip.alloc_output after the region.
+      if (allocOp->getParentRegion() != &funcOp.getBody())
+        return;
       int64_t outIdx = -1;
       for (Value aliased : aliasAnalysis.resolve(allocOp.getResult()))
         for (OpOperand &use : aliased.getUses())
@@ -401,6 +429,11 @@ struct UseOutputAllocatorPass
 
       AllocOutputOp allocOutput;
       if (!replacement) {
+        auto retType =
+            retVal ? dyn_cast<MemRefType>(retVal.getType()) : MemRefType();
+        if (retType && retType.getRank() > allocOp.getType().getRank() &&
+            !expandAbiCoversReturn(allocOp, retVal))
+          continue;
         builder.setInsertionPoint(allocOp);
         allocOutput = AllocOutputOp::create(
             builder, allocOp.getLoc(), allocOp.getType(), ctx,

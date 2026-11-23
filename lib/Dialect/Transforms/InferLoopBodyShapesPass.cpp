@@ -91,6 +91,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 #define DEBUG_TYPE "hip-infer-loop-body-shapes"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "] ")
@@ -271,18 +272,33 @@ static bool named(StringRef name, ArrayRef<StringRef> ops) {
 
 static bool preservesShape(StringRef name) {
   static constexpr StringRef kOps[] = {
-      "onnx.Cast",    "onnx.Identity", "onnx.Sqrt",  "onnx.Reciprocal",
-      "onnx.Tanh",    "onnx.Softmax",  "onnx.Relu",  "onnx.LeakyRelu",
-      "onnx.Sigmoid", "onnx.Exp",      "onnx.Log",   "onnx.Neg",
-      "onnx.Abs",     "onnx.Erf",      "onnx.Floor", "onnx.Ceil",
-      "onnx.Round",   "onnx.Not",      "onnx.Sign"};
+      "onnx.Cast",       "onnx.Identity",  "onnx.Sqrt",
+      "onnx.Reciprocal", "onnx.Tanh",      "onnx.Softmax",
+      "onnx.Relu",       "onnx.LeakyRelu", "onnx.Sigmoid",
+      "onnx.Exp",        "onnx.Log",       "onnx.Neg",
+      "onnx.Abs",        "onnx.Erf",       "onnx.Floor",
+      "onnx.Ceil",       "onnx.Round",     "onnx.Not",
+      "onnx.Sign",       "onnx.Clip",      "onnx.ScatterElements"};
   return named(name, kOps);
 }
 
 static bool broadcastsShape(StringRef name) {
-  static constexpr StringRef kOps[] = {"onnx.Add", "onnx.Mul", "onnx.Sub",
-                                       "onnx.Pow", "onnx.Div", "onnx.Max",
-                                       "onnx.Min"};
+  static constexpr StringRef kOps[] = {"onnx.Add",
+                                       "onnx.Mul",
+                                       "onnx.Sub",
+                                       "onnx.Pow",
+                                       "onnx.Div",
+                                       "onnx.Max",
+                                       "onnx.Min",
+                                       "onnx.Equal",
+                                       "onnx.Greater",
+                                       "onnx.Less",
+                                       "onnx.GreaterOrEqual",
+                                       "onnx.LessOrEqual",
+                                       "onnx.And",
+                                       "onnx.Or",
+                                       "onnx.Xor",
+                                       "onnx.Where"};
   return named(name, kOps);
 }
 
@@ -838,6 +854,50 @@ static RankedTensorType inferShapeOpResult(Operation *op) {
   return rankedLike(op->getResult(0).getType(), {length});
 }
 
+/// `onnx.Squeeze` drops `axes` (attribute, or a constant operand). Output
+/// rank is input rank minus the number of axes. A missing axes list drops
+/// every static size-1 dim; a dynamic dim with no axes list does not fix
+/// the rank. A squeezed axis is omitted even when its extent is dynamic:
+/// ONNX still removes that axis, and the lowering slices it to 1.
+static RankedTensorType inferSqueezeResult(Operation *op) {
+  if (op->getNumOperands() < 1 || op->getNumResults() != 1)
+    return {};
+  auto inputType = dyn_cast<RankedTensorType>(op->getOperand(0).getType());
+  if (!inputType)
+    return {};
+  SmallVector<int64_t> axes;
+  if (!readIntArrayAttr(op, "axes", axes)) {
+    if (op->getNumOperands() < 2 || isOnnxNone(op->getOperand(1))) {
+      SmallVector<int64_t> shape;
+      for (int64_t dim : inputType.getShape()) {
+        if (ShapedType::isDynamic(dim))
+          return {};
+        if (dim != 1)
+          shape.push_back(dim);
+      }
+      return rankedLike(op->getResult(0).getType(), shape);
+    }
+    auto axisValues = readConstInt1D(op->getOperand(1));
+    if (!axisValues)
+      return {};
+    axes = std::move(*axisValues);
+  }
+  int64_t rank = inputType.getRank();
+  SmallVector<bool> drop(rank, false);
+  for (int64_t axis : axes) {
+    if (axis < 0)
+      axis += rank;
+    if (axis < 0 || axis >= rank || drop[axis])
+      return {};
+    drop[axis] = true;
+  }
+  SmallVector<int64_t> shape;
+  for (int64_t i = 0; i < rank; ++i)
+    if (!drop[i])
+      shape.push_back(inputType.getDimSize(i));
+  return rankedLike(op->getResult(0).getType(), shape);
+}
+
 /// `onnx.Unsqueeze` inserts unit dims at `axes` (attribute, or a constant
 /// operand). Output rank is input rank plus the number of axes.
 static RankedTensorType inferUnsqueezeResult(Operation *op) {
@@ -874,7 +934,11 @@ static RankedTensorType inferUnsqueezeResult(Operation *op) {
 
 /// `onnx.Slice`. Rank is unchanged. A static axis extent becomes the number
 /// of elements from start to end. Bounds come from attributes, or from
-/// constant inputs. A runtime bound yields no type, so a stored shape stays.
+/// constant inputs. A bound that is not a constant does not establish a
+/// rank. The slice lowering uses the input extent when it cannot compute
+/// the length, so a runtime bound would publish that extent as the result
+/// shape. A shape already stored on the result is kept by
+/// `mergeInferredType`.
 static RankedTensorType inferSliceResult(Operation *op) {
   if (op->getNumOperands() < 1 || op->getNumResults() != 1)
     return {};
@@ -944,6 +1008,127 @@ static RankedTensorType inferSliceResult(Operation *op) {
     shape[axis] = (span + step - 1) / step;
   }
   return rankedLike(op->getResult(0).getType(), shape);
+}
+
+/// `onnx.ConstantOfShape`: rank is the static length of the shape vector.
+static RankedTensorType inferConstantOfShapeResult(Operation *op) {
+  if (op->getNumOperands() < 1 || op->getNumResults() != 1)
+    return {};
+  auto shapeType = dyn_cast<RankedTensorType>(op->getOperand(0).getType());
+  if (!shapeType || shapeType.getRank() != 1 || shapeType.isDynamicDim(0))
+    return {};
+  int64_t rank = shapeType.getDimSize(0);
+  SmallVector<int64_t> extents;
+  if (auto values = readConstInt1D(op->getOperand(0)))
+    extents.assign(values->begin(), values->end());
+  else
+    appendShapeExtents(op->getOperand(0), extents);
+  if ((int64_t)extents.size() != rank)
+    extents.assign(rank, ShapedType::kDynamic);
+  for (int64_t &extent : extents)
+    if (extent < 0)
+      extent = ShapedType::kDynamic;
+  return rankedLike(op->getResult(0).getType(), extents);
+}
+
+/// `onnx.Expand` broadcasts the input against the shape vector.
+static RankedTensorType inferExpandResult(Operation *op) {
+  if (op->getNumOperands() < 2 || op->getNumResults() != 1)
+    return {};
+  auto inputType = dyn_cast<RankedTensorType>(op->getOperand(0).getType());
+  auto shapeType = dyn_cast<RankedTensorType>(op->getOperand(1).getType());
+  if (!inputType || !shapeType || shapeType.getRank() != 1 ||
+      shapeType.isDynamicDim(0))
+    return {};
+  SmallVector<int64_t> extents;
+  if (auto values = readConstInt1D(op->getOperand(1)))
+    extents.assign(values->begin(), values->end());
+  else
+    appendShapeExtents(op->getOperand(1), extents);
+  if ((int64_t)extents.size() != shapeType.getDimSize(0))
+    extents.assign(shapeType.getDimSize(0), ShapedType::kDynamic);
+  int64_t outRank = std::max<int64_t>(extents.size(), inputType.getRank());
+  SmallVector<int64_t> shape(outRank, ShapedType::kDynamic);
+  for (int64_t i = 0; i < outRank; ++i) {
+    int64_t inIdx = i - (outRank - inputType.getRank());
+    int64_t exIdx = i - (outRank - (int64_t)extents.size());
+    int64_t in = inIdx >= 0 ? inputType.getDimSize(inIdx) : 1;
+    int64_t ex = exIdx >= 0 ? extents[exIdx] : 1;
+    if (ex > 1)
+      shape[i] = ex;
+    else if (ex == 1 || (ShapedType::isDynamic(ex) && in > 1))
+      shape[i] = in;
+  }
+  return rankedLike(op->getResult(0).getType(), shape);
+}
+
+/// `onnx.NonZero` returns one row of indices per input dim.
+static RankedTensorType inferNonZeroResult(Operation *op) {
+  if (op->getNumOperands() < 1 || op->getNumResults() != 1)
+    return {};
+  auto inputType = dyn_cast<RankedTensorType>(op->getOperand(0).getType());
+  if (!inputType)
+    return {};
+  return rankedLike(
+      op->getResult(0).getType(),
+      {std::max<int64_t>(inputType.getRank(), 1), ShapedType::kDynamic});
+}
+
+/// `onnx.Flatten` folds dims before `axis` into the first output dim.
+static RankedTensorType inferFlattenResult(Operation *op) {
+  if (op->getNumOperands() < 1 || op->getNumResults() != 1)
+    return {};
+  auto inputType = dyn_cast<RankedTensorType>(op->getOperand(0).getType());
+  if (!inputType)
+    return {};
+  int64_t rank = inputType.getRank();
+  int64_t axis = 1;
+  if (auto attr = op->getAttrOfType<IntegerAttr>("axis"))
+    axis = attr.getValue().getSExtValue();
+  if (axis < 0)
+    axis += rank;
+  if (axis < 0 || axis > rank)
+    return {};
+  auto product = [&](int64_t begin, int64_t end) {
+    int64_t n = 1;
+    for (int64_t i = begin; i < end; ++i) {
+      if (inputType.isDynamicDim(i))
+        return ShapedType::kDynamic;
+      n *= inputType.getDimSize(i);
+    }
+    return n;
+  };
+  return rankedLike(op->getResult(0).getType(),
+                    {product(0, axis), product(axis, rank)});
+}
+
+/// `onnx.TopK`: values and indices keep the input shape, with `k` on `axis`.
+static LogicalResult inferTopKResults(Operation *op,
+                                      SmallVectorImpl<Type> &out) {
+  if (op->getNumOperands() < 2 || op->getNumResults() != 2)
+    return failure();
+  auto inputType = dyn_cast<RankedTensorType>(op->getOperand(0).getType());
+  if (!inputType || inputType.getRank() == 0)
+    return failure();
+  int64_t rank = inputType.getRank();
+  int64_t axis = -1;
+  if (auto attr = op->getAttrOfType<IntegerAttr>("axis"))
+    axis = attr.getValue().getSExtValue();
+  if (axis < 0)
+    axis += rank;
+  if (axis < 0 || axis >= rank)
+    return failure();
+  SmallVector<int64_t> shape(inputType.getShape());
+  shape[axis] = ShapedType::kDynamic;
+  if (auto k = readConstInt1D(op->getOperand(1)); k && k->size() == 1)
+    shape[axis] = (*k)[0];
+  for (Value result : op->getResults()) {
+    RankedTensorType ranked = rankedLike(result.getType(), shape);
+    if (!ranked)
+      return failure();
+    out.push_back(ranked);
+  }
+  return success();
 }
 
 /// A tiny constant tensor, used to fold the Shape/Gather/Mul/Floor chain that
@@ -1301,10 +1486,19 @@ static std::optional<SmallVector<int64_t>> readConstInt1D(Value value) {
     return std::nullopt;
   SmallVector<int64_t> values;
   values.reserve(tensor->data.size());
+  // Elements are held as double, so the INT64_MAX / INT64_MIN "to the end"
+  // sentinels exporters put in Slice bounds arrive as +/-2^63, which is out of
+  // int64 range; saturate instead of casting.
+  constexpr double kTwoPow63 = 9223372036854775808.0;
   for (double element : tensor->data) {
     if (!std::isfinite(element) || element != std::trunc(element))
       return std::nullopt;
-    values.push_back(static_cast<int64_t>(element));
+    if (element >= kTwoPow63)
+      values.push_back(std::numeric_limits<int64_t>::max());
+    else if (element <= -kTwoPow63)
+      values.push_back(std::numeric_limits<int64_t>::min());
+    else
+      values.push_back(static_cast<int64_t>(element));
   }
   return values;
 }
@@ -1456,12 +1650,24 @@ static LogicalResult inferUnrankedOnnxResults(Operation *op,
   }
   if (name == "onnx.Shape")
     return pushSingle(inferShapeOpResult(op));
+  if (name == "onnx.Squeeze")
+    return pushSingle(inferSqueezeResult(op));
   if (name == "onnx.Unsqueeze")
     return pushSingle(inferUnsqueezeResult(op));
   if (name == "onnx.Slice")
     return pushSingle(inferSliceResult(op));
   if (name == "onnx.Upsample")
     return pushSingle(inferUpsampleResult(op));
+  if (name == "onnx.ConstantOfShape")
+    return pushSingle(inferConstantOfShapeResult(op));
+  if (name == "onnx.Expand")
+    return pushSingle(inferExpandResult(op));
+  if (name == "onnx.NonZero")
+    return pushSingle(inferNonZeroResult(op));
+  if (name == "onnx.Flatten")
+    return pushSingle(inferFlattenResult(op));
+  if (name == "onnx.TopK")
+    return inferTopKResults(op, out);
   return failure();
 }
 

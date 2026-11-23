@@ -33,8 +33,8 @@ module {
 
 // CHECK-LABEL: llvm.func @ring_f16(
 // CHECK: %[[ABSENT:.*]] = llvm.mlir.constant(0 : i32) : i32
-// RING: llvm.call @wrap_group_query_attention_ring_f16({{.*}}, %[[ABSENT]], %[[ABSENT]])
-// DEFAULT: llvm.call @wrap_group_query_attention_host_length({{.*}}, %[[ABSENT]], %[[ABSENT]])
+// RING: llvm.call @wrap_group_query_attention_ring_f16({{.*}}, %[[ABSENT]], %[[ABSENT]], {{.*}})
+// DEFAULT: llvm.call @wrap_group_query_attention_host_length({{.*}}, %[[ABSENT]], %[[ABSENT]], {{.*}})
 
 // -----
 
@@ -42,8 +42,8 @@ module {
 // CHECK-LABEL: llvm.func @ring_host_length(
 // CHECK: llvm.store %[[LENGTH:arg[0-9]+]],
 // CHECK: %[[PRESENT:.*]] = llvm.mlir.constant(1 : i32) : i32
-// RING: llvm.call @wrap_group_query_attention_ring_f16({{.*}}, %[[PRESENT]], %[[LENGTH]])
-// DEFAULT: llvm.call @wrap_group_query_attention_host_length({{.*}}, %[[PRESENT]], %[[LENGTH]])
+// RING: llvm.call @wrap_group_query_attention_ring_f16({{.*}}, %[[PRESENT]], %[[LENGTH]], {{.*}})
+// DEFAULT: llvm.call @wrap_group_query_attention_host_length({{.*}}, %[[PRESENT]], %[[LENGTH]], {{.*}})
 func.func @ring_host_length(%ctx: !hip.context, %length: i32,
     %q: memref<1x1x6144xf16>, %k: memref<1x1x1024xf16>, %v: memref<1x1x1024xf16>,
     %total: memref<i32>, %out: memref<1x1x6144xf16>,
@@ -433,4 +433,37 @@ module {
 }
 
 // CHECK-LABEL: llvm.func @smooth_fallback(
+// CHECK: llvm.call @wrap_group_query_attention_host_length(
+
+// -----
+
+module {
+  func.func @key_bias_fallback(%ctx: !hip.context,
+                                %query: memref<1x1x6144xf16, 1>,
+                                %key: memref<1x1x1024xf16, 1>,
+                                %value: memref<1x1x1024xf16, 1>,
+                                %past_key: memref<1x4x127x256xf16, 1>,
+                                %past_value: memref<1x4x127x256xf16, 1>,
+                                %seqlens_k: memref<1x1xi32, 1>,
+                                %total_seq_len: memref<i32, 1>,
+                                %key_bias: memref<1x128xf16, 1>,
+                                %output: memref<1x1x6144xf16, 1>,
+                                %present_key: memref<1x4x128x256xf16, 1>,
+                                %present_value: memref<1x4x128x256xf16, 1>) {
+    hip.gqa(%ctx)
+        ins(%query, %key, %value, %past_key, %past_value, %seqlens_k, %total_seq_len :
+            memref<1x1x6144xf16, 1>, memref<1x1x1024xf16, 1>, memref<1x1x1024xf16, 1>,
+            memref<1x4x127x256xf16, 1>, memref<1x4x127x256xf16, 1>,
+            memref<1x1xi32, 1>, memref<i32, 1>)
+        key_bias(%key_bias : memref<1x128xf16, 1>)
+        outs(%output, %present_key, %present_value :
+             memref<1x1x6144xf16, 1>, memref<1x4x128x256xf16, 1>, memref<1x4x128x256xf16, 1>)
+        {num_heads = 24 : i64, kv_num_heads = 4 : i64,
+         scale = 0.0625 : f32, softcap = 0.000000e+00 : f32,
+         do_rotary = 0 : i64, rotary_interleaved = 0 : i64}
+    return
+  }
+}
+
+// CHECK-LABEL: llvm.func @key_bias_fallback(
 // CHECK: llvm.call @wrap_group_query_attention_host_length(

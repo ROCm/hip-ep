@@ -112,6 +112,35 @@
      __builtin_amdgcn_wmma_f32_16x16x16_f16_w32((a), (b), (c))
 #endif
 
+/* LDS-only workgroup barrier.
+ *
+ * __syncthreads() is a full workgroup fence: on RDNA it emits s_waitcnt for both
+ * counters, s_barrier, AND buffer_gl0_inv, because a workgroup can span the two
+ * CUs of a WGP and global-memory coherence between them requires invalidating
+ * the per-CU L0. A loop that only ever synchronizes shared memory -- its global
+ * loads private to the thread that issues them, its global stores never read
+ * back by the workgroup -- pays for the store drain and the L0 flush on every
+ * step, and loses any L0 hits the next step's loads might have had.
+ *
+ * The "memory" clobber is what keeps the compiler from moving LDS accesses
+ * across the barrier; without it the raw s_barrier intrinsic is IntrNoMem and
+ * reordering is legal.
+ *
+ * The standalone s_barrier instruction is provided by the gfx9, gfx10 and
+ * gfx11 families. gfx12 replaced it with the s_barrier_signal/s_barrier_wait
+ * pair, and later architectures likewise lack it, so the inline asm fails to
+ * assemble there. Emit the asm only on the families that provide it and let
+ * every other target -- current or future -- fall back to __syncthreads(),
+ * which is always correct (a strictly stronger full-workgroup fence); it only
+ * reintroduces the redundant drain and L0 flush the raw asm skips. */
+#if defined(__HIP_DEVICE_COMPILE__) && defined(__AMDGCN__) &&                   \
+    (defined(__GFX9__) || defined(__GFX10__) || defined(__GFX11__))
+#define HIPDNN_LDS_BARRIER()                                                    \
+    __asm__ __volatile__("s_waitcnt lgkmcnt(0)\n\ts_barrier" ::: "memory")
+#else
+#define HIPDNN_LDS_BARRIER() __syncthreads()
+#endif
+
 #if defined(__HIPCC__)
 /* __device__/__forceinline__ come from hip_runtime.h; some callers (e.g.
  * matmul_nbits_kernel.hip) include this header before it, so pull it in here

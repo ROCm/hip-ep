@@ -73,19 +73,32 @@ setup throws `std::runtime_error`. See [native-vs-ir-comparison.md](../native-vs
 
 `Metadata.rocmlir_arch` records what the embedded rocMLIR code objects were
 built for, not only the GPU arch: it is `hip::compiler::rocMlirArtifactTarget()`,
-which is empty when `HIPDNN_EP_ROCMLIR` was off, the arch alone when rocMLIR
-compiled with default perfConfigs (`gfx1151`), and the arch with an
-`+autotune=<space>` suffix when `HIPDNN_EP_ROCMLIR_AUTOTUNE` selected
-benchmarked ones (`gfx1151+autotune=quick`). The perfConfig a kernel was tuned
-to is baked into its code object, so a tuned and an untuned artifact are not
-interchangeable even on the same GPU.
+which is empty when `HIPDNN_EP_ROCMLIR` was off, the arch with an
+`+autotune=<space>` suffix when rocMLIR benchmarked perfConfigs
+(`gfx1151+autotune=quick`, `gfx1151+autotune=full`), and the arch alone when
+`HIP_ROCMLIR_SKIP_BENCHMARKING` compiled the default perfConfig (`gfx1151`).
+There is no `+lut=` fingerprint. A provided `HIPDNN_EP_ROCMLIR_AUTOTUNE`
+skips the shipped `tools/problem-cache/lut/*.fb`; when it is unset, the shipped
+table is consulted before the search. `hip-rocmlir-compiler` still honors
+`--problem-cache` / `HIP_ROCMLIR_PROBLEM_CACHE` ahead of the search. The
+provider does not read `HIP_ROCMLIR_PROBLEM_CACHE`. `hip-rocmlir-compiler` and
+the ONNX Runtime provider both read the skip variable: unset or `0`
+benchmarks. A present empty value skips, and so does any other value. Autotune
+otherwise runs for a rocMLIR session. Unset `HIPDNN_EP_ROCMLIR_AUTOTUNE`
+selects `quick`. `quick`, `full`, and `exhaustive` are the only accepted
+values; anything else warns and stays on quick.
+That tool writes LLVM bitcode; it does not stamp `Metadata.rocmlir_arch`.
+The perfConfig a kernel was tuned to is baked into its code object, so a tuned
+and an untuned artifact are not interchangeable even on the same GPU.
 
 The model cache / EPContext identity is derived from the graph alone, so the EP
 refuses to load an artifact whose recorded value differs from the current one;
-delete the cache and recompile after changing GPUs or toggling either
-`HIPDNN_EP_ROCMLIR` or `HIPDNN_EP_ROCMLIR_AUTOTUNE`. Compilation fails outright
-if autotuning was requested but no HIP device could be reached, so the suffix
-never claims tuning that did not happen.
+delete the cache and recompile after changing GPUs, or toggling either
+`HIPDNN_EP_ROCMLIR`,
+`HIP_ROCMLIR_SKIP_BENCHMARKING`, or
+`HIPDNN_EP_ROCMLIR_AUTOTUNE`. Compilation fails outright
+if autotune is on but no HIP device could be reached, so the suffix never
+claims tuning that did not happen.
 
 `HIPDNN_EP_ROCMLIR_AUTOTUNE_BENCH` selects how candidates are timed and is not
 part of the suffix: both modes search the same space and record the same kind
@@ -227,6 +240,43 @@ constant. For these entries `inference_init` maps the source file instead of
 uploading it, and `hipdnn_ep_constant_get` returns null. See
 [constant-handling-design.md](constant-handling-design.md#disk-resident-gather-tables)
 for selection and the runtime read path.
+
+### rocMLIR kernel dispatch
+
+Each `hip.rocmlir` op lowers to one call:
+
+```text
+wrap_rocmlir(state, kernel_binary, func_name, block_size, grid_size,
+             kernargs, N * sizeof(void*))
+```
+
+- `kernel_binary` is the code object that `hip-fuse-rocmlir-anchor` outlined and
+  rocMLIR compiled. `func_name`, `block_size` and `grid_size` come from the
+  same compile.
+- `kernargs` holds `N` bare device pointers: the `ins` operands in order, then
+  the `outs` operands in order.
+- A kernel can have more than one result. rocMLIR appends one output argument
+  per kernel function result, in result order, so the `outs` order is the
+  result order. Extra results are chain values that are also read outside the
+  kernel.
+- Every operand must be contiguous; the lowering passes no layout metadata.
+
+The runtime wrapper does not depend on the operand count, so a kernel with
+more results needs no runtime change.
+
+A kernel argument that rocMLIR marks `rock.prefill` must hold a given value
+before every launch. A split-K kernel adds its partial sums into its output
+with atomics, so it asks for that output to start at 0. The compile stamps
+these arguments on the op as `prefill` (argument index, bytes per element,
+element bit pattern), and each one lowers to a call before the launch, on the
+same stream:
+
+```text
+wrap_rocmlir_prefill(state, kernargs[index], num_elements, bytes, pattern)
+```
+
+The autotuner fills the same arguments before every candidate launch, so a
+split-K config is timed with its fill.
 
 ---
 

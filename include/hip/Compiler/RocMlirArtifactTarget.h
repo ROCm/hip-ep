@@ -13,15 +13,17 @@
 
 namespace hip::compiler {
 
-/// The GPU arch CompilerDriver would embed rocMLIR code objects for right now,
-/// or "" when the rocMLIR path is off (HIPDNN_EP_ROCMLIR unset/0, or a build
-/// without ENABLE_ROCMLIRTRITON).
+/// What CompilerDriver would embed rocMLIR code objects for right now, or ""
+/// when the rocMLIR path is off (HIPDNN_EP_ROCMLIR unset/0, or a build without
+/// ENABLE_ROCMLIRTRITON).
 ///
-/// The model cache / EPContext identity is derived from the graph alone, so an
-/// artifact that carries an arch-specific HSACO could otherwise be reused on
-/// a different GPU or after HIPDNN_EP_ROCMLIR is toggled. The level-1 pass
-/// records this value in the artifact metadata and the custom op refuses to
-/// load an artifact whose recorded value differs from the current one.
+/// The string is the GPU arch, plus `+autotune=<space>` when benchmarking is
+/// on. There is no `+lut=` suffix, whether or not the shipped problem-cache
+/// LUT was consulted. The model cache / EPContext identity is derived
+/// from the graph alone, so an artifact that carries an arch-specific HSACO
+/// could otherwise be reused on a different GPU, or after HIPDNN_EP_ROCMLIR
+/// or the autotune space changes. The level-1 pass records this value and the
+/// custom op refuses a mismatch.
 std::string rocMlirArtifactTarget();
 
 } // namespace hip::compiler

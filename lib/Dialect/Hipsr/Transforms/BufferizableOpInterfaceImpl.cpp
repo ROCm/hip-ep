@@ -117,8 +117,10 @@ struct ConstantBufferizableModel
                                           const BufferizationState &,
                                           SmallVector<Value> &) const {
     auto tensorType = cast<TensorType>(value.getType());
+    // defaultMemorySpaceFn takes TensorLikeType. TensorType implements that
+    // interface, but MSVC will not convert it through std::function.
     std::optional<Attribute> memorySpace =
-        options.defaultMemorySpaceFn(tensorType);
+        options.defaultMemorySpaceFn(cast<TensorLikeType>(tensorType));
     if (!memorySpace) {
       return op->emitError("could not infer memory space");
     }

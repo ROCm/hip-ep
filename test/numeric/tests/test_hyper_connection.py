@@ -45,6 +45,9 @@ def _vi(name, dtype, shape):
         # Flattened streams, 4 branches, hidden scaled down from 2560 to 8.
         (["batch", "seq", 32], ["batch", "seq", 32], 4, 0.25, np.float16),
         (["batch", "seq", 10240], ["batch", "seq", 10240], 4, 0.25, np.float16),
+        # Prefill-sized grids take the 16-byte chunked kernel.
+        ([1, 64, 10240], [1, 64, 10240], 4, 0.25, np.float16),
+        ([1, 64, 10240], [1, 64, 4], 4, 1.0, np.float32),
         # Per-branch gate on flattened streams.
         ([2, 3, 20], [2, 3, 4], 4, 1.0, np.float32),
         # Grouped streams, per-feature gate.
