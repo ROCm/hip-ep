@@ -116,6 +116,10 @@ set(_kernel_sources
     hip/scaled_masked_softmax_kernel.hip
     hip/nonzero_kernel.hip
     hip/strided_copy_kernel.hip
+    hip/kquant/kquant_matmul_kernel.hip
+    hip/kquant/kquant_mmq_kernel.hip
+    hip/token_major_gqa/token_major_gqa_kernel.hip
+    hip/token_major_gqa/token_major_gqa_tile.hip
 )
 
 # MatMulNBits offline autotune table.

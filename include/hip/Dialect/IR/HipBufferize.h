@@ -154,6 +154,18 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     SwigluOp::attachInterface<HipDstBufferizableModel<SwigluOp>>(*ctx);
     ScaledMaskedSoftmaxOp::attachInterface<
         HipDstBufferizableModel<ScaledMaskedSoftmaxOp>>(*ctx);
+    QuantizeQ8_1Op::attachInterface<HipDstBufferizableModel<QuantizeQ8_1Op>>(
+        *ctx);
+    SkipRmsNormQ8_1Op::attachInterface<
+        HipDstBufferizableModel<SkipRmsNormQ8_1Op>>(*ctx);
+    KQuantMatmulOp::attachInterface<HipDstBufferizableModel<KQuantMatmulOp>>(
+        *ctx);
+    KQuantMatmulQ8_1Op::attachInterface<
+        HipDstBufferizableModel<KQuantMatmulQ8_1Op>>(*ctx);
+    KQuantSwigluQ8_1Op::attachInterface<
+        HipDstBufferizableModel<KQuantSwigluQ8_1Op>>(*ctx);
+    TokenMajorGqaOp::attachInterface<HipDstBufferizableModel<TokenMajorGqaOp>>(
+        *ctx);
     ResizeOp::attachInterface<HipDstBufferizableModel<ResizeOp>>(*ctx);
     GridSampleOp::attachInterface<HipDstBufferizableModel<GridSampleOp>>(*ctx);
     RoiAlignOp::attachInterface<HipDstBufferizableModel<RoiAlignOp>>(*ctx);

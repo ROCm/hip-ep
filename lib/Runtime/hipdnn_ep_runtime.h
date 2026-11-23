@@ -2057,6 +2057,69 @@ int wrap_gated_delta_net(RuntimeState *state, const void *qkv,
                          int64_t head_size_v, float scale,
                          int64_t element_size_bytes);
 
+//===----------------------------------------------------------------------===//
+// K-quant projections and token-major GQA (hip.quantize_q8_1,
+// hip.skip_rms_norm_q8_1, hip.kquant_*, hip.token_major_gqa)
+//===----------------------------------------------------------------------===//
+//
+// format_id and sum_mode are kquant_abi.h's HIP_KQUANT_FORMAT_* and
+// HIP_Q8_1_SUM_*. Activations are [batch_count, M, K]; packed weights [N, K].
+// Each returns non-zero, before any launch, when the extents disagree.
+
+int wrap_quantize_q8_1(RuntimeState *state, const float *activation,
+                       void *quantized_activation, int64_t M, int64_t K,
+                       int64_t batch_count, int64_t sum_mode,
+                       int64_t rows_per_token);
+
+// The leading three extents of each operand, which must agree.
+int wrap_skip_rms_norm_q8_1(RuntimeState *state, const float *input,
+                            const float *skip, const float *gamma, float *sum,
+                            void *quantized_activation, int64_t input_dim0,
+                            int64_t input_dim1, int64_t input_dim2,
+                            int64_t skip_dim0, int64_t skip_dim1,
+                            int64_t skip_dim2, int64_t gamma_elements,
+                            int64_t sum_dim0, int64_t sum_dim1,
+                            int64_t sum_dim2, int64_t quantized_dim0,
+                            int64_t quantized_dim1, int64_t quantized_dim2,
+                            int64_t K, float epsilon, int64_t sum_mode,
+                            int64_t rows_per_token);
+
+int wrap_kquant_matmul(RuntimeState *state, const float *activation,
+                       const void *packed_weights, float *output, int64_t M,
+                       int64_t N, int64_t K, int64_t batch_count,
+                       int64_t format_id);
+
+int wrap_kquant_matmul_q8_1(RuntimeState *state,
+                            const void *quantized_activation,
+                            const void *packed_weights, float *output,
+                            int64_t M, int64_t N, int64_t K,
+                            int64_t batch_count, int64_t format_id,
+                            int64_t sum_mode, int64_t rows_per_token);
+
+int wrap_kquant_swiglu_q8_1(RuntimeState *state,
+                            const void *quantized_activation,
+                            const void *gate_weights, const void *up_weights,
+                            float *output, int64_t q8_dim0, int64_t q8_dim1,
+                            int64_t q8_dim2, int64_t gate_weight_bytes,
+                            int64_t up_weight_bytes, int64_t output_dim0,
+                            int64_t output_dim1, int64_t output_dim2, int64_t K,
+                            int64_t N, int64_t gate_format_id,
+                            int64_t up_format_id, int64_t sum_mode,
+                            int64_t rows_per_token);
+
+// query and output [B, S, H, D] f32; caches [B, C, G, D] f16; mask
+// [1|B, 1, S, C] f16. written_rows (nullable) holds written_row_count i64
+// cache rows.
+int wrap_token_major_gqa(RuntimeState *state, const float *query,
+                         const void *key_cache, const void *value_cache,
+                         const void *mask, float *output, int64_t batch_count,
+                         int64_t query_tokens, int64_t query_heads,
+                         int64_t kv_heads, int64_t cache_capacity,
+                         int64_t head_dimension, int64_t mask_batch_count,
+                         int64_t mask_query_tokens, int64_t output_query_tokens,
+                         float scale, const void *written_rows,
+                         int64_t written_row_count);
+
 // fp16 only. past_* may alias present_*. head_size is query width / num_heads
 // (/ (num_heads + 2 * kv_num_heads) for a packed query, when key and value
 // are null and their dims ignored) and capacity is past_key dim 2; the

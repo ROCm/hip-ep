@@ -4364,6 +4364,103 @@ HIP_KERNEL_API int hip_gemv_f16_kn(void* stream, const void* a, const void* B,
 HIP_KERNEL_API int hip_gemm_wmma_fp16(void* stream, const void* A, const void* B,
                        void* C, int M, int K, int N);
 
+/* ===================================================================
+ * K-quant projections and token-major GQA (hip/kquant, hip/token_major_gqa)
+ *
+ * Packed weights are an [N, K] matrix of Q4_K, Q5_K or Q6_K blocks
+ * (format_id: HIP_KQUANT_FORMAT_*), read in place; Q8_1 activations are
+ * 36-byte blocks of 32 values with the sum field `sum_mode` names
+ * (HIP_Q8_1_SUM_*). Layouts and constants are in kquant_abi.h. Leading
+ * dimensions fold into batch_count; M rows of K values a batch. Return 0 on
+ * success.
+ * =================================================================== */
+
+HIP_KERNEL_API int hip_quantize_q8_1(void *stream, const float *activation,
+                                     void *quantized_activation, int64_t M,
+                                     int64_t K, int64_t batch_count,
+                                     int sum_mode, int64_t rows_per_token);
+
+/* residual = lhs + rhs, then RMSNorm(residual) * scale into Q8_1. */
+HIP_KERNEL_API int hip_skip_rms_norm_q8_1(
+    void *stream, const float *lhs, const float *rhs, const float *scale,
+    float *residual, void *quantized_activation, int64_t row_count, int64_t K,
+    float epsilon, int sum_mode, int64_t rows_per_token);
+
+/* Two to eight rows run llama.cpp's MMVQ over several columns, whose
+ * Q4_K/Q5_K minimums take the quants' integer sums as llama.cpp's do,
+ * whatever `sum_mode` stored. */
+HIP_KERNEL_API int hip_kquant_matmul_q8_1(
+    void *stream, const void *quantized_activation, const void *packed_weights,
+    float *output, int64_t M, int64_t N, int64_t K, int64_t batch_count,
+    int format_id, int sum_mode, int64_t rows_per_token);
+
+/* SiLU(activation * gate^T) * (activation * up^T). Several rows need
+ * `output_scratch` of M * N floats for the gate projection. */
+HIP_KERNEL_API int hip_kquant_swiglu_q8_1(
+    void *stream, const void *quantized_activation, const void *gate_weights,
+    const void *up_weights, float *output, int64_t M, int64_t N, int64_t K,
+    int64_t batch_count, int gate_format_id, int up_format_id, int sum_mode,
+    int64_t rows_per_token, void *output_scratch, size_t output_scratch_size);
+
+/* The F32 activation is quantized into `q8_1_scratch` on the way. */
+HIP_KERNEL_API int hip_kquant_matmul(
+    void *stream, const float *activation, const void *packed_weights,
+    float *output, int64_t M, int64_t N, int64_t K, int64_t batch_count,
+    int format_id, void *q8_1_scratch, size_t q8_1_scratch_size);
+
+/* llama.cpp's quantized tile product (MMQ) on gfx1151, for at least
+ * HIP_KQUANT_MMQ_MIN_INPUT_ROWS rows and N a multiple of the format's row
+ * tile; K is a multiple of 256. MMQ-layout activations need 128 * 4 Q8_1
+ * blocks of addressable padding past the last input tile. */
+HIP_KERNEL_API int hip_kquant_mmq_is_supported(int64_t M, int64_t N, int64_t K,
+                                               int64_t batch_count,
+                                               int format_id);
+
+/* Whether the product must start from standard Q8_1 blocks
+ * (hip_kquant_mmq_from_q8_1) because the format reads their sums; otherwise
+ * F32 activations may be quantized straight into the MMQ layout. */
+HIP_KERNEL_API int hip_kquant_mmq_reads_q8_1(int format_id);
+
+HIP_KERNEL_API int hip_kquant_mmq_packed_q8_1(void *stream,
+                                              const void *mmq_activation,
+                                              const void *packed_weights,
+                                              float *output, int64_t M,
+                                              int64_t N, int64_t K,
+                                              int64_t batch_count,
+                                              int format_id);
+
+HIP_KERNEL_API int hip_kquant_mmq_from_q8_1(
+    void *stream, const void *quantized_activation, void *mmq_scratch,
+    const void *packed_weights, float *output, int64_t M, int64_t N, int64_t K,
+    int64_t batch_count, int format_id);
+
+HIP_KERNEL_API int hip_kquant_mmq_f32(void *stream, const float *activation,
+                                      void *q8_scratch,
+                                      const void *packed_weights,
+                                      float *output, int64_t M, int64_t N,
+                                      int64_t K, int64_t batch_count,
+                                      int format_id);
+
+/* Attention of F32 `query` [B, T, H, D] over a token-major F16 cache
+ * [B, capacity, G, D] under an additive F16 `mask` [1|B, T, capacity], into
+ * F32 `output` [B, T, H, D], on llama.cpp's tile kernel. `written_rows`, when
+ * not null, are the `written_row_count` cache rows just written: rows past
+ * the largest are not read. `scratch` of `scratch_size` bytes holds partial
+ * results; hip_token_major_gqa_scratch_size bytes are what the shape wants, and
+ * less runs with fewer parallel blocks, down to two. */
+HIP_KERNEL_API int hip_token_major_gqa(
+    void *stream, const float *query, const void *key_cache,
+    const void *value_cache, const void *mask, float *output,
+    int64_t batch_count, int64_t query_tokens, int64_t query_heads,
+    int64_t kv_heads, int64_t cache_capacity, const int64_t *written_rows,
+    int64_t written_row_count, int64_t head_dim, int64_t mask_batch_count,
+    float scale, void *scratch, size_t scratch_size);
+
+/* 0 when hip_token_major_gqa takes no call of this shape. */
+HIP_KERNEL_API size_t hip_token_major_gqa_scratch_size(
+    int64_t batch_count, int64_t query_tokens, int64_t query_heads,
+    int64_t kv_heads, int64_t cache_capacity, int64_t head_dim);
+
 #ifdef __cplusplus
 }
 #endif
