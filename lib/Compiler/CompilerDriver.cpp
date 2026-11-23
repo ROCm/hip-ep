@@ -58,6 +58,17 @@
 #include <memory>
 #include <sstream>
 
+#if defined(ENABLE_ROCMLIRTRITON) && defined(HIPDNN_EP_LINK_HIP_HOST) &&       \
+    defined(HIPDNN_HIP_RUNTIME_LIB)
+// File scope, and each declaration is extern. Inside extern "C" { }, a const
+// object is still a definition, so GCC rejects the missing initializer and
+// the unknown array bound. Inside the anonymous namespace below, extern "C"
+// stays a member of that namespace and misses the generated blob.
+extern "C" const unsigned char *const kRocmlirProblemCacheBlobs[];
+extern "C" const size_t kRocmlirProblemCacheBlobSizes[];
+extern "C" const size_t kRocmlirProblemCacheBlobCount;
+#endif
+
 namespace hip::compiler {
 
 namespace {
