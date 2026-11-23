@@ -589,7 +589,9 @@ struct SliceDecompose : public mlir::RewritePattern {
     //   x[1] view = extract_slice x[1] [3] [2]                     -> x[1],
     //   x[3], x[5] hip.reverse(view) {axes = [0]}                        ->
     //   x[5], x[3], x[1]
-    bool noInBoundsView = false;
+    // An input with a zero-sized dimension has no elements, so every slice of
+    // it is empty, including when the zero-sized axis is not sliced.
+    bool noInBoundsView = llvm::is_contained(dataType.getShape(), 0);
     llvm::SmallVector<int64_t> reversedAxes;
     for (size_t k = 0; k < axesVec.size(); ++k) {
       int64_t axis = axesVec[k];

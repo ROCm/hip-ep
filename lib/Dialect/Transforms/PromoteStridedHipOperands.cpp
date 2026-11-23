@@ -29,10 +29,10 @@
 //
 // hip.concat reads each input from one offset-aware pointer, so a contiguous
 // view (one flat run with a descriptor offset) is read in place. Each strided
-// input still needs a copy before the kernel. When those copies plus the
-// kernel launch at least as often as one copy per input, the concat becomes
-// one copy per input into its output slot, which is what insert_slice
-// bufferizes to:
+// input still needs a copy before the kernel. The concat kernel launches once
+// per 16 non-empty inputs. When those copies plus the kernel launches are at
+// least as many as one copy per input, the concat becomes one copy per input
+// into its output slot, which is what insert_slice bufferizes to:
 //
 //   Before:
 //     hip.concat(%ctx) ins(%a, %b : memref<64x64x1xf32, strided<[128, 2, 1]>>,
@@ -168,11 +168,20 @@ static bool splitStridedConcat(ConcatOp concat) {
   auto outputType = dyn_cast<MemRefType>(concat.getOutput().getType());
   if (!outputType || !outputType.hasStaticShape() || concat->getNumResults())
     return false;
+  const int64_t axis = concat.getAxis();
   int64_t strided = llvm::count_if(concat.getInputs(), [](Value input) {
     return !isContiguousView(cast<MemRefType>(input.getType()));
   });
   int64_t inputs = concat.getInputs().size();
-  if (strided == 0 || strided + 1 < inputs)
+  // hip_concat launches once per 16 inputs with a non-zero width (its
+  // CC_MAX_INPUTS window), so a promoted concat pays one launch per window.
+  constexpr int64_t kInputsPerLaunch = 16;
+  int64_t nonEmpty = llvm::count_if(concat.getInputs(), [axis](Value input) {
+    return cast<MemRefType>(input.getType()).getDimSize(axis) != 0;
+  });
+  int64_t launches = std::max<int64_t>(1, (nonEmpty + kInputsPerLaunch - 1) /
+                                              kInputsPerLaunch);
+  if (strided == 0 || strided + launches < inputs)
     return false;
   if (!llvm::all_of(concat.getInputs(), [](Value input) {
         return cast<MemRefType>(input.getType()).hasStaticShape();
@@ -181,7 +190,6 @@ static bool splitStridedConcat(ConcatOp concat) {
 
   OpBuilder builder(concat);
   Location loc = concat.getLoc();
-  int64_t axis = concat.getAxis();
   int64_t rank = outputType.getRank();
   int64_t start = 0;
   for (Value input : concat.getInputs()) {

@@ -423,3 +423,20 @@ func.func @concat_one_strided_input_promoted(
     outs(%out : memref<4x12xf32>) {axis = 1 : i64}
   return
 }
+
+// ----------------------------------------------------------------------------
+// hip.concat with 17 inputs and 15 strided ones. The concat kernel launches once
+// per 16 inputs, so a promoted concat pays two launches. Promoting the 15 strided
+// inputs costs 17 launches, which is no cheaper than one slot copy per input, so
+// the concat is split into 17 copies.
+// ----------------------------------------------------------------------------
+// CHECK-LABEL: func.func @concat_17_inputs_split
+// CHECK-NOT:     memref.alloc
+// CHECK-COUNT-17: memref.copy
+// CHECK-NOT:     hip.concat
+func.func @concat_17_inputs_split(%ctx: !hip.context, %a0: memref<2x1xf32, strided<[2, 1]>>, %a1: memref<2x1xf32, strided<[2, 1]>>, %a2: memref<2x1xf32, strided<[2, 1]>>, %a3: memref<2x1xf32, strided<[2, 1]>>, %a4: memref<2x1xf32, strided<[2, 1]>>, %a5: memref<2x1xf32, strided<[2, 1]>>, %a6: memref<2x1xf32, strided<[2, 1]>>, %a7: memref<2x1xf32, strided<[2, 1]>>, %a8: memref<2x1xf32, strided<[2, 1]>>, %a9: memref<2x1xf32, strided<[2, 1]>>, %a10: memref<2x1xf32, strided<[2, 1]>>, %a11: memref<2x1xf32, strided<[2, 1]>>, %a12: memref<2x1xf32, strided<[2, 1]>>, %a13: memref<2x1xf32, strided<[2, 1]>>, %a14: memref<2x1xf32, strided<[2, 1]>>, %a15: memref<2x1xf32>, %a16: memref<2x1xf32>, %out: memref<2x17xf32>) {
+  hip.concat(%ctx)
+    ins(%a0, %a1, %a2, %a3, %a4, %a5, %a6, %a7, %a8, %a9, %a10, %a11, %a12, %a13, %a14, %a15, %a16 : memref<2x1xf32, strided<[2, 1]>>, memref<2x1xf32, strided<[2, 1]>>, memref<2x1xf32, strided<[2, 1]>>, memref<2x1xf32, strided<[2, 1]>>, memref<2x1xf32, strided<[2, 1]>>, memref<2x1xf32, strided<[2, 1]>>, memref<2x1xf32, strided<[2, 1]>>, memref<2x1xf32, strided<[2, 1]>>, memref<2x1xf32, strided<[2, 1]>>, memref<2x1xf32, strided<[2, 1]>>, memref<2x1xf32, strided<[2, 1]>>, memref<2x1xf32, strided<[2, 1]>>, memref<2x1xf32, strided<[2, 1]>>, memref<2x1xf32, strided<[2, 1]>>, memref<2x1xf32, strided<[2, 1]>>, memref<2x1xf32>, memref<2x1xf32>)
+    outs(%out : memref<2x17xf32>) {axis = 1 : i64}
+  return
+}

@@ -232,6 +232,25 @@ module {
     return %r : tensor<?xf32>
   }
 
+  // Test 4h: the zero-sized dimension is axis 0 and is not sliced, so only
+  // the whole-input check makes the result empty.
+  func.func @test_slice_zero_sized_unsliced_axis(%input: tensor<0x6xf32>) -> tensor<0x3xf32> {
+    // CHECK-LABEL: func.func @test_slice_zero_sized_unsliced_axis
+    %starts = arith.constant dense<[-1]> : tensor<1xi64>
+    %ends   = arith.constant dense<[-7]> : tensor<1xi64>
+    %axes   = arith.constant dense<[1]> : tensor<1xi64>
+    %steps  = arith.constant dense<[-2]> : tensor<1xi64>
+    %r = "onnx.Slice"(%input, %starts, %ends, %axes, %steps)
+        : (tensor<0x6xf32>, tensor<1xi64>, tensor<1xi64>,
+           tensor<1xi64>, tensor<1xi64>) -> tensor<0x3xf32>
+
+    // CHECK-NOT: tensor.extract_slice
+    // CHECK-NOT: hip.reverse
+    // CHECK: tensor.empty() : tensor<0x3xf32>
+
+    return %r : tensor<0x3xf32>
+  }
+
   // Test 5: non-constant starts (block argument) also falls back to the
   // native op — the decompose pattern needs to read the values.
   func.func @test_slice_native_dynamic_starts(
