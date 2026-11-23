@@ -144,17 +144,6 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   // 1b*. HIP-to-HIP pattern rewriting, Such as Q/DQ fusion
   pm.addPass(mlir::hip::createHipFusionTransformPass());
 
-  // 1b**. Opt-in compile-time evaluation of constant-input boolean tensor
-  //       ops. Runs after fusion so folding cannot break fusion patterns, and
-  //       before externalization so folded producers never reach constant
-  //       storage assignment. Gated off by default while the evaluator
-  //       coverage grows; enable per-build with
-  //       HIPDNN_EP_FOLD_TENSOR_CONSTANTS=1 or per-pipeline with
-  //       fold-tensor-constants=true.
-  if (options.foldTensorConstants ||
-      hip_env_is_on("HIPDNN_EP_FOLD_TENSOR_CONSTANTS"))
-    pm.addPass(mlir::hip::createFoldTensorConstantsPass());
-
   // Apply constant storage policy only after HIP shape inference has consumed
   // every inspectable dense carrier payload. This keeps compile-time shape
   // values visible through conversion and reification while still replacing
@@ -393,7 +382,8 @@ void mlir::hip::buildOnnxToHipPipelineTail(
 
 void mlir::hip::buildOnnxToHipPipelineHead(OpPassManager &pm,
                                            hipdnnHandle_t handle,
-                                           CompiledGraphMap output_graphs) {
+                                           CompiledGraphMap output_graphs,
+                                           bool foldTensorConstants) {
   // Pre-lowering ONNX-dialect simplifications (currently: CastLike -> Cast
   // + drop dead type-donor function arguments). Pure ONNX dialect; runs
   // BEFORE hip-add-context-arg so it operates in the original ONNX
@@ -470,12 +460,24 @@ void mlir::hip::buildOnnxToHipPipelineHead(OpPassManager &pm,
   // hip.constant carriers.
   addPluginPassesForSlot(pm,
                          ::hip::compiler::PipelineSlot::AfterConvertOnnxToHip);
+
+  // Opt-in compile-time evaluation of constant-input boolean tensor ops.
+  // Last head pass so it sees plugin-emitted carriers, and so folding
+  // happens before any fusion flow starts: the rocMLIR fusion runs between
+  // head and tail, and hip-fusion-transform runs in the tail. Both then see
+  // constants instead of foldable op chains. Gated off by default while the
+  // evaluator coverage grows; enable per-build with
+  // HIPDNN_EP_FOLD_TENSOR_CONSTANTS=1 or per-pipeline with
+  // fold-tensor-constants=true.
+  if (foldTensorConstants || hip_env_is_on("HIPDNN_EP_FOLD_TENSOR_CONSTANTS"))
+    pm.addPass(createFoldTensorConstantsPass());
 }
 
 void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
                                        const OnnxToHipPipelineOptions &options,
                                        morphizen::FileSystem *fs) {
-  buildOnnxToHipPipelineHead(pm);
+  buildOnnxToHipPipelineHead(pm, /*handle=*/nullptr, /*output_graphs=*/{},
+                             options.foldTensorConstants);
   buildOnnxToHipPipelineTail(pm, options, fs);
 }
 
@@ -484,7 +486,8 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
                                        morphizen::FileSystem *fs,
                                        hipdnnHandle_t handle,
                                        CompiledGraphMap output_graphs) {
-  buildOnnxToHipPipelineHead(pm, handle, std::move(output_graphs));
+  buildOnnxToHipPipelineHead(pm, handle, std::move(output_graphs),
+                             options.foldTensorConstants);
   buildOnnxToHipPipelineTail(pm, options, fs);
 }
 

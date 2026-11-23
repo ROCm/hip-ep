@@ -161,7 +161,7 @@ the selected perfConfig string are printed only with `--verbose`.
 | `hip-fold-constant-extracts` | func.func | Resolve constant-index `tensor.extract` of vectors assembled with `tensor.insert_slice` (ONNX shape vectors) to the `from_elements` operand or integer constant element they read. |
 | `hip-infer-shapes` | module | Refine `?` dims on HIP DPS result types via `ReifyRankedShapedTypeOpInterface`. |
 | `hip-fusion-transform` | module | HIP-to-HIP rewriting at unrestricted arity (one op → many, many → one, or subgraph → subgraph). The patterns live in `lib/Dialect/Transforms/fusion_pattern/` — PDLL files compiled into the library, plus native C++ for rewrites whose shape depends on the matched op's rank — and share one `RewritePatternSet`. Includes the GELU fusion: collapses primitive `hip.mul`/`add`/`tanh`/`erf`/`div`/`pow` chains to one `hip.gelu` when the coefficients are statically known scalar or one-element floating-point constants, with supported casts evaluated. |
-| `hip-fold-tensor-constants` | module | Opt-in (`fold-tensor-constants=true` pipeline option or `HIPDNN_EP_FOLD_TENSOR_CONSTANTS=1`): evaluate element-wise boolean HIP ops (`hip.not`/`hip.and`/`hip.or`) whose data inputs are inline `hip.constant` carriers of exactly the static result type, replacing results whose every use is a same-block DPS input with a new inline carrier; consumed carriers are erased once dead. Does nothing when duplicate explicit serialization orders exist. Runs after `hip-fusion-transform`, before `hip-externalize-constants`. |
+| `hip-fold-tensor-constants` | module | Opt-in (`fold-tensor-constants=true` pipeline option or `HIPDNN_EP_FOLD_TENSOR_CONSTANTS=1`): evaluate element-wise boolean HIP ops (`hip.not`/`hip.and`/`hip.or`) whose data inputs are inline `hip.constant` carriers of exactly the static result type, replacing results whose every use is a same-block DPS input with a new inline carrier; consumed carriers are erased once dead. Does nothing when duplicate explicit serialization orders exist. Last pass of the pipeline head: after `convert-onnx-to-hip` and the `AfterConvertOnnxToHip` plugin slot, before any fusion flow and before `hip-externalize-constants`. |
 | `hip-split-duplicate-dps-inits` | func.func | De-alias DPS init operands that CSE merged onto one `tensor.empty`, so an op that reads back its own outputs (e.g. `hip.gqa` present K/V) does not share a buffer (pre-bufferize). |
 | `hip-resolve-tensor-dims` | func.func | Fold `tensor.dim` of reshape chains into root-dim arithmetic (pre-bufferize). |
 | `hip-loop-body-to-out-params` | module | Promote outlined loop bodies to the out-param ABI. |
@@ -278,6 +278,10 @@ ONNX → HIP  (buildOnnxToHipPipeline)
   func.func(hip-fold-batchnorm)      (shared with the rocMLIR head, so it runs
                                       before any conv rewrite or kernel outlining)
   «slot: AfterConvertOnnxToHip»  (supported hip.constant producer boundary)
+  hip-fold-tensor-constants          (opt-in: fold-tensor-constants=true or
+                                      HIPDNN_EP_FOLD_TENSOR_CONSTANTS=1; last
+                                      head pass, before any fusion flow and
+                                      before externalization)
   func.func(hip-decompose-conv-transpose)  (rank-3 -> rank-4 hip.conv before
                                            the MIOpen lowering; rocmlir-pipeline
                                            runs the same pass in its own head)
@@ -285,9 +289,6 @@ ONNX → HIP  (buildOnnxToHipPipeline)
   hip-infer-shapes
   hip-fusion-transform               (must precede externalization: its patterns
                                       read hip.constant payloads)
-  hip-fold-tensor-constants          (opt-in: fold-tensor-constants=true or
-                                      HIPDNN_EP_FOLD_TENSOR_CONSTANTS=1; after
-                                      fusion, before externalization)
   hip-externalize-constants
   canonicalize ; cse
   func.func(hip-split-duplicate-dps-inits)

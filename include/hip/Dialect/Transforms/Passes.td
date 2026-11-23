@@ -483,7 +483,9 @@ def FoldTensorConstantsPass
     graph outputs stay runtime-allocated. Carriers whose payloads were
     consumed are erased only when they become dead.
 
-    Opt-in; runs after shape inference and HIP fusion, before
+    Opt-in; runs as the last pass of the ONNX-to-HIP pipeline head, after
+    conversion and the AfterConvertOnnxToHip plugin slot and before any
+    fusion flow (rocMLIR fusion or hip-fusion-transform), well before
     --hip-externalize-constants. The pass creates no serialization_order on
     new carriers and does nothing if duplicate explicit orders exist, so it
     cannot hide the externalizer's duplicate-order diagnostic.

@@ -101,9 +101,13 @@ void buildOnnxToHipPipelineTail(OpPassManager &pm,
 /// work between the two -- the rocMLIR path outlines kernels and compiles them
 /// there, which has to happen on tensor-level HIP IR before the tail
 /// bufferizes. \p handle, when non-null, inserts the hipDNN graph passes.
+/// \p foldTensorConstants adds the opt-in hip-fold-tensor-constants pass at
+/// the end of the head (also enabled by HIPDNN_EP_FOLD_TENSOR_CONSTANTS=1),
+/// so constant-input boolean ops fold before either fusion flow starts.
 void buildOnnxToHipPipelineHead(OpPassManager &pm,
                                 hipdnnHandle_t handle = nullptr,
-                                CompiledGraphMap output_graphs = {});
+                                CompiledGraphMap output_graphs = {},
+                                bool foldTensorConstants = false);
 
 /// Build the ONNX-to-HIP compilation pipeline.
 ///
