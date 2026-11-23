@@ -65,6 +65,169 @@
   },
   "leaves": [
     {
+      "leaf": "gqa/kv_pareto/Xfp16_Wi8_Yfp16",
+      "package_executable": "hipdnn-kernel-ut-gqa-kv-pareto-xfp16-wi8-yfp16.exe",
+      "source": "test_gqa_kv_pareto.cpp",
+      "capabilities": {
+        "coverage": true,
+        "timing": "shared",
+        "mode": "lookup",
+        "rank": false
+      },
+      "suite": {
+        "args": [
+          "--coverage"
+        ],
+        "coverage_default": "HIPDNN_UT_COVERAGE, else 1"
+      },
+      "custom": {
+        "selected_by": "any custom-case flag",
+        "params": [
+          {
+            "name": "batch",
+            "flag": "--batch",
+            "make": "B",
+            "type": "int",
+            "exe_default": 1,
+            "make_default": 1,
+            "description": "Batch size. The codec supports one sequence.",
+            "choices": [
+              1
+            ]
+          },
+          {
+            "name": "heads",
+            "flag": "--heads",
+            "make": "H",
+            "type": "int",
+            "exe_default": 24,
+            "make_default": 24,
+            "description": "Query heads sharing four KV heads.",
+            "choices": [
+              16,
+              24
+            ]
+          },
+          {
+            "name": "kv_heads",
+            "flag": "--kv-heads",
+            "make": "G",
+            "type": "int",
+            "exe_default": 4,
+            "make_default": 4,
+            "description": "KV heads. Fixed by the codec contract.",
+            "choices": [
+              4
+            ]
+          },
+          {
+            "name": "head_dim",
+            "flag": "--head-dim",
+            "make": "D",
+            "type": "int",
+            "exe_default": 256,
+            "make_default": 256,
+            "description": "True attention head dimension.",
+            "choices": [
+              256
+            ]
+          },
+          {
+            "name": "new_tokens",
+            "flag": "--new-tokens",
+            "make": "SQ",
+            "type": "int",
+            "exe_default": 17,
+            "make_default": 17,
+            "description": "New prompt tokens. One token with history selects decode."
+          },
+          {
+            "name": "past",
+            "flag": "--past",
+            "make": "PAST",
+            "type": "int",
+            "exe_default": 129,
+            "make_default": 129,
+            "description": "Packed history rows preceding the new tokens."
+          },
+          {
+            "name": "capacity",
+            "flag": "--capacity",
+            "make": "CAPACITY",
+            "type": "int",
+            "exe_default": 4096,
+            "make_default": 4096,
+            "description": "Physical packed-cache capacity, including unused rows."
+          },
+          {
+            "name": "seed",
+            "flag": "--seed",
+            "make": "SEED",
+            "type": "int",
+            "exe_default": 1234,
+            "make_default": 1234,
+            "description": "Positive RNG seed for synthetic Q/K/V and packed history."
+          },
+          {
+            "name": "scale",
+            "flag": "--scale",
+            "make": "SCALE",
+            "type": "float",
+            "exe_default": 0.0625,
+            "make_default": "0.0625",
+            "description": "Finite positive attention scale."
+          }
+        ],
+        "constraints": [
+          "B=1, H in {16,24}, G=4 and D=256.",
+          "New tokens: 1..262144, capacity: 1..262272, past + new tokens <= capacity.",
+          "Seed: 1..2147483647. Scale must be finite and positive."
+        ],
+        "checks": [
+          "batch == 1",
+          "heads == 16 or heads == 24",
+          "kv_heads == 4",
+          "head_dim == 256",
+          "1 <= new_tokens <= 262144",
+          "0 <= past",
+          "1 <= capacity <= 262272",
+          "past + new_tokens <= capacity",
+          "1 <= seed <= 2147483647",
+          "0 < scale <= 340282346638528859811704183484516925440.0"
+        ]
+      },
+      "examples": [
+        {
+          "name": "decode",
+          "values": {
+            "heads": 24,
+            "new_tokens": 1,
+            "past": 4095,
+            "capacity": 4133
+          }
+        },
+        {
+          "name": "append",
+          "values": {
+            "heads": 16,
+            "new_tokens": 17,
+            "past": 129,
+            "capacity": 4096
+          }
+        }
+      ],
+      "diagnostic_flags": [
+        {
+          "flag": "--help",
+          "description": "Print suite and custom-case options."
+        }
+      ],
+      "devices": [
+        "gfx1151"
+      ],
+      "gaps": []
+    },
+    {
       "leaf": "gqa/ring/Xfp16_Wfp16_Yfp16",
       "package_executable": "hipdnn-kernel-ut-gqa-ring-xfp16-wfp16-yfp16.exe",
       "source": "test_gqa_ring.cpp",

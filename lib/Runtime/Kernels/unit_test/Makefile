@@ -2,7 +2,7 @@
 # the same controller the packaging CI runs.
 #
 #   make test  HIP_SDK=<sdk> [OFFLOAD=--offload-arch=<gfx>] [MODE=lookup|autotune] [COVERAGE=1|2|3] [TIMING=screen|standard|confirm]
-#   make build OFFLOAD=... HIP_SDK=...   (build only)
+#   make build OFFLOAD=... HIP_SDK=... HIP_EP_PACKAGE=...   (build only)
 #   make clean OFFLOAD=... HIP_SDK=...
 #
 # `build` runs each leaf's own `make build` (the kernel sources are compiled into
@@ -11,7 +11,8 @@
 # kernel_ut_main.cpp. `test` then runs, from out/bin,
 #   hipdnn-kernel-ut.exe --mode <MODE> --coverage <COVERAGE>
 # with the CI package's layout, exit codes and out/results.csv. Add -j to build
-# the leaves in parallel.
+# the leaves in parallel. KV-Pareto links an existing HIP_EP_PACKAGE built
+# with HIP_EP_ENABLE_KV_PARETO=ON, instead of compiling duplicate kernels.
 #
 # OFFLOAD defaults to the release target, gfx11-generic, as in every leaf; a
 # generic build looks up the table of the GPU it runs on (LUT_ARCH, see a
@@ -27,6 +28,7 @@ endif
 
 OFFLOAD  ?= --offload-arch=gfx11-generic
 HIP_SDK  ?=
+HIP_EP_PACKAGE ?=
 MODE     ?= lookup
 COVERAGE ?= 3
 TIMING   ?= standard
@@ -39,6 +41,7 @@ endif
 LEAVES := cast/Xany_Yany_bf16 \
 	gather_block_quantized/Xi64_Wfp8_Yfp16 \
 	gather_block_quantized/Xi64_Wu4_Yfp16 gather_block_quantized/Xi64_Wu8_Yfp16 \
+	gqa/kv_pareto/Xfp16_Wi8_Yfp16 \
 	gqa/decode/Xfp16_Wfp16_Yfp16 gqa/decode/Xfp16_Wi8_Yfp16 \
 	gqa/prefill/Xfp16_Wfp16_Yfp16 gqa/prefill/Xfp16_Wi8_Yfp16 \
 	matmul_nbits/Xfp16_Wu2_Yfp16 matmul_nbits/Xfp16_Wu3_Yfp16 \
@@ -59,13 +62,15 @@ ut_exe = hipdnn-kernel-ut-$(subst _,-,$(subst /,-,$(subst X,x,$(subst W,w,$(subs
 
 ifeq ($(DETECTED_OS),Windows)
     HIP_SDK_WIN := $(subst /,\,$(HIP_SDK))
+    HIP_EP_PACKAGE_WIN := $(subst /,\,$(HIP_EP_PACKAGE))
     MKDIR_KT    = if not exist $(subst /,\,$(KT)) mkdir $(subst /,\,$(KT))
-    RUN_UT      = cd $(subst /,\,$(PKG)) && set "PATH=$(HIP_SDK_WIN)\bin;%PATH%" && hipdnn-kernel-ut.exe $(1)
+    RUN_UT      = cd $(subst /,\,$(PKG)) && set "PATH=$(HIP_EP_PACKAGE_WIN)\bin;$(HIP_SDK_WIN)\bin;%PATH%" && hipdnn-kernel-ut.exe $(1)
     RM_OUT      = if exist out rmdir /s /q out
 else
     HIP_SDK_WIN := $(shell wslpath -w "$(HIP_SDK)")
+    HIP_EP_PACKAGE_WIN := $(if $(HIP_EP_PACKAGE),$(shell wslpath -w "$(HIP_EP_PACKAGE)"),)
     MKDIR_KT    = mkdir -p $(KT)
-    RUN_UT      = cd $(PKG) && cmd.exe /c "set PATH=$(HIP_SDK_WIN)\bin;%PATH% && hipdnn-kernel-ut.exe $(1)"
+    RUN_UT      = cd $(PKG) && cmd.exe /c "set PATH=$(HIP_EP_PACKAGE_WIN)\bin;$(HIP_SDK_WIN)\bin;%PATH% && hipdnn-kernel-ut.exe $(1)"
     RM_OUT      = rm -rf out
 endif
 
@@ -85,7 +90,7 @@ $(LEAVES): | $(KT)
 	$(MAKE) -C $@ build OFFLOAD=$(OFFLOAD) HIP_SDK=$(HIP_SDK) MODE=$(MODE) PKG_DIR=$(abspath $(KT)) PKG_NAME=$(call ut_exe,$@)
 
 $(PKG)/hipdnn-kernel-ut.exe: kernel_ut_main.cpp | $(KT)
-	$(HIPCC) -O3 -std=c++17 -w $(OFFLOAD) -x hip kernel_ut_main.cpp -o $@
+	$(HIPCC) -O3 -std=c++17 -w $(OFFLOAD) -DHIP_EP_KV_PARETO_ENABLED=1 -x hip kernel_ut_main.cpp -o $@
 
 clean: $(CLEAN_LEAVES)
 	@$(RM_OUT)
