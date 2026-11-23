@@ -227,18 +227,18 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x4x32x32xf16>,
 // CHECK: %[[K:.*]] = hip.rocmlir({{.*}}) @mlir_{{[a-z0-9_]+}}
 // CHECK: return %[[K]]
 
-func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x8x3xf16>,
-                      %y: tensor<1x8x8x3xf16>) -> tensor<1x3x8x8xf16> {
-  %ae = tensor.empty() : tensor<1x8x8x3xf16>
-  %a = hip.add(%ctx) ins(%x, %y : tensor<1x8x8x3xf16>, tensor<1x8x8x3xf16>)
-      outs(%ae : tensor<1x8x8x3xf16>) -> tensor<1x8x8x3xf16>
-  %me = tensor.empty() : tensor<1x8x8x3xf16>
-  %m = hip.mul(%ctx) ins(%a, %a : tensor<1x8x8x3xf16>, tensor<1x8x8x3xf16>)
-      outs(%me : tensor<1x8x8x3xf16>) -> tensor<1x8x8x3xf16>
-  %te = tensor.empty() : tensor<1x3x8x8xf16>
-  %t = hip.transpose(%ctx) ins(%m : tensor<1x8x8x3xf16>)
-      outs(%te : tensor<1x3x8x8xf16>) {perm = [0, 3, 1, 2]} : tensor<1x3x8x8xf16>
-  return %t : tensor<1x3x8x8xf16>
+func.func @main_graph(%ctx: !hip.context, %x: tensor<1x32x32x3xf16>,
+                      %y: tensor<1x32x32x3xf16>) -> tensor<1x3x32x32xf16> {
+  %ae = tensor.empty() : tensor<1x32x32x3xf16>
+  %a = hip.add(%ctx) ins(%x, %y : tensor<1x32x32x3xf16>, tensor<1x32x32x3xf16>)
+      outs(%ae : tensor<1x32x32x3xf16>) -> tensor<1x32x32x3xf16>
+  %me = tensor.empty() : tensor<1x32x32x3xf16>
+  %m = hip.mul(%ctx) ins(%a, %a : tensor<1x32x32x3xf16>, tensor<1x32x32x3xf16>)
+      outs(%me : tensor<1x32x32x3xf16>) -> tensor<1x32x32x3xf16>
+  %te = tensor.empty() : tensor<1x3x32x32xf16>
+  %t = hip.transpose(%ctx) ins(%m : tensor<1x32x32x3xf16>)
+      outs(%te : tensor<1x3x32x32xf16>) {perm = [0, 3, 1, 2]} : tensor<1x3x32x32xf16>
+  return %t : tensor<1x3x32x32xf16>
 }
 
 // -----
