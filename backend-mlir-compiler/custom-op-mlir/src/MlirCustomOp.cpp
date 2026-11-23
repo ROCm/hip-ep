@@ -298,9 +298,9 @@ customop::ArtifactKind determine_artifact_kind(const std::string &format_str) {
 // The cache / EPContext identity is derived from the graph only, so a cached
 // artifact is reused regardless of GPU or HIPDNN_EP_ROCMLIR. One that embeds
 // rocMLIR code objects for another chip would load and then fail at the first
-// dispatch, and one built with the opposite HIPDNN_EP_ROCMLIR or
-// HIPDNN_EP_ROCMLIR_AUTOTUNE setting silently ignores the switch. Refuse all of
-// them instead of running a stale artifact.
+// dispatch, and one built with the opposite HIPDNN_EP_ROCMLIR,
+// HIPDNN_EP_ROCMLIR_AUTOTUNE or HIPDNN_EP_ROCMLIR_NO_ATTENTION setting silently
+// ignores the switch. Refuse all of them instead of running a stale artifact.
 void check_rocmlir_arch(const std::string &recorded) {
   const std::string current = hip::compiler::rocMlirArtifactTarget();
   if (recorded == current)
@@ -310,9 +310,10 @@ void check_rocmlir_arch(const std::string &recorded) {
   };
   LOG(FATAL) << "Cached MLIR artifact was compiled with " << describe(recorded)
              << ", but this session requests " << describe(current)
-             << " (HIPDNN_EP_ROCMLIR / HIPDNN_EP_ROCMLIR_AUTOTUNE / ROCK_ARCH "
-                "/ active GPU). Delete the model cache or EPContext model "
-                "and recompile.";
+             << " (HIPDNN_EP_ROCMLIR / HIPDNN_EP_ROCMLIR_AUTOTUNE / "
+                "HIPDNN_EP_ROCMLIR_NO_ATTENTION / ROCK_ARCH / active GPU / "
+                "shipped problem cache). Delete the model cache or EPContext "
+                "model and recompile.";
 }
 } // anonymous namespace
 

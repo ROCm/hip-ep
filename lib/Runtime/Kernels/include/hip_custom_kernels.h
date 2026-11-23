@@ -1208,18 +1208,17 @@ HIP_KERNEL_API int hip_gqa_softmax_inplace(
 /* Row-wise softmax over a flattened [rows, cols] row-major fp16 buffer,
  * reading `input` and writing normalized probabilities to `output`. Matches
  * ONNX Softmax semantics for axis = -1 on the flattened input. `input` may
- * equal `output`. Used by the standalone `hip_miopen_softmax` runtime entry
+ * equal `output`. Used by the standalone `hip_softmax_typed` runtime entry
  * point, which is destination-passing and would otherwise have to copy its
  * input over its output before running an in-place kernel. */
 HIP_KERNEL_API int hip_softmax_row_2d(void* stream, const void* input, void* output, int rows, int cols);
 
-/* fp32 variant of the above — for models where Softmax input is fp32.
- * Qwen VLM vision encoder attention scores are fp32; using the fp16 kernel
- * there misinterprets the data and produces completely wrong outputs.
- * Called by hip_miopen_softmax when elem_size_bytes == 4. */
+/* fp32 and bf16 variants of the above, with the same contract. All three
+ * compute in fp32; hip_softmax_typed selects one from its data_type. */
 HIP_KERNEL_API int hip_softmax_row_2d_fp32(void* stream, const void* input, void* output, int rows, int cols);
+HIP_KERNEL_API int hip_softmax_row_2d_bf16(void* stream, const void* input, void* output, int rows, int cols);
 
-/* Single-buffer forms of the two above, for callers that softmax a buffer
+/* Single-buffer forms of the fp16 and fp32 kernels, for callers that softmax a buffer
  * in place. Equivalent to passing `data` as both source and destination. */
 HIP_KERNEL_API int hip_softmax_row_2d_inplace(void* stream, void* data, int rows, int cols);
 HIP_KERNEL_API int hip_softmax_row_2d_inplace_fp32(void* stream, void* data, int rows, int cols);
@@ -1501,8 +1500,9 @@ HIP_KERNEL_API int hip_gqa_flash_decode_fused_copy(
  *   FLOAT32 <-> FLOAT16; FLOAT32 -> INT64, INT32
  *   FLOAT16 -> INT64, INT32, UINT8; INT64/INT32/UINT8 -> FLOAT16, FLOAT32
  *   BFLOAT16 <-> FLOAT32, FLOAT16, FLOAT64, INT64, INT32, INT16, INT8, UINT8
- *   (FLOAT64 is kernel-only for now: wrap_cast does not map
- *   HIPDNN_EP_DATATYPE_DOUBLE yet, so model graphs cannot reach it.)
+ *   FLOAT64 <-> FLOAT32, FLOAT16 (through fp32, same as the bf16 casts)
+ *   FLOAT64 <-> INT64, INT32, INT16, INT8, UINT8 (direct static_cast; f64 to
+ *   integer truncates toward zero)
  * bf16 conversions go through fp32: fp32 -> bf16 rounds to nearest even
  * (same as PyTorch and ONNX), bf16 -> fp32 is exact, float -> integer
  * truncates toward zero.
@@ -2284,6 +2284,28 @@ HIP_KERNEL_API int hip_layer_norm(
     int hip_dtype,
     int mean_dtype);
 
+/* Residual add fused with LayerNormalization over the last axis:
+ *
+ *   sum = input + skip [+ bias]       (rounded to hip_dtype)
+ *   y   = (sum - mean) * rsqrt(var + epsilon) * gamma [+ beta]
+ *
+ * `beta`, `bias` and `input_skip_bias_sum` may be null. All tensors share
+ * `hip_dtype` (FLOAT16 or FLOAT32).
+ */
+HIP_KERNEL_API int hip_skip_layer_norm(
+    void* stream,
+    const void* input,
+    const void* skip,
+    const void* gamma,
+    const void* beta,                 // optional
+    const void* bias,                 // optional
+    void* output,
+    void* input_skip_bias_sum,        // optional
+    int64_t outer,
+    int64_t norm_size,
+    float epsilon,
+    int hip_dtype);
+
 /* =========================================================================
  * InstanceNormalization
  * =========================================================================
@@ -2342,7 +2364,21 @@ HIP_KERNEL_API int hip_batch_norm(
  * Mean/var over each (N, group). channels_last 0 is NCHW, 1 is NHWC.
  * activation 1 applies SiLU after the affine transform.
  * `hip_dtype`: FLOAT16, BFLOAT16, FLOAT32, or FLOAT64.
+ *
+ * Large groups use a split reduction whose partials live in `workspace`
+ * (device memory, 256-byte aligned). Query the size with
+ * hip_group_norm_workspace_bytes for the current device. A null or smaller
+ * workspace is valid: the kernel shrinks the split or uses a slower
+ * one-block-per-group path.
  */
+HIP_KERNEL_API size_t hip_group_norm_workspace_bytes(
+    int64_t n,
+    int64_t c,
+    int64_t spatial,
+    int64_t groups,
+    int channels_last,
+    int hip_dtype);
+
 HIP_KERNEL_API int hip_group_norm(
     void* stream,
     const void* input,
@@ -2356,6 +2392,8 @@ HIP_KERNEL_API int hip_group_norm(
     int channels_last,
     int activation,
     float epsilon,
+    void* workspace,
+    size_t workspace_bytes,
     int hip_dtype);
 
 /* =========================================================================
@@ -3876,6 +3914,27 @@ HIP_KERNEL_API int hip_strided_copy(void *stream, void *dst, const void *src,
                      const int64_t *src_outer_strides,
                      const int64_t *dst_outer_strides, int64_t row_elems,
                      int64_t outer_total);
+
+// N-D strided device-to-device copy (one launch). sizes and strides are in
+// elements and cover every dim, the innermost included. Source strides may be
+// negative, in which case `src` points at the element with every index 0. Up
+// to HIPDNN_MAX_MEMREF_RANK + 1 dims. Returns 0 on success, -2 if elem_size is
+// unsupported.
+HIP_KERNEL_API int hip_strided_copy_nd(void *stream, void *dst,
+                                       const void *src, int64_t elem_size,
+                                       int rank, const int64_t *sizes,
+                                       const int64_t *src_strides,
+                                       const int64_t *dst_strides);
+
+// Concat of `num_inputs` contiguous device buffers along a row-major axis in
+// one launch (more than 16 inputs take one launch per 16). The output and
+// input i are viewed as [outer, width]; input i has row width src_widths[i]
+// (elements) and the output row width is their sum. `srcs` is a host array of
+// device pointers. Returns 0 on success, -2 if elem_size is unsupported.
+HIP_KERNEL_API int hip_concat(void *stream, void *dst, int num_inputs,
+                              const void *const *srcs,
+                              const int64_t *src_widths, int64_t outer,
+                              int64_t elem_size);
 
 /* =========================================================================
  * Causal Depthwise 1D Conv -- single-step "decode" path

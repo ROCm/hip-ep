@@ -495,6 +495,48 @@ def Hip_IfOp : Hip_Op<"if",
   let hasVerifier = 1;
 }
 
+def Hip_IfResultDimOp : Hip_Op<"if_result_dim", [Pure]> {
+  let summary = "Run-time size of one dynamic dimension of a hip.if output";
+  let description = [{
+    Size of dimension `$dim` of output `$result_index` of the hip.if whose
+    branches are `$then_func` / `$else_func`, for the branch `$cond` selects.
+    `$captures` are that hip.if's captures, in the same order.
+
+    `onnx-if-outline` emits this op to size the `tensor.empty` o_init of an
+    output whose type has a `?` dimension. The branch bodies are still ONNX
+    there, so the size is not yet known. `hip-resolve-if-result-dims` replaces
+    the op after conversion: it rebuilds each branch's size from its captures
+    on the host and selects between them on `$cond`. The op must not survive
+    to bufferization.
+
+    Example:
+    ```mlir
+    %d1 = hip.if_result_dim(%cond) captures(%ids : tensor<?x?xi64>)
+              then @main_graph_if_then_n0 else @main_graph_if_else_n1
+              {result_index = 0 : i32, dim = 1 : i64}
+    %init = tensor.empty(%d1) : tensor<1x?xf32>
+    ```
+  }];
+
+  let arguments = (ins
+    I1:$cond,
+    Variadic<AnyType>:$captures,
+    FlatSymbolRefAttr:$then_func,
+    FlatSymbolRefAttr:$else_func,
+    I32Attr:$result_index,
+    I64Attr:$dim
+  );
+
+  let results = (outs Index:$size);
+
+  let assemblyFormat = [{
+    `(` $cond `)`
+    ( `captures` `(` $captures^ `:` type($captures) `)` )?
+    `then` $then_func `else` $else_func
+    attr-dict
+  }];
+}
+
 def Hip_FreeOp : Hip_Op<"free",
     [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "Free device memory";
@@ -1968,6 +2010,72 @@ def Hip_SkipRmsNormOp :
   let hasVerifier = 1;
 }
 
+def Hip_SkipLayerNormOp :
+    Hip_DpsOp_AutoReify<"skip_layer_norm", [AttrSizedOperandSegments]> {
+  let summary = "Fused residual add + layer normalization over the last axis";
+  let description = [{
+    Residual add fused with LayerNormalization over the last axis, in one
+    kernel. com.microsoft.SkipLayerNormalization lowers here directly.
+    hip-fusion-transform folds a same-shape hip.add in front of
+    hip.layer_norm into this op:
+
+      input_skip_bias_sum = input + skip [+ bias]
+      output = (sum - mean(sum)) / sqrt(var(sum) + epsilon) * gamma [+ beta]
+
+    The sum is rounded to the element type before it is normalized, so the
+    result matches the unfused Add followed by LayerNormalization.
+
+    Inputs:
+      input  (required, T) - [..., hidden]
+      skip   (required, T) - same shape as input
+      gamma  (required, T) - [hidden]
+      beta   (optional, T) - [hidden]
+      bias   (optional, T) - [hidden], added to the sum before normalizing
+
+    DPS output buffers:
+      outputs[0] = output              (required, T)
+      outputs[1] = input_skip_bias_sum (optional, T)
+
+    Example:
+    ```mlir
+    hip.skip_layer_norm(%ctx)
+        ins(%input, %skip, %gamma : memref<1x128x768xf16, 1>,
+            memref<1x128x768xf16, 1>, memref<768xf16, 1>,
+            beta %beta : memref<768xf16, 1>)
+        outs(%output, %sum : memref<1x128x768xf16, 1>,
+                             memref<1x128x768xf16, 1>)
+        {epsilon = 1.0e-05 : f32}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$skip,
+    Hip_TensorOrMemRef:$gamma,
+    Optional<Hip_TensorOrMemRef>:$beta,
+    Optional<Hip_TensorOrMemRef>:$bias,
+
+    // DPS output buffers: [output] or [output, input_skip_bias_sum]
+    Variadic<Hip_TensorOrMemRef>:$outputs,
+
+    F32Attr:$epsilon
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $input `,` $skip `,` $gamma
+        `:` type($input) `,` type($skip) `,` type($gamma)
+        ( `,` `beta` $beta^ `:` type($beta) )?
+        ( `,` `bias` $bias^ `:` type($bias) )?
+    `)`
+    `outs` `(` $outputs `:` type($outputs) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+}
+
 def Hip_RopeOp : Hip_DpsOp_WithInfer<"rope"> {
   let summary = "Rotary position embedding (RoPE)";
   let description = [{
@@ -2330,6 +2438,76 @@ def Hip_TransposeOp : Hip_DpsOp_WithInfer<"transpose", "Output",
   // result_tensors inherited from Hip_DpsOp
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
+
+def Hip_ReverseOp : Hip_DpsOp_AutoReifyInfer<"reverse"> {
+  let summary = "Reverse the element order along the given axes";
+  let description = [{
+    Copies `input` to `output` with the element order reversed along every
+    axis in `axes`: output[..., i, ...] = input[..., n - 1 - i, ...].
+    `input` and `output` have the same shape and element type.
+
+    A constant negative-step ONNX Slice becomes a positive-step
+    `tensor.extract_slice` over the same elements followed by this op, so the
+    slice needs neither its parameters on the device nor a host
+    synchronization.
+
+    The input may keep a strided layout after bufferization (for example a
+    `memref.subview` of the sliced tensor): the lowering reads the view through
+    its descriptor, so no identity-layout copy is made first. The lowering is
+    one `wrap_strided_copy_nd` call with negated source strides on the
+    reversed axes.
+
+    Example:
+    ```mlir
+    hip.reverse(%ctx) ins(%x : memref<2x49xf32, strided<[51, 1], offset: 1>, 1>)
+                      outs(%y : memref<2x49xf32, 1>) {axes = [1]}
+    ```
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    I64ArrayAttr:$axes
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
+
+def Hip_ConcatOp : Hip_DpsOp_AutoReifyInfer<"concat"> {
+  let summary = "Concatenate tensors along an axis in one kernel launch";
+  let description = [{
+    Writes `inputs` side by side along `axis` into `output`. Every input has
+    the output's rank and element type and matches it on every other axis.
+
+    Each input and the output are viewed as [outer, width], where `outer` is
+    the product of the dims before `axis`; one kernel reads every input and
+    writes the joined rows. ONNX Concat uses this op when `outer` is greater
+    than one, where copying each input on its own would need one strided copy
+    per input; other concats keep the `tensor.insert_slice` form.
+
+    Example:
+    ```mlir
+    hip.concat(%ctx) ins(%a, %b : memref<4x3xf32, 1>, memref<4x5xf32, 1>)
+                     outs(%r : memref<4x8xf32, 1>) {axis = 1 : i64}
+    ```
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Variadic<Hip_TensorOrMemRef>:$inputs,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$axis
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $inputs `:` type($inputs) `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
@@ -6116,6 +6294,28 @@ def Hip_ReadbackScalarOp : Hip_Op<"readback_scalar",
   let assemblyFormat = [{
     `(` $ctx `,` $scalar `:` type($scalar) `)` attr-dict `->` type($value)
   }];
+}
+
+// hip.stream_wait : block the host until all work queued on the stream has
+// completed. Use it when the host reuses storage that queued work may still
+// access and there is no value to read back.
+//
+//   hip.stream_wait(%ctx)
+//   memref.store %n, %slot[%c0] : memref<1xi64>
+def Hip_StreamWaitOp : Hip_Op<"stream_wait",
+    [MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "Wait for all queued work on the stream to complete";
+  let description = [{
+    Synchronizes the GPU stream. Host accesses after this op observe every
+    effect of the work queued before it.
+
+    It has side effects on all memory: it must not be removed, reordered, or
+    hoisted across queued work or host accesses.
+  }];
+
+  let arguments = (ins Hip_ContextType:$ctx);
+
+  let assemblyFormat = "`(` $ctx `)` attr-dict";
 }
 
 def Hip_QuantizeLinearOp : Hip_DpsOp_AutoReifyInfer<"quantize_linear"> {

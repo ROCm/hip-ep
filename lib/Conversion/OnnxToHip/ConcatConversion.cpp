@@ -255,11 +255,101 @@ struct ConcatDecompose : public mlir::RewritePattern {
   }
 };
 
+// A static Concat whose output has more than one row before the concat axis
+// becomes one `hip.concat`, which writes every input in a single kernel launch.
+// Through insert_slice each such input is a separate pitched or strided copy
+// over all rows; for an interleave (every input one element wide) that is one
+// launch per input over the whole output.
+//
+// Before:
+//
+//   %r = "onnx.Concat"(%a, %b) {axis = -1 : si64}
+//       : (tensor<4096x1xf32>, tensor<4096x1xf32>) -> tensor<4096x2xf32>
+//
+// After:
+//
+//   %init = tensor.empty() : tensor<4096x2xf32>
+//   %r = hip.concat(%ctx) ins(%a, %b : tensor<4096x1xf32>, tensor<4096x1xf32>)
+//                         outs(%init : tensor<4096x2xf32>) {axis = 1 : i64}
+//
+// A single-row concat (outer extent 1) is a set of contiguous blocks; it keeps
+// the insert_slice form, where each block is one flat copy and the slots can
+// be written in place. Small outputs keep it too, so shape-sized concats stay
+// visible to host shape resolution.
+struct ConcatToHip : public mlir::RewritePattern {
+  ConcatToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Concat", /*benefit=*/2, ctx) {}
+
+  static constexpr int64_t kMinElements = 4096;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    if (op->getNumOperands() < 2 || op->getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected >=2 inputs, 1 output");
+    auto axisAttr = op->getAttrOfType<mlir::IntegerAttr>("axis");
+    auto resultType =
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    if (!axisAttr || !resultType || !resultType.hasStaticShape() ||
+        resultType.getRank() == 0)
+      return rewriter.notifyMatchFailure(op, "needs a static ranked result");
+    mlir::Type elemType = resultType.getElementType();
+    // Bool (i1) buffers hold one byte per element, which the kernel copies.
+    if (!elemType.isIntOrFloat() ||
+        (!elemType.isInteger(1) && elemType.getIntOrFloatBitWidth() % 8 != 0))
+      return rewriter.notifyMatchFailure(op, "unsupported element type");
+
+    int64_t rank = resultType.getRank();
+    int64_t axis = axisAttr.getSInt();
+    if (axis < 0)
+      axis += rank;
+    if (axis < 0 || axis >= rank)
+      return rewriter.notifyMatchFailure(op, "axis out of range");
+
+    int64_t outer = 1;
+    for (int64_t d : llvm::seq<int64_t>(axis))
+      outer *= resultType.getDimSize(d);
+    if (outer <= 1 || resultType.getNumElements() < kMinElements)
+      return rewriter.notifyMatchFailure(
+          op, "single-row or small concat keeps insert_slice");
+
+    llvm::SmallVector<mlir::Value> inputs;
+    int64_t axisSum = 0;
+    for (mlir::Value input : op->getOperands()) {
+      auto t = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+      if (!t || !t.hasStaticShape() || t.getRank() != rank ||
+          t.getElementType() != elemType)
+        return rewriter.notifyMatchFailure(op, "input is not static/matching");
+      for (int64_t d : llvm::seq<int64_t>(rank))
+        if (d != axis && t.getDimSize(d) != resultType.getDimSize(d))
+          return rewriter.notifyMatchFailure(op, "off-axis dim mismatch");
+      axisSum += t.getDimSize(axis);
+      if (t.getDimSize(axis) != 0)
+        inputs.push_back(input);
+    }
+    if (axisSum != resultType.getDimSize(axis) || inputs.size() < 2)
+      return rewriter.notifyMatchFailure(op, "nothing to join");
+
+    auto ctxOrFailure = getContextArg(op, rewriter);
+    if (mlir::failed(ctxOrFailure))
+      return rewriter.notifyMatchFailure(op, "missing context argument");
+
+    mlir::Location loc = op->getLoc();
+    mlir::Value init = mlir::tensor::EmptyOp::create(
+        rewriter, loc, resultType.getShape(), elemType);
+    auto concat =
+        mlir::hip::ConcatOp::create(rewriter, loc, *ctxOrFailure, inputs, init,
+                                    rewriter.getI64IntegerAttr(axis));
+    rewriter.replaceOp(op, concat->getResult(0));
+    return mlir::success();
+  }
+};
+
 } // namespace
 
 void populateConcatConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx) {
-  patterns.add<ConcatDecompose>(ctx);
+  patterns.add<ConcatToHip, ConcatDecompose>(ctx);
 }
 
 } // namespace hip

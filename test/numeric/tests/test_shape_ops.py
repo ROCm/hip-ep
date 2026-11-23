@@ -108,6 +108,42 @@ class TestConcat:
         actual, expected = model_runner.run_sample(model, feeds)
         compare_outputs(actual, expected, atol=0)
 
+    # Static concats with more than one row before the axis and >= 4096
+    # output elements lower to hip.concat: one launch reads every input.
+    @pytest.mark.parametrize(
+        "dtype,shapes,axis",
+        [
+            # Interleave: every input one element wide.
+            (np.float32, [[64, 64, 1], [64, 64, 1]], -1),
+            (np.int64, [[128, 40, 1], [128, 40, 1], [128, 40, 1]], 2),
+            # Uneven last-axis widths, 2-byte elements.
+            (np.float16, [[64, 8, 3], [64, 8, 5], [64, 8, 7]], -1),
+            # Rows of 16-byte multiples take the vector path.
+            (np.float32, [[16, 3, 64], [16, 5, 64]], 1),
+            (np.float32, [[64, 64, 4], [64, 64, 4]], -1),
+            # More inputs than one launch takes (16): later inputs go in a
+            # second launch writing its own column window.
+            (np.float32, [[256, 1]] * 20, 1),
+            # Concat along an interior axis of a rank-4 tensor.
+            (np.float32, [[8, 1, 192, 51], [8, 1, 192, 49]], 3),
+            # Bool: one byte per element.
+            (np.bool_, [[64, 64, 1], [64, 64, 3]], -1),
+        ],
+    )
+    def test_concat_single_launch(self, model_runner, dtype, shapes, axis):
+        model = _make_concat_model(dtype, shapes, axis)
+        rng = np.random.default_rng(750 + len(shapes))
+        feeds = []
+        for i, s in enumerate(shapes):
+            if dtype == np.bool_:
+                feeds.append(rng.integers(0, 2, s).astype(np.bool_))
+            elif np.issubdtype(dtype, np.integer):
+                feeds.append(rng.integers(-100, 100, s, dtype=dtype))
+            else:
+                feeds.append(rng.uniform(-2.0, 2.0, s).astype(dtype))
+        actual, expected = model_runner.run_sample(model, feeds)
+        compare_outputs(actual, expected, atol=0)
+
 
 # ---------------------------------------------------------------------------
 # Tier-3 strided memref.copy kernel (hip_strided_copy)
@@ -174,6 +210,12 @@ class TestTile:
             (np.float32, [1, 4], [3, 2]),
             (np.int32, [1, 4], [4, 1]),
             (np.int64, [1, 1, 4], [1, 2, 3]),
+            # Repeats on a unit extent only: a plain broadcast.
+            (np.float32, [1, 8, 1, 4, 4], [1, 1, 2, 1, 1]),
+            # Repeated and kept extents mixed.
+            (np.float16, [2, 3, 4], [3, 1, 2]),
+            # Too many repeated extents for the broadcast form; stays hip.tile.
+            (np.float32, [2, 2, 2, 2, 2], [2, 2, 2, 2, 2]),
         ],
     )
     def test_tile(self, model_runner, dtype, shape, repeats):
@@ -213,6 +255,21 @@ class TestExpand:
             (np.int64, [1, 1, 1], [2, 3, 4]),
             # Llama-style attention-mask expand: [1, 1, S] -> [1, H, S]
             (np.int32, [1, 1, 16], [1, 8, 16]),
+            # Per-channel broadcast; the innermost run is broadcast and a
+            # multiple of the vector width.
+            (np.float16, [1, 6, 1, 1], [1, 6, 136, 128]),
+            # Same pattern with an innermost run off the vector width.
+            (np.float16, [1, 6, 1, 1], [2, 6, 17, 3]),
+            # Middle broadcast with a contiguous, vectorisable innermost run.
+            (np.float32, [3, 1, 64], [3, 5, 64]),
+            # Middle broadcast with a short contiguous innermost run.
+            (np.float32, [3, 1, 6], [3, 5, 6]),
+            # Alternating broadcast and copied dims, 8-byte elements.
+            (np.int64, [4, 1, 3, 1, 2], [4, 3, 3, 5, 2]),
+            # Every dim collapses away.
+            (np.float16, [1, 1], [1, 1]),
+            # No broadcast at all: a plain copy.
+            (np.float16, [5, 8], [5, 8]),
         ],
     )
     def test_expand(self, model_runner, dtype, in_shape, out_shape):
@@ -517,14 +574,12 @@ class TestGatherND:
 # Slice
 # ---------------------------------------------------------------------------
 #
-# The graph-constant + positive-stride case is folded to
-# `tensor.extract_slice` upstream. The other cases run the `hip_slice` kernel
-# through one of two paths:
-#   (a) parameters fed as *graph inputs* (non-constant) take the runtime path:
-#       D2H readback and host-side resolution in wrap_slice;
-#   (b) constant negative steps over a static input are resolved at compile
-#       time and passed from host memory (wrap_slice_static), with no
-#       readback.
+# Graph-constant parameters over static sliced axes are resolved at compile
+# time: a positive step folds to `tensor.extract_slice`, and a negative step
+# becomes the positive-step view of the same elements plus `hip.reverse` (one
+# strided-copy launch, no readback). Parameters fed as *graph inputs*
+# (non-constant) run the `hip_slice` kernel through the runtime path: D2H
+# readback and host-side resolution in wrap_slice.
 
 
 def _make_slice_model(
@@ -542,7 +597,7 @@ def _make_slice_model(
 
     If ``constant_indices`` is True, starts/ends/axes/steps become
     initializers: positive steps fold to an extract_slice, and negative steps
-    take the compile-time (wrap_slice_static) path. If ``constant_indices`` is
+    become an extract_slice plus hip.reverse. If ``constant_indices`` is
     False they become graph inputs, guaranteeing the runtime readback path.
     """
     tp = np_to_onnx_type(dtype)
@@ -642,8 +697,9 @@ class TestSlice:
     @pytest.mark.parametrize(
         "dtype,shape,starts,ends,axes,steps,out_shape",
         [
-            # Negative step: reverses elements along axis 0. Constant indices
-            # resolve at compile time, so these take the wrap_slice_static path.
+            # Negative step with constant indices: lowered at compile time to
+            # a positive-step view plus hip.reverse (one strided-copy launch,
+            # no parameter readback).
             #
             # Note on the negative-end sentinel:
             #   ONNX Slice spec normalises `end += dim` for any end < 0,
@@ -660,12 +716,18 @@ class TestSlice:
             # step=-2 walking 7,5,3,1 down to 0 exclusive (so 4 elements):
             #   start=7, end=-9=-(8+1) -> end=-1, step=-2 -> 4 elements.
             (np.int32, [8], [7], [-9], [0], [-2], [4]),
+            # Full flip of the last axis with the INT64 end sentinel.
+            (np.float32, [2, 4, 51], [-1], [-(2**63 - 1)], [2], [-1], [2, 4, 51]),
+            # step=-3 on a middle axis: indices 9, 6, 3, 0.
+            (np.int64, [3, 10, 5], [9], [-(2**63 - 1)], [1], [-3], [3, 4, 5]),
+            # Mixed: forward stride on one axis, reverse on another.
+            (np.float16, [6, 8], [0, 6], [6, 1], [0, 1], [2, -1], [3, 5]),
         ],
     )
     def test_slice_negative_step(
         self, model_runner, dtype, shape, starts, ends, axes, steps, out_shape
     ):
-        """Constant negative steps take the compile-time path."""
+        """Constant negative steps take the compile-time reverse path."""
         model, _ = _make_slice_model(
             dtype,
             shape,
@@ -681,6 +743,40 @@ class TestSlice:
             x = rng.integers(-50, 50, shape, dtype=dtype)
         else:
             x = rng.uniform(-2.0, 2.0, shape).astype(dtype)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+    @pytest.mark.parametrize("dtype", [np.float32, np.float16])
+    def test_slice_flip_of_view_joined(self, model_runner, dtype):
+        """Flip of an interior slice, joined back onto the source.
+
+        The flip reads the [1:-1] view in place (strided input with an offset
+        and a negated stride), and the Concat is a single hip.concat.
+        """
+        tp = np_to_onnx_type(dtype)
+        shape = [8, 1, 192, 51]
+        X = helper.make_tensor_value_info("X", tp, shape)
+        Y = helper.make_tensor_value_info("Y", tp, [8, 1, 192, 100])
+
+        def i64(name, values):
+            return numpy_helper.from_array(np.array(values, dtype=np.int64), name)
+
+        inits = [
+            i64("s1", [1]),
+            i64("e1", [-1]),
+            i64("ax", [3]),
+            i64("st1", [1]),
+            i64("s2", [-1]),
+            i64("e2", [-(2**63 - 1)]),
+            i64("st2", [-1]),
+        ]
+        nodes = [
+            helper.make_node("Slice", ["X", "s1", "e1", "ax", "st1"], ["inner"]),
+            helper.make_node("Slice", ["inner", "s2", "e2", "ax", "st2"], ["flip"]),
+            helper.make_node("Concat", ["X", "flip"], ["Y"], axis=3),
+        ]
+        model = make_model_from_nodes(nodes, [X], [Y], initializers=inits)
+        x = np.random.default_rng(503).uniform(-2.0, 2.0, shape).astype(dtype)
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=0)
 
@@ -726,8 +822,8 @@ class TestSlice:
         compare_outputs(actual, expected, atol=0)
 
     # Constant negative-step slices over static inputs are resolved at compile
-    # time (ONNX negative-index and clamping rules) and passed to the kernel
-    # from host memory.
+    # time (ONNX negative-index and clamping rules) into a positive-step view
+    # plus hip.reverse, so no parameter reaches the device.
     @pytest.mark.parametrize(
         "dtype,shape,starts,ends,axes,steps,out_shape",
         [
@@ -744,6 +840,8 @@ class TestSlice:
             (np.float16, [6], [100], [-100], [0], [-1], [6]),
             # Two axes with mixed signs: rows 4..1, columns 1 and 3.
             (np.int32, [5, 6], [4, 1], [0, 5], [0, 1], [-1, 2], [4, 2]),
+            # Bool flip: one byte per element.
+            (np.bool_, [4, 6], [-1], [-(2**63)], [1], [-1], [4, 6]),
         ],
     )
     def test_slice_negative_step_static(
@@ -760,7 +858,9 @@ class TestSlice:
             constant_indices=True,
         )
         rng = np.random.default_rng(505)
-        if np.issubdtype(dtype, np.integer):
+        if dtype == np.bool_:
+            x = rng.integers(0, 2, shape).astype(np.bool_)
+        elif np.issubdtype(dtype, np.integer):
             x = rng.integers(-50, 50, shape, dtype=dtype)
         else:
             x = rng.uniform(-2.0, 2.0, shape).astype(dtype)

@@ -38,6 +38,10 @@
 // 27. add_two_users_no_fold - the bias-free result has another reader
 // 28. add_init_no_fold      - the result is the add's init, not an addend
 // 29. add_overflow_no_fold  - the summed f16 bias would overflow
+// 30. dequant_weight       - constant int8 filter dequant folds, then splits
+// 31. dequant_per_axis     - per-axis scale is applied before the channel swap
+// 32. dequant_runtime      - a non-constant quantized filter stays on MIOpen
+// 33. dequant_i32_fp32_arith - i32 filter folds with the kernel's fp32 rounding
 //
 // Cases 1-5 use a splat filter and so only pin structure. Cases 6, 7 and 15
 // use distinct per-tap values, which is what actually catches a wrong tap
@@ -866,4 +870,123 @@ module {
   // CHECK: hip.conv({{.*}} tensor<8x1x1x1xf16>, tensor<8xf16>)
   // CHECK: hip.add
   // CHECK: return
+  // 30. Constant DequantizeLinear weight: (5 - 1) * 0.5 = 2, then one residue.
+  // --------------------------------------------------------------------------
+  func.func @dequant_weight(%ctx: !hip.context, %x: tensor<1x1x2x2xf32>)
+      -> tensor<1x1x2x2xf32> {
+    %q = hip.constant {value = dense<5> : tensor<1x1x1x1xi8>}
+        : tensor<1x1x1x1xi8>
+    %s = hip.constant {value = dense<5.000000e-01> : tensor<f32>} : tensor<f32>
+    %z = hip.constant {value = dense<1> : tensor<i8>} : tensor<i8>
+    %we = tensor.empty() : tensor<1x1x1x1xf32>
+    %w = hip.dequantize_linear(%ctx)
+        ins(%q, %s : tensor<1x1x1x1xi8>, tensor<f32>)
+        zero_point(%z : tensor<i8>) outs(%we : tensor<1x1x1x1xf32>)
+        {axis = 0 : i64, block_size = 0 : i64} : tensor<1x1x1x1xf32>
+    %init = tensor.empty() : tensor<1x1x2x2xf32>
+    %y = hip.conv_transpose(%ctx) ins(%x, %w : tensor<1x1x2x2xf32>,
+                                              tensor<1x1x1x1xf32>)
+        outs(%init : tensor<1x1x2x2xf32>)
+        {kernel_shape = [1, 1], strides = [1, 1], pads = [0, 0, 0, 0],
+         dilations = [1, 1], output_padding = [0, 0], group = 1 : i64}
+        : tensor<1x1x2x2xf32>
+    return %y : tensor<1x1x2x2xf32>
+  }
+
+  // CHECK-LABEL: func.func @dequant_weight
+  // CHECK-NOT: hip.conv_transpose
+  // CHECK-NOT: hip.dequantize_linear
+  // CHECK: dense<2.000000e+00> : tensor<1x1x1x1xf32>
+  // CHECK: hip.conv
+
+  // --------------------------------------------------------------------------
+  // 31. Per-axis scale on C. Channel swap puts the folded values in [M, C].
+  //     q = 2, scales [1, 3] -> filter values 2 and 6.
+  // --------------------------------------------------------------------------
+  func.func @dequant_per_axis(%ctx: !hip.context, %x: tensor<1x2x2x2xf32>)
+      -> tensor<1x1x2x2xf32> {
+    %q = hip.constant {value = dense<2> : tensor<2x1x1x1xi8>}
+        : tensor<2x1x1x1xi8>
+    %s = hip.constant {value = dense<[1.000000e+00, 3.000000e+00]> : tensor<2xf32>}
+        : tensor<2xf32>
+    %we = tensor.empty() : tensor<2x1x1x1xf32>
+    %w = hip.dequantize_linear(%ctx)
+        ins(%q, %s : tensor<2x1x1x1xi8>, tensor<2xf32>)
+        outs(%we : tensor<2x1x1x1xf32>)
+        {axis = 0 : i64, block_size = 0 : i64} : tensor<2x1x1x1xf32>
+    %init = tensor.empty() : tensor<1x1x2x2xf32>
+    %y = hip.conv_transpose(%ctx) ins(%x, %w : tensor<1x2x2x2xf32>,
+                                              tensor<2x1x1x1xf32>)
+        outs(%init : tensor<1x1x2x2xf32>)
+        {kernel_shape = [1, 1], strides = [1, 1], pads = [0, 0, 0, 0],
+         dilations = [1, 1], output_padding = [0, 0], group = 1 : i64}
+        : tensor<1x1x2x2xf32>
+    return %y : tensor<1x1x2x2xf32>
+  }
+
+  // CHECK-LABEL: func.func @dequant_per_axis
+  // CHECK-NOT: hip.conv_transpose
+  // CHECK: 2.000000e+00
+  // CHECK-SAME: 6.000000e+00
+  // CHECK-SAME: tensor<1x2x1x1xf32>
+  // CHECK: hip.conv
+
+  // --------------------------------------------------------------------------
+  // 32. The quantized filter is not a constant, so nothing can be folded.
+  // --------------------------------------------------------------------------
+  func.func @dequant_runtime(%ctx: !hip.context, %x: tensor<1x1x2x2xf32>,
+                             %q: tensor<1x1x1x1xi8>) -> tensor<1x1x2x2xf32> {
+    %s = hip.constant {value = dense<5.000000e-01> : tensor<f32>} : tensor<f32>
+    %we = tensor.empty() : tensor<1x1x1x1xf32>
+    %w = hip.dequantize_linear(%ctx)
+        ins(%q, %s : tensor<1x1x1x1xi8>, tensor<f32>)
+        outs(%we : tensor<1x1x1x1xf32>)
+        {axis = 0 : i64, block_size = 0 : i64} : tensor<1x1x1x1xf32>
+    %init = tensor.empty() : tensor<1x1x2x2xf32>
+    %y = hip.conv_transpose(%ctx) ins(%x, %w : tensor<1x1x2x2xf32>,
+                                              tensor<1x1x1x1xf32>)
+        outs(%init : tensor<1x1x2x2xf32>)
+        {kernel_shape = [1, 1], strides = [1, 1], pads = [0, 0, 0, 0],
+         dilations = [1, 1], output_padding = [0, 0], group = 1 : i64}
+        : tensor<1x1x2x2xf32>
+    return %y : tensor<1x1x2x2xf32>
+  }
+
+  // CHECK-LABEL: func.func @dequant_runtime
+  // CHECK: hip.dequantize_linear
+  // CHECK: hip.conv_transpose
+
+  // --------------------------------------------------------------------------
+  // 33. i32 filter: 16777217 is not representable in fp32. The kernel converts
+  //     it to 16777216 before multiplying by 3, giving 50331648. Folding in
+  //     double would round 50331651 to 50331652 instead.
+  // --------------------------------------------------------------------------
+  func.func @dequant_i32_fp32_arith(%ctx: !hip.context,
+                                    %x: tensor<1x1x2x2xf32>)
+      -> tensor<1x1x2x2xf32> {
+    %q = hip.constant {value = dense<16777217> : tensor<1x1x1x1xi32>}
+        : tensor<1x1x1x1xi32>
+    %s = hip.constant {value = dense<3.000000e+00> : tensor<f32>} : tensor<f32>
+    %z = hip.constant {value = dense<0> : tensor<i32>} : tensor<i32>
+    %we = tensor.empty() : tensor<1x1x1x1xf32>
+    %w = hip.dequantize_linear(%ctx)
+        ins(%q, %s : tensor<1x1x1x1xi32>, tensor<f32>)
+        zero_point(%z : tensor<i32>) outs(%we : tensor<1x1x1x1xf32>)
+        {axis = 0 : i64, block_size = 0 : i64} : tensor<1x1x1x1xf32>
+    %init = tensor.empty() : tensor<1x1x2x2xf32>
+    %y = hip.conv_transpose(%ctx) ins(%x, %w : tensor<1x1x2x2xf32>,
+                                              tensor<1x1x1x1xf32>)
+        outs(%init : tensor<1x1x2x2xf32>)
+        {kernel_shape = [1, 1], strides = [1, 1], pads = [0, 0, 0, 0],
+         dilations = [1, 1], output_padding = [0, 0], group = 1 : i64}
+        : tensor<1x1x2x2xf32>
+    return %y : tensor<1x1x2x2xf32>
+  }
+
+  // CHECK-LABEL: func.func @dequant_i32_fp32_arith
+  // CHECK-NOT: hip.conv_transpose
+  // CHECK-NOT: hip.dequantize_linear
+  // 0x4C400000 is 50331648.0f; the double-precision fold gave 0x4C400001.
+  // CHECK: dense<0x4C400000> : tensor<1x1x1x1xf32>
+  // CHECK: hip.conv
 }

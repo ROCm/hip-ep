@@ -117,6 +117,8 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     RmsNormOp::attachInterface<HipDstBufferizableModel<RmsNormOp>>(*ctx);
     SkipRmsNormOp::attachInterface<HipDstBufferizableModel<SkipRmsNormOp>>(
         *ctx);
+    SkipLayerNormOp::attachInterface<HipDstBufferizableModel<SkipLayerNormOp>>(
+        *ctx);
     RopeOp::attachInterface<HipDstBufferizableModel<RopeOp>>(*ctx);
     MRotaryEmbeddingOp::attachInterface<
         HipDstBufferizableModel<MRotaryEmbeddingOp>>(*ctx);
@@ -126,6 +128,8 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     MiopenSoftmaxOp::attachInterface<HipDstBufferizableModel<MiopenSoftmaxOp>>(
         *ctx);
     TransposeOp::attachInterface<HipDstBufferizableModel<TransposeOp>>(*ctx);
+    ReverseOp::attachInterface<HipDstBufferizableModel<ReverseOp>>(*ctx);
+    ConcatOp::attachInterface<HipDstBufferizableModel<ConcatOp>>(*ctx);
     GatherOp::attachInterface<HipDstBufferizableModel<GatherOp>>(*ctx);
     GatherElementsOp::attachInterface<
         HipDstBufferizableModel<GatherElementsOp>>(*ctx);

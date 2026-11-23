@@ -16,13 +16,17 @@
 //   - onnx.Custom(GatedRMSNorm, com.microsoft)          -> hip.gated_rms_norm
 //   - onnx.Custom(EngramGate, com.microsoft)            -> hip.engram_gate
 //   - onnx.Custom(SkipSimplifiedLayerNormalization)     -> hip.skip_rms_norm
-//   - onnx.Custom(SkipLayerNormalization)               -> add + layer_norm
+//   - onnx.Custom(SkipLayerNormalization)               -> hip.skip_layer_norm
+//                                                          (or add +
+//                                                          layer_norm)
 //   - onnx.Custom(EmbedLayerNormalization)              -> gather + add +
 //   layer_norm
+//   - onnx.LayerNormalization(onnx.Add(a, b))           -> hip.skip_layer_norm
 //   - onnx.LayerNormalization (standard, opset 17+)     -> hip.layer_norm
 //   - onnx.InstanceNormalization                        -> hip.instance_norm
 //   - onnx.BatchNormalization (inference)               -> hip.batch_norm
 //   - onnx.Custom(GroupNorm, com.microsoft)             -> hip.group_norm
+//   - onnx.GroupNormalization (per-channel, opset 21)   -> hip.group_norm
 //===----------------------------------------------------------------------===//
 
 #include "OnnxToHipUtils.h"
@@ -722,16 +726,76 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
   return mlir::success();
 }
 
-//===----------------------------------------------------------------------===//
-// onnx.Custom(SkipLayerNormalization) -> hip.add + hip.layer_norm
+// Helpers for hip.skip_layer_norm. A same-shape residual Add in
+// front of LayerNormalization is folded later by hip-fusion-transform.
 //===----------------------------------------------------------------------===//
 
-/// com.microsoft.SkipLayerNormalization -> hip.add + hip.layer_norm.
+/// True when hip.skip_layer_norm can take these operands: f16 or f32
+/// throughout, `skip` and the result typed like `input`, and gamma / beta /
+/// bias each a static vector of the (static) hidden size.
+static bool canUseSkipLayerNorm(mlir::Value input, mlir::Value skip,
+                                mlir::Value gamma, mlir::Value beta,
+                                mlir::Value bias, mlir::Type outputType) {
+  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+  if (!inputType || inputType.getRank() < 1 || skip.getType() != inputType ||
+      outputType != inputType)
+    return false;
+  mlir::Type elemType = inputType.getElementType();
+  if (!elemType.isF16() && !elemType.isF32())
+    return false;
+  int64_t hidden = inputType.getDimSize(inputType.getRank() - 1);
+  if (mlir::ShapedType::isDynamic(hidden))
+    return false;
+  auto isHiddenVector = [&](mlir::Value v) {
+    if (!v)
+      return true;
+    auto t = mlir::dyn_cast<mlir::RankedTensorType>(v.getType());
+    return t && t.hasStaticShape() && t.getElementType() == elemType &&
+           t.getNumElements() == hidden;
+  };
+  return isHiddenVector(gamma) && isHiddenVector(beta) && isHiddenVector(bias);
+}
+
+/// Emits hip.skip_layer_norm; result 1 is input_skip_bias_sum when
+/// \p withSum.
+static mlir::Operation *
+createSkipLayerNorm(mlir::PatternRewriter &rewriter, mlir::Location loc,
+                    mlir::Value context, mlir::Value input, mlir::Value skip,
+                    mlir::Value gamma, mlir::Value beta, mlir::Value bias,
+                    float epsilon, bool withSum) {
+  auto type = mlir::cast<mlir::RankedTensorType>(input.getType());
+  llvm::SmallVector<mlir::Value> operands = {context, input, skip, gamma};
+  if (beta)
+    operands.push_back(beta);
+  if (bias)
+    operands.push_back(bias);
+  operands.push_back(createEmptyTensor(rewriter, loc, type, input));
+  if (withSum)
+    operands.push_back(createEmptyTensor(rewriter, loc, type, input));
+
+  mlir::OperationState state(loc, "hip.skip_layer_norm");
+  state.addOperands(operands);
+  state.addTypes(llvm::SmallVector<mlir::Type>(withSum ? 2 : 1, type));
+  state.addAttribute("epsilon", rewriter.getF32FloatAttr(epsilon));
+  // [ctx, input, skip, gamma, beta?, bias?, outputs]
+  state.addAttribute(
+      "operand_segment_sizes",
+      rewriter.getDenseI32ArrayAttr(
+          {1, 1, 1, 1, beta ? 1 : 0, bias ? 1 : 0, withSum ? 2 : 1}));
+  return rewriter.create(state);
+}
+
+//===----------------------------------------------------------------------===//
+// onnx.Custom(SkipLayerNormalization) -> hip.skip_layer_norm
+//===----------------------------------------------------------------------===//
+
+/// com.microsoft.SkipLayerNormalization -> hip.skip_layer_norm.
 ///
 /// This is STANDARD (mean-subtracting) LayerNorm with a skip/residual add and
 /// bias, distinct from SkipSimplifiedLayerNormalization (which is RMS norm and
-/// maps to hip.skip_rms_norm). No fused hip op exists for the standard-LN skip
-/// variant, so we compose:
+/// maps to hip.skip_rms_norm). When the operands fit hip.skip_layer_norm
+/// (see canUseSkipLayerNorm) the whole op is one kernel; otherwise we
+/// compose:
 ///   biased = input + bias               (hip.add, only when bias is present)
 ///   sum    = biased + skip              (hip.add)
 ///   output = LayerNorm(sum, gamma, beta, epsilon)   (hip.layer_norm)
@@ -804,6 +868,25 @@ SkipLayerNormToHip::matchAndRewrite(mlir::Operation *op,
 
   auto inputType = mlir::cast<mlir::RankedTensorType>(input.getType());
 
+  unsigned numResults = op->getNumResults();
+  if (canUseSkipLayerNorm(input, skip, gamma, beta, inputBias,
+                          op->getResult(0).getType())) {
+    bool withSum = false;
+    for (unsigned i = 1; i < numResults; ++i)
+      withSum |= !mlir::isa<mlir::NoneType>(op->getResult(i).getType());
+    mlir::Operation *fused =
+        createSkipLayerNorm(rewriter, loc, context, input, skip, gamma, beta,
+                            inputBias, epsValue.convertToFloat(), withSum);
+    llvm::SmallVector<mlir::Value> replacements = {fused->getResult(0)};
+    for (unsigned i = 1; i < numResults; ++i)
+      replacements.push_back(
+          mlir::isa<mlir::NoneType>(op->getResult(i).getType())
+              ? mlir::Value{}
+              : fused->getResult(1));
+    rewriter.replaceOp(op, replacements);
+    return mlir::success();
+  }
+
   // === 1. sum = (input + bias) + skip. This is output[3]. ==================
   // Dynamic extents live on `input`; the bias is a static trailing vector, so
   // the empty tensor is sized from the input.
@@ -861,7 +944,6 @@ SkipLayerNormToHip::matchAndRewrite(mlir::Operation *op,
 
   // === 3. Map results: output[0] = LN output; output[1..2] (mean, inv_std)
   //        are None and dropped; output[3] (input_skip_bias_sum) = sum. =====
-  unsigned numResults = op->getNumResults();
   llvm::SmallVector<mlir::Value> replacements;
   replacements.push_back(output); // output[0]
   for (unsigned i = 1; i < numResults; ++i) {
@@ -1625,6 +1707,108 @@ GroupNormToHip::matchAndRewrite(mlir::Operation *op,
   return mlir::success();
 }
 
+//===----------------------------------------------------------------------===//
+// onnx.GroupNormalization -> hip.group_norm (NCHW, no activation)
+//===----------------------------------------------------------------------===//
+
+/// ONNX GroupNormalization (schema 21):
+///   inputs:  X (N,C,D1,...,Dn), scale (C), bias (C)
+///   attrs:   num_groups (required), epsilon (default 1e-5), stash_type
+///   output:  same shape as X
+///
+///   y = scale * (x - mean) / sqrt(variance + epsilon) + bias
+///   mean/var are per (N, group) over the group's channels and D1..Dn.
+///
+/// Schema 18 took scale and bias per group, not per channel. A scale whose
+/// length is num_groups (or cannot be told apart from it) is that form and
+/// stays unconverted unless num_groups equals C, where both readings agree.
+/// hip.group_norm reduces in fp32 for fp16/bf16 and fp64 for f64, which
+/// meets or exceeds every stash_type.
+struct GroupNormalizationToHip : public mlir::RewritePattern {
+  GroupNormalizationToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.GroupNormalization", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult GroupNormalizationToHip::matchAndRewrite(
+    mlir::Operation *op, mlir::PatternRewriter &rewriter) const {
+  if (op->getNumOperands() != 3 || op->getNumResults() != 1)
+    return rewriter.notifyMatchFailure(
+        op, "GroupNormalization expects 3 operands (X, scale, bias) and 1 "
+            "result");
+
+  auto groupsAttr = op->getAttrOfType<mlir::IntegerAttr>("num_groups");
+  if (!groupsAttr)
+    return rewriter.notifyMatchFailure(
+        op, "GroupNormalization requires num_groups");
+  int64_t groups = groupsAttr.getValue().getSExtValue();
+  if (groups <= 0)
+    return rewriter.notifyMatchFailure(
+        op, "GroupNormalization num_groups must be positive");
+
+  mlir::Value input = op->getOperand(0);
+  mlir::Value scale = op->getOperand(1);
+  mlir::Value bias = op->getOperand(2);
+  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+  if (!inputType || inputType.getRank() < 3)
+    return rewriter.notifyMatchFailure(
+        op, "GroupNormalization requires ranked input of rank >= 3");
+
+  auto scaleType = mlir::dyn_cast<mlir::RankedTensorType>(scale.getType());
+  auto biasType = mlir::dyn_cast<mlir::RankedTensorType>(bias.getType());
+  if (!scaleType || scaleType.getRank() != 1 || !biasType ||
+      biasType.getRank() != 1 ||
+      scaleType.getElementType() != inputType.getElementType() ||
+      biasType.getElementType() != inputType.getElementType())
+    return rewriter.notifyMatchFailure(
+        op, "GroupNormalization scale and bias must be 1-D with X's element "
+            "type");
+
+  auto outputType =
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  if (!outputType || outputType.getElementType() != inputType.getElementType())
+    return rewriter.notifyMatchFailure(
+        op, "GroupNormalization requires a ranked result of X's element type");
+
+  // Per-channel affine (schema 21) is required: lengths must equal C. With a
+  // dynamic C nothing proves that, and the kernel would read past scale and
+  // bias when the runtime C is larger, so a dynamic C is rejected.
+  auto isChannelLength = [&](mlir::RankedTensorType type) {
+    if (type.isDynamicDim(0) || inputType.isDynamicDim(1))
+      return false;
+    return type.getDimSize(0) == inputType.getDimSize(1);
+  };
+  if (!isChannelLength(scaleType) || !isChannelLength(biasType))
+    return rewriter.notifyMatchFailure(
+        op, "GroupNormalization scale and bias must be per channel (schema "
+            "21); a per-group affine (schema 18) is not supported");
+  if (!inputType.isDynamicDim(1) && inputType.getDimSize(1) % groups != 0)
+    return rewriter.notifyMatchFailure(
+        op, "GroupNormalization channel extent is not divisible by num_groups");
+
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return rewriter.notifyMatchFailure(op, "missing context argument");
+  mlir::Value context = *ctxOrFailure;
+
+  llvm::APFloat epsValue(1.0e-05f);
+  if (auto epsAttr = op->getAttrOfType<mlir::FloatAttr>("epsilon"))
+    epsValue = epsAttr.getValue();
+
+  mlir::Location loc = op->getLoc();
+  mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, input);
+  auto hipOp = mlir::hip::GroupNormOp::create(
+      rewriter, loc, context, input, scale, bias, outputInit,
+      rewriter.getI64IntegerAttr(groups), rewriter.getI64IntegerAttr(0),
+      rewriter.getI64IntegerAttr(0),
+      rewriter.getF32FloatAttr(epsValue.convertToFloat()));
+  rewriter.replaceOp(op, hipOp->getResult(0));
+  return mlir::success();
+}
+
 } // namespace
 
 void populateNormConversionPatterns(RewritePatternSet &patterns,
@@ -1633,7 +1817,7 @@ void populateNormConversionPatterns(RewritePatternSet &patterns,
                BranchwiseRMSNormToHip, GatedRMSNormToHip, EngramGateToHip,
                SkipSimplifiedLayerNormToHip, SkipLayerNormToHip,
                EmbedLayerNormToHip, LayerNormToHip, InstanceNormToHip,
-               BatchNormToHip, GroupNormToHip>(ctx);
+               BatchNormToHip, GroupNormToHip, GroupNormalizationToHip>(ctx);
 }
 
 } // namespace hip

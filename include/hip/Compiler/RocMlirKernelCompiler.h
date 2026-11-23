@@ -91,6 +91,10 @@ struct RocMlirEmbedOptions {
 // ROCK_ARCH wins, else a default the rock backend can parse.
 std::string resolveRocMlirArch();
 
+// The L2 cache size of device 0 in bytes, as the HIP runtime reports it, or 0
+// when there is no runtime or device to ask.
+int64_t resolveRocMlirL2CacheBytes();
+
 // The gemm element types, printed as in IR (f16, bf16, ...), that `arch`
 // runs on matrix cores, for the rocMLIR fusion's gemm-gemm-accel-types option.
 std::vector<std::string> getRocMlirGemmAccelTypes(MLIRContext &context,

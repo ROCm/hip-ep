@@ -17,10 +17,15 @@
 
 using namespace mlir;
 
+int64_t mlir::hip::getStorageBitWidth(MemRefType type) {
+  int64_t bits = type.getElementTypeBitWidth();
+  return bits == 1 ? 8 : bits;
+}
+
 int64_t mlir::hip::getStaticByteSize(MemRefType type) {
   if (!type.hasStaticShape())
     return 0;
-  int64_t totalBits = type.getNumElements() * type.getElementTypeBitWidth();
+  int64_t totalBits = type.getNumElements() * getStorageBitWidth(type);
   return static_cast<int64_t>(llvm::divideCeil(totalBits, 8));
 }
 

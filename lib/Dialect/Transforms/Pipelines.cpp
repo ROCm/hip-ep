@@ -141,6 +141,13 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   //     the reference cases.
   pm.addPass(mlir::hip::createInferShapesPass());
 
+  // 1b-if. Size each dynamic hip.if output. onnx-if-outline left a
+  //        `hip.if_result_dim` placeholder per `?` dim; the branch bodies are
+  //        now lowered, so each size is host arithmetic on the captures.
+  //        Runs before hip-externalize-constants, which moves the shape
+  //        constants that arithmetic reads out of the IR.
+  pm.addPass(mlir::hip::createResolveIfResultDimsPass());
+
   // 1b*. HIP-to-HIP pattern rewriting, Such as Q/DQ fusion
   pm.addPass(mlir::hip::createHipFusionTransformPass());
 
@@ -382,7 +389,8 @@ void mlir::hip::buildOnnxToHipPipelineTail(
 
 void mlir::hip::buildOnnxToHipPipelineHead(OpPassManager &pm,
                                            hipdnnHandle_t handle,
-                                           CompiledGraphMap output_graphs) {
+                                           CompiledGraphMap output_graphs,
+                                           bool convIntegerQuantConv) {
   // Pre-lowering ONNX-dialect simplifications (currently: CastLike -> Cast
   // + drop dead type-donor function arguments). Pure ONNX dialect; runs
   // BEFORE hip-add-context-arg so it operates in the original ONNX
@@ -445,7 +453,13 @@ void mlir::hip::buildOnnxToHipPipelineHead(OpPassManager &pm,
     pm.addPass(createCompileHipDNNGraphsPass(handle, std::move(output_graphs)));
   }
 
-  pm.addPass(createConvertOnnxToHipPass());
+  if (convIntegerQuantConv) {
+    ConvertOnnxToHipPassOptions options;
+    options.convIntegerQuantConv = true;
+    pm.addPass(createConvertOnnxToHipPass(options));
+  } else {
+    pm.addPass(createConvertOnnxToHipPass());
+  }
 
   // Fold constant-parameter BatchNorm into the producing convolutions while
   // the conv -> add -> batch_norm chain is still as converted: this head is
@@ -588,7 +602,10 @@ void mlir::hip::buildRocMlirFusionPipeline(
   fuseOptions.arch = options.arch;
   fuseOptions.gemmGemmAccelTypes.assign(options.gemmGemmAccelTypes.begin(),
                                         options.gemmGemmAccelTypes.end());
+  fuseOptions.standaloneElementwise = options.standaloneElementwise;
   fuseOptions.int4Weights = options.int4Weights;
+  fuseOptions.attention = options.attention;
+  fuseOptions.attentionF32MinScoreBytes = options.attentionF32MinScoreBytes;
   addRocMlirFusionPasses(pm, fuseOptions, options.report);
 }
 

@@ -166,6 +166,8 @@ Each domain is partitioned into:
 - fully static allocations, whose byte sizes are compile-time constants;
 - dynamic allocations, whose byte sizes depend on runtime SSA values.
 
+Byte sizes use the storage width of the element type (`getStorageBitWidth`): `i1` occupies one byte per element because the runtime ABI and kernels address bools that way, while other sub-byte types keep their packed width.
+
 ### Phase 3: static packing
 
 Static allocations use greedy best-fit gap packing in byte space. Allocations with disjoint lifetimes may reuse the same offset.
@@ -327,6 +329,12 @@ Small copy-filled integer buffers with an explicit readback also qualify when
 their aliases are bounded and their backend readers support mapped inputs. This
 avoids extra device-pool storage when early placement separates them from
 host-written buffers. Copies and payload accesses stay in their original order.
+
+A host load that may follow an async copy or HIP op on the slot becomes a
+synchronized `hip.readback_scalar`. A slot allocated inside a loop with such
+writers is preceded by `hip.stream_wait`: each iteration reuses the same slot,
+so its host accesses would otherwise race with the previous iteration's
+pending work.
 
 All selected allocations in a function share one `hip.get_host_scratch` buffer. Their offsets are aligned to 64 bytes, independently of PoolAllocs' default 256-byte alignment.
 

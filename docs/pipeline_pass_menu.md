@@ -160,7 +160,8 @@ the selected perfConfig string are printed only with `--verbose`.
 | `hip-externalize-constants` | module | Validate explicit serialization order, append unordered carriers deterministically, plan/serialize, then replace `hip.constant` using the existing inline/full/streaming/hybrid metadata contract. Direct threshold default: 0. |
 | `hip-fold-constant-extracts` | func.func | Resolve constant-index `tensor.extract` of vectors assembled with `tensor.insert_slice` (ONNX shape vectors) to the `from_elements` operand or integer constant element they read. |
 | `hip-infer-shapes` | module | Refine `?` dims on HIP DPS result types via `ReifyRankedShapedTypeOpInterface`. |
-| `hip-fusion-transform` | module | HIP-to-HIP rewriting at unrestricted arity (one op → many, many → one, or subgraph → subgraph). The patterns live in `lib/Dialect/Transforms/fusion_pattern/` — PDLL files compiled into the library, plus native C++ for rewrites whose shape depends on the matched op's rank — and share one `RewritePatternSet`. Includes the GELU fusion: collapses primitive `hip.mul`/`add`/`tanh`/`erf`/`div`/`pow` chains to one `hip.gelu` when the coefficients are statically known scalar or one-element floating-point constants, with supported casts evaluated. |
+
+
 | `hip-split-duplicate-dps-inits` | func.func | De-alias DPS init operands that CSE merged onto one `tensor.empty`, so an op that reads back its own outputs (e.g. `hip.gqa` present K/V) does not share a buffer (pre-bufferize). |
 | `hip-resolve-tensor-dims` | func.func | Fold `tensor.dim` of reshape chains into root-dim arithmetic (pre-bufferize). |
 | `hip-loop-body-to-out-params` | module | Promote outlined loop bodies to the out-param ABI. |
@@ -168,8 +169,8 @@ the selected perfConfig string are printed only with `--verbose`.
 | `hip-fix-loop-accumulator-offset` | func.func | Rewrite frozen Concat-accumulator offsets in loop bodies to iter-driven offsets. |
 | `hip-forward-concat-slots` | func.func | Retarget the writer and every reader of a private buffer at an identity view of its packed concat slot, and drop that input's `memref.copy`. A chained concat buffer becomes a prefix view of the outer buffer, and a dense block's concats share one buffer. A slot off a 16-byte boundary keeps its copy. Runs after `hip-materialize-host-scalars`. |
 | `hip-optimize-memrefs` | func.func | HIP-specific buffer reuse / subview folding. |
-| `hip-promote-strided-operands` | func.func | Materialize identity-layout temporaries for non-identity-layout DPS-input memrefs. |
-| `hip-materialize-host-scalars` | func.func | Redirect tiny host-fed scalar allocs to runtime-owned host-mapped scratch (away from the GPU pool). |
+| `hip-promote-strided-operands` | func.func | Materialize identity-layout temporaries for non-identity-layout DPS-input memrefs. `hip.reverse` reads strided inputs directly and is skipped. `hip.concat` reads contiguous views in place, and becomes per-input slot copies when its strided inputs would otherwise need as many copies. |
+| `hip-materialize-host-scalars` | module | Redirect tiny host-fed scalar allocs to runtime-owned host-mapped scratch (away from the GPU pool). Every function shares the one scratch buffer, so its slots are laid out across the module. |
 | `hip-resolve-memref-dims` | func.func | Fold post-bufferization `memref.dim` through view/reshape chains before pool planning. |
 | `hip-hoist-alloc-size-arith` | func.func | Hoist pure size producers before the earliest allocation their dependencies permit (PoolAllocs precondition). |
 | `hip-pool-allocs` | func.func | Pack allocations into one or more grow-on-demand GPU pools; stamp pool-planning module attributes. |
@@ -194,7 +195,7 @@ ONNX-to-HIP tail; the others do not. The fusion design is in
 | `hip-hoist-pointwise-over-views` | func.func | Move a pointwise op whose other inputs are constant scalars above a chain of single-use element-move views over a single-use conv, matmul or gemm result, so the anchor fusion takes it into the epilogue. The anchor result may have at most 50% more elements than the op's input. |
 | `hip-rocmlir-prepare-quant` | func.func | Split each static 4-bit `hip.matmul_nbits` into unpack, blocked dequantize and `hip.matmul`, then sink each per-tensor `hip.quantize_linear` back through element-move ops to its dequantizes, replace each QLinearConv / QLinearMatMul whose channels all have a requantize multiplier below 2^-33 with a constant of its output zero point, split each QLinearConv / QLinearMatMul with ui8 weights or a non-zero weight zero point into integer ops on `w - offset` and over the shifted zero point, then rebias each ui8 tree that reaches an integer anchor to i8. |
 | `hip-fuse-rocmlir-elementwise` | func.func | Group the pointwise ops, transposes, static reshapes and per-tensor quantizes and dequantizes into `hip.rocmlir_elementwise` modules that an anchor can take whole. |
-| `hip-fuse-rocmlir-anchor` | func.func | Plan an epilogue and a prologue of modules for each conv, matmul and gemm anchor, and outline each plan into a `rock.kernel` function (stamped with `rock.arch` from the `arch` option when set) behind `hip.rocmlir`. A module that no plan takes and that saves a launch becomes a `rock.elementwise` kernel; the other modules are inlined. Decomposes the QLinear ops and dequantized convs that become integer anchors, then merges gemm-elementwise-gemm pairs. |
+| `hip-fuse-rocmlir-anchor` | func.func | Plan an epilogue and a prologue of modules for each conv, matmul and gemm anchor, and outline each plan into a `rock.kernel` function (stamped with `rock.arch` from the `arch` option when set) behind `hip.rocmlir`. A module that no plan takes and that saves a launch becomes a `rock.elementwise` kernel when `standalone-elementwise` is on (the default; `HIPDNN_EP_ROCMLIR_NO_STANDALONE_ELEMENTWISE=1` turns it off in the EP), after its boundary transposes that move the innermost dimension are peeled into HIP transposes and the slice chains of its inputs are copied into it; the other modules are inlined. Decomposes the QLinear ops and dequantized convs that become integer anchors, then merges gemm-elementwise-gemm pairs. |
 | `hip-inline-rocmlir-elementwise` | func.func | Put the body of each `hip.rocmlir_elementwise` back in its block. For tests and replays. |
 | `hip-rocmlir-fusion-report` | module | Append one JSON line for each kernel and host function to the `report` file. |
 | `convert-hip-to-tosa` | func.func | Lower the outlined kernel bodies from HIP ops to TOSA. |
@@ -282,6 +283,8 @@ ONNX → HIP  (buildOnnxToHipPipeline)
                                            runs the same pass in its own head)
   func.func(hip-fold-constant-extracts)
   hip-infer-shapes
+  hip-resolve-if-result-dims         (must precede externalization: it reads
+                                      the shape constants the branches use)
   hip-fusion-transform               (must precede externalization: its patterns
                                       read hip.constant payloads)
   hip-externalize-constants
@@ -297,7 +300,7 @@ ONNX → HIP  (buildOnnxToHipPipeline)
   lower-affine
   cse ; canonicalize
   func.func(convert-linalg-to-loops)
-  func.func(hip-materialize-host-scalars)
+  hip-materialize-host-scalars
   func.func(hip-optimize-memrefs)
   func.func(hip-promote-strided-operands)
   func.func(hip-resolve-memref-dims)

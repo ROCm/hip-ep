@@ -3,27 +3,24 @@
 
 // ============================================================================
 // TEST PURPOSE:
-// Verify ONNX SkipLayerNormalization (com.microsoft domain) is correctly
-// lowered to a composed hip.add + hip.layer_norm sequence.
+// Verify ONNX SkipLayerNormalization (com.microsoft domain) is lowered to the
+// fused hip.skip_layer_norm, and to a composed hip.add + hip.layer_norm
+// sequence when the operands do not fit the fused op.
 //
 // This is STANDARD (mean-subtracting) LayerNorm with a skip/residual add and
 // bias (beta) -- distinct from SkipSimplifiedLayerNormalization (RMS norm ->
-// hip.skip_rms_norm). No fused hip op exists for the standard-LN skip variant,
-// so the converter composes:
-//   sum    = input + skip                                 (hip.add)
-//   output = LayerNorm(sum, gamma, beta, epsilon)         (hip.layer_norm)
+// hip.skip_rms_norm).
+//   sum    = input + skip [+ bias]
+//   output = LayerNorm(sum, gamma, beta, epsilon)
 //   output[3] (input_skip_bias_sum) = sum
 //
 // This test validates:
-// - Custom operation lowering (onnx.Custom -> hip.add + hip.layer_norm)
-// - Domain check: only "com.microsoft" domain is converted
-// - 4-input form (input, skip, gamma, beta) as used by Whisper
-// - 5-input form (input, skip, gamma, beta, bias) as used by Stable Diffusion
-//   text encoder: bias is added to input before the skip
-// - REAL Whisper-large-v3 hidden size 1280 with 3D [1,16,1280] tensors
-// - 4-output ONNX pattern (output, none, none, input_skip_bias_sum) where
-//   output[3] is consumed as the residual for the next block (Whisper)
-// - input_skip_bias_sum is wired to the input+skip sum (the hip.add result)
+// - 4-input form (input, skip, gamma, beta) with output[3] consumed: the
+//   fused op writes the sum as its second result
+// - single-output form: no sum buffer
+// - 5-input form (input, skip, gamma, beta, bias): bias is an operand of the
+//   fused op, dynamic batch / sequence
+// - a skip that broadcasts falls back to hip.add + hip.layer_norm
 // - No leftover onnx.Custom
 //
 // MS spec reference:
@@ -35,7 +32,6 @@
 
 module {
   // ===== Test 1: 4-input / 4-output, output[0] + output[3] consumed =====
-  // Matches the real Whisper-large-v3 encoder pattern (hidden = 1280).
 
   func.func @main_graph(%input: tensor<1x16x1280xf16>,
                          %skip: tensor<1x16x1280xf16>,
@@ -70,8 +66,6 @@ module {
   }
 
   // ===== Test 3: 5-input / 4-output, bias added before the skip =====
-  // Matches Stable Diffusion text encoder SkipLayerNorm_AddBias: dynamic
-  // batch and sequence, hidden 1024, trailing bias broadcast onto the input.
 
   func.func @with_input_bias(%input: tensor<?x?x1024xf16>,
                               %skip: tensor<?x?x1024xf16>,
@@ -88,28 +82,48 @@ module {
         -> (tensor<?x?x1024xf16>, none, none, tensor<?x?x1024xf16>)
     return %0#0, %0#3 : tensor<?x?x1024xf16>, tensor<?x?x1024xf16>
   }
+
+  // ===== Test 4: skip broadcasts over the batch -> composed fallback =====
+
+  func.func @broadcast_skip(%input: tensor<2x16x768xf32>,
+                             %skip: tensor<16x768xf32>,
+                             %gamma: tensor<768xf32>,
+                             %beta: tensor<768xf32>)
+      -> tensor<2x16x768xf32> {
+    %0 = "onnx.Custom"(%input, %skip, %gamma, %beta) {
+      function_name = "SkipLayerNormalization",
+      domain_name = "com.microsoft",
+      epsilon = 9.99999974E-6 : f32
+    } : (tensor<2x16x768xf32>, tensor<16x768xf32>,
+         tensor<768xf32>, tensor<768xf32>)
+        -> tensor<2x16x768xf32>
+    return %0 : tensor<2x16x768xf32>
+  }
 }
 
-// Test 1: output[0] = LayerNorm(input+skip); output[3] = input+skip (the
-// hip.add result). The CHECK below pins SUM to the hip.add output and verifies
-// the function returns (layer_norm result, SUM).
 // CHECK-LABEL: func.func @main_graph
 // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[INPUT:.*]]: tensor<1x16x1280xf16>, %[[SKIP:.*]]: tensor<1x16x1280xf16>, %[[GAMMA:.*]]: tensor<1280xf16>, %[[BETA:.*]]: tensor<1280xf16>)
-// CHECK: %[[SUM:.*]] = hip.add(%[[CTX]]) ins(%[[INPUT]], %[[SKIP]] : tensor<1x16x1280xf16>, tensor<1x16x1280xf16>) outs({{.*}} : tensor<1x16x1280xf16>) -> tensor<1x16x1280xf16>
-// CHECK: %[[OUT:.*]] = hip.layer_norm(%[[CTX]]) ins(%[[SUM]], %[[GAMMA]], %[[BETA]] : tensor<1x16x1280xf16>, tensor<1280xf16>, tensor<1280xf16>) outs({{.*}} : tensor<1x16x1280xf16>)
-// CHECK: return %[[OUT]], %[[SUM]] : tensor<1x16x1280xf16>, tensor<1x16x1280xf16>
+// CHECK-NOT: hip.add
+// CHECK: %[[R:.*]]:2 = hip.skip_layer_norm(%[[CTX]]) ins(%[[INPUT]], %[[SKIP]], %[[GAMMA]] : tensor<1x16x1280xf16>, tensor<1x16x1280xf16>, tensor<1280xf16>, beta %[[BETA]] : tensor<1280xf16>) outs({{.*}}, {{.*}} : tensor<1x16x1280xf16>, tensor<1x16x1280xf16>)
+// CHECK-SAME: epsilon = 9.99999974E-6 : f32
+// CHECK-NOT: hip.layer_norm
+// CHECK: return %[[R]]#0, %[[R]]#1 : tensor<1x16x1280xf16>, tensor<1x16x1280xf16>
 // CHECK-NOT: onnx.Custom
 
 // CHECK-LABEL: func.func @output_only
-// CHECK: %[[SUM2:.*]] = hip.add(%{{.*}}) ins({{.*}}) outs({{.*}})
-// CHECK: hip.layer_norm(%{{.*}}) ins(%[[SUM2]], {{.*}})
+// CHECK: %[[OUT2:.*]] = hip.skip_layer_norm(%{{.*}}) ins({{.*}}) outs(%{{[^,]*}} : tensor<1x16x1280xf16>)
+// CHECK: return %[[OUT2]]
 // CHECK-NOT: onnx.Custom
 
-// Test 3: sum = (input + bias) + skip, then LayerNorm. output[3] is that sum.
 // CHECK-LABEL: func.func @with_input_bias
 // CHECK-SAME: (%[[CTX3:.*]]: !hip.context, %[[IN3:.*]]: tensor<?x?x1024xf16>, %[[SKIP3:.*]]: tensor<?x?x1024xf16>, %[[GAMMA3:.*]]: tensor<1024xf16>, %[[BETA3:.*]]: tensor<1024xf16>, %[[BIAS3:.*]]: tensor<1024xf16>)
-// CHECK: %[[BIASED:.*]] = hip.add(%[[CTX3]]) ins(%[[IN3]], %[[BIAS3]] : tensor<?x?x1024xf16>, tensor<1024xf16>) outs({{.*}} : tensor<?x?x1024xf16>) -> tensor<?x?x1024xf16>
-// CHECK: %[[SUM3:.*]] = hip.add(%[[CTX3]]) ins(%[[BIASED]], %[[SKIP3]] : tensor<?x?x1024xf16>, tensor<?x?x1024xf16>) outs({{.*}} : tensor<?x?x1024xf16>) -> tensor<?x?x1024xf16>
-// CHECK: %[[OUT3:.*]] = hip.layer_norm(%[[CTX3]]) ins(%[[SUM3]], %[[GAMMA3]], %[[BETA3]] : tensor<?x?x1024xf16>, tensor<1024xf16>, tensor<1024xf16>) outs({{.*}} : tensor<?x?x1024xf16>)
-// CHECK: return %[[OUT3]], %[[SUM3]] : tensor<?x?x1024xf16>, tensor<?x?x1024xf16>
+// CHECK-NOT: hip.add
+// CHECK: %[[R3:.*]]:2 = hip.skip_layer_norm(%[[CTX3]]) ins(%[[IN3]], %[[SKIP3]], %[[GAMMA3]] : tensor<?x?x1024xf16>, tensor<?x?x1024xf16>, tensor<1024xf16>, beta %[[BETA3]] : tensor<1024xf16>, bias %[[BIAS3]] : tensor<1024xf16>)
+// CHECK: return %[[R3]]#0, %[[R3]]#1 : tensor<?x?x1024xf16>, tensor<?x?x1024xf16>
+// CHECK-NOT: onnx.Custom
+
+// CHECK-LABEL: func.func @broadcast_skip
+// CHECK-NOT: hip.skip_layer_norm
+// CHECK: %[[SUM4:.*]] = hip.add(%{{.*}}) ins(%{{.*}}, %{{.*}} : tensor<2x16x768xf32>, tensor<16x768xf32>)
+// CHECK: hip.layer_norm(%{{.*}}) ins(%[[SUM4]], {{.*}})
 // CHECK-NOT: onnx.Custom

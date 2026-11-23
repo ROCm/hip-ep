@@ -59,6 +59,8 @@ inline constexpr const char *kHipAllocOutput = "hipdnn_ep_alloc_output";
 inline constexpr const char *kWrapHipMemcpyAsync = "wrap_hipMemcpyAsync";
 inline constexpr const char *kWrapHipMemcpy2DAsync = "wrap_hipMemcpy2DAsync";
 inline constexpr const char *kWrapStridedCopy = "wrap_strided_copy";
+inline constexpr const char *kWrapStridedCopyNd = "wrap_strided_copy_nd";
+inline constexpr const char *kWrapConcat = "wrap_concat";
 
 inline constexpr const char *kWrapConv = "wrap_conv";
 inline constexpr const char *kWrapConvTranspose = "wrap_conv_transpose";
@@ -73,6 +75,7 @@ inline constexpr const char *kWrapSkipSimplifiedLayerNormMixed =
     "wrap_skip_simplified_layer_norm_mixed";
 inline constexpr const char *kWrapLayerNormalization =
     "wrap_layer_normalization";
+inline constexpr const char *kWrapSkipLayerNorm = "wrap_skip_layer_norm";
 inline constexpr const char *kWrapInstanceNormalization =
     "wrap_instance_normalization";
 inline constexpr const char *kWrapBatchNormalization =
@@ -88,7 +91,7 @@ inline constexpr const char *kWrapHyperConnectionPostMixNorm =
     "wrap_hyper_connection_post_mix_norm";
 inline constexpr const char *kMiopenAdd = "hip_miopen_add";
 inline constexpr const char *kMiopenMul = "hip_miopen_mul";
-inline constexpr const char *kMiopenSoftmax = "hip_miopen_softmax";
+inline constexpr const char *kSoftmaxTyped = "hip_softmax_typed";
 inline constexpr const char *kWrapTranspose = "wrap_transpose";
 inline constexpr const char *kWrapGather = "wrap_gather";
 inline constexpr const char *kWrapGatherFromFile = "wrap_gather_from_file";
@@ -213,6 +216,11 @@ inline constexpr const char *kHipReadbackI32 = "hipdnn_ep_readback_i32";
 // width into a host buffer (used by hip.readback_scalar for non-i32 scalars
 // such as the i64/f32/f16 operands of a data-dependent onnx.Range).
 inline constexpr const char *kHipReadbackScalar = "hipdnn_ep_readback_scalar";
+
+// Look up the session stream and wait for it (used by hip.stream_wait).
+inline constexpr const char *kHipStateGetStream = "hipdnn_ep_state_get_stream";
+inline constexpr const char *kHipStreamSynchronize =
+    "wrap_hipStreamSynchronize";
 
 // LLVM memref descriptor struct field indices.
 // Layout: { allocatedPtr, alignedPtr, offset, sizes[rank], strides[rank] }
@@ -528,6 +536,8 @@ void populateReduceLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns);
 void populateTransposeLoweringPatterns(const LLVMTypeConverter &converter,
                                        RewritePatternSet &patterns);
+void populateCopyOpsLoweringPatterns(const LLVMTypeConverter &converter,
+                                     RewritePatternSet &patterns);
 void populateRopeLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateGqaLoweringPatterns(
@@ -605,6 +615,7 @@ void populateReadbackDimLoweringPatterns(
     const DenseMap<Operation *, Value> &hostScalars);
 // hip.readback_scalar: generic synchronized host-readback of a single device
 // scalar of arbitrary element type (the i64/f32/f16 sibling of readback_dim).
+// Also lowers hip.stream_wait, the same synchronization without a readback.
 void populateReadbackScalarLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns,
     const DenseMap<Operation *, Value> &hostScalars);

@@ -1688,16 +1688,16 @@ int wrap_swiglu(RuntimeState *state, void *gate, void *up, void *output,
 
 // Mock impl of the runtime symbol referenced by the hip.miopen.softmax
 // lowering. Signature must match lib/Runtime/real/activation.cpp.
-extern "C" int hip_miopen_softmax(RuntimeState *state, const void *input,
-                                  void *output, int64_t rows, int64_t cols,
-                                  int64_t data_type) {
+extern "C" int hip_softmax_typed(RuntimeState *state, const void *input,
+                                 void *output, int64_t rows, int64_t cols,
+                                 int64_t data_type) {
   if (!state) {
-    fprintf(stderr, "Invalid state in hip_miopen_softmax\n");
+    fprintf(stderr, "Invalid state in hip_softmax_typed\n");
     return -1;
   }
   (void)input;
   (void)output;
-  MOCK_PRINT("[MOCK] hip_miopen_softmax(rows=%lld, cols=%lld, "
+  MOCK_PRINT("[MOCK] hip_softmax_typed(rows=%lld, cols=%lld, "
              "data_type=%s(%lld))\n",
              (long long)rows, (long long)cols,
              hipdnn_ep_datatype_name(data_type), (long long)data_type);
@@ -3207,6 +3207,30 @@ int wrap_layer_normalization(RuntimeState *state, void *input, void *scale,
              (long long)element_size_bytes, (long long)axis, epsilon,
              (long long)stash_type, bias ? "yes" : "null",
              mean ? "yes" : "null", inv_std ? "yes" : "null");
+
+  return 0;
+}
+
+int wrap_skip_layer_norm(RuntimeState *state, void *input, void *skip,
+                         void *gamma, void *beta, void *bias, void *output,
+                         void *input_skip_bias_sum, int64_t input_num_elements,
+                         int64_t gamma_num_elements, int64_t element_size_bytes,
+                         float epsilon) {
+  (void)input;
+  (void)skip;
+  (void)gamma;
+  (void)output;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_skip_layer_norm\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_skip_layer_norm(input_num_elements=%lld, "
+             "gamma_num_elements=%lld, element_size_bytes=%lld, epsilon=%f, "
+             "beta=%s, bias=%s, sum=%s)\n",
+             (long long)input_num_elements, (long long)gamma_num_elements,
+             (long long)element_size_bytes, epsilon, beta ? "yes" : "null",
+             bias ? "yes" : "null", input_skip_bias_sum ? "yes" : "null");
 
   return 0;
 }
