@@ -152,6 +152,50 @@ class TestStridedCopyTier3:
 
 
 # ---------------------------------------------------------------------------
+# Tier-2 strided memref.copy with a dynamic outer dim
+# ---------------------------------------------------------------------------
+#
+# With a symbolic leading dim the destination subview is `?xW` with a strided
+# layout, which the static copy lowering rejects, so the copy reaches the
+# runtime `memrefCopy` helper with a single non-contiguous outer dim (Tier 2).
+# Copies up to the size threshold run as one strided-copy kernel; larger ones
+# stay on hipMemcpy2DAsync. Both sides of the threshold must stay bit-exact.
+class TestStridedCopyTier2Dynamic:
+    @pytest.mark.parametrize(
+        "dtype,rows,widths",
+        [
+            # Kernel path: a few KiB.
+            (np.float16, 1, [17408, 17408]),
+            (np.float16, 4, [96, 160]),
+            (np.float32, 3, [5, 11]),
+            (np.int64, 7, [3, 6]),
+            # DMA path: 2 x 3072 x 1024 x 2 B is above the kernel threshold.
+            (np.float16, 3072, [1024, 1024]),
+        ],
+    )
+    def test_concat_dynamic_rows(self, model_runner, dtype, rows, widths):
+        tp = np_to_onnx_type(dtype)
+        inputs = [
+            helper.make_tensor_value_info(f"X{i}", tp, ["N", w])
+            for i, w in enumerate(widths)
+        ]
+        Y = helper.make_tensor_value_info("Y", tp, ["N", sum(widths)])
+        node = helper.make_node(
+            "Concat", [f"X{i}" for i in range(len(widths))], ["Y"], axis=1
+        )
+        model = make_model_from_nodes([node], inputs, [Y])
+        rng = np.random.default_rng(900 + rows)
+        feeds = []
+        for w in widths:
+            if np.issubdtype(dtype, np.integer):
+                feeds.append(rng.integers(-100, 100, (rows, w), dtype=dtype))
+            else:
+                feeds.append(rng.uniform(-2.0, 2.0, (rows, w)).astype(dtype))
+        actual, expected = model_runner.run_sample(model, feeds)
+        compare_outputs(actual, expected, atol=0)
+
+
+# ---------------------------------------------------------------------------
 # Tile
 # ---------------------------------------------------------------------------
 def _make_tile_model(dtype, input_shape: list[int], repeats: list[int]):
