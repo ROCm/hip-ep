@@ -291,7 +291,8 @@ reshapes in `main_graph` share one shape constant.
 
 After the plans outline, each module that is still in `main_graph` becomes a
 `rock.kernel` function with the `rock.elementwise` attribute, behind
-`hip.rocmlir`, when these conditions are true:
+`hip.rocmlir`, when `standalone-elementwise` is on and these conditions are
+true:
 
 - Every module op, other than a `tensor.empty` and a static reshape, is a
   pointwise op that `convert-hip-to-tosa` lowers, a TOSA-lowerable per-tensor
@@ -301,6 +302,41 @@ After the plans outline, each module that is still in `main_graph` becomes a
 - A module with more than one result has no result that is a transpose of a
   module input, through static reshapes only. rocMLIR cannot store such a
   result next to the other results of the kernel.
+
+rocMLIR tiles an elementwise kernel over its flattened output, so a transpose
+that moves the innermost dimension makes one side of the kernel access memory
+with a stride. When the innermost dimension of the transpose input or output is
+small, the tile still reads or writes a few contiguous streams. So before such
+a module outlines, its boundary transposes of this kind leave the kernel and run
+as HIP transposes when the input innermost dimension has at least 8 elements
+(`peel-min-input-elements`) and the output innermost dimension at least 32
+(`peel-min-output-elements`). These limits are where peeling starts to win in a
+sweep of 2 to 256 elements on gfx1151; the crossover was the same for f16, f32
+and i8.
+The peeled transposes are:
+
+- a result transpose, with the static reshapes around it, that only module
+  results read; the kernel stores the value that the transpose read;
+- an input transpose, with the static reshapes before it, of a module input;
+  the kernel reads the transposed tensor.
+
+The HIP transpose copies whole bytes, so a transpose of a sub-byte element (an
+`i1` mask) stays in the kernel. The remaining ops form the module again, and the
+conditions above apply once more. A module keeps its transposes when no compute
+op is left, or when the remaining ops would launch only once and run as HIP ops
+on a type other than f16 and f32, which the HIP elementwise kernels may not
+cover.
+
+A module input that comes from a chain of static, unit-stride slices and static
+reshapes, with at least one slice, would otherwise run as a strided copy before
+the kernel; a crop of a pixel-shuffle output is the common case. The module gets
+its own copy of that chain and reads the chain's source, and rocMLIR folds the
+slice into the kernel's loads. Another reader of the slice keeps the original.
+A slice counts as a view, not a launch, when the module is checked again.
+A slice with SSA offsets, sizes or strides stays outside, since in the module
+those operands are kernel arguments, not constants. A chain that ends in a `ui8`
+Where condition also stays outside: the kernel views that argument as `i8` only
+when it reads the condition directly.
 
 The inline scalar constants that the module reads are cloned into the kernel.
 Any other module is inlined back. The rocMLIR compile does not autotune an
@@ -375,13 +411,14 @@ the A operand of the second gemm through pointwise ops and row-only reshapes
 
 ## Options
 
-`arch` and `gemm-gemm-accel-types` describe the target. `int4-weights` is the
-only switch of the fusion rules.
+`arch` and `gemm-gemm-accel-types` describe the target. `standalone-elementwise`
+and `int4-weights` are the fusion switches.
 
 | Option | EP value | Effect |
 |---|---|---|
 | `arch=<gfx>` | detected | Stamps `rock.arch` on each kernel. |
 | `gemm-gemm-accel-types=<types>` | detected | The element types for the gemm-gemm gate. |
+| `standalone-elementwise=<bool>` | `true`; `false` with `HIPDNN_EP_ROCMLIR_NO_STANDALONE_ELEMENTWISE=1` | Outlines a module that no anchor takes as an elementwise kernel. |
 | `int4-weights=<bool>` | on when rocMLIR autotuning is on | Takes packed-int4 weight dequantizes into the kernel. |
 
 ## Tests and tools
