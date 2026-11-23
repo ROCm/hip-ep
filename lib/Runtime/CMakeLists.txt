@@ -236,7 +236,6 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
         list(APPEND IMPL_DEPS
             ${CMAKE_CURRENT_SOURCE_DIR}/real/runtime_types.h
             ${CMAKE_CURRENT_SOURCE_DIR}/real/dense_gemm.h
-            ${CMAKE_CURRENT_SOURCE_DIR}/real/attention_gemm.h
             ${CMAKE_CURRENT_SOURCE_DIR}/real/cache_utils.h
             ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/hip/autotune/gqa/gqa_autotune.h
             ${CMAKE_CURRENT_SOURCE_DIR}/real/zp_unpack_cache.h
