@@ -558,6 +558,10 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->seqlens_k_cached_valid = false;
   state->seqlens_k_cached_val = 0;
   state->seqlens_k_cached_ptr = nullptr;
+  state->seqlens_k_hint_valid = false;
+  state->seqlens_k_hint_stepped = false;
+  state->seqlens_k_hint_val = 0;
+  state->seqlens_k_hint_steps = 0;
   state->sai_past_len_cached_valid = false;
   state->sai_past_len_cached_val = 0;
   state->sai_past_len_cached_ptr = nullptr;
@@ -1433,9 +1437,10 @@ const char *hipdnn_ep_runtime_get_provider_option(RuntimeState *state,
   return it == options->end() ? nullptr : it->second.c_str();
 }
 
-// Per-Compute() cache invalidation hook. Today this only resets the GQA
-// seqlens_k cache; future per-forward-pass caches should be cleared here
-// as well so the EP-side hook stays a single call.
+// Per-Compute() cache invalidation hook. Today this resets the GQA seqlens_k
+// cache and re-arms its decode estimate for one more step; future
+// per-forward-pass caches should be cleared here as well so the EP-side hook
+// stays a single call.
 //
 // __declspec(dllexport) matches the convention in real/test_hip_from_dll.cpp
 // and guarantees the symbol survives LLVM optimization in the runtime.bc
@@ -1451,6 +1456,7 @@ extern "C"
   }
   state->seqlens_k_cached_valid = false;
   state->seqlens_k_cached_ptr = nullptr;
+  state->seqlens_k_hint_stepped = false;
   state->sai_past_len_cached_valid = false;
   state->sai_past_len_cached_ptr = nullptr;
   // Publish the session stream for ABI-fixed helpers (memrefCopy) that run

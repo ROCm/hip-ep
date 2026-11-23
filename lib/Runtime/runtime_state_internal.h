@@ -296,6 +296,19 @@ struct RuntimeState {
   int32_t seqlens_k_cached_val;
   const void *seqlens_k_cached_ptr;
 
+  // Host-side estimate of seqlens_k for a decode whose KV cache is updated in
+  // place. That path needs the length only to pick a tuned kernel config --
+  // the kernels read the exact value from device -- so it takes the last
+  // value read from device plus one per decode step since, instead of a D2H
+  // copy and stream sync. Unlike the cache above it survives across Compute()
+  // calls; `stepped` is reset by hipdnn_ep_runtime_begin_compute() so one
+  // forward pass advances the estimate once, and `steps` bounds how far it
+  // may run ahead of the last real read.
+  bool seqlens_k_hint_valid;
+  bool seqlens_k_hint_stepped;
+  int32_t seqlens_k_hint_val;
+  int32_t seqlens_k_hint_steps;
+
   // SparseAttentionIndexer past_sequence_length, same lifetime as above.
   bool sai_past_len_cached_valid;
   int32_t sai_past_len_cached_val;

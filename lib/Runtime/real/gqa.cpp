@@ -171,8 +171,53 @@ static int32_t read_seqlens_k_for_dispatch(hipStream_t stream,
     state->seqlens_k_cached_val = seqlens_k_val;
     state->seqlens_k_cached_ptr = seqlens_k_ptr;
     state->seqlens_k_cached_valid = true;
+    state->seqlens_k_hint_val = seqlens_k_val;
+    state->seqlens_k_hint_steps = 0;
+    state->seqlens_k_hint_stepped = true;
+    state->seqlens_k_hint_valid = true;
   }
   return seqlens_k_val;
+}
+
+// Decode steps the estimate below may run ahead of the last device read before
+// it is refreshed by one. The tuned configs are keyed by length buckets far
+// wider than this, so a refresh is a safety net against a step the estimate
+// did not see (e.g. a forward pass split across several Compute() calls), not
+// a precision need.
+static constexpr int32_t kSeqlensKHintMaxSteps = 32;
+
+// seqlens_k for a decode that only needs it to choose a kernel config: the
+// kernels read the exact value from device, so an estimate costs at worst a
+// less suited config, never a wrong result. A value already read in this
+// forward pass is returned as is. Otherwise, the first call of each forward
+// pass advances the last device value by one decode step, and later calls of
+// the same pass reuse it. Falls back to the device read when no value has been
+// read yet, the estimate has run kSeqlensKHintMaxSteps steps ahead, or the
+// seqlens_k cache is disabled. The estimate never enters the cache, so a path
+// that needs the exact length still reads it.
+static int32_t
+estimate_seqlens_k_for_decode(hipStream_t stream, const void *seqlens_k_ptr,
+                              int64_t B, RuntimeState *state,
+                              std::optional<int32_t> host_length) {
+  if (!seqlens_k_ptr || B != 1 || host_length || !state ||
+      !gqa_cache_seqlens_enabled())
+    return read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state,
+                                       host_length);
+  if (state->seqlens_k_cached_valid &&
+      state->seqlens_k_cached_ptr == seqlens_k_ptr)
+    return state->seqlens_k_cached_val;
+  if (!state->seqlens_k_hint_valid || state->seqlens_k_hint_val < 0)
+    return read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state,
+                                       host_length);
+  if (!state->seqlens_k_hint_stepped) {
+    if (state->seqlens_k_hint_steps >= kSeqlensKHintMaxSteps)
+      return read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state,
+                                         host_length);
+    ++state->seqlens_k_hint_val;
+    ++state->seqlens_k_hint_steps;
+    state->seqlens_k_hint_stepped = true;
+  }
+  return state->seqlens_k_hint_val;
 }
 
 // FA-2 split-K decode workspace capacity, in splits (matches gqa_kernel.hip).
@@ -506,9 +551,16 @@ static int gqa_forward_fused(
   const bool need_rope = do_rotary && cos_cache && sin_cache;
   const bool packed_qkv = (!key && !value);
 
-  // B==1 pre-read (cached per Compute) feeds host past_len where needed.
+  // B==1 pre-read (cached per Compute) feeds host past_len where needed. A
+  // decode that updates the cache in place uses the length only to pick a
+  // config, so it takes the host estimate instead of a D2H sync.
+  const bool in_place_decode =
+      sq == 1 && !(past_key && past_key != present_key);
   const int32_t seqlens_k_pre =
-      read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state, host_length);
+      in_place_decode ? estimate_seqlens_k_for_decode(stream, seqlens_k_ptr, B,
+                                                      state, host_length)
+                      : read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B,
+                                                    state, host_length);
 
   const size_t Q_full_bytes = static_cast<size_t>(B) * sq * H * d * elem_sz;
   const size_t K_full_bytes = static_cast<size_t>(B) * sq * G * d * elem_sz;
@@ -707,13 +759,14 @@ static int gqa_forward_fused(
             kv_quantized ? k_scale : nullptr, kv_quantized ? v_scale : nullptr,
             key_bias, key_bias_stride);
       } else {
-        // B==1 already paid (and caches) the seqlens_k read above, so the LUT
-        // sees the length the kernel will actually scan without adding a sync.
-        // For B>1 this is the host-known shape length, which is the upper
-        // bound; the nearest-neighbour lookup answers it from the closest
-        // measured length either way.
+        // B==1 has the length the kernel will scan from above -- read, cached
+        // or estimated -- so the LUT sees it without adding a sync. For B>1,
+        // or an estimate past the cache, this is the host-known shape length,
+        // which is the upper bound; the nearest-neighbour lookup answers it
+        // from the closest measured length either way.
         int effective_skv = static_cast<int>(skv);
-        if (seqlens_k_pre != kSeqlensKNotRead && seqlens_k_pre >= 0)
+        if (seqlens_k_pre != kSeqlensKNotRead && seqlens_k_pre >= 0 &&
+            seqlens_k_pre < skv)
           effective_skv = seqlens_k_pre + 1;
         const hipdnn_ep::GqaDecodeRequest request{
             kv_dtype,
