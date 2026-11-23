@@ -27,33 +27,46 @@ add_library(HipDialectTransforms STATIC
   # instantiates the driver, only ever sees their populate declarations.
   fusion_pattern/linear_attention_group_fold.cpp
   fusion_pattern/patch_embed_conv_to_gemm.cpp
+  fusion_pattern/gelu_fusion.cpp
   fusion_pattern/swiglu_fusion.cpp
   AddHipContextArg.cpp
   AssignOpStateSlots.cpp
   BufferUtils.cpp
   DecomposeConvTranspose.cpp
+  DecomposeMatMulNBits.cpp
   ExternalizeConstants.cpp
   FixLoopAccumulatorOffset.cpp
   FoldBatchNorm.cpp
   FoldConstantExtracts.cpp
-  FuseROCMlir.cpp
+  ForwardConcatSlots.cpp
+  FuseRocMlirAnchor.cpp
+  FuseROCMlirReport.cpp
+  FuseRocMlirElementwise.cpp
+  GemmGemm.cpp
   GenerateInterface.cpp
   GenerateOpStateInit.cpp
   HipFusionTransform.cpp
   HoistAllocSizeArith.cpp
   InferLoopBodyShapesPass.cpp
   InferShapesPass.cpp
+  KernelOutline.cpp
   LoopBodyToOutParams.cpp
   LowerAllocs.cpp
+  HoistPointwiseOverViews.cpp
   MaterializeHostScalars.cpp
   OptimizeMemRefs.cpp
   Pipelines.cpp
   PoolAllocs.cpp
   PromoteStridedHipOperands.cpp
+  QLinearPlan.cpp
+  QuantizedEpilogue.cpp
+  RebiasUnsignedQuantize.cpp
   RelaxMultiDynExpandShape.cpp
+  RocMlirPrepareQuant.cpp
   ResolveExternConstants.cpp
   ResolveMemRefDims.cpp
   ResolveTensorDims.cpp
+  SinkQuantize.cpp
   SplitDuplicateDpsInits.cpp
   UseOutputAllocator.cpp
 )

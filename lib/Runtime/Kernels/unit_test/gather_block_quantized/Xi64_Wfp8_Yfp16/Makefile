@@ -11,7 +11,7 @@
 #
 # `test` runs every categorical situation (compact rows x scale granularity x
 # indices rank) on the shapes COVERAGE selects (default 3; see
-# unit_test/README.md "Shape coverage"). Inputs and the CPU reference are
+# unit_test/GUIDELINES.md "Shape coverage"). Inputs and the CPU reference are
 # generated in-process -- no python, no data files.
 # ============================================================
 

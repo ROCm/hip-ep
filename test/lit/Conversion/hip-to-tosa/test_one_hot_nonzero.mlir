@@ -59,7 +59,7 @@ func.func @one_hot_axis1(
   return %r : tensor<2x3x2xf16>
 }
 
-// The shape hip-fuse-rocmlir produces for an outlined kernel.
+// The shape the rocMLIR fusion produces for an outlined kernel.
 // CHECK-LABEL: func.func @one_hot_outlined_kernel
 // CHECK: tosa.equal
 // CHECK-NOT: hip.one_hot
