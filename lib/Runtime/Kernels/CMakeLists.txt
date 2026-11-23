@@ -117,6 +117,16 @@ set(_kernel_sources
     hip/nonzero_kernel.hip
     hip/strided_copy_kernel.hip
 )
+# The kernels of llama.cpp's ggml path, built with it (HIPDNN_EP_BUILD_GGML).
+set(_ggml_kernel_sources
+    hip/kquant/kquant_matmul_kernel.hip
+    hip/kquant/kquant_mmq_kernel.hip
+    hip/token_major_gqa/token_major_gqa_kernel.hip
+    hip/token_major_gqa/token_major_gqa_tile.hip
+)
+if(HIPDNN_EP_BUILD_GGML)
+    list(APPEND _kernel_sources ${_ggml_kernel_sources})
+endif()
 
 # MatMulNBits offline autotune table.
 #
@@ -277,6 +287,8 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
             ${_gqa_lut_src}
         INCLUDE_DIRECTORIES
             ${CMAKE_CURRENT_SOURCE_DIR}/include
+            # hip/kquant_abi.h, shared with the compiler.
+            ${PROJECT_SOURCE_DIR}/include
             # matmul_nbits_autotune_generated.h and gqa_autotune_generated.h;
             # flatbuffers is header-only for reading, so no link library needed.
             ${CMAKE_BINARY_DIR}/schemas

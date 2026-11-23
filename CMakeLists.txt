@@ -128,6 +128,13 @@ option(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS
   "Build the opt-in native .dll/.so artifact path (lld). When OFF, artifact_format=NATIVE throws."
   OFF)
 
+# llama.cpp's ggml graphs (docs/design/ggml-backend.md): the K-quant, Q8_1
+# and token-major GQA kernels and their runtime wrappers, which only that path
+# uses.
+option(HIPDNN_EP_BUILD_GGML
+  "Build the kernels and runtime wrappers llama.cpp's ggml-hipep backend uses"
+  OFF)
+
 # Build rocMLIR/Triton (rocmlirTriton) in-tree as a subdirectory, reusing the
 # same LLVM/MLIR this project already resolves (see cmake/deps.cmake). When ON,
 # the in-tree LLVM is built as a superset (adds the AMDGPU target and matching
@@ -145,6 +152,11 @@ option(ENABLE_ROCMLIRTRITON "Build rocmlirTriton (rocMLIR/Triton) in-tree, reusi
 # Centralized dependency resolution (LLVM/MLIR/LLD, flatbuffers, cpptrace,
 # TheRock, morphizen, ONNX Runtime, protobuf).
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps.cmake)
+
+# After the dependencies, so toggling the ggml path rebuilds none of them.
+if(HIPDNN_EP_BUILD_GGML)
+  add_compile_definitions(HIPDNN_EP_BUILD_GGML)
+endif()
 
 option(HIPDNN_EP_LINK_HIP_HOST
        "Link hip::host into the EP DLL (enables HIP host APIs in EP code)" ON)

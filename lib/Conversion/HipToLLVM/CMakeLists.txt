@@ -85,6 +85,11 @@ add_library(HipToLLVM STATIC
   QLpNormalizationLowering.cpp
   QSigmoidLowering.cpp
 )
+# The K-quant and token-major GQA lowering, whose runtime wrappers only llama.cpp's
+# ggml path builds (HIPDNN_EP_BUILD_GGML).
+if(HIPDNN_EP_BUILD_GGML)
+  target_sources(HipToLLVM PRIVATE KQuantLowering.cpp)
+endif()
 
 add_dependencies(HipToLLVM
   HipDialectIncGen

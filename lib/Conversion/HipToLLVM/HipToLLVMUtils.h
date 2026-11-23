@@ -147,6 +147,12 @@ inline constexpr const char *kWrapDequantizeLinear = "wrap_dequantize_linear";
 inline constexpr const char *kWrapGemm = "wrap_gemm";
 inline constexpr const char *kWrapLinearAttention = "wrap_linear_attention";
 inline constexpr const char *kWrapGatedDeltaNet = "wrap_gated_delta_net";
+inline constexpr const char *kWrapQuantizeQ8_1 = "wrap_quantize_q8_1";
+inline constexpr const char *kWrapSkipRmsNormQ8_1 = "wrap_skip_rms_norm_q8_1";
+inline constexpr const char *kWrapKQuantMatmul = "wrap_kquant_matmul";
+inline constexpr const char *kWrapKQuantMatmulQ8_1 = "wrap_kquant_matmul_q8_1";
+inline constexpr const char *kWrapKQuantSwigluQ8_1 = "wrap_kquant_swiglu_q8_1";
+inline constexpr const char *kWrapTokenMajorGqa = "wrap_token_major_gqa";
 inline constexpr const char *kWrapDynamicSparseAttention =
     "wrap_dynamic_sparse_attention";
 inline constexpr const char *kWrapSparseAttentionIndexer =
@@ -563,6 +569,8 @@ void populateLinearAttentionLoweringPatterns(const LLVMTypeConverter &converter,
                                              RewritePatternSet &patterns);
 void populateGatedDeltaNetLoweringPatterns(const LLVMTypeConverter &converter,
                                            RewritePatternSet &patterns);
+void populateKQuantLoweringPatterns(const LLVMTypeConverter &converter,
+                                    RewritePatternSet &patterns);
 void populateDynamicSparseAttentionLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateSparseAttentionIndexerLoweringPatterns(

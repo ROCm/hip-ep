@@ -239,6 +239,8 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
             ${CMAKE_CURRENT_SOURCE_DIR}/real/cache_utils.h
             ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/hip/autotune/gqa/gqa_autotune.h
             ${CMAKE_CURRENT_SOURCE_DIR}/real/zp_unpack_cache.h
+            ${CMAKE_CURRENT_SOURCE_DIR}/real/kquant_contract.h
+            ${CMAKE_SOURCE_DIR}/include/hip/kquant_abi.h
             ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/include/hip_custom_kernels.h)
     else()
         list(APPEND COMPILE_FLAGS "-I" "${CMAKE_CURRENT_SOURCE_DIR}/mock")
@@ -515,6 +517,14 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qlpnormalization.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qsigmoid.bc
     )
+    # The wrappers of llama.cpp's ggml path, built with it (HIPDNN_EP_BUILD_GGML).
+    if(HIPDNN_EP_BUILD_GGML)
+        compile_to_bitcode(real/kquant.cpp runtime_kquant.bc)
+        compile_to_bitcode(real/token_major_gqa.cpp runtime_token_major_gqa.bc)
+        list(APPEND RUNTIME_BC_MODULES
+            ${CMAKE_CURRENT_BINARY_DIR}/runtime_kquant.bc
+            ${CMAKE_CURRENT_BINARY_DIR}/runtime_token_major_gqa.bc)
+    endif()
     # Vendor-symbol stubs (see the compile_to_bitcode above) join runtime.bc only
     # when the vendor BLAS/DNN backends are disabled.
     if(HIPDNN_EP_DISABLE_VENDOR_BLAS)

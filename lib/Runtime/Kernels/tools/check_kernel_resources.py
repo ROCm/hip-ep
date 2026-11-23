@@ -64,9 +64,13 @@ LDS_LOAD = re.compile(r"ds_(?:load|read)(?:_addtid)?_(2addr_(?:stride64_)?)?([bi
 
 def kernel_sources():
     text = (KERNELS / "CMakeLists.txt").read_text()
-    block = text[text.index("set(_kernel_sources"):]
-    block = block[:block.index(")")]
-    return re.findall(r"(hip/[\w./-]+\.hip)", block)
+    sources = []
+    # Every kernel, including those only one build option builds.
+    for name in ("set(_kernel_sources", "set(_ggml_kernel_sources"):
+        block = text[text.index(name):]
+        block = block[:block.index(")")]
+        sources += re.findall(r"(hip/[\w./-]+\.hip)", block)
+    return sources
 
 
 def hipcc_env(rocm):
@@ -90,6 +94,8 @@ def product_flags(arch):
                   "-include", str(KERNELS / "include" / "msvc_hip_cmath_workaround.h")]
     for inc in ("include", "hip", "hip/autotune/gqa", "hip/autotune/matmul_nbits"):
         flags += ["-I", str(KERNELS / inc)]
+    # hip/kquant_abi.h, shared with the compiler.
+    flags += ["-I", str(KERNELS.parents[2] / "include")]
     return flags
 
 
