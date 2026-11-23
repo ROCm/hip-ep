@@ -180,6 +180,67 @@ class TestGather:
         actual, expected = model_runner.run_sample(model, [x, ids])
         compare_outputs(actual, expected, atol=0)
 
+    @pytest.mark.parametrize(
+        "dtype,inner",
+        [
+            # One element per row (1, 2, 4 and 8 bytes): one thread per row.
+            (np.int8, 1),
+            (np.float16, 1),
+            (np.float32, 1),
+            (np.int64, 1),
+            # Rows of 2 to 4 chunks: 6 B and 12 B rows, one thread per row.
+            (np.float16, 3),
+            (np.float32, 3),
+            (np.float16, 4),
+            # Rows off every vector width: 1-byte and 2-byte chunks.
+            (np.int8, 7),
+            (np.float16, 147),
+            (np.float16, 387),
+            # Rows of whole 16-byte chunks, one thread per chunk.
+            (np.float32, 64),
+        ],
+    )
+    @pytest.mark.parametrize("idx_type", [np.int32, np.int64])
+    def test_gather_row_sizes(self, model_runner, dtype, inner, idx_type):
+        """Gather [outer, axis, inner] on axis 1 for every row-size path."""
+        data_shape = [3, 40, inner]
+        indices_shape = [2, 9]
+        tp = helper.np_dtype_to_tensor_dtype(np.dtype(dtype))
+        itp = helper.np_dtype_to_tensor_dtype(np.dtype(idx_type))
+        data = helper.make_tensor_value_info("data", tp, data_shape)
+        indices = helper.make_tensor_value_info("indices", itp, indices_shape)
+        output = helper.make_tensor_value_info("output", tp, [3, 2, 9, inner])
+        node = helper.make_node("Gather", ["data", "indices"], ["output"], axis=1)
+        model = make_model_from_nodes([node], [data, indices], [output])
+
+        rng = np.random.default_rng(11)
+        if np.issubdtype(dtype, np.integer):
+            x = rng.integers(-100, 100, data_shape).astype(dtype)
+        else:
+            x = rng.uniform(-1, 1, data_shape).astype(dtype)
+        ids = rng.integers(-40, 40, indices_shape).astype(idx_type)
+        actual, expected = model_runner.run_sample(model, [x, ids])
+        compare_outputs(actual, expected, atol=0)
+
+    @pytest.mark.parametrize("index", [0, 1, -1])
+    def test_gather_scalar_index_last_axis(self, model_runner, index):
+        """A scalar index into a size-2 innermost axis: 4-byte rows."""
+        data_shape = [2, 3, 17, 19, 2]
+        data = helper.make_tensor_value_info("data", TensorProto.FLOAT, data_shape)
+        indices = helper.make_tensor_value_info("indices", TensorProto.INT64, [])
+        output = helper.make_tensor_value_info(
+            "output", TensorProto.FLOAT, data_shape[:4]
+        )
+        node = helper.make_node("Gather", ["data", "indices"], ["output"], axis=4)
+        model = make_model_from_nodes([node], [data, indices], [output])
+
+        rng = np.random.default_rng(3)
+        x = rng.uniform(-1, 1, data_shape).astype(np.float32)
+        actual, expected = model_runner.run_sample(
+            model, [x, np.array(index, dtype=np.int64)]
+        )
+        compare_outputs(actual, expected, atol=0)
+
     @pytest.mark.parametrize("seq_len", SEQ_LENS)
     def test_gather_embedding_gpt_oss_shape(self, model_runner, seq_len):
         """Embedding lookup: [201088, 2880] f16 gather by [1, S] i64.
