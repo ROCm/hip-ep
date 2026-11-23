@@ -14,9 +14,11 @@
 //     hip.conv -> expand_shape, hip.transpose, collapse_shape x2, hip.gemm,
 //                 expand_shape, hip.transpose
 //
-// A 1x1 kernel is excluded: it meets `stride == kernel` without being a patch
-// embed, and rewriting it only adds data movement. Declining is always safe,
-// since `hip.conv` has a runtime for every rank it can hold.
+// A 1x1 kernel over more than one pixel is excluded: it meets
+// `stride == kernel` without being a patch embed, and this rewrite only adds
+// data movement to it. pointwise_conv_to_matmul.hpp takes those convs instead.
+// Declining is always safe, since `hip.conv` has a runtime for every rank it
+// can hold.
 //
 // Before/After IR: patch_embed_conv_to_gemm.cpp.
 //===----------------------------------------------------------------------===//
