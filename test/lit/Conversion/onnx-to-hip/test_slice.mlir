@@ -300,8 +300,8 @@ module {
   }
 
   // Test 9: an opaque `starts` (a graph input, not shape arithmetic) is not
-  // host-resolvable, so the extent falls back to the data dim upper bound
-  // rather than emitting an extent that cannot be justified.
+  // host-resolvable, so both bounds are read back from the device rather than
+  // falling back to the data dim, which would be the wrong extent.
   func.func @test_slice_native_opaque_starts(
       %data: tensor<?xi64>, %starts: tensor<1xi64>, %ends: tensor<1xi64>)
       -> tensor<?xi64> {
@@ -311,9 +311,15 @@ module {
         : (tensor<?xi64>, tensor<1xi64>, tensor<1xi64>,
            tensor<1xi64>) -> tensor<?xi64>
 
-    // CHECK-NOT: arith.minsi
     // CHECK: %[[DIM:.*]] = tensor.dim %arg1, %{{.*}} : tensor<?xi64>
-    // CHECK: tensor.empty(%[[DIM]]) : tensor<?xi64>
+    // CHECK: hip.readback_scalar(%arg0, %{{.*}} : tensor<i64>) -> i64
+    // CHECK: hip.readback_scalar(%arg0, %{{.*}} : tensor<i64>) -> i64
+    // CHECK-NOT: hip.readback_scalar
+    // CHECK: %[[SPAN:.*]] = arith.subi %{{.*}}, %{{.*}} : index
+    // CHECK: %[[EXT:.*]] = arith.maxsi %[[SPAN]], %{{.*}} : index
+    // CHECK: %[[EMPTY:.*]] = arith.cmpi eq, %[[EXT]], %{{.*}} : index
+    // CHECK: %[[CAP:.*]] = arith.select %[[EMPTY]], %[[DIM]], %[[EXT]] : index
+    // CHECK: tensor.empty(%[[CAP]]) : tensor<?xi64>
     // CHECK: hip.slice
     return %r : tensor<?xi64>
   }
@@ -719,6 +725,268 @@ module {
         : (tensor<?x?xf32>, tensor<1xi64>, tensor<1xi64>,
            tensor<1xi64>) -> tensor<*xf32>
     %r = "onnx.Identity"(%s) : (tensor<*xf32>) -> tensor<?x?xf32>
+    return %r : tensor<?x?xf32>
+  }
+
+  // Test 27: Whisper decoder_with_past's position-embedding slice,
+  // `embed_positions[past_len : past_len + len]`, with both bounds built as
+  // Unsqueeze of scalar `Gather(Shape(x), k)` arithmetic. The extent must come
+  // from the bounds: falling back to the 448-row table sized the embedding add
+  // at [B, 448, 512] and every decoder buffer after it, and the run faulted on
+  // the GPU.
+  func.func @test_slice_native_unsqueezed_gather_shape_extent(
+      %table: tensor<448x512xf32>, %past: tensor<?x8x?x64xf32>,
+      %ids: tensor<?x?xi64>) -> tensor<?x?xf32> {
+    // CHECK-LABEL: func.func @test_slice_native_unsqueezed_gather_shape_extent
+    %zero = "onnx.Constant"() {value = dense<0> : tensor<1xi64>} : () -> tensor<1xi64>
+    %one = "onnx.Constant"() {value = dense<1> : tensor<1xi64>} : () -> tensor<1xi64>
+    %k1 = "onnx.Constant"() {value = dense<1> : tensor<i64>} : () -> tensor<i64>
+    %k2 = "onnx.Constant"() {value = dense<2> : tensor<i64>} : () -> tensor<i64>
+    %past_shape = "onnx.Shape"(%past) : (tensor<?x8x?x64xf32>) -> tensor<4xi64>
+    %past_len = "onnx.Gather"(%past_shape, %k2) {axis = 0 : si64}
+        : (tensor<4xi64>, tensor<i64>) -> tensor<i64>
+    %starts = "onnx.Unsqueeze"(%past_len, %zero)
+        : (tensor<i64>, tensor<1xi64>) -> tensor<1xi64>
+    %ids_shape = "onnx.Shape"(%ids) : (tensor<?x?xi64>) -> tensor<2xi64>
+    %len = "onnx.Gather"(%ids_shape, %k1) {axis = 0 : si64}
+        : (tensor<2xi64>, tensor<i64>) -> tensor<i64>
+    %end = "onnx.Add"(%past_len, %len)
+        : (tensor<i64>, tensor<i64>) -> tensor<i64>
+    %ends = "onnx.Unsqueeze"(%end, %zero)
+        : (tensor<i64>, tensor<1xi64>) -> tensor<1xi64>
+    %r = "onnx.Slice"(%table, %starts, %ends, %zero, %one)
+        : (tensor<448x512xf32>, tensor<1xi64>, tensor<1xi64>, tensor<1xi64>,
+           tensor<1xi64>) -> tensor<?x?xf32>
+
+    // CHECK: %[[PAST:.*]] = tensor.dim %arg2, %c2 : tensor<?x8x?x64xf32>
+    // CHECK: %[[LEN:.*]] = tensor.dim %arg3, %c1 : tensor<?x?xi64>
+    // CHECK: arith.addi %[[PAST]], %[[LEN]] : index
+    // CHECK: %[[LO:.*]] = arith.minsi %{{.*}}, %{{.*}} : index
+    // CHECK: %[[HI:.*]] = arith.minsi %{{.*}}, %{{.*}} : index
+    // CHECK: %[[SPAN:.*]] = arith.subi %[[HI]], %[[LO]] : index
+    // CHECK: %[[EXT:.*]] = arith.maxsi %[[SPAN]], %{{.*}} : index
+    // CHECK: %[[EMPTY:.*]] = arith.cmpi eq, %[[EXT]], %{{.*}} : index
+    // CHECK: %[[CAP:.*]] = arith.select %[[EMPTY]], %{{.*}}, %[[EXT]] : index
+    // CHECK: tensor.empty(%[[CAP]], %{{.*}}) : tensor<?x?xf32>
+    // CHECK: hip.slice
+    return %r : tensor<?x?xf32>
+  }
+
+  // Test 28: test 27 in the post-conversion spelling: Unsqueeze already
+  // lowered to tensor.expand_shape, Gather(Shape) to from_elements, and the
+  // Add to a rank-0 hip.add.
+  func.func @test_slice_native_lowered_expand_shape_extent(
+      %ctx: !hip.context, %table: tensor<448x512xf32>,
+      %past: tensor<?x8x?x64xf32>, %ids: tensor<?x?xi64>) -> tensor<?x?xf32> {
+    // CHECK-LABEL: func.func @test_slice_native_lowered_expand_shape_extent
+    %c1 = arith.constant 1 : index
+    %c2 = arith.constant 2 : index
+    %zero = arith.constant dense<0> : tensor<1xi64>
+    %one = arith.constant dense<1> : tensor<1xi64>
+    %past_dim = tensor.dim %past, %c2 : tensor<?x8x?x64xf32>
+    %past_i64 = arith.index_cast %past_dim : index to i64
+    %past_len = tensor.from_elements %past_i64 : tensor<i64>
+    %starts = tensor.expand_shape %past_len [] output_shape [1]
+        : tensor<i64> into tensor<1xi64>
+    %ids_dim = tensor.dim %ids, %c1 : tensor<?x?xi64>
+    %ids_i64 = arith.index_cast %ids_dim : index to i64
+    %len = tensor.from_elements %ids_i64 : tensor<i64>
+    %add_init = tensor.empty() : tensor<i64>
+    %end = hip.add(%ctx) ins(%past_len, %len : tensor<i64>, tensor<i64>)
+        outs(%add_init : tensor<i64>) -> tensor<i64>
+    %ends = tensor.expand_shape %end [] output_shape [1]
+        : tensor<i64> into tensor<1xi64>
+    %r = "onnx.Slice"(%table, %starts, %ends, %zero, %one)
+        : (tensor<448x512xf32>, tensor<1xi64>, tensor<1xi64>, tensor<1xi64>,
+           tensor<1xi64>) -> tensor<?x?xf32>
+
+    // CHECK: %[[PAST:.*]] = tensor.dim %arg2, %c2 : tensor<?x8x?x64xf32>
+    // CHECK: %[[LEN:.*]] = tensor.dim %arg3, %c1 : tensor<?x?xi64>
+    // CHECK: arith.addi %[[PAST]], %[[LEN]] : index
+    // CHECK: %[[LO:.*]] = arith.minsi %{{.*}}, %{{.*}} : index
+    // CHECK: %[[HI:.*]] = arith.minsi %{{.*}}, %{{.*}} : index
+    // CHECK: %[[SPAN:.*]] = arith.subi %[[HI]], %[[LO]] : index
+    // CHECK: %[[EXT:.*]] = arith.maxsi %[[SPAN]], %{{.*}} : index
+    // CHECK: %[[EMPTY:.*]] = arith.cmpi eq, %[[EXT]], %{{.*}} : index
+    // CHECK: %[[CAP:.*]] = arith.select %[[EMPTY]], %{{.*}}, %[[EXT]] : index
+    // CHECK: tensor.empty(%[[CAP]], %{{.*}}) : tensor<?x?xf32>
+    // CHECK: hip.slice
+    return %r : tensor<?x?xf32>
+  }
+
+  // Test 29: an i32 bound `Unsqueeze(n * n + 3)` wraps at 32 bits in the
+  // graph (n = 65536 gives an end of 3), so the host rebuild truncates to i32
+  // and sign-extends after each arithmetic step rather than computing at
+  // index width.
+  func.func @test_slice_native_i32_bound_wraps(
+      %ctx: !hip.context, %table: tensor<448x512xf32>,
+      %ids: tensor<?x?xi64>) -> tensor<?x?xf32> {
+    // CHECK-LABEL: func.func @test_slice_native_i32_bound_wraps
+    %c1 = arith.constant 1 : index
+    %zero = arith.constant dense<0> : tensor<1xi32>
+    %one = arith.constant dense<1> : tensor<1xi32>
+    %three = arith.constant dense<3> : tensor<i32>
+    %ids_dim = tensor.dim %ids, %c1 : tensor<?x?xi64>
+    %ids_i32 = arith.index_cast %ids_dim : index to i32
+    %n = tensor.from_elements %ids_i32 : tensor<i32>
+    %mul_init = tensor.empty() : tensor<i32>
+    %sq = hip.mul(%ctx) ins(%n, %n : tensor<i32>, tensor<i32>)
+        outs(%mul_init : tensor<i32>) -> tensor<i32>
+    %add_init = tensor.empty() : tensor<i32>
+    %end = hip.add(%ctx) ins(%sq, %three : tensor<i32>, tensor<i32>)
+        outs(%add_init : tensor<i32>) -> tensor<i32>
+    %ends = tensor.expand_shape %end [] output_shape [1]
+        : tensor<i32> into tensor<1xi32>
+    %r = "onnx.Slice"(%table, %zero, %ends, %zero, %one)
+        : (tensor<448x512xf32>, tensor<1xi32>, tensor<1xi32>, tensor<1xi32>,
+           tensor<1xi32>) -> tensor<?x?xf32>
+
+    // CHECK: arith.index_cast %{{.*}} : i32 to index
+    // CHECK: %[[SQ:.*]] = arith.muli %{{.*}}, %{{.*}} : index
+    // CHECK: %[[SQ32:.*]] = arith.index_cast %[[SQ]] : index to i32
+    // CHECK: %[[SQW:.*]] = arith.index_cast %[[SQ32]] : i32 to index
+    // CHECK: %[[END:.*]] = arith.addi %[[SQW]], %{{.*}} : index
+    // CHECK: %[[END32:.*]] = arith.index_cast %[[END]] : index to i32
+    // CHECK: arith.index_cast %[[END32]] : i32 to index
+    // CHECK: hip.slice
+    return %r : tensor<?x?xf32>
+  }
+
+  // Test 30: flattening Add([[a], [b]], [[10, 20]]) must not reuse flat
+  // indices for the broadcast operands. In particular, end[1] is a + 20,
+  // not b + 20. Use device readback when host coordinate mapping is absent.
+  func.func @test_slice_native_broadcast_bound_readback(
+      %input: tensor<?x?x?x?xf32>, %shape_source: tensor<?x?xf32>)
+      -> tensor<?x?x?x?xf32> {
+    // CHECK-LABEL: func.func @test_slice_native_broadcast_bound_readback
+    %zero = arith.constant dense<0> : tensor<4xi64>
+    %axes = arith.constant dense<[0, 1, 2, 3]> : tensor<4xi64>
+    %column_shape = arith.constant dense<[2, 1]> : tensor<2xi64>
+    %flat_shape = arith.constant dense<[4]> : tensor<1xi64>
+    %offsets = arith.constant dense<[[10, 20]]> : tensor<1x2xi64>
+    %shape = "onnx.Shape"(%shape_source)
+        : (tensor<?x?xf32>) -> tensor<2xi64>
+    %column = "onnx.Reshape"(%shape, %column_shape)
+        : (tensor<2xi64>, tensor<2xi64>) -> tensor<2x1xi64>
+    %sum = "onnx.Add"(%column, %offsets)
+        : (tensor<2x1xi64>, tensor<1x2xi64>) -> tensor<2x2xi64>
+    %ends = "onnx.Reshape"(%sum, %flat_shape)
+        : (tensor<2x2xi64>, tensor<1xi64>) -> tensor<4xi64>
+    %s = "onnx.Slice"(%input, %zero, %ends, %axes)
+        : (tensor<?x?x?x?xf32>, tensor<4xi64>, tensor<4xi64>,
+           tensor<4xi64>) -> tensor<*xf32>
+    %r = "onnx.Identity"(%s) : (tensor<*xf32>) -> tensor<?x?x?x?xf32>
+
+    // CHECK-COUNT-4: hip.readback_scalar
+    // CHECK-NOT: hip.readback_scalar
+    // CHECK: hip.slice
+    return %r : tensor<?x?x?x?xf32>
+  }
+
+  // Test 31: the same broadcast in its post-conversion spelling.
+  func.func @test_slice_native_lowered_broadcast_bound_readback(
+      %ctx: !hip.context, %input: tensor<?x?x?x?xf32>,
+      %shape_source: tensor<?x?xf32>) -> tensor<?x?x?x?xf32> {
+    // CHECK-LABEL: func.func @test_slice_native_lowered_broadcast_bound_readback
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %zero = arith.constant dense<0> : tensor<4xi64>
+    %axes = arith.constant dense<[0, 1, 2, 3]> : tensor<4xi64>
+    %offsets = arith.constant dense<[[10, 20]]> : tensor<1x2xi64>
+    %a_dim = tensor.dim %shape_source, %c0 : tensor<?x?xf32>
+    %b_dim = tensor.dim %shape_source, %c1 : tensor<?x?xf32>
+    %a = arith.index_cast %a_dim : index to i64
+    %b = arith.index_cast %b_dim : index to i64
+    %shape = tensor.from_elements %a, %b : tensor<2xi64>
+    %column = tensor.expand_shape %shape [[0, 1]] output_shape [2, 1]
+        : tensor<2xi64> into tensor<2x1xi64>
+    %init = tensor.empty() : tensor<2x2xi64>
+    %sum = hip.add(%ctx) ins(%column, %offsets : tensor<2x1xi64>, tensor<1x2xi64>)
+        outs(%init : tensor<2x2xi64>) -> tensor<2x2xi64>
+    %ends = tensor.collapse_shape %sum [[0, 1]]
+        : tensor<2x2xi64> into tensor<4xi64>
+    %s = "onnx.Slice"(%input, %zero, %ends, %axes)
+        : (tensor<?x?x?x?xf32>, tensor<4xi64>, tensor<4xi64>,
+           tensor<4xi64>) -> tensor<*xf32>
+    %r = "onnx.Identity"(%s) : (tensor<*xf32>) -> tensor<?x?x?x?xf32>
+
+    // CHECK-COUNT-4: hip.readback_scalar
+    // CHECK-NOT: hip.readback_scalar
+    // CHECK: hip.slice
+    return %r : tensor<?x?x?x?xf32>
+  }
+
+  // Test 32: test 30 with a ranked result. The data dim is the wrong extent
+  // for a ranked result too, so the unresolved ends are read back rather
+  // than falling back to it.
+  func.func @test_slice_native_ranked_broadcast_bound_readback(
+      %input: tensor<?x?x?x?xf32>, %shape_source: tensor<?x?xf32>)
+      -> tensor<?x?x?x?xf32> {
+    // CHECK-LABEL: func.func @test_slice_native_ranked_broadcast_bound_readback
+    %zero = arith.constant dense<0> : tensor<4xi64>
+    %axes = arith.constant dense<[0, 1, 2, 3]> : tensor<4xi64>
+    %column_shape = arith.constant dense<[2, 1]> : tensor<2xi64>
+    %flat_shape = arith.constant dense<[4]> : tensor<1xi64>
+    %offsets = arith.constant dense<[[10, 20]]> : tensor<1x2xi64>
+    %shape = "onnx.Shape"(%shape_source)
+        : (tensor<?x?xf32>) -> tensor<2xi64>
+    %column = "onnx.Reshape"(%shape, %column_shape)
+        : (tensor<2xi64>, tensor<2xi64>) -> tensor<2x1xi64>
+    %sum = "onnx.Add"(%column, %offsets)
+        : (tensor<2x1xi64>, tensor<1x2xi64>) -> tensor<2x2xi64>
+    %ends = "onnx.Reshape"(%sum, %flat_shape)
+        : (tensor<2x2xi64>, tensor<1xi64>) -> tensor<4xi64>
+    %r = "onnx.Slice"(%input, %zero, %ends, %axes)
+        : (tensor<?x?x?x?xf32>, tensor<4xi64>, tensor<4xi64>,
+           tensor<4xi64>) -> tensor<?x?x?x?xf32>
+
+    // CHECK-COUNT-4: hip.readback_scalar
+    // CHECK-NOT: hip.readback_scalar
+    // CHECK: tensor.empty(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : tensor<?x?x?x?xf32>
+    // CHECK: hip.slice
+    return %r : tensor<?x?x?x?xf32>
+  }
+
+  // Test 33: test 28's start bound with Gather(Shape) already lowered to
+  // hip.gather, as when GatherToHip runs before SliceToHip. The walker reads
+  // through the hip.gather to the shape vector, so the extent is host
+  // arithmetic on dim 2 of %past and nothing is read back.
+  func.func @test_slice_native_lowered_hip_gather_extent(
+      %ctx: !hip.context, %table: tensor<448x512xf32>,
+      %past: tensor<?x8x?x64xf32>) -> tensor<?x?xf32> {
+    // CHECK-LABEL: func.func @test_slice_native_lowered_hip_gather_extent
+    // CHECK-NOT: hip.readback_scalar
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c2 = arith.constant 2 : index
+    %c3 = arith.constant 3 : index
+    %zero = arith.constant dense<0> : tensor<1xi64>
+    %one = arith.constant dense<1> : tensor<1xi64>
+    %k2 = arith.constant dense<2> : tensor<i64>
+    %d0 = tensor.dim %past, %c0 : tensor<?x8x?x64xf32>
+    %d1 = tensor.dim %past, %c1 : tensor<?x8x?x64xf32>
+    %d2 = tensor.dim %past, %c2 : tensor<?x8x?x64xf32>
+    %d3 = tensor.dim %past, %c3 : tensor<?x8x?x64xf32>
+    %e0 = arith.index_cast %d0 : index to i64
+    %e1 = arith.index_cast %d1 : index to i64
+    %e2 = arith.index_cast %d2 : index to i64
+    %e3 = arith.index_cast %d3 : index to i64
+    %shape = tensor.from_elements %e0, %e1, %e2, %e3 : tensor<4xi64>
+    %gather_init = tensor.empty() : tensor<i64>
+    %past_len = hip.gather(%ctx) ins(%shape, %k2 : tensor<4xi64>, tensor<i64>)
+        outs(%gather_init : tensor<i64>) : tensor<i64>
+    %ends = tensor.expand_shape %past_len [] output_shape [1]
+        : tensor<i64> into tensor<1xi64>
+    %r = "onnx.Slice"(%table, %zero, %ends, %zero, %one)
+        : (tensor<448x512xf32>, tensor<1xi64>, tensor<1xi64>, tensor<1xi64>,
+           tensor<1xi64>) -> tensor<?x?xf32>
+
+    // CHECK: %[[PAST:.*]] = tensor.dim %arg2, %c2 : tensor<?x8x?x64xf32>
+    // CHECK: hip.gather
+    // CHECK: arith.cmpi slt, %[[PAST]], %c0 : index
+    // CHECK-NOT: hip.readback_scalar
+    // CHECK: tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?xf32>
+    // CHECK: hip.slice
     return %r : tensor<?x?xf32>
   }
 }

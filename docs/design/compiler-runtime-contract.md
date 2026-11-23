@@ -73,19 +73,32 @@ setup throws `std::runtime_error`. See [native-vs-ir-comparison.md](../native-vs
 
 `Metadata.rocmlir_arch` records what the embedded rocMLIR code objects were
 built for, not only the GPU arch: it is `hip::compiler::rocMlirArtifactTarget()`,
-which is empty when `HIPDNN_EP_ROCMLIR` was off, the arch alone when rocMLIR
-compiled with default perfConfigs (`gfx1151`), and the arch with an
-`+autotune=<space>` suffix when `HIPDNN_EP_ROCMLIR_AUTOTUNE` selected
-benchmarked ones (`gfx1151+autotune=quick`). The perfConfig a kernel was tuned
-to is baked into its code object, so a tuned and an untuned artifact are not
-interchangeable even on the same GPU.
+which is empty when `HIPDNN_EP_ROCMLIR` was off, the arch with an
+`+autotune=<space>` suffix when rocMLIR benchmarked perfConfigs
+(`gfx1151+autotune=quick`, `gfx1151+autotune=full`), and the arch alone when
+`HIP_ROCMLIR_SKIP_BENCHMARKING` compiled the default perfConfig (`gfx1151`).
+There is no `+lut=` fingerprint. A provided `HIPDNN_EP_ROCMLIR_AUTOTUNE`
+skips the shipped `tools/problem-cache/lut/*.fb`; when it is unset, the shipped
+table is consulted before the search. `hip-rocmlir-compiler` still honors
+`--problem-cache` / `HIP_ROCMLIR_PROBLEM_CACHE` ahead of the search. The
+provider does not read `HIP_ROCMLIR_PROBLEM_CACHE`. `hip-rocmlir-compiler` and
+the ONNX Runtime provider both read the skip variable: unset or `0`
+benchmarks. A present empty value skips, and so does any other value. Autotune
+otherwise runs for a rocMLIR session. Unset `HIPDNN_EP_ROCMLIR_AUTOTUNE`
+selects `quick`. `quick`, `full`, and `exhaustive` are the only accepted
+values; anything else warns and stays on quick.
+That tool writes LLVM bitcode; it does not stamp `Metadata.rocmlir_arch`.
+The perfConfig a kernel was tuned to is baked into its code object, so a tuned
+and an untuned artifact are not interchangeable even on the same GPU.
 
 The model cache / EPContext identity is derived from the graph alone, so the EP
 refuses to load an artifact whose recorded value differs from the current one;
-delete the cache and recompile after changing GPUs or toggling either
-`HIPDNN_EP_ROCMLIR` or `HIPDNN_EP_ROCMLIR_AUTOTUNE`. Compilation fails outright
-if autotuning was requested but no HIP device could be reached, so the suffix
-never claims tuning that did not happen.
+delete the cache and recompile after changing GPUs, or toggling either
+`HIPDNN_EP_ROCMLIR`,
+`HIP_ROCMLIR_SKIP_BENCHMARKING`, or
+`HIPDNN_EP_ROCMLIR_AUTOTUNE`. Compilation fails outright
+if autotune is on but no HIP device could be reached, so the suffix never
+claims tuning that did not happen.
 
 `HIPDNN_EP_ROCMLIR_AUTOTUNE_BENCH` selects how candidates are timed and is not
 part of the suffix: both modes search the same space and record the same kind
