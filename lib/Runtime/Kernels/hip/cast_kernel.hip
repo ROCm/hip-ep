@@ -11,6 +11,7 @@
 #include <hip/hip_fp16.h>
 #include <cstdint>
 #include <cstdio>
+#include <type_traits>
 
 namespace {
 
@@ -304,35 +305,30 @@ static int launch_cast_bf16(hipStream_t stream, const void* input,
   return -1;
 }
 
-// Integer dtype -> f(TypeTag<T>{}). Returns -1 for any other dtype.
-template <typename F>
-int dispatch_int_dtype(int dtype, F&& f) {
-  switch (dtype) {
-  case HIP_DTYPE_INT64: return f(TypeTag<int64_t>{});
-  case HIP_DTYPE_INT32: return f(TypeTag<int32_t>{});
-  case HIP_DTYPE_INT16: return f(TypeTag<int16_t>{});
-  case HIP_DTYPE_INT8:  return f(TypeTag<int8_t>{});
-  case HIP_DTYPE_UINT8: return f(TypeTag<uint8_t>{});
-  default:              return -1;
-  }
-}
-
 // Launches any integer -> integer cast (two's-complement truncation or
 // extension, as ONNX Cast and torch .to()). Returns -1 without launching when
 // either side is not an integer dtype.
 static int launch_cast_int(hipStream_t stream, const void* input, void* output,
                            int64_t num_elements, int input_dtype,
                            int output_dtype, int grid_size, int block_size) {
-  return dispatch_int_dtype(input_dtype, [&](auto src) {
+  return dispatch_dtype(input_dtype, [&](auto src) {
     using Src = typename decltype(src)::type;
-    return dispatch_int_dtype(output_dtype, [&](auto dst) {
-      using Dst = typename decltype(dst)::type;
-      hipLaunchKernelGGL(HIP_KERNEL_NAME(cast_int_to_int_kernel<Src, Dst>),
-                         dim3(grid_size), dim3(block_size), 0, stream,
-                         static_cast<const Src*>(input),
-                         static_cast<Dst*>(output), num_elements);
-      return 0;
-    });
+    if constexpr (!std::is_integral_v<Src>) {
+      return -1;
+    } else {
+      return dispatch_dtype(output_dtype, [&](auto dst) {
+        using Dst = typename decltype(dst)::type;
+        if constexpr (!std::is_integral_v<Dst>) {
+          return -1;
+        } else {
+          hipLaunchKernelGGL(HIP_KERNEL_NAME(cast_int_to_int_kernel<Src, Dst>),
+                             dim3(grid_size), dim3(block_size), 0, stream,
+                             static_cast<const Src*>(input),
+                             static_cast<Dst*>(output), num_elements);
+          return 0;
+        }
+      });
+    }
   });
 }
 
