@@ -262,10 +262,27 @@ mlir::LogicalResult MultiHeadAttentionToHip::matchAndRewrite(
         mlir::arith::IndexCastOp::create(rewriter, loc, i32Ty, total);
     mlir::Value batchSize =
         mlir::tensor::DimOp::create(rewriter, loc, query, 0);
-    mlir::Value seqlensK = mlir::tensor::SplatOp::create(
-        rewriter, loc, lastI32,
-        mlir::RankedTensorType::get({mlir::ShapedType::kDynamic}, i32Ty),
-        mlir::ValueRange{batchSize});
+    // seqlens_k is P + S - 1 for every batch row. A splat of it would be
+    // written by the host into a buffer of the batch's (dynamic) size, which
+    // hip-materialize-host-scalars does not move out of the pool: there a
+    // kernel still queued before it may overwrite it (a pool offset is reused
+    // in stream order, a host store is not), and the GQA call reads garbage.
+    // One element - host scratch - broadcast to the batch on the device.
+    auto i64Ty = rewriter.getIntegerType(64);
+    mlir::Value lastElem = mlir::tensor::FromElementsOp::create(
+        rewriter, loc, mlir::RankedTensorType::get({1}, i32Ty),
+        mlir::ValueRange{lastI32});
+    mlir::Value batchShape = mlir::tensor::FromElementsOp::create(
+        rewriter, loc, mlir::RankedTensorType::get({1}, i64Ty),
+        mlir::ValueRange{
+            mlir::arith::IndexCastOp::create(rewriter, loc, i64Ty, batchSize)});
+    mlir::Value seqlensInit = mlir::tensor::EmptyOp::create(
+        rewriter, loc, llvm::ArrayRef<int64_t>{mlir::ShapedType::kDynamic},
+        i32Ty, mlir::ValueRange{batchSize});
+    mlir::Value seqlensK =
+        mlir::hip::ExpandOp::create(rewriter, loc, context, lastElem,
+                                    batchShape, seqlensInit)
+            ->getResult(0);
     mlir::Value totalSeqLen = mlir::tensor::FromElementsOp::create(
         rewriter, loc, mlir::RankedTensorType::get({}, i32Ty),
         mlir::ValueRange{totalI32});
