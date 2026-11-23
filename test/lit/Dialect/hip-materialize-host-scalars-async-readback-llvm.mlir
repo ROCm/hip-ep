@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 // RUN: hip-mlir-opt %s --hip-materialize-host-scalars \
-// RUN:   --expand-strided-metadata --lower-affine --convert-hip-to-llvm | FileCheck %s
+// RUN:   --expand-strided-metadata --convert-hip-to-llvm | FileCheck %s
 
 // The readback slot of a padded element is aligned to a power of two, not to
 // its 6-byte payload.
