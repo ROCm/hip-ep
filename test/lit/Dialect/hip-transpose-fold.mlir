@@ -200,6 +200,62 @@ module {
   }
 
   // --------------------------------------------------------------------------
+  // Positive: a chain of three collapses one pair at a time into a single
+  // Transpose reading the original input.
+  //
+  // [1,0,2] then [0,2,1] composes to [1,2,0]; [1,2,0] then [1,0,2] composes to
+  // [2,1,0], whichever pair the driver folds first.
+  // --------------------------------------------------------------------------
+  // CHECK-LABEL: func.func @compose_three_transposes
+  // CHECK:         hip.transpose(%arg0) ins(%arg1 : tensor<2x3x4xf32>)
+  // CHECK-SAME:      perm = [2, 1, 0]
+  // CHECK-NOT:     hip.transpose
+  // CHECK:         return
+  func.func @compose_three_transposes(
+      %ctx: !hip.context,
+      %x: tensor<2x3x4xf32>) -> tensor<4x3x2xf32> {
+    %a = tensor.empty() : tensor<3x2x4xf32>
+    %0 = hip.transpose(%ctx) ins(%x : tensor<2x3x4xf32>)
+                             outs(%a : tensor<3x2x4xf32>)
+                             {perm = [1, 0, 2]} : tensor<3x2x4xf32>
+    %b = tensor.empty() : tensor<3x4x2xf32>
+    %1 = hip.transpose(%ctx) ins(%0 : tensor<3x2x4xf32>)
+                             outs(%b : tensor<3x4x2xf32>)
+                             {perm = [0, 2, 1]} : tensor<3x4x2xf32>
+    %c = tensor.empty() : tensor<4x3x2xf32>
+    %2 = hip.transpose(%ctx) ins(%1 : tensor<3x4x2xf32>)
+                             outs(%c : tensor<4x3x2xf32>)
+                             {perm = [1, 0, 2]} : tensor<4x3x2xf32>
+    return %2 : tensor<4x3x2xf32>
+  }
+
+  // --------------------------------------------------------------------------
+  // Positive: three rotations by one axis return to the start although no two
+  // neighbors undo each other. Either adjacent pair composes to [2,0,1], which
+  // the remaining Transpose cancels, so all three go.
+  // --------------------------------------------------------------------------
+  // CHECK-LABEL: func.func @fold_three_rotations
+  // CHECK-NOT:     hip.transpose
+  // CHECK:         return %arg1
+  func.func @fold_three_rotations(
+      %ctx: !hip.context,
+      %x: tensor<2x3x4xf32>) -> tensor<2x3x4xf32> {
+    %a = tensor.empty() : tensor<3x4x2xf32>
+    %0 = hip.transpose(%ctx) ins(%x : tensor<2x3x4xf32>)
+                             outs(%a : tensor<3x4x2xf32>)
+                             {perm = [1, 2, 0]} : tensor<3x4x2xf32>
+    %b = tensor.empty() : tensor<4x2x3xf32>
+    %1 = hip.transpose(%ctx) ins(%0 : tensor<3x4x2xf32>)
+                             outs(%b : tensor<4x2x3xf32>)
+                             {perm = [1, 2, 0]} : tensor<4x2x3xf32>
+    %c = tensor.empty() : tensor<2x3x4xf32>
+    %2 = hip.transpose(%ctx) ins(%1 : tensor<4x2x3xf32>)
+                             outs(%c : tensor<2x3x4xf32>)
+                             {perm = [1, 2, 0]} : tensor<2x3x4xf32>
+    return %2 : tensor<2x3x4xf32>
+  }
+
+  // --------------------------------------------------------------------------
   // Negative: an inverse pair issued on two contexts is left alone. Nothing
   // says the two share an execution state.
   // --------------------------------------------------------------------------
