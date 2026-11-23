@@ -21,6 +21,12 @@
 //             : memref<?xi8> to memref<1xi32>
 //         memref.store %n, %a[%c0] : memref<1xi32>
 //
+// A host load placed after a memref.copy into the buffer or a HIP op using it
+// becomes a stream-synchronized hip.readback_scalar. Both run asynchronously,
+// so a plain load could read the slot before they land. A loop-local slot
+// with such writers is preceded by hip.stream_wait: the next iteration's host
+// accesses reuse the slot while the previous iteration's work may be pending.
+//
 // Limits: at most 16 elements; context in argument zero; no unknown consumers.
 // Float buffers need a HIP consumer. This bounded rule does not make all host
 // accesses safe. Larger and unsupported allocations need separate handling.
@@ -49,6 +55,7 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/SymbolTable.h"
+#include "mlir/Interfaces/ControlFlowInterfaces.h"
 #include "mlir/Interfaces/DataLayoutInterfaces.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
 
@@ -240,6 +247,92 @@ static DenseElementsAttr getHostConstantCandidate(memref::GetGlobalOp op) {
   return init;
 }
 
+/// Appends every (user, aliased value) pair reaching \p buffer, directly or
+/// through views of it.
+static void
+collectAliasUses(Value buffer,
+                 SmallVectorImpl<std::pair<Operation *, Value>> &uses) {
+  for (Operation *user : buffer.getUsers()) {
+    uses.push_back({user, buffer});
+    if (auto view = dyn_cast<ViewLikeOpInterface>(user))
+      if (view.getViewSource() == buffer)
+        collectAliasUses(view->getResult(0), uses);
+  }
+}
+
+/// Whether \p user, reached through \p val, may access the buffer from queued
+/// GPU work. memref.copy lowers to an async hipMemcpy and hip ops are async
+/// kernels. Hip users count as writers whatever their operand role; a
+/// needless sync only costs time.
+static bool isAsyncWriter(Operation *user, Value val) {
+  auto copy = dyn_cast<memref::CopyOp>(user);
+  bool isHip = user->getDialect() &&
+               user->getDialect()->getNamespace() == "hip" &&
+               !isa<ReadbackScalarOp, ReadbackDimOp>(user);
+  return (copy && copy.getTarget() == val) || isHip;
+}
+
+/// Host loads from \p allocOp that may run before queued GPU work writing it,
+/// so a plain memref.load reads the scratch before that work lands.
+/// Ordering is only proven within the allocation's block; a writer or load
+/// outside it is assumed to be ordered write-first.
+static SmallVector<memref::LoadOp>
+findLoadsAfterAsyncWrites(memref::AllocOp allocOp) {
+  SmallVector<std::pair<Operation *, Value>> uses;
+  collectAliasUses(allocOp.getResult(), uses);
+  Block *block = allocOp->getBlock();
+  // Each writer's ancestor in `block`, or null when it lies outside it.
+  SmallVector<Operation *> writers;
+  for (auto [user, val] : uses)
+    if (isAsyncWriter(user, val))
+      writers.push_back(block->findAncestorOpInBlock(*user));
+  SmallVector<memref::LoadOp> loads;
+  for (auto [user, val] : uses) {
+    auto load = dyn_cast<memref::LoadOp>(user);
+    if (!load || !isa<IntegerType, FloatType, IndexType>(load.getType()))
+      continue;
+    Operation *at = block->findAncestorOpInBlock(*load);
+    if (llvm::any_of(writers, [&](Operation *w) {
+          return !w || !at || w == at || w->isBeforeInBlock(at);
+        }))
+      loads.push_back(load);
+  }
+  return loads;
+}
+
+/// Whether a later iteration of an enclosing loop reuses the fixed scratch
+/// slot of \p allocOp while GPU work queued on it in an earlier iteration may
+/// still be pending. Block order within one iteration does not order host
+/// accesses with that work.
+static bool isReusedWhileQueued(memref::AllocOp allocOp) {
+  if (!getEnclosingRepetitiveRegion(allocOp.getOperation()))
+    return false;
+  SmallVector<std::pair<Operation *, Value>> uses;
+  collectAliasUses(allocOp.getResult(), uses);
+  return llvm::any_of(uses, [](const auto &use) {
+    return isAsyncWriter(use.first, use.second);
+  });
+}
+
+/// Replaces \p load with a stream-synchronized hip.readback_scalar of the same
+/// element.
+static void rewriteAsReadback(memref::LoadOp load, Value ctx) {
+  OpBuilder b(load);
+  Location loc = load.getLoc();
+  Value src = load.getMemRef();
+  int64_t rank = load.getMemRefType().getRank();
+  if (rank > 0) {
+    SmallVector<OpFoldResult> offsets(load.getIndices());
+    SmallVector<OpFoldResult> ones(rank, b.getIndexAttr(1));
+    Value elem = memref::SubViewOp::create(b, loc, src, offsets, ones, ones);
+    src = memref::CollapseShapeOp::create(b, loc, elem,
+                                          ArrayRef<ReassociationIndices>{});
+  }
+  Value v = ReadbackScalarOp::create(b, loc, load.getType(), ctx, src);
+  load.replaceAllUsesWith(v);
+  load.erase();
+}
+
 /// Bytes \p type occupies in scratch, matching the default layout used by
 /// HIP-to-LLVM, including element padding.
 static int64_t scratchBytes(MemRefType type) {
@@ -307,7 +400,14 @@ static void materialize(FunctionScratch &plan, int64_t total) {
 
   // The runtime owns scratch. Replace allocations and erase their deallocs.
   for (auto [allocOp, offset] : llvm::zip(candidates, offsets)) {
+    bool waitForQueuedWork = isReusedWhileQueued(allocOp);
+    for (memref::LoadOp load : findLoadsAfterAsyncWrites(allocOp))
+      rewriteAsReadback(load, ctx);
+
     builder.setInsertionPoint(allocOp);
+    // Each iteration starts with the slot free of earlier iterations' work.
+    if (waitForQueuedWork)
+      StreamWaitOp::create(builder, allocOp.getLoc(), ctx);
     Value offsetVal =
         arith::ConstantIndexOp::create(builder, allocOp.getLoc(), offset);
     auto view = memref::ViewOp::create(builder, allocOp.getLoc(),
