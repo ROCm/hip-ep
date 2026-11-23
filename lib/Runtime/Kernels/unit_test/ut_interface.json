@@ -661,6 +661,46 @@
         {"name": "suite_tier1", "coverage": 1}
       ],
       "gaps": ["custom_shape", "shared_timer", "arch_default"]
+    },
+    {
+      "leaf": "gather_nd/Xi64_Wu8_Yu8",
+      "package_executable": "hipdnn-kernel-ut-gather-nd-xi64-wu8-yu8.exe",
+      "source": "test_gather_nd.cpp",
+      "capabilities": {
+        "coverage": true,
+        "timing": "none",
+        "mode": "label_only",
+        "rank": false
+      },
+      "suite": {
+        "args": ["--coverage"],
+        "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
+      },
+      "custom": null,
+      "examples": [
+        {"name": "suite_tier1", "coverage": 1}
+      ],
+      "gaps": ["custom_shape", "shared_timer", "arch_default"]
+    },
+    {
+      "leaf": "gqa/softmax/Xfp32_Wbf16_Ybf16",
+      "package_executable": "hipdnn-kernel-ut-gqa-softmax-xfp32-wbf16-ybf16.exe",
+      "source": "test_gqa_softmax.cpp",
+      "capabilities": {
+        "coverage": true,
+        "timing": "none",
+        "mode": "label_only",
+        "rank": false
+      },
+      "suite": {
+        "args": ["--coverage"],
+        "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
+      },
+      "custom": null,
+      "examples": [
+        {"name": "suite_tier1", "coverage": 1}
+      ],
+      "gaps": ["custom_shape", "shared_timer", "arch_default"]
     }
   ]
 }

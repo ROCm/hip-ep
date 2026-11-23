@@ -61,6 +61,8 @@ static const Leaf kLeaves[] = {
      "hipdnn-kernel-ut-gqa-prefill-xfp16-wi8-yfp16.exe"},
     {"qmoe", "Xfp16_Wu4_Yfp16",
      "hipdnn-kernel-ut-qmoe-xfp16-wu4-yfp16.exe"},
+    {"gqa/softmax", "Xfp32_Wbf16_Ybf16",
+     "hipdnn-kernel-ut-gqa-softmax-xfp32-wbf16-ybf16.exe"},
     {"qmoe_ragged_mm", "Xfp16_Wu4_Yfp16",
      "hipdnn-kernel-ut-qmoe-ragged-mm-xfp16-wu4-yfp16.exe"},
     {"qmoe_ragged_mm", "Xfp16_Wu2_Yfp16",
@@ -72,6 +74,7 @@ static const Leaf kLeaves[] = {
     {"gather_block_quantized", "Xi64_Wfp8_Yfp16",
      "hipdnn-kernel-ut-gather-block-quantized-xi64-wfp8-yfp16.exe"},
     {"cast", "Xany_Yany_bf16", "hipdnn-kernel-ut-cast-xany-yany-bf16.exe"},
+    {"gather_nd", "Xi64_Wu8_Yu8", "hipdnn-kernel-ut-gather-nd-xi64-wu8-yu8.exe"},
 };
 
 static std::string executableDirectory() {
