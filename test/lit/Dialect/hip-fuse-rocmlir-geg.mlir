@@ -9,7 +9,7 @@
 // RUN: hip-mlir-opt --split-input-file --hip-rocmlir-prepare-quant \
 // RUN:   --hip-fuse-rocmlir-elementwise --hip-fuse-rocmlir-anchor %s \
 // RUN:   | hip-mlir-opt --split-input-file \
-// RUN:   | FileCheck %s --check-prefixes=NOGEG,NOARCH
+// RUN:   | FileCheck %s
 
 
 
@@ -22,9 +22,6 @@
 // CHECK-NOT: hip.rocmlir
 // CHECK: hip.matmul
 // CHECK-NOT: hip.rocmlir
-func.func @main_graph
-// NOGEG: hip.rocmlir
-// NOGEG: hip.rocmlir
 func.func @main_graph(%ctx: !hip.context, %x: tensor<512x64xf16>,
                       %w0: tensor<64x1xf16>, %w1: tensor<1x32xf16>)
     -> tensor<512x32xf16> {
@@ -52,9 +49,6 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<512x64xf16>,
 // CHECK-NOT: hip.rocmlir
 // CHECK: hip.matmul
 // CHECK-NOT: hip.rocmlir
-func.func @main_graph
-// NOGEG: hip.rocmlir
-// NOGEG: hip.rocmlir
 func.func @main_graph(%ctx: !hip.context, %x: tensor<512x64xf16>,
                       %w0: tensor<1x64xf16>, %w1: tensor<1x32xf16>)
     -> tensor<512x32xf16> {

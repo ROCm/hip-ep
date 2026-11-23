@@ -210,7 +210,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
 // CHECK-NOT: hip.rocmlir
 // CHECK: hip.matmul
 // CHECK-NOT: hip.rocmlir
-// CHECK: hip.reshape
+// CHECK: tensor.expand_shape
 // CHECK-NOT: hip.rocmlir
 // CHECK: hip.transpose
 // CHECK-NOT: hip.rocmlir
