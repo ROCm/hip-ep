@@ -560,7 +560,7 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<16x8xf16>,
 // CHECK-NOT: hip.rocmlir
 // CHECK: hip.matmul
 // CHECK-NOT: hip.rocmlir
-// CHECK: hip.sigmoid
+// CHECK: hip.add
 // CHECK-NOT: hip.rocmlir
 func.func @main_graph(%ctx: !hip.context, %a: tensor<1x16xf16>,
                       %b: tensor<16x32xf16>, %r: tensor<2x32xf16>)
@@ -1284,15 +1284,13 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
 
 
 
-// Dense GEMMs remain on hip_gemm; the surrounding operations stay in main_graph.
-// CHECK-LABEL: func.func @main_graph
-// CHECK-NOT: hip.rocmlir
-// CHECK: hip.matmul
-// CHECK-NOT: hip.rocmlir
-// CHECK: hip.reshape
-// CHECK-NOT: hip.rocmlir
+// The GEMM stays native; its GELU epilogue can still fuse independently.
+// CHECK-LABEL: func.func @mlir_mul_erf_add_mul_0
 // CHECK: hip.erf
-// CHECK-NOT: hip.rocmlir
+// CHECK-LABEL: func.func @main_graph
+// CHECK: %[[MM:.*]] = hip.matmul
+// CHECK: hip.rocmlir({{.*}}) @mlir_mul_erf_add_mul_0 ins(%[[MM]] : tensor<8x32xf16>)
+// CHECK-NOT: hip.matmul
 func.func @main_graph(%ctx: !hip.context, %a: tensor<8x16xf16>,
                       %b: tensor<16x32xf16>) -> tensor<1x8x32xf16> {
   %scale = hip.constant {value = dense<7.070310e-01> : tensor<f16>} : tensor<f16>
@@ -1327,7 +1325,7 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<8x16xf16>,
 // CHECK-NOT: hip.rocmlir
 // CHECK: hip.matmul
 // CHECK-NOT: hip.rocmlir
-// CHECK: hip.reshape
+// CHECK: tensor.expand_shape
 // CHECK-NOT: hip.rocmlir
 func.func @main_graph(%ctx: !hip.context, %a: tensor<8x16xf16>,
                       %b: tensor<16x32xf16>)
