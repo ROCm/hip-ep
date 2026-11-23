@@ -74,6 +74,51 @@ class TestGridSample:
         actual, expected = model_runner.run_sample(model, [x, grid])
         compare_outputs(actual, expected, atol=1e-5, rtol=1e-5)
 
+    @pytest.mark.parametrize("mode", ["bilinear", "nearest"])
+    @pytest.mark.parametrize("padding_mode", ["zeros", "border", "reflection"])
+    @pytest.mark.parametrize("align_corners", [0, 1])
+    def test_grid_sample_out_of_range_grid(
+        self, model_runner, mode, padding_mode, align_corners
+    ):
+        """Several batches and channels, with a grid that leaves [-1, 1]."""
+        input_shape = [2, 5, 9, 11]
+        grid_shape = [2, 6, 7, 2]
+        model = _make_grid_sample_model(
+            input_shape,
+            grid_shape,
+            np.float32,
+            mode=mode,
+            padding_mode=padding_mode,
+            align_corners=align_corners,
+        )
+        rng = np.random.default_rng(21)
+        x = rng.uniform(-2, 2, input_shape).astype(np.float32)
+        grid = rng.uniform(-1.3, 1.3, grid_shape).astype(np.float32)
+        actual, expected = model_runner.run_sample(model, [x, grid])
+        compare_outputs(actual, expected, atol=1e-5, rtol=1e-5)
+
+    def test_grid_sample_f16_warp_border_align_corners(self, model_runner):
+        """fp16 bilinear warp with border padding and align_corners=1."""
+        input_shape = [1, 3, 24, 32]
+        grid_shape = [1, 24, 32, 2]
+        model = _make_grid_sample_model(
+            input_shape,
+            grid_shape,
+            np.float16,
+            mode="bilinear",
+            padding_mode="border",
+            align_corners=1,
+        )
+        rng = np.random.default_rng(22)
+        x = rng.uniform(-2, 2, input_shape).astype(np.float16)
+        ys, xs = np.meshgrid(
+            np.linspace(-1, 1, 24), np.linspace(-1, 1, 32), indexing="ij"
+        )
+        grid = np.stack([xs + 0.05 * np.sin(3 * ys), ys - 0.05], axis=-1)
+        grid = grid[None].astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [x, grid])
+        compare_outputs(actual, expected, atol=2e-3, rtol=1e-3)
+
     def test_grid_sample_f16(self, model_runner):
         input_shape = [1, 2, 8, 8]
         grid_shape = [1, 3, 3, 2]
