@@ -40,7 +40,9 @@ matmul and gemm into quant types, so those patterns only fire when
   its hip storage tensor (`uiN` for unsigned, signless `iN` for signed). It
   exists because `quant.scast` rejects `uiN`. A cast pair that restores the
   original type folds, so consecutive quantized ops connect directly.
-- `hip.add` verifies that its tensors are all quantized or all not.
+- An op may mix quantized and float tensors, e.g. a weight-only matmul
+  (`f16 × !quant.uniform<i8:…> → f16`); each tensor's type says how to read
+  it.
 - After legalization, every `hip.add` carries `quant_types`: the quantized
   types for a QDQ add, its own float or integer types for any other
   (`[f32, f32, f32]`). Lowering asks only whether those entries are quantized,
@@ -50,7 +52,7 @@ matmul and gemm into quant types, so those patterns only fire when
 
 | Step | Where | What |
 |---|---|---|
-| Fold Q/DQ into types | `hip-fold-qdq-to-quant-types` (`FoldQdqToQuantTypes.cpp`), run just before `hip-fusion-transform` | DQ → op → Q becomes the quant-typed op when every Q/DQ has a per-tensor type (splat constant scale, readable zero point, integer storage, not packed). Kernels are not checked here. |
+| Fold Q/DQ into types | `hip-fold-qdq-to-quant-types` (`FoldQdqToQuantTypes.cpp`), run just before `hip-fusion-transform` | Per operand: each DQ input with a per-tensor type (splat constant scale, readable zero point, integer storage, not packed) folds into the input's type, and a single same-shaped per-tensor Q folds into the result type. Float inputs and a result without a Q stay float, so ops may mix quantized and float types. A DQ input that is not per-tensor leaves the op to the Q-specific fusions. Kernels are not checked here. |
 | Quant-type-agnostic fusions | `hip-fusion-transform`, PDLL in `fusion_pattern/` (`MatmulBiasFusion.pdll`) and native `gemm_to_matmul.cpp` | Read element types only, so float and quant-typed chains share them. See below. |
 | Legalize | `hip-legalize-quant-types`, before bufferization | Memrefs cannot hold quant types: the element types of every quant-capable op (float or quantized) move into its `quant_types` attribute, quantized tensors become storage integers, casts disappear. |
 | Lower | `convert-hip-to-llvm` | quantized `quant_types` → `wrap_qelementwise` (scales/zero points from the types); otherwise `wrap_elementwise`. |
@@ -91,10 +93,10 @@ never whether a kernel exists.
   `quant_types` order (data inputs, optional ones only when present, then the
   output): the DPS inputs and inits. Integer operands (indices) are listed
   but never quantized.
-- The interface verifier checks all-or-none quantization and, after
-  legalization, that `quant_types` matches the storage types. It runs only on
-  the ops that declare the interface; `hip-legalize-quant-types` runs the
-  same check on the others.
+- The interface verifier allows mixed quantized and float operands and,
+  after legalization, checks that `quant_types` matches the storage types. It
+  runs only on the ops that declare the interface;
+  `hip-legalize-quant-types` runs the same check on the others.
 
 ### Asking an op about its quantization
 

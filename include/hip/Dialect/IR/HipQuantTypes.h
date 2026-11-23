@@ -45,10 +45,9 @@ SmallVector<Type> getOperandQuantTypes(Operation *op);
 /// empty unless every one is per-tensor quantized.
 SmallVector<quant::UniformQuantizedType, 3> getQuantElementTypes(Operation *op);
 
-/// HipQuantCapableOpInterface's verifier: the non-integer `operands` are all
-/// quantized (no `quant_types`) or none are; then `quant_types` has one entry
-/// per operand, each quantized with a matching storage type or equal to the
-/// operand type. Integer operands (indices) are never quantized.
+/// HipQuantCapableOpInterface's verifier. Operands may mix quantized and float
+/// types. After legalization, `quant_types` has one entry per operand, each
+/// quantized with a matching storage type or equal to the operand type.
 LogicalResult verifyQuantTypes(Operation *op, ValueRange operands);
 
 /// Default getQuantOperands(): shaped DPS inputs, then the inits (non-DPS:

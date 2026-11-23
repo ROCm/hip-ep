@@ -23,8 +23,9 @@ Constraint CanFuseMatmulBias(matmul: Op, bias: Value, add: Op) {
   // The add must not broadcast the matmul result.
   HasSameShape(matmul.0, add.0);
   IsRowBias(bias, add.0);
-  // A float chain is one element type; quantized types differ by design.
-  IsQuantizedOrSameElementType(matmul.0, bias, add.0);
+  // Float values share one element type; quantized ones (mixed included)
+  // each carry their own scale.
+  HasOneFloatElementType(matmul.0, bias, add.0);
 }
 
 // The add's init already has the fused result's type and dynamic extents.

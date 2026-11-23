@@ -29,10 +29,10 @@ func.func @cast_shape(%a: tensor<8xui16>)
 
 // -----
 
+// Mixed quantized and float operands are valid (no diagnostic).
 func.func @add_mixed(%ctx: !hip.context, %a: tensor<8x!quant.uniform<u16:f32, 0.5>>,
                      %b: tensor<8xf32>) -> tensor<8xf32> {
   %e = tensor.empty() : tensor<8xf32>
-  // expected-error @+1 {{operands must be all quantized or all non-quantized}}
   %s = hip.add(%ctx) ins(%a, %b : tensor<8x!quant.uniform<u16:f32, 0.5>>, tensor<8xf32>)
       outs(%e : tensor<8xf32>) -> tensor<8xf32>
   return %s : tensor<8xf32>
@@ -82,11 +82,10 @@ func.func @float_entry_mismatch(%ctx: !hip.context, %a: memref<8xf32>, %out: mem
 
 // -----
 
-// Quantized and float entries do not mix; integer entries (indices) may.
-func.func @entries_mixed(%ctx: !hip.context, %a: memref<8xui16>, %out: memref<8xui16>) {
-  // expected-error @+1 {{'quant_types' must be all quantized or all non-quantized}}
-  hip.add(%ctx) ins(%a, %a : memref<8xui16>, memref<8xui16>) outs(%out : memref<8xui16>)
-      {quant_types = [!quant.uniform<u16:f32, 0.5>, f32, !quant.uniform<u16:f32, 0.5>]}
+// After legalization, a mixed op keeps quantized and float entries.
+func.func @entries_mixed(%ctx: !hip.context, %a: memref<8xui16>, %b: memref<8xf32>, %out: memref<8xf32>) {
+  hip.add(%ctx) ins(%a, %b : memref<8xui16>, memref<8xf32>) outs(%out : memref<8xf32>)
+      {quant_types = [!quant.uniform<u16:f32, 0.5>, f32, f32]}
   return
 }
 
@@ -95,7 +94,6 @@ func.func @entries_mixed(%ctx: !hip.context, %a: memref<8xui16>, %out: memref<8x
 func.func @matmul_mixed(%ctx: !hip.context, %a: tensor<4x4x!quant.uniform<i8:f32, 0.5>>,
                         %b: tensor<4x4xf32>) -> tensor<4x4xf32> {
   %e = tensor.empty() : tensor<4x4xf32>
-  // expected-error @+1 {{operands must be all quantized or all non-quantized}}
   %m = hip.matmul(%ctx) ins(%a, %b : tensor<4x4x!quant.uniform<i8:f32, 0.5>>, tensor<4x4xf32>)
       outs(%e : tensor<4x4xf32>) : tensor<4x4xf32>
   return %m : tensor<4x4xf32>
@@ -117,7 +115,6 @@ func.func @gemm_count(%ctx: !hip.context, %a: memref<4x4xi8>, %b: memref<4x4xi8>
 func.func @matmul_mixed(%ctx: !hip.context, %a: tensor<4x8x!quant.uniform<i8:f32, 0.5>>,
                         %b: tensor<8x6xf32>) -> tensor<4x6xf32> {
   %e = tensor.empty() : tensor<4x6xf32>
-  // expected-error @+1 {{operands must be all quantized or all non-quantized}}
   %m = hip.matmul(%ctx) ins(%a, %b : tensor<4x8x!quant.uniform<i8:f32, 0.5>>, tensor<8x6xf32>)
       outs(%e : tensor<4x6xf32>) : tensor<4x6xf32>
   return %m : tensor<4x6xf32>
@@ -125,13 +122,12 @@ func.func @matmul_mixed(%ctx: !hip.context, %a: tensor<4x8x!quant.uniform<i8:f32
 
 // -----
 
-// The bias counts as an operand: a float C with quantized A and B is mixed.
+// A float C with quantized A and B is a valid mixed gemm.
 
 func.func @gemm_mixed_bias(%ctx: !hip.context, %a: tensor<4x8x!quant.uniform<i8:f32, 0.5>>,
                            %b: tensor<8x6x!quant.uniform<i8:f32, 0.5>>, %c: tensor<6xf32>)
     -> tensor<4x6x!quant.uniform<i8:f32, 0.5>> {
   %e = tensor.empty() : tensor<4x6x!quant.uniform<i8:f32, 0.5>>
-  // expected-error @+1 {{operands must be all quantized or all non-quantized}}
   %g = hip.gemm(%ctx) ins(%a, %b, %c : tensor<4x8x!quant.uniform<i8:f32, 0.5>>, tensor<8x6x!quant.uniform<i8:f32, 0.5>>, tensor<6xf32>)
       outs(%e : tensor<4x6x!quant.uniform<i8:f32, 0.5>>) : tensor<4x6x!quant.uniform<i8:f32, 0.5>>
   return %g : tensor<4x6x!quant.uniform<i8:f32, 0.5>>

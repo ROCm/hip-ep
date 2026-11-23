@@ -67,40 +67,19 @@ mlir::hip::getQuantElementTypes(Operation *op) {
   return result;
 }
 
-// Integer operands (indices) are never quantized, so all-or-none skips them.
-static bool isInteger(Type type) {
-  return getElementTypeOrSelf(type).isIntOrIndex();
-}
-
 LogicalResult mlir::hip::verifyQuantTypes(Operation *op, ValueRange operands) {
+  // Operands may mix quantized and float types (e.g. a weight-only matmul).
   auto attr = op->getAttrOfType<ArrayAttr>("quant_types");
-  unsigned numQuantized = llvm::count_if(
-      operands, [](Value value) { return isQuantized(value.getType()); });
-
-  if (!attr) {
-    unsigned numQuantizable = llvm::count_if(
-        operands, [](Value value) { return !isInteger(value.getType()); });
-    if (numQuantized != 0 && numQuantized != numQuantizable)
-      return op->emitOpError(
-          "operands must be all quantized or all non-quantized");
+  if (!attr)
     return success();
-  }
 
-  if (numQuantized != 0)
+  if (llvm::any_of(operands,
+                   [](Value value) { return isQuantized(value.getType()); }))
     return op->emitOpError(
         "'quant_types' is only valid on storage-typed operands");
   if (attr.size() != operands.size())
     return op->emitOpError("'quant_types' expects ")
            << operands.size() << " entries, got " << attr.size();
-
-  auto entries = attr.getAsRange<TypeAttr>();
-  size_t numQuantTypes = llvm::count_if(
-      entries, [](TypeAttr type) { return isQuantized(type.getValue()); });
-  size_t numQuantizable = llvm::count_if(
-      entries, [](TypeAttr type) { return !isInteger(type.getValue()); });
-  if (numQuantTypes != 0 && numQuantTypes != numQuantizable)
-    return op->emitOpError(
-        "'quant_types' must be all quantized or all non-quantized");
 
   for (auto [value, typeAttr] :
        llvm::zip_equal(operands, attr.getAsRange<TypeAttr>())) {

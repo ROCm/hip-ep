@@ -52,7 +52,7 @@ Constraint IsHipPerChannelQuantizedWeight(dq: Op, consumer: Op);
 Constraint HasSameShape(lhs: Value, rhs: Value);
 Constraint IsRowBias(bias: Value, result: Value);
 Constraint CanTakeMatmulBias(matmul: Op);
-Constraint IsQuantizedOrSameElementType(a: Value, b: Value, c: Value);
+Constraint HasOneFloatElementType(a: Value, b: Value, c: Value);
 Rewrite ToRowBias(bias: Value) -> Value;
 
 // Compute-op geometry.

@@ -266,20 +266,22 @@ canTakeMatmulBias(mlir::PatternRewriter &, mlir::PDLResultList &,
                        (a.getRank() == 2 || matmul.getTransA() == 0));
 }
 
-/// the last value is quantized, or all values share one element type
+/// the non-quantized values share one element type; quantized ones may differ
+/// (each carries its own scale), so mixed float/quantized chains also fuse
 inline mlir::LogicalResult
-isQuantizedOrSameElementType(mlir::PatternRewriter &, mlir::PDLResultList &,
-                             llvm::ArrayRef<mlir::PDLValue> args) {
-  if (args.empty())
-    return mlir::failure();
-  mlir::Type last =
-      mlir::getElementTypeOrSelf(args.back().cast<mlir::Value>().getType());
-  if (mlir::hip::isQuantized(last))
-    return mlir::success();
-  return mlir::success(llvm::all_of(args, [&](const mlir::PDLValue &arg) {
-    return mlir::getElementTypeOrSelf(arg.cast<mlir::Value>().getType()) ==
-           last;
-  }));
+hasOneFloatElementType(mlir::PatternRewriter &, mlir::PDLResultList &,
+                       llvm::ArrayRef<mlir::PDLValue> args) {
+  mlir::Type floatType;
+  for (const mlir::PDLValue &arg : args) {
+    mlir::Type type =
+        mlir::getElementTypeOrSelf(arg.cast<mlir::Value>().getType());
+    if (mlir::hip::isQuantized(type))
+      continue;
+    if (floatType && type != floatType)
+      return mlir::failure();
+    floatType = type;
+  }
+  return mlir::success();
 }
 
 /// rms computes an L2 normalization over the trailing axis
@@ -813,8 +815,8 @@ inline void registerNativeHelpers(mlir::PDLPatternModule &pdlPatterns) {
   pdlPatterns.registerConstraintFunction("IsRowBias", isRowBias);
   pdlPatterns.registerConstraintFunction("CanTakeMatmulBias",
                                          canTakeMatmulBias);
-  pdlPatterns.registerConstraintFunction("IsQuantizedOrSameElementType",
-                                         isQuantizedOrSameElementType);
+  pdlPatterns.registerConstraintFunction("HasOneFloatElementType",
+                                         hasOneFloatElementType);
   pdlPatterns.registerRewriteFunction("ToRowBias", toRowBias);
   pdlPatterns.registerConstraintFunction("IsHipFusableQConvGeometry",
                                          isHipFusableQConvGeometry);

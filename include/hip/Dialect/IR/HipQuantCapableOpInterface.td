@@ -67,8 +67,8 @@ def HipQuantCapableOpInterface : OpInterface<"HipQuantCapableOpInterface"> {
       }]>
   ];
 
-  // All quantized or none; after legalization, `quant_types` matches the
-  // storage types.
+  // Quantized and float operands may mix; after legalization, `quant_types`
+  // matches the storage types.
   let verify = [{
     return ::mlir::hip::verifyQuantTypes(
         $_op, ::llvm::cast<HipQuantCapableOpInterface>($_op)

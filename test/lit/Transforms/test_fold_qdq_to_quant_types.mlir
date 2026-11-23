@@ -3,7 +3,8 @@
 
 // hip-fold-qdq-to-quant-types: DQ(inputs) -> op -> Q around any quant-capable op
 // becomes the op on !quant.uniform tensors, retyped in place. One pass for every
-// op implementing HipQuantCapableOpInterface; no per-op pattern.
+// op implementing HipQuantCapableOpInterface; no per-op pattern. Folding is per
+// operand, so float inputs or a result without a Q stay float (mixed ops).
 
 // RUN: hip-mlir-opt --split-input-file --hip-fold-qdq-to-quant-types %s | FileCheck %s
 
@@ -261,12 +262,14 @@ func.func @shared_dq(%ctx: !hip.context, %a: tensor<8xui16>, %b: tensor<8xui16>)
 
 // -----
 
-// All or none: a float input next to a DQ means the op stays as it is.
+// Mixed: the DQ input and the Q fold, the float input stays float.
 // CHECK-LABEL: func.func @one_input_not_dq
-// CHECK:         hip.dequantize_linear
-// CHECK:         hip.add(%{{.*}}) ins(%{{.*}}, %{{.*}} : tensor<8xf32>, tensor<8xf32>)
-// CHECK:         hip.quantize_linear
-// CHECK-NOT:     hip.storage_cast
+// CHECK-SAME:    %[[F:[^:]*]]: tensor<8xf32>
+// CHECK:         %[[QA:.*]] = hip.storage_cast %{{.*}} : tensor<8xui16> to tensor<8x!quant.uniform<u16:f32, 2.500000e-01:32768>>
+// CHECK:         %[[S:.*]] = hip.add(%{{.*}}) ins(%[[QA]], %[[F]] : tensor<8x!quant.uniform<u16:f32, 2.500000e-01:32768>>, tensor<8xf32>) outs(%{{.*}} : tensor<8x!quant.uniform<u16:f32, 5.000000e-01:32768>>)
+// CHECK-NEXT:    hip.storage_cast %[[S]] : tensor<8x!quant.uniform<u16:f32, 5.000000e-01:32768>> to tensor<8xui16>
+// CHECK-NOT:     hip.quantize_linear
+// CHECK-NOT:     hip.dequantize_linear
 func.func @one_input_not_dq(%ctx: !hip.context, %a: tensor<8xui16>, %f: tensor<8xf32>) -> tensor<8xui16> {
   %sa = hip.constant {value = dense<0.25> : tensor<f32>} : tensor<f32>
   %sy = hip.constant {value = dense<0.5> : tensor<f32>} : tensor<f32>
@@ -289,10 +292,12 @@ func.func @one_input_not_dq(%ctx: !hip.context, %a: tensor<8xui16>, %f: tensor<8
 
 // -----
 
-// The result has a second user besides the Q.
+// The result has a second user besides the Q: the inputs fold, the result
+// stays float and the Q stays.
 // CHECK-LABEL: func.func @two_users
-// CHECK:         hip.add(%{{.*}}) ins(%{{.*}}, %{{.*}} : tensor<8xf32>, tensor<8xf32>)
-// CHECK-NOT:     hip.storage_cast
+// CHECK:         %[[S:.*]] = hip.add(%{{.*}}) ins(%{{.*}}, %{{.*}} : tensor<8x!quant.uniform<u16:f32, 2.500000e-01:32768>>, tensor<8x!quant.uniform<u16:f32, 1.250000e-01:32768>>) outs(%{{.*}} : tensor<8xf32>)
+// CHECK:         hip.quantize_linear(%{{.*}}) ins(%[[S]],
+// CHECK-NOT:     hip.dequantize_linear
 func.func @two_users(%ctx: !hip.context, %a: tensor<8xui16>, %b: tensor<8xui16>) -> (tensor<8xui16>, tensor<8xf32>) {
   %sa = hip.constant {value = dense<0.25> : tensor<f32>} : tensor<f32>
   %sb = hip.constant {value = dense<0.125> : tensor<f32>} : tensor<f32>
@@ -322,7 +327,8 @@ func.func @two_users(%ctx: !hip.context, %a: tensor<8xui16>, %b: tensor<8xui16>)
 
 // -----
 
-// A per-column weight is not per-tensor: it stays for QMatMulFusion.pdll.
+// A per-column weight is not per-tensor: the whole op, the per-tensor
+// activation included, stays for QMatMulFusion.pdll.
 // CHECK-LABEL: func.func @per_column_weight
 // CHECK:         hip.matmul(%{{.*}}) ins(%{{.*}}, %{{.*}} : tensor<4x8xf32>, tensor<8x6xf32>)
 // CHECK-NOT:     hip.storage_cast
@@ -387,7 +393,8 @@ func.func @packed_int4(%ctx: !hip.context, %a: tensor<4x8xi8>, %w: tensor<8x6xi8
 
 // -----
 
-// A scale that is not a constant cannot become a type parameter.
+// A scale that is not a constant cannot become a type parameter, so the op is
+// left alone rather than folded partially.
 // CHECK-LABEL: func.func @runtime_scale
 // CHECK:         hip.dequantize_linear
 // CHECK:         hip.add(%{{.*}}) ins(%{{.*}}, %{{.*}} : tensor<8xf32>, tensor<8xf32>)
@@ -531,4 +538,48 @@ func.func @transpose_not_capable(%ctx: !hip.context, %a: tensor<2x4xui16>) -> te
       {axis = 1 : i64, block_size = 0 : i64, precision = 0 : i64,
        saturate = 1 : i64} : tensor<4x2xui16>
   return %y : tensor<4x2xui16>
+}
+
+// -----
+
+// Weight-only matmul: float activation, DQ weight, float result (no Q).
+// CHECK-LABEL: func.func @weight_only_matmul
+// CHECK-SAME:    %[[A:[^:]*]]: tensor<4x8xf16>
+// CHECK:         %[[QW:.*]] = hip.storage_cast %{{.*}} : tensor<8x6xi8> to tensor<8x6x!quant.uniform<i8:f16, 1.250000e-01:3>>
+// CHECK:         hip.matmul(%{{.*}}) ins(%[[A]], %[[QW]] : tensor<4x8xf16>, tensor<8x6x!quant.uniform<i8:f16, 1.250000e-01:3>>) outs(%{{.*}} : tensor<4x6xf16>)
+// CHECK-NOT:     hip.dequantize_linear
+func.func @weight_only_matmul(%ctx: !hip.context, %a: tensor<4x8xf16>) -> tensor<4x6xf16> {
+  %w = hip.constant {value = dense<1> : tensor<8x6xi8>} : tensor<8x6xi8>
+  %sw = hip.constant {value = dense<0.125> : tensor<f32>} : tensor<f32>
+  %zw = hip.constant {value = dense<3> : tensor<i8>} : tensor<i8>
+  %dw_e = tensor.empty() : tensor<8x6xf16>
+  %dw = hip.dequantize_linear(%ctx)
+      ins(%w, %sw : tensor<8x6xi8>, tensor<f32>)
+      zero_point(%zw : tensor<i8>)
+      outs(%dw_e : tensor<8x6xf16>)
+      {axis = 1 : i64, block_size = 0 : i64} : tensor<8x6xf16>
+  %e = tensor.empty() : tensor<4x6xf16>
+  %m = hip.matmul(%ctx) ins(%a, %dw : tensor<4x8xf16>, tensor<8x6xf16>) outs(%e : tensor<4x6xf16>) : tensor<4x6xf16>
+  return %m : tensor<4x6xf16>
+}
+
+// -----
+
+// Only the output is quantized: float inputs, the Q folds into the result.
+// CHECK-LABEL: func.func @output_only
+// CHECK-SAME:    %[[A:[^:]*]]: tensor<8xf32>
+// CHECK:         %[[G:.*]] = hip.gelu(%{{.*}}) ins(%[[A]] : tensor<8xf32>) outs(%{{.*}} : tensor<8x!quant.uniform<u16:f32, 5.000000e-01:32768>>)
+// CHECK-NEXT:    hip.storage_cast %[[G]] : tensor<8x!quant.uniform<u16:f32, 5.000000e-01:32768>> to tensor<8xui16>
+// CHECK-NOT:     hip.quantize_linear
+func.func @output_only(%ctx: !hip.context, %a: tensor<8xf32>) -> tensor<8xui16> {
+  %sy = hip.constant {value = dense<0.5> : tensor<f32>} : tensor<f32>
+  %z = hip.constant {value = dense<32768> : tensor<ui16>} : tensor<ui16>
+  %e = tensor.empty() : tensor<8xf32>
+  %g = hip.gelu(%ctx) ins(%a : tensor<8xf32>) outs(%e : tensor<8xf32>) : tensor<8xf32>
+  %y_e = tensor.empty() : tensor<8xui16>
+  %y = hip.quantize_linear(%ctx) ins(%g, %sy : tensor<8xf32>, tensor<f32>)
+      zero_point(%z : tensor<ui16>) outs(%y_e : tensor<8xui16>)
+      {axis = 1 : i64, block_size = 0 : i64, precision = 0 : i64,
+       saturate = 1 : i64} : tensor<8xui16>
+  return %y : tensor<8xui16>
 }

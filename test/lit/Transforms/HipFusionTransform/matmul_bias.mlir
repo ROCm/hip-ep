@@ -2,9 +2,9 @@
 // Licensed under the MIT License.
 
 // hip.matmul + row-bias hip.add -> hip.matmul with a bias operand. The pattern
-// checks structure only (shapes, single use, one float type for a float
-// chain), so float and quant-typed chains fuse alike and kernel availability
-// is not its concern.
+// checks structure only (shapes, single use, one float type among the float
+// values), so float, quant-typed and mixed chains fuse alike and kernel
+// availability is not its concern.
 
 // RUN: hip-mlir-opt --hip-fold-qdq-to-quant-types --hip-fusion-transform --split-input-file %s | FileCheck %s
 
@@ -305,4 +305,25 @@ func.func @qdq_chain_int32_bias(%ctx: !hip.context, %a: tensor<4x8xui16>,
   %e7 = tensor.empty() : tensor<4x6xui16>
   %y = hip.quantize_linear(%ctx) ins(%s, %sy : tensor<4x6xf32>, tensor<f32>) zero_point(%zy : tensor<ui16>) outs(%e7 : tensor<4x6xui16>) {axis = 1 : i64, block_size = 0 : i64, precision = 0 : i64, saturate = 1 : i64} : tensor<4x6xui16>
   return %y : tensor<4x6xui16>
+}
+
+// -----
+
+// Mixed: a weight-only matmul (f16 activation, quantized weight, f16 result)
+// plus a quantized bias with an f16 result fuses into one mixed matmul.
+
+// CHECK-LABEL: func.func @mixed_weight_only
+// CHECK:         hip.matmul(%{{.*}}) ins(%{{.*}}, %{{.*}}, %{{.*}} : tensor<4x8xf16>, tensor<8x6x!quant.uniform<i8:f16, 1.250000e-01:3>>, tensor<6x!quant.uniform<u16:f16, 6.250000e-02:32768>>) outs(%{{.*}} : tensor<4x6xf16>) : tensor<4x6xf16>
+// CHECK-NOT:     hip.add
+func.func @mixed_weight_only(%ctx: !hip.context, %a: tensor<4x8xf16>,
+                             %w: tensor<8x6x!quant.uniform<i8:f16, 1.250000e-01:3>>,
+                             %bias: tensor<6x!quant.uniform<u16:f16, 6.250000e-02:32768>>)
+    -> tensor<4x6xf16> {
+  %e0 = tensor.empty() : tensor<4x6xf16>
+  %m = hip.matmul(%ctx) ins(%a, %w : tensor<4x8xf16>, tensor<8x6x!quant.uniform<i8:f16, 1.250000e-01:3>>)
+      outs(%e0 : tensor<4x6xf16>) : tensor<4x6xf16>
+  %e1 = tensor.empty() : tensor<4x6xf16>
+  %y = hip.add(%ctx) ins(%m, %bias : tensor<4x6xf16>, tensor<6x!quant.uniform<u16:f16, 6.250000e-02:32768>>)
+      outs(%e1 : tensor<4x6xf16>) -> tensor<4x6xf16>
+  return %y : tensor<4x6xf16>
 }

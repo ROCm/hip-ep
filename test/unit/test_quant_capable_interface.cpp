@@ -69,6 +69,23 @@ func.func @gemm_no_c(%ctx: !hip.context, %a: tensor<4x8xf16>, %b: tensor<8x6xf16
   %g = hip.gemm(%ctx) ins(%a, %b : tensor<4x8xf16>, tensor<8x6xf16>) outs(%e : tensor<4x6xf16>) : tensor<4x6xf16>
   return %g : tensor<4x6xf16>
 }
+func.func @weight_only_matmul(%ctx: !hip.context, %a: tensor<4x8xf16>,
+                              %w: tensor<8x6x!quant.uniform<i8:f16, 0.0625:3>>) -> tensor<4x6xf16> {
+  %e = tensor.empty() : tensor<4x6xf16>
+  %m = hip.matmul(%ctx) ins(%a, %w : tensor<4x8xf16>, tensor<8x6x!quant.uniform<i8:f16, 0.0625:3>>)
+      outs(%e : tensor<4x6xf16>) : tensor<4x6xf16>
+  return %m : tensor<4x6xf16>
+}
+func.func @quant_gelu(%ctx: !hip.context, %a: tensor<8x!qa>) -> tensor<8x!qy> {
+  %e = tensor.empty() : tensor<8x!qy>
+  %g = hip.gelu(%ctx) ins(%a : tensor<8x!qa>) outs(%e : tensor<8x!qy>) : tensor<8x!qy>
+  return %g : tensor<8x!qy>
+}
+func.func @float_transpose(%ctx: !hip.context, %a: tensor<2x4xf32>) -> tensor<4x2xf32> {
+  %e = tensor.empty() : tensor<4x2xf32>
+  %t = hip.transpose(%ctx) ins(%a : tensor<2x4xf32>) outs(%e : tensor<4x2xf32>) {perm = [1, 0]} : tensor<4x2xf32>
+  return %t : tensor<4x2xf32>
+}
 func.func @float_mul(%ctx: !hip.context, %a: tensor<8xf32>) -> tensor<8xf32> {
   %e = tensor.empty() : tensor<8xf32>
   %s = hip.mul(%ctx) ins(%a, %a : tensor<8xf32>, tensor<8xf32>) outs(%e : tensor<8xf32>) -> tensor<8xf32>
@@ -188,6 +205,36 @@ int main() {
     check(gemm.getOperandQuantTypes() ==
               llvm::SmallVector<mlir::Type>{f16, f16, f16},
           "gemm without C: getOperandQuantTypes() is [f16, f16, f16]");
+  }
+
+  // A mixed op: per-operand answers; getQuantElementTypes() needs all
+  // operands quantized, so it is empty.
+  {
+    auto matmul = mlir::cast<mlir::hip::MatmulOp>(
+        findOp(*module, "weight_only_matmul", "hip.matmul"));
+    check(matmul.isQuantized(), "weight-only matmul: isQuantized() is true");
+    check(matmul.getInputQuantType(0) == f16 && !matmul.getUniformQuantType(0),
+          "weight-only matmul: A is f16, no uniform type");
+    check(isUniform(matmul.getInputQuantType(1), 0.0625, 3),
+          "weight-only matmul: B is the weight's uniform type");
+    check(matmul.getResultQuantType() == f16,
+          "weight-only matmul: result is f16");
+    check(mlir::hip::getQuantElementTypes(matmul).empty(),
+          "weight-only matmul: getQuantElementTypes() is empty");
+  }
+
+  // An op without the interface in ODS gets it at dialect load; a
+  // deny-listed one does not.
+  {
+    auto gelu = mlir::dyn_cast<HipQuantCapableOpInterface>(
+        findOp(*module, "quant_gelu", "hip.gelu"));
+    check(gelu && gelu.isQuantized(),
+          "hip.gelu: attached interface, isQuantized() is true");
+    check(gelu && isUniform(gelu.getResultQuantType(), 0.125, 32768),
+          "hip.gelu: result is its uniform type");
+    check(!mlir::isa<HipQuantCapableOpInterface>(
+              findOp(*module, "float_transpose", "hip.transpose")),
+          "hip.transpose is deny-listed");
   }
 
   // An op without the interface: no cast possible, free functions answer.
