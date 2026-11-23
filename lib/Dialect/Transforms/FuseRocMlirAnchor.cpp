@@ -1562,10 +1562,12 @@ private:
     if (peel.empty())
       return module;
 
-    // A remainder that saves no launch is inlined and runs as HIP ops. The
-    // HIP elementwise kernels cover f16 and f32 up to rank 4 (the broadcast
-    // ABI); other types (an i8 Max, for one) or higher ranks may have none,
-    // so such a module keeps its transposes instead.
+    // The remainder may end up inlined as HIP ops: when it saves no launch,
+    // or when, regrouped, it no longer outlines alone (a peeled transpose can
+    // become a result that only moves an argument). The HIP elementwise
+    // kernels cover f16 and f32 up to rank 4 (the broadcast ABI), and hip.silu
+    // has no HIP runtime entry, so a module whose remainder falls outside that
+    // keeps its transposes instead.
     auto hipElementType = [](Type type) {
       auto shaped = dyn_cast<ShapedType>(type);
       return !shaped || ((shaped.getElementType().isF16() ||
@@ -1584,10 +1586,11 @@ private:
         continue;
       ++launches;
       computes |= !isa<TransposeOp>(op);
-      hipTypes &= llvm::all_of(op.getOperandTypes(), hipElementType) &&
+      hipTypes &= !isa<SiluOp>(op) &&
+                  llvm::all_of(op.getOperandTypes(), hipElementType) &&
                   llvm::all_of(op.getResultTypes(), hipElementType);
     }
-    if (!computes || (launches < 2 && !hipTypes))
+    if (!computes || !hipTypes)
       return module;
 
     rewriter.setInsertionPoint(module);

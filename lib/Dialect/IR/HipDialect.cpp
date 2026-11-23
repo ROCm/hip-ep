@@ -203,6 +203,8 @@ LogicalResult RocMlirElementwiseOp::verify() {
   auto isStaticSlice = [](Operation &op) {
     auto slice = dyn_cast<tensor::ExtractSliceOp>(op);
     return slice && slice.getType().hasStaticShape() &&
+           slice.getSourceType().hasStaticShape() &&
+           slice.getSourceType().getRank() == slice.getType().getRank() &&
            llvm::none_of(slice.getStaticOffsets(), ShapedType::isDynamic) &&
            llvm::all_of(slice.getStaticStrides(),
                         [](int64_t stride) { return stride == 1; });
