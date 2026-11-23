@@ -32,6 +32,7 @@
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 // Environment parameters (global scope, before namespace)
@@ -310,8 +311,8 @@ void check_rocmlir_arch(const std::string &recorded) {
   LOG(FATAL) << "Cached MLIR artifact was compiled with " << describe(recorded)
              << ", but this session requests " << describe(current)
              << " (HIPDNN_EP_ROCMLIR / HIPDNN_EP_ROCMLIR_AUTOTUNE / ROCK_ARCH "
-                "/ active GPU). Delete the model cache or EPContext model and "
-                "recompile.";
+                "/ active GPU). Delete the model cache or EPContext model "
+                "and recompile.";
 }
 } // anonymous namespace
 
@@ -803,7 +804,11 @@ void MlirCustomOp::compute_with_output_allocator(
   inference_state_->set_output_allocator(nullptr);
 
   if (ret != 0) {
-    LOG(ERROR) << "inference_compute (allocator) failed with code: " << ret;
+    // Do not copy or publish outputs after a runtime admission/kernel failure.
+    // The EP Compute callback converts this exception to an OrtStatus.
+    throw std::runtime_error(
+        "inference_compute (allocator) failed with code: " +
+        std::to_string(ret));
   }
 
   // Output-completeness guard. Every declared output must be produced in-graph

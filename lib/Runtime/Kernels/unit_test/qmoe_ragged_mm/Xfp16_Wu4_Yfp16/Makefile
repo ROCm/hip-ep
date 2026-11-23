@@ -15,7 +15,7 @@
 # `test` runs every categorical situation (routing x input layout x bias x
 # zero points, the GEMV / WMMA16 / WMMA64 row-count boundaries, the bucket
 # descriptors and the FC1 -> SwiGLU -> FC2 pipeline) on the shapes COVERAGE
-# selects (default 3; see unit_test/README.md "Shape coverage"). Inputs and
+# selects (default 3; see unit_test/GUIDELINES.md "Shape coverage"). Inputs and
 # the CPU reference are generated in-process -- no python, no data files.
 # ============================================================
 
@@ -39,11 +39,15 @@ ifeq ($(HIP_SDK),)
     $(error pass HIP_SDK=<HIP SDK root>)
 endif
 
+# Named UT preset; numeric sampling belongs to common/hip_adaptive_timing.h.
+TIMING ?= standard
+
 # ---- Paths ----
 
 HIPCC       := $(HIP_SDK)/bin/hipcc.exe
 INCLUDE_DIR := ../../../include
 KERNEL_HIP  := ../../../hip/qmoe_ragged_mm_kernel.hip
+MATMUL_HIP := ../../../hip/matmul_nbits_kernel.hip
 # Token bucketing and SwiGLU, which the pipeline case drives around the MatMul.
 ROUTING_HIP := ../../../hip/qmoe_kernel.hip
 
@@ -63,13 +67,13 @@ INCLUDES     := -I$(INCLUDE_DIR)
 
 ifeq ($(DETECTED_OS),Windows)
     HIP_SDK_WIN := $(subst /,\,$(HIP_SDK))
-    RUN_CMD     = set "PATH=$(HIP_SDK_WIN)\bin;%PATH%" && set "HIPDNN_RESULTS_CSV=$(subst /,\,$(RESULTS_CSV))" && set "HIPDNN_RESULTS_OP=qmoe_ragged_mm" && set "HIPDNN_RESULTS_LEAF=Xfp16_Wu4_Yfp16" && set "HIPDNN_RESULTS_ARCH=$(ARCH)" && set "HIPDNN_RESULTS_MODE=$(MODE)" && $(subst /,\,.\$(1))
+    RUN_CMD     = set "PATH=$(HIP_SDK_WIN)\bin;%PATH%" && set "HIPDNN_UT_TIMING=$(TIMING)" && set "HIPDNN_RESULTS_CSV=$(subst /,\,$(RESULTS_CSV))" && set "HIPDNN_RESULTS_OP=qmoe_ragged_mm" && set "HIPDNN_RESULTS_LEAF=Xfp16_Wu4_Yfp16" && set "HIPDNN_RESULTS_ARCH=$(ARCH)" && set "HIPDNN_RESULTS_MODE=$(MODE)" && $(subst /,\,.\$(1))
     define DO_CLEAN
 	if exist $(BUILD_DIR) rmdir /s /q $(BUILD_DIR)
     endef
 else
     HIP_SDK_WIN := $(shell wslpath -w "$(HIP_SDK)")
-    RUN_CMD     = cmd.exe /c "set PATH=$(HIP_SDK_WIN)\bin;%PATH% && set HIPDNN_RESULTS_CSV=$(RESULTS_CSV) && set HIPDNN_RESULTS_OP=qmoe_ragged_mm && set HIPDNN_RESULTS_LEAF=Xfp16_Wu4_Yfp16 && set HIPDNN_RESULTS_ARCH=$(ARCH) && set HIPDNN_RESULTS_MODE=$(MODE) && %CD%\$(1)"
+    RUN_CMD     = cmd.exe /c "set PATH=$(HIP_SDK_WIN)\bin;%PATH% && set HIPDNN_UT_TIMING=$(TIMING) && set HIPDNN_RESULTS_CSV=$(RESULTS_CSV) && set HIPDNN_RESULTS_OP=qmoe_ragged_mm && set HIPDNN_RESULTS_LEAF=Xfp16_Wu4_Yfp16 && set HIPDNN_RESULTS_ARCH=$(ARCH) && set HIPDNN_RESULTS_MODE=$(MODE) && %CD%\$(1)"
     define DO_CLEAN
 	rm -rf $(BUILD_DIR)
     endef
@@ -93,12 +97,14 @@ endif
 DIRECT_TEST_OBJ    := $(BUILD_DIR)/direct_test.obj
 DIRECT_KERNEL_OBJ  := $(BUILD_DIR)/direct_kernel.obj
 DIRECT_ROUTING_OBJ := $(BUILD_DIR)/direct_routing.obj
+DIRECT_MATMUL_OBJ := $(BUILD_DIR)/direct_matmul.obj
 
 direct: FORCE | $(BUILD_DIR)
 	$(HIPCC) -c $(CXXFLAGS) $(OFFLOAD) $(INCLUDES) -x hip test_qmoe_ragged_mm.cpp -o $(DIRECT_TEST_OBJ)
 	$(HIPCC) -c $(KERNEL_FLAGS) $(OFFLOAD) $(INCLUDES) $(KERNEL_HIP) -o $(DIRECT_KERNEL_OBJ)
 	$(HIPCC) -c $(KERNEL_FLAGS) $(OFFLOAD) $(INCLUDES) $(ROUTING_HIP) -o $(DIRECT_ROUTING_OBJ)
-	$(HIPCC) $(OFFLOAD) $(DIRECT_TEST_OBJ) $(DIRECT_KERNEL_OBJ) $(DIRECT_ROUTING_OBJ) -o $(TARGET_DIRECT)
+	$(HIPCC) -c $(KERNEL_FLAGS) $(OFFLOAD) $(INCLUDES) $(MATMUL_HIP) -o $(DIRECT_MATMUL_OBJ)
+	$(HIPCC) $(OFFLOAD) $(DIRECT_TEST_OBJ) $(DIRECT_KERNEL_OBJ) $(DIRECT_ROUTING_OBJ) $(DIRECT_MATMUL_OBJ) -o $(TARGET_DIRECT)
 
 # ============================================================
 # Run / test targets (uniform API)
