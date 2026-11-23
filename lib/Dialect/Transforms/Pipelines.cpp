@@ -144,6 +144,17 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   // 1b*. HIP-to-HIP pattern rewriting, Such as Q/DQ fusion
   pm.addPass(mlir::hip::createHipFusionTransformPass());
 
+  // 1b**. Opt-in compile-time evaluation of constant-input boolean tensor
+  //       ops. Runs after fusion so folding cannot break fusion patterns, and
+  //       before externalization so folded producers never reach constant
+  //       storage assignment. Gated off by default while the evaluator
+  //       coverage grows; enable per-build with
+  //       HIPDNN_EP_FOLD_TENSOR_CONSTANTS=1 or per-pipeline with
+  //       fold-tensor-constants=true.
+  if (options.foldTensorConstants ||
+      hip_env_is_on("HIPDNN_EP_FOLD_TENSOR_CONSTANTS"))
+    pm.addPass(mlir::hip::createFoldTensorConstantsPass());
+
   // Apply constant storage policy only after HIP shape inference has consumed
   // every inspectable dense carrier payload. This keeps compile-time shape
   // values visible through conversion and reification while still replacing

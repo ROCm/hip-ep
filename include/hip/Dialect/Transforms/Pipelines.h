@@ -65,6 +65,12 @@ struct OnnxToHipPipelineOptions
       llvm::cl::desc("Skip writing constant data to constants.bin (metadata "
                      "only). Used for ORT EP live-compile path."),
       llvm::cl::init(false)};
+  Option<bool> foldTensorConstants{
+      *this, "fold-tensor-constants",
+      llvm::cl::desc("Evaluate constant-input boolean tensor ops at compile "
+                     "time before constant externalization (opt-in; also "
+                     "enabled by HIPDNN_EP_FOLD_TENSOR_CONSTANTS=1)"),
+      llvm::cl::init(false)};
 };
 
 /// Pipeline options for the HIP-to-LLVM lowering pipeline.

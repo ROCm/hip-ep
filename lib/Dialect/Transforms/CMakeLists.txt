@@ -38,6 +38,7 @@ add_library(HipDialectTransforms STATIC
   FixLoopAccumulatorOffset.cpp
   FoldBatchNorm.cpp
   FoldConstantExtracts.cpp
+  FoldTensorConstants.cpp
   ForwardConcatSlots.cpp
   FuseRocMlirAnchor.cpp
   FuseROCMlirReport.cpp

@@ -466,6 +466,34 @@ def ForwardConcatSlotsPass : Pass<"hip-forward-concat-slots", "mlir::func::FuncO
   ];
 }
 
+def FoldTensorConstantsPass
+    : Pass<"hip-fold-tensor-constants", "mlir::ModuleOp"> {
+  let summary = "Fold constant-input boolean tensor ops before externalization";
+  let description = [{
+    Evaluates element-wise boolean HIP tensor operations (hip.not, hip.and,
+    hip.or) at compile time when every data input is an inline hip.constant
+    of exactly the static result type (broadcasting forms are left alone),
+    replacing the result with a new inline hip.constant. Producer-before-
+    consumer chains fold in one block-order sweep. Analysis is function-local
+    and limited to single-block function bodies.
+
+    A result is only replaced when every use is a destination-passing-style
+    input in the same block. DPS init uses are refused so a constant never
+    becomes a bufferization destination, and terminator uses are refused so
+    graph outputs stay runtime-allocated. Carriers whose payloads were
+    consumed are erased only when they become dead.
+
+    Opt-in; runs after shape inference and HIP fusion, before
+    --hip-externalize-constants. The pass creates no serialization_order on
+    new carriers and does nothing if duplicate explicit orders exist, so it
+    cannot hide the externalizer's duplicate-order diagnostic.
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::func::FuncDialect"
+  ];
+}
+
 def PromoteStridedHipOperandsPass
     : Pass<"hip-promote-strided-operands", "mlir::func::FuncOp"> {
   let summary = "Materialize identity-layout temporaries for DPS-input memrefs "
