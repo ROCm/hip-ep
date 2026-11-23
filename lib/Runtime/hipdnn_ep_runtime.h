@@ -424,6 +424,14 @@ int hipdnn_ep_state_ensure_matmul_dp4a_scratch(RuntimeState *state,
 void *hipdnn_ep_state_get_la_scratch(RuntimeState *state);
 int hipdnn_ep_state_ensure_la_scratch(RuntimeState *state, size_t needed_size);
 
+// Per-session scratch for hip_paged_attention: metadata staging plus the
+// context-split partials. Same policy as la_scratch: grown on demand, never
+// shrunk, freed in hipdnn_ep_state_cleanup, shared by all attention layers
+// because the stream is serialised.
+void *hipdnn_ep_state_get_paged_attention_scratch(RuntimeState *state);
+int hipdnn_ep_state_ensure_paged_attention_scratch(RuntimeState *state,
+                                                   size_t needed_size);
+
 // Per-op state slots (see docs/design/op-state-slots-design.md). The generated
 // @hipdnn_ep_op_states_init_fn (built by --generate-op-state-init) calls
 // _alloc once, then per stateful op calls its construct symbol; each construct

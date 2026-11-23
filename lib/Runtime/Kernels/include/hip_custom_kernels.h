@@ -4332,14 +4332,20 @@ HIP_KERNEL_API int hip_gemv_f16_kn(void* stream, const void* a, const void* B,
 HIP_KERNEL_API int hip_gemm_wmma_fp16(void* stream, const void* A, const void* B,
                        void* C, int M, int K, int N);
 
-/* fp16 causal paged attention. Metadata pointers may be host or device memory. */
+/* fp16 causal paged attention. Metadata pointers may be host or device memory.
+ * scratch is device memory of at least hip_paged_attention_scratch_bytes()
+ * bytes for the same shape; it stages the metadata and holds the context-split
+ * partials, and must stay untouched until the stream has consumed the launch. */
+HIP_KERNEL_API size_t hip_paged_attention_scratch_bytes(
+    int64_t num_heads, int64_t kv_num_heads, int64_t num_tokens,
+    int64_t head_size, int64_t batch, int64_t block_size, int64_t max_blocks);
 HIP_KERNEL_API int hip_paged_attention(
     void *stream, const void *query, const void *key, const void *value,
     void *key_cache, void *value_cache, const void *cumulative_sequence_length,
     const void *past_seqlens, const void *block_table, void *output,
     int64_t num_heads, int64_t kv_num_heads, int64_t num_tokens,
     int64_t head_size, int64_t batch, int64_t num_blocks, int64_t block_size,
-    int64_t max_blocks, float scale);
+    int64_t max_blocks, float scale, void *scratch, size_t scratch_bytes);
 
 #ifdef __cplusplus
 }

@@ -38,9 +38,18 @@ int wrap_paged_attention(RuntimeState *state, void *query, void *key,
     return -1;
   if (scale == 0.f)
     scale = 1.f / std::sqrt(static_cast<float>(head_size));
-  return hip_paged_attention(state->stream, query, key, value, key_cache,
-                             value_cache, cumulative_sequence_length,
-                             past_seqlens, block_table, output, num_heads,
-                             kv_num_heads, num_tokens, head_size, batch,
-                             num_blocks, block_size, max_blocks, scale);
+  if (num_tokens == 0)
+    return 0;
+  const size_t scratch_bytes = hip_paged_attention_scratch_bytes(
+      num_heads, kv_num_heads, num_tokens, head_size, batch, block_size,
+      max_blocks);
+  if (scratch_bytes == 0 ||
+      hipdnn_ep_state_ensure_paged_attention_scratch(state, scratch_bytes) != 0)
+    return -1;
+  return hip_paged_attention(
+      state->stream, query, key, value, key_cache, value_cache,
+      cumulative_sequence_length, past_seqlens, block_table, output, num_heads,
+      kv_num_heads, num_tokens, head_size, batch, num_blocks, block_size,
+      max_blocks, scale, hipdnn_ep_state_get_paged_attention_scratch(state),
+      scratch_bytes);
 }

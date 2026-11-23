@@ -462,7 +462,8 @@ __global__ void __launch_bounds__(32 * ND * HB)
                         const _Float16 *__restrict__ value_cache,
                         _Float16 *__restrict__ O, DeviceMeta meta, int batch,
                         int Hq, int G, int max_blocks, int block_size,
-                        int cache_slots, int nqb, float scale) {
+                        int cache_slots, int nqb, float scale,
+                        float *__restrict__ partials, int split_tiles) {
 #if HIPDNN_HAS_WMMA
   constexpr int D = kFlashHeadSize;
   constexpr int NW = ND * HB;
@@ -480,7 +481,11 @@ __global__ void __launch_bounds__(32 * ND * HB)
   // through L2 together; query tiles run last-first because under the causal
   // mask they walk the most keys.
   const int cpg = (Hq / G) / HB;
-  const int bid = static_cast<int>(blockIdx.x);
+  // With `partials` set the grid is replicated once per slice of the key
+  // range; the slice index is the slowest-varying part of the block id.
+  const int base_grid = (Hq / HB) * nqb;
+  const int split = static_cast<int>(blockIdx.x) / base_grid;
+  const int bid = static_cast<int>(blockIdx.x) - split * base_grid;
   const int qb = (bid / cpg) % nqb;
   const int chunk = (bid / (cpg * nqb)) * cpg + bid % cpg;
 
@@ -546,6 +551,10 @@ __global__ void __launch_bounds__(32 * ND * HB)
                          ? (skv - 1)
                          : (past_len + q_start + kFlashQueryRows - 1);
   const int num_tiles = kv_max / BKV + 1;
+  const int t_begin = split * split_tiles;
+  if (t_begin >= num_tiles)
+    return;
+  const int t_end = min(num_tiles, t_begin + split_tiles);
 
   using Stage = PagedKvStage<BKV, D, 32 * NW, VT_STR, K_STR>;
   constexpr int kPerThr = Stage::kPerThr;
@@ -615,18 +624,19 @@ __global__ void __launch_bounds__(32 * ND * HB)
   const _Float16 *K_frag_base = &K_lds[wmma_lane * K_STR + dt0 * 16];
   const _Float16 *V_frag_base = &V_lds[(dt0 * 16 + wmma_lane) * VT_STR];
   Chunks pf, pv;
-  load_k(pf, 0);
-  load_v(pv, 0);
-  commit_k(pf, 0);
-  commit_v(pv, 0);
+  const int kv_begin = t_begin * BKV;
+  load_k(pf, kv_begin);
+  load_v(pv, kv_begin);
+  commit_k(pf, kv_begin);
+  commit_v(pv, kv_begin);
   __syncthreads();
-  if (num_tiles > 1) {
-    load_k(pf, BKV);
+  if (t_end - t_begin > 1) {
+    load_k(pf, kv_begin + BKV);
     if constexpr (!kSplitKv)
-      load_v(pv, BKV);
+      load_v(pv, kv_begin + BKV);
   }
 
-  for (int t = 0; t < num_tiles; ++t) {
+  for (int t = t_begin; t < t_end; ++t) {
     const int kv0 = t * BKV;
 
     float8_t S_reg[S_TILES_J];
@@ -656,7 +666,7 @@ __global__ void __launch_bounds__(32 * ND * HB)
     }
     __syncthreads();
     if constexpr (kSplitKv) {
-      if (t + 1 < num_tiles) {
+      if (t + 1 < t_end) {
         commit_k(pf, kv0 + BKV);
         load_v(pf, kv0 + BKV);
       }
@@ -700,14 +710,17 @@ __global__ void __launch_bounds__(32 * ND * HB)
         rmax = fmaxf(rmax, S_reg[sj][e]);
     rmax = fmaxf(rmax, swap_halves(rmax));
     const float m_new = fmaxf(m_reg, rmax * c);
-    const float corr = __builtin_amdgcn_exp2f(m_reg - m_new);
+    // A slice that starts past a row's last visible key sees only masked
+    // scores for that row; keep the subtraction finite so it contributes zero.
+    const float m_sub = (m_new == -INFINITY) ? 0.0f : m_new;
+    const float corr = __builtin_amdgcn_exp2f(m_reg - m_sub);
     float rsum = 0.0f;
 #pragma unroll
     for (int sj = 0; sj < S_TILES_J; ++sj) {
       _Float16 own[kAcc];
 #pragma unroll
       for (int e = 0; e < kAcc; ++e) {
-        const float p = __builtin_amdgcn_exp2f(fmaf(S_reg[sj][e], c, -m_new));
+        const float p = __builtin_amdgcn_exp2f(fmaf(S_reg[sj][e], c, -m_sub));
         rsum += p;
         own[e] = static_cast<_Float16>(p);
       }
@@ -753,17 +766,17 @@ __global__ void __launch_bounds__(32 * ND * HB)
         });
     __syncthreads();  // V_lds and Sp are reused by the next tile
     if constexpr (kSplitKv) {
-      if (t + 1 < num_tiles) {
+      if (t + 1 < t_end) {
         commit_v(pf, kv0 + BKV);
-        if (t + 2 < num_tiles)
+        if (t + 2 < t_end)
           load_k(pf, kv0 + 2 * BKV);
       }
     } else {
-      if (t + 1 < num_tiles) {
+      if (t + 1 < t_end) {
         commit_k(pf, kv0 + BKV);
         commit_v(pv, kv0 + BKV);
         __syncthreads();
-        if (t + 2 < num_tiles) {
+        if (t + 2 < t_end) {
           load_k(pf, kv0 + 2 * BKV);
           load_v(pv, kv0 + 2 * BKV);
         }
@@ -771,8 +784,29 @@ __global__ void __launch_bounds__(32 * ND * HB)
     }
   }
 
-  const float inv_l = 1.0f / fmaxf(l_reg, 1e-6f);
   const int q_pos = q_start + wmma_lane;
+  if (partials) {
+    if (q_pos < sq) {
+      const size_t splits = gridDim.x / base_grid;
+      float *part =
+          partials +
+          ((static_cast<size_t>(seq_begin + q_pos) * Hq + head_q) * splits +
+           split) *
+              partial_stride(D);
+#pragma unroll
+      for (int tj = 0; tj < DT; ++tj)
+#pragma unroll
+        for (int e = 0; e < kAcc; ++e)
+          part[2 + (dt0 + tj) * 16 + hipdnn_wmma_acc_row(pair, e)] =
+              O_frag[tj][e];
+      if (g == 0 && pair == 0) {
+        part[0] = m_reg;
+        part[1] = l_reg;
+      }
+    }
+    return;
+  }
+  const float inv_l = 1.0f / fmaxf(l_reg, 1e-6f);
   if (q_pos < sq) {
     _Float16 *o_row =
         &O[(static_cast<size_t>(seq_begin + q_pos) * Hq + head_q) * D];
@@ -788,15 +822,98 @@ __global__ void __launch_bounds__(32 * ND * HB)
 #endif
 }
 
+// Merges the key-range slices written by paged_flash_prefill. Partial maxima
+// are in scaled log2 units. A slice is only read when it can hold a visible
+// key of the row.
+__global__ void __launch_bounds__(kAttentionThreads)
+    paged_flash_reduce(const float *partials, __half *output, DeviceMeta meta,
+                       int batch, int num_heads, int splits, int split_keys) {
+  const int token = blockIdx.x;
+  const int head = blockIdx.y;
+  __half *out = output + (static_cast<int64_t>(token) * num_heads + head) *
+                             kFlashHeadSize;
+  const int batch_index = find_batch(meta.cumulative, batch, token);
+  if (batch_index < 0) {
+    for (int d = threadIdx.x; d < kFlashHeadSize; d += blockDim.x)
+      out[d] = __float2half(0.f);
+    return;
+  }
+  const int position =
+      meta.past[batch_index] + (token - meta.cumulative[batch_index]);
+  const int used = min(splits, position / split_keys + 1);
+  const int64_t stride = partial_stride(kFlashHeadSize);
+  const float *base =
+      partials + (static_cast<int64_t>(token) * num_heads + head) * splits *
+                     stride;
+  float global_max = -INFINITY;
+  for (int s = 0; s < used; ++s)
+    global_max = fmaxf(global_max, base[s * stride]);
+  float denom = 0.f;
+  if (global_max != -INFINITY) {
+    for (int s = 0; s < used; ++s) {
+      const float *p = base + s * stride;
+      if (p[0] != -INFINITY)
+        denom += p[1] * __builtin_amdgcn_exp2f(p[0] - global_max);
+    }
+  }
+  for (int d = threadIdx.x; d < kFlashHeadSize; d += blockDim.x) {
+    float sum = 0.f;
+    if (denom > 0.f) {
+      for (int s = 0; s < used; ++s) {
+        const float *p = base + s * stride;
+        if (p[0] != -INFINITY)
+          sum += p[2 + d] * __builtin_amdgcn_exp2f(p[0] - global_max);
+      }
+      sum /= denom;
+    }
+    out[d] = __float2half(sum);
+  }
+}
+
 struct FlashConfig {
   int nd;
   int hb;
   int bkv;
 };
 
-// Picks the widest head grouping that divides the GQA group. Returns false
-// when the shape has no tiled path (the caller falls back to the per-token
-// kernel).
+// The history a block walks is cut into slices of at most this many keys so
+// that the K/V working set live at once stays within the last-level cache; the
+// slices are merged by paged_flash_reduce. The slice count follows the cache
+// capacity, so a history that fits one slice takes the unsplit path.
+constexpr int kFlashSplitKeys = 8192;
+constexpr size_t kMaxFlashPartialBytes = 512u << 20;
+constexpr int kNoSplitTiles = 1 << 28;
+
+struct FlashSplitPlan {
+  int splits;
+  int split_tiles;
+  size_t partial_bytes;
+};
+
+FlashSplitPlan plan_flash_splits(int64_t num_tokens, int num_heads, int bkv,
+                                 int block_size, int max_blocks) {
+  int keys = kFlashSplitKeys;
+  const int64_t capacity = static_cast<int64_t>(max_blocks) * block_size;
+  const size_t per_split = static_cast<size_t>(num_tokens) * num_heads *
+                           partial_stride(kFlashHeadSize) * sizeof(float);
+  int64_t splits = (capacity + keys - 1) / keys;
+  const int64_t budget =
+      static_cast<int64_t>(kMaxFlashPartialBytes / per_split);
+  if (splits > budget && budget >= 1) {
+    splits = budget;
+    keys = static_cast<int>((capacity + splits - 1) / splits);
+  }
+  keys = (keys + bkv - 1) / bkv * bkv;
+  splits = (capacity + keys - 1) / keys;
+  if (splits <= 1 || splits > budget || keys <= 0)
+    return {1, kNoSplitTiles, 0};
+  return {static_cast<int>(splits), keys / bkv, per_split * splits};
+}
+
+// Picks the head grouping and the number of waves per head. Three heads with
+// four waves per head keeps the accumulators and query fragments of each wave
+// small enough to stay in registers; wider groupings spill. Returns false when
+// the shape has no tiled path (the caller falls back to the per-token kernel).
 bool pick_flash_config(int num_heads, int kv_heads, int head_size,
                        int block_size, FlashConfig *cfg) {
   if (head_size != kFlashHeadSize)
@@ -805,12 +922,12 @@ bool pick_flash_config(int num_heads, int kv_heads, int head_size,
   const int bkv = 32;
   if (block_size % bkv != 0)
     return false;
-  int hb = 1;
+  FlashConfig c{2, 1, bkv};
   if (group % 3 == 0)
-    hb = 3;
+    c = FlashConfig{4, 3, bkv};
   else if (group % 2 == 0)
-    hb = 2;
-  *cfg = FlashConfig{2, hb, bkv};
+    c = FlashConfig{2, 2, bkv};
+  *cfg = c;
   return true;
 }
 
@@ -840,10 +957,20 @@ hipError_t launch_flash(hipStream_t stream, const FlashConfig &cfg,
                         const void *value_cache, void *output,
                         const DeviceMeta &meta, int64_t num_tokens, int batch,
                         int num_heads, int kv_heads, int block_size,
-                        int max_blocks, int cache_slots, float scale) {
+                        int max_blocks, int cache_slots, float scale,
+                        float *partials_scratch,
+                        size_t partials_scratch_bytes) {
   const int nqb = static_cast<int>(
       (num_tokens + kFlashQueryRows - 1) / kFlashQueryRows + batch);
-  const int64_t grid = static_cast<int64_t>(num_heads / HB) * nqb;
+  FlashSplitPlan plan =
+      plan_flash_splits(num_tokens, num_heads, BKV, block_size, max_blocks);
+  float *partials = nullptr;
+  if (plan.splits > 1 && plan.partial_bytes <= partials_scratch_bytes)
+    partials = partials_scratch;
+  else
+    plan = {1, kNoSplitTiles, 0};
+  const int64_t grid =
+      static_cast<int64_t>(num_heads / HB) * nqb * plan.splits;
   if (grid > 2147483647)
     return hipErrorInvalidValue;
   paged_flash_prefill<BKV, ND, HB>
@@ -853,8 +980,18 @@ hipError_t launch_flash(hipStream_t stream, const FlashConfig &cfg,
           static_cast<const _Float16 *>(key_cache),
           static_cast<const _Float16 *>(value_cache),
           static_cast<_Float16 *>(output), meta, batch, num_heads, kv_heads,
-          max_blocks, block_size, cache_slots, nqb, scale);
-  return hipGetLastError();
+          max_blocks, block_size, cache_slots, nqb, scale, partials,
+          plan.split_tiles);
+  hipError_t err = hipGetLastError();
+  if (partials && err == hipSuccess) {
+    paged_flash_reduce<<<dim3(static_cast<unsigned>(num_tokens),
+                              static_cast<unsigned>(num_heads)),
+                         dim3(kAttentionThreads), 0, stream>>>(
+        partials, static_cast<__half *>(output), meta, batch, num_heads,
+        plan.splits, plan.split_tiles * BKV);
+    err = hipGetLastError();
+  }
+  return err;
 }
 
 hipError_t dispatch_flash(hipStream_t stream, const FlashConfig &cfg,
@@ -863,14 +1000,15 @@ hipError_t dispatch_flash(hipStream_t stream, const FlashConfig &cfg,
                           const DeviceMeta &meta, int64_t num_tokens,
                           int batch, int num_heads, int kv_heads,
                           int block_size, int max_blocks, int cache_slots,
-                          float scale) {
+                          float scale, float *partials_scratch,
+                          size_t partials_scratch_bytes) {
 #define PA_LAUNCH(ND_, HB_)                                                    \
   launch_flash<32, ND_, HB_>(stream, cfg, query, key_cache, value_cache,      \
                              output, meta, num_tokens, batch, num_heads,       \
                              kv_heads, block_size, max_blocks, cache_slots,    \
-                             scale)
-  if (cfg.hb == 3)
-    return PA_LAUNCH(2, 3);
+                             scale, partials_scratch, partials_scratch_bytes)
+  if (cfg.nd == 4 && cfg.hb == 3)
+    return PA_LAUNCH(4, 3);
   if (cfg.hb == 2)
     return PA_LAUNCH(2, 2);
   return PA_LAUNCH(2, 1);
@@ -1057,23 +1195,16 @@ __global__ void __launch_bounds__(kGroupedThreads)
 constexpr int kMinSplitChunk = 512;
 constexpr int kMaxSplits = 256;
 constexpr size_t kMaxPartialBytes = 256u << 20;
+constexpr size_t kScratchAlign = 256;
 
-// Per-token attention. A decode-sized batch has only tokens * heads blocks,
-// each walking the whole context serially, so a long context is cut into
-// slices that run in parallel and are merged by paged_attention_reduce.
-hipError_t launch_per_token(hipStream_t stream, const void *query,
-                            void *key_cache, void *value_cache, void *output,
-                            const DeviceMeta &meta, int num_tokens, int batch,
-                            int num_heads, int kv_heads, int head_size,
-                            int block_size, int max_blocks, int cache_slots,
-                            float scale) {
-  int wave_size = 32;
-  (void)hipDeviceGetAttribute(&wave_size, hipDeviceAttributeWarpSize, 0);
-  const int num_waves = kAttentionThreads / wave_size;
-  const size_t shared_bytes =
-      (2 * static_cast<size_t>(num_waves) +
-       static_cast<size_t>(num_waves) * static_cast<size_t>(head_size)) *
-      sizeof(float);
+struct SplitPlan {
+  int chunk;
+  int splits;
+  size_t partial_bytes;
+};
+
+SplitPlan plan_splits(int num_tokens, int num_heads, int head_size,
+                      int block_size, int max_blocks) {
   const int capacity = max_blocks * block_size;
   int chunk = kMinSplitChunk;
   while ((capacity + chunk - 1) / chunk > kMaxSplits)
@@ -1082,12 +1213,46 @@ hipError_t launch_per_token(hipStream_t stream, const void *query,
   const size_t partial_bytes = static_cast<size_t>(num_tokens) * num_heads *
                                splits * partial_stride(head_size) *
                                sizeof(float);
+  return {chunk, splits, partial_bytes};
+}
+
+// Bytes of the int32 metadata staging area at the start of the caller scratch.
+size_t meta_stage_bytes(int64_t batch, int64_t max_blocks) {
+  const size_t count = static_cast<size_t>(batch + 1) +
+                       static_cast<size_t>(batch) +
+                       static_cast<size_t>(batch) *
+                           static_cast<size_t>(max_blocks);
+  const size_t bytes = count * sizeof(int32_t);
+  return (bytes + kScratchAlign - 1) / kScratchAlign * kScratchAlign;
+}
+
+// Per-token attention. A decode-sized batch has only tokens * heads blocks,
+// each walking the whole context serially, so a long context is cut into
+// slices that run in parallel and are merged by paged_attention_reduce. The
+// slice partials live in caller scratch; when it is too small the context is
+// not split.
+hipError_t launch_per_token(hipStream_t stream, const void *query,
+                            void *key_cache, void *value_cache, void *output,
+                            const DeviceMeta &meta, int num_tokens, int batch,
+                            int num_heads, int kv_heads, int head_size,
+                            int block_size, int max_blocks, int cache_slots,
+                            float scale, float *partials_scratch,
+                            size_t partials_scratch_bytes) {
+  int wave_size = 32;
+  (void)hipDeviceGetAttribute(&wave_size, hipDeviceAttributeWarpSize, 0);
+  const int num_waves = kAttentionThreads / wave_size;
+  const size_t shared_bytes =
+      (2 * static_cast<size_t>(num_waves) +
+       static_cast<size_t>(num_waves) * static_cast<size_t>(head_size)) *
+      sizeof(float);
+  const SplitPlan plan =
+      plan_splits(num_tokens, num_heads, head_size, block_size, max_blocks);
+  const int chunk = plan.chunk;
+  const int splits = plan.splits;
   float *partials = nullptr;
-  if (splits > 1 && partial_bytes <= kMaxPartialBytes) {
-    const hipError_t alloc = hipMallocAsync(&partials, partial_bytes, stream);
-    if (alloc != hipSuccess)
-      return alloc;
-  }
+  if (splits > 1 && plan.partial_bytes <= kMaxPartialBytes &&
+      plan.partial_bytes <= partials_scratch_bytes)
+    partials = partials_scratch;
   const unsigned z = partials ? static_cast<unsigned>(splits) : 1u;
   const int heads_per_kv = num_heads / kv_heads;
   int grouped_heads = 0;
@@ -1138,21 +1303,60 @@ hipError_t launch_per_token(hipStream_t stream, const void *query,
           chunk, splits);
       err = hipGetLastError();
     }
-    (void)hipFreeAsync(partials, stream);
   }
   return err;
 }
 
-int copy_i32(hipStream_t stream, const void *src, int count, int32_t **dst) {
+int copy_i32(hipStream_t stream, const void *src, int count, int32_t *dst) {
   const size_t bytes = static_cast<size_t>(count) * sizeof(int32_t);
-  hipError_t err = hipMallocAsync(dst, bytes, stream);
-  if (err != hipSuccess)
-    return static_cast<int>(err);
-  err = hipMemcpyAsync(*dst, src, bytes, hipMemcpyDefault, stream);
-  return static_cast<int>(err);
+  return static_cast<int>(
+      hipMemcpyAsync(dst, src, bytes, hipMemcpyDefault, stream));
+}
+
+// Fewer tokens than one query tile means decode-sized work: the per-token
+// kernel is the better fit there.
+bool select_flash(int64_t num_tokens, int64_t num_heads, int64_t kv_num_heads,
+                  int64_t head_size, int64_t block_size, FlashConfig *cfg) {
+  return num_tokens >= kFlashQueryRows * 2 &&
+         pick_flash_config(static_cast<int>(num_heads),
+                           static_cast<int>(kv_num_heads),
+                           static_cast<int>(head_size),
+                           static_cast<int>(block_size), cfg) &&
+         device_has_wmma();
 }
 
 }  // namespace
+
+// Scratch layout: int32 metadata staging first, then the per-token slice
+// partials. Prefill through the flash kernel needs no partials.
+extern "C" size_t hip_paged_attention_scratch_bytes(
+    int64_t num_heads, int64_t kv_num_heads, int64_t num_tokens,
+    int64_t head_size, int64_t batch, int64_t block_size, int64_t max_blocks) {
+  const int64_t kIntMax = 2147483647;
+  if (num_tokens <= 0 || num_heads <= 0 || kv_num_heads <= 0 ||
+      head_size <= 0 || batch <= 0 || block_size < 16 || max_blocks <= 0 ||
+      num_tokens > kIntMax || num_heads > kIntMax || head_size > kIntMax ||
+      block_size > kIntMax || max_blocks > kIntMax ||
+      batch > kIntMax / max_blocks || max_blocks > kIntMax / block_size)
+    return 0;
+  size_t bytes = meta_stage_bytes(batch, max_blocks);
+  FlashConfig flash_cfg{};
+  if (select_flash(num_tokens, num_heads, kv_num_heads, head_size, block_size,
+                   &flash_cfg)) {
+    bytes += plan_flash_splits(num_tokens, static_cast<int>(num_heads),
+                               flash_cfg.bkv, static_cast<int>(block_size),
+                               static_cast<int>(max_blocks))
+                 .partial_bytes;
+  } else {
+    const SplitPlan plan =
+        plan_splits(static_cast<int>(num_tokens), static_cast<int>(num_heads),
+                    static_cast<int>(head_size), static_cast<int>(block_size),
+                    static_cast<int>(max_blocks));
+    if (plan.splits > 1 && plan.partial_bytes <= kMaxPartialBytes)
+      bytes += plan.partial_bytes;
+  }
+  return bytes;
+}
 
 extern "C" int hip_paged_attention(
     void *stream_ptr, const void *query, const void *key, const void *value,
@@ -1160,7 +1364,7 @@ extern "C" int hip_paged_attention(
     const void *past_seqlens, const void *block_table, void *output,
     int64_t num_heads, int64_t kv_num_heads, int64_t num_tokens,
     int64_t head_size, int64_t batch, int64_t num_blocks, int64_t block_size,
-    int64_t max_blocks, float scale) {
+    int64_t max_blocks, float scale, void *scratch, size_t scratch_bytes) {
   if (num_tokens == 0)
     return 0;
   if (!query || !key || !value || !key_cache || !value_cache || !output ||
@@ -1179,26 +1383,23 @@ extern "C" int hip_paged_attention(
   if (head_size > kMaxHeadSize || num_heads > 65535)
     return -1;
 
+  const size_t meta_bytes = meta_stage_bytes(batch, max_blocks);
+  if (!scratch || scratch_bytes < meta_bytes)
+    return -1;
+
   auto stream = static_cast<hipStream_t>(stream_ptr);
-  int32_t *cumulative = nullptr;
-  int32_t *past = nullptr;
-  int32_t *table = nullptr;
+  int32_t *cumulative = static_cast<int32_t *>(scratch);
+  int32_t *past = cumulative + (batch + 1);
+  int32_t *table = past + batch;
   int status = copy_i32(stream, cumulative_sequence_length,
-                        static_cast<int>(batch + 1), &cumulative);
+                        static_cast<int>(batch + 1), cumulative);
   if (status == 0)
-    status = copy_i32(stream, past_seqlens, static_cast<int>(batch), &past);
+    status = copy_i32(stream, past_seqlens, static_cast<int>(batch), past);
   if (status == 0)
     status = copy_i32(stream, block_table,
-                      static_cast<int>(batch * max_blocks), &table);
-  if (status != 0) {
-    if (cumulative)
-      (void)hipFreeAsync(cumulative, stream);
-    if (past)
-      (void)hipFreeAsync(past, stream);
-    if (table)
-      (void)hipFreeAsync(table, stream);
+                      static_cast<int>(batch * max_blocks), table);
+  if (status != 0)
     return status;
-  }
 
   DeviceMeta meta{cumulative, past, table};
   const int cache_slots = static_cast<int>(num_blocks * block_size);
@@ -1213,23 +1414,21 @@ extern "C" int hip_paged_attention(
                      static_cast<int>(block_size), static_cast<int>(max_blocks),
                      cache_slots);
   hipError_t err = hipGetLastError();
-  // Fewer tokens than one query tile means decode-sized work: the per-token
-  // kernel is the better fit there.
   FlashConfig flash_cfg{};
   const bool use_flash =
-      err == hipSuccess && num_tokens >= kFlashQueryRows * 2 &&
-      pick_flash_config(static_cast<int>(num_heads),
-                        static_cast<int>(kv_num_heads),
-                        static_cast<int>(head_size),
-                        static_cast<int>(block_size), &flash_cfg) &&
-      device_has_wmma();
+      err == hipSuccess &&
+      select_flash(num_tokens, num_heads, kv_num_heads, head_size, block_size,
+                   &flash_cfg);
   if (use_flash) {
     err = dispatch_flash(stream, flash_cfg, query, key_cache, value_cache,
                          output, meta, num_tokens, static_cast<int>(batch),
                          static_cast<int>(num_heads),
                          static_cast<int>(kv_num_heads),
                          static_cast<int>(block_size),
-                         static_cast<int>(max_blocks), cache_slots, scale);
+                         static_cast<int>(max_blocks), cache_slots, scale,
+                         reinterpret_cast<float *>(
+                             static_cast<char *>(scratch) + meta_bytes),
+                         scratch_bytes - meta_bytes);
   } else if (err == hipSuccess) {
     err = launch_per_token(stream, query, key_cache, value_cache, output, meta,
                            static_cast<int>(num_tokens),
@@ -1237,11 +1436,11 @@ extern "C" int hip_paged_attention(
                            static_cast<int>(kv_num_heads),
                            static_cast<int>(head_size),
                            static_cast<int>(block_size),
-                           static_cast<int>(max_blocks), cache_slots, scale);
+                           static_cast<int>(max_blocks), cache_slots, scale,
+                           reinterpret_cast<float *>(
+                               static_cast<char *>(scratch) + meta_bytes),
+                           scratch_bytes - meta_bytes);
   }
-  (void)hipFreeAsync(cumulative, stream);
-  (void)hipFreeAsync(past, stream);
-  (void)hipFreeAsync(table, stream);
   if (err != hipSuccess) {
     fprintf(stderr, "[custom_kernels] hip_paged_attention launch failed: %s\n",
             hipGetErrorString(err));
