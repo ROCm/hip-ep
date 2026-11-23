@@ -195,6 +195,14 @@ extern "C" int hip_gather_nd(void *stream, const void *input,
                        static_cast<const int64_t *>(indices),
                        static_cast<int64_t *>(output), p, num_output_elements);
     break;
+  case HIP_DTYPE_UINT8:
+  case HIP_DTYPE_INT8:
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_gather_nd_kernel<uint8_t>),
+                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const uint8_t *>(input),
+                       static_cast<const int64_t *>(indices),
+                       static_cast<uint8_t *>(output), p, num_output_elements);
+    break;
   default:
     fprintf(stderr, "[custom_kernels] hip_gather_nd: unsupported dtype=%d\n",
             hip_dtype);

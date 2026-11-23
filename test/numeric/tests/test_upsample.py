@@ -435,6 +435,9 @@ class TestResizeLinearDownsample:
             ([1, 2, 45, 60], [1.0, 1.0, 1.0 / 3, 1.0 / 3], "align_corners"),
             # 4800 outputs per row: 600 lanes of 8, padded to 768 slots.
             ([1, 1, 16, 9600], [1.0, 1.0, 0.5, 0.5], "half_pixel"),
+            # 4608 rows over 2048 row groups: a thread takes two or three rows,
+            # and the last pass is partial.
+            ([1, 16, 576, 672], [1.0, 1.0, 0.5, 0.5], "half_pixel"),
         ],
     )
     def test_linear_f16(self, model_runner, shape, scales, coord):
