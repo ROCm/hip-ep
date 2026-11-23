@@ -436,6 +436,12 @@ def PromoteStridedHipOperandsPass
     `hip.reverse` is skipped: its lowering reads the input through the memref
     descriptor, so promoting it would only add a copy.
 
+    `hip.concat` reads each input from an offset-aware pointer, so contiguous
+    views (identity strides with any offset) are not promoted. When promoting
+    its strided inputs would launch at least one copy per input, the concat
+    is instead rewritten to one `memref.copy` per input into a
+    `memref.subview` of its output slot.
+
     DPS-init operands are intentionally left untouched because promoting a
     write target requires copy-back and must preserve read-before-write
     semantics. The production pipeline normally supplies identity-layout inits

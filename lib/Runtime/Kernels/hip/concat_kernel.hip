@@ -66,6 +66,20 @@ __global__ void __launch_bounds__(CC_BLOCK)
   }
 }
 
+constexpr int64_t CC_TILE = int64_t(CC_BLOCK) * CC_ELEMS_PER_THREAD;
+
+int64_t gridBlocks(int64_t total) {
+  int64_t grid = (total + CC_TILE - 1) / CC_TILE;
+  return grid > (int64_t(1) << 20) ? int64_t(1) << 20 : grid;
+}
+
+// A block leaves the grid-stride loop only after stepping its base one grid
+// past the last tile, so 32-bit indexing needs that step to fit as well.
+bool fitsNarrowLoop(int64_t total) {
+  const int64_t lastBase = (total - 1) / CC_TILE * CC_TILE;
+  return lastBase + gridBlocks(total) * CC_TILE <= INT32_MAX;
+}
+
 template <typename IndexT>
 int launchConcatWindow(hipStream_t s, void *dst, int64_t vecBytes,
                        int numInputs, const void *const *srcs,
@@ -84,12 +98,7 @@ int launchConcatWindow(hipStream_t s, void *dst, int64_t vecBytes,
   }
   p.begins[numInputs] = (IndexT)begin;
 
-  const int64_t total = outer * begin;
-  const int64_t tile = int64_t(CC_BLOCK) * CC_ELEMS_PER_THREAD;
-  int64_t grid64 = (total + tile - 1) / tile;
-  if (grid64 > (int64_t(1) << 20))
-    grid64 = int64_t(1) << 20; // grid-stride loop covers the remainder
-  dim3 grid((unsigned)grid64), blk(CC_BLOCK);
+  dim3 grid((unsigned)gridBlocks(outer * begin)), blk(CC_BLOCK);
   switch (vecBytes) {
   case 16:
     hipLaunchKernelGGL((concat_kernel<uint4, IndexT>), grid, blk, 0, s,
@@ -155,8 +164,9 @@ extern "C" int hip_concat(void *stream, void *dst, int num_inputs,
   }
   const int64_t ratio = vecBytes / elem_size;
   const int64_t vecDstWidth = dstWidth / ratio;
-  const int64_t tile = int64_t(CC_BLOCK) * CC_ELEMS_PER_THREAD;
-  const bool narrow = outer * vecDstWidth + tile <= INT32_MAX;
+  // Every window is at most the full output, and its output offsets stay
+  // below outer * vecDstWidth.
+  const bool narrow = fitsNarrowLoop(outer * vecDstWidth);
 
   hipStream_t s = static_cast<hipStream_t>(stream);
   // Clear a stale error from an unrelated earlier launch so the check below

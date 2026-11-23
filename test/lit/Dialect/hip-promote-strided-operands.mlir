@@ -338,3 +338,88 @@ func.func @non_hip_dps_input_promoted(
   }
   return
 }
+
+// ----------------------------------------------------------------------------
+// hip.concat with only strided inputs: promoting them would launch one copy
+// per input plus the concat, so each input is copied straight into its slot of
+// the output instead.
+// ----------------------------------------------------------------------------
+// CHECK-LABEL: func.func @concat_strided_inputs_split
+// CHECK-SAME:    (%[[CTX:.*]]: !hip.context,
+// CHECK-SAME:     %[[A:[^:]*]]: memref<64x64x1xf32, strided<[128, 2, 1]>>,
+// CHECK-SAME:     %[[B:[^:]*]]: memref<64x64x1xf32, strided<[128, 2, 1], offset: 1>>,
+// CHECK-SAME:     %[[OUT:[^:]*]]: memref<64x64x2xf32>)
+// CHECK-NOT:     memref.alloc
+// CHECK:         %[[SA:.*]] = memref.subview %[[OUT]][0, 0, 0] [64, 64, 1] [1, 1, 1]
+// CHECK:         memref.copy %[[A]], %[[SA]]
+// CHECK:         %[[SB:.*]] = memref.subview %[[OUT]][0, 0, 1] [64, 64, 1] [1, 1, 1]
+// CHECK:         memref.copy %[[B]], %[[SB]]
+// CHECK-NOT:     hip.concat
+// CHECK:         return
+func.func @concat_strided_inputs_split(
+    %ctx: !hip.context,
+    %a: memref<64x64x1xf32, strided<[128, 2, 1]>>,
+    %b: memref<64x64x1xf32, strided<[128, 2, 1], offset: 1>>,
+    %out: memref<64x64x2xf32>) {
+  hip.concat(%ctx)
+    ins(%a, %b : memref<64x64x1xf32, strided<[128, 2, 1]>>,
+                 memref<64x64x1xf32, strided<[128, 2, 1], offset: 1>>)
+    outs(%out : memref<64x64x2xf32>) {axis = 2 : i64}
+  return
+}
+
+// ----------------------------------------------------------------------------
+// hip.concat reads a contiguous view through its descriptor offset, so a
+// view that only carries an offset is not promoted.
+// ----------------------------------------------------------------------------
+// CHECK-LABEL: func.func @concat_contiguous_offset_input_kept
+// CHECK-SAME:    (%[[CTX:.*]]: !hip.context,
+// CHECK-SAME:     %[[A:[^:]*]]: memref<8x2x3xf32, strided<[6, 3, 1], offset: 48>>,
+// CHECK-SAME:     %[[B:[^:]*]]: memref<8x2x5xf32>,
+// CHECK-SAME:     %[[OUT:[^:]*]]: memref<8x2x8xf32>)
+// CHECK-NOT:     memref.alloc
+// CHECK-NOT:     memref.copy
+// CHECK:         hip.concat(%[[CTX]]) ins(%[[A]], %[[B]]
+// CHECK-NOT:     memref.dealloc
+func.func @concat_contiguous_offset_input_kept(
+    %ctx: !hip.context,
+    %a: memref<8x2x3xf32, strided<[6, 3, 1], offset: 48>>,
+    %b: memref<8x2x5xf32>,
+    %out: memref<8x2x8xf32>) {
+  hip.concat(%ctx)
+    ins(%a, %b : memref<8x2x3xf32, strided<[6, 3, 1], offset: 48>>,
+                 memref<8x2x5xf32>)
+    outs(%out : memref<8x2x8xf32>) {axis = 2 : i64}
+  return
+}
+
+// ----------------------------------------------------------------------------
+// hip.concat with one strided input among four: a single promotion copy plus
+// the concat launches fewer kernels than four slot copies, so only that input
+// is promoted.
+// ----------------------------------------------------------------------------
+// CHECK-LABEL: func.func @concat_one_strided_input_promoted
+// CHECK-SAME:    (%[[CTX:.*]]: !hip.context,
+// CHECK-SAME:     %[[A:[^:]*]]: memref<4x3xf32, strided<[6, 1]>>,
+// CHECK-SAME:     %[[B:[^:]*]]: memref<4x3xf32>,
+// CHECK-SAME:     %[[C:[^:]*]]: memref<4x3xf32>,
+// CHECK-SAME:     %[[D:[^:]*]]: memref<4x3xf32>,
+// CHECK-SAME:     %[[OUT:[^:]*]]: memref<4x12xf32>)
+// CHECK:         %[[TMP:.*]] = memref.alloc() : memref<4x3xf32>
+// CHECK:         memref.copy %[[A]], %[[TMP]]
+// CHECK-NOT:     memref.alloc
+// CHECK:         hip.concat(%[[CTX]]) ins(%[[TMP]], %[[B]], %[[C]], %[[D]]
+// CHECK:         memref.dealloc %[[TMP]]
+func.func @concat_one_strided_input_promoted(
+    %ctx: !hip.context,
+    %a: memref<4x3xf32, strided<[6, 1]>>,
+    %b: memref<4x3xf32>,
+    %c: memref<4x3xf32>,
+    %d: memref<4x3xf32>,
+    %out: memref<4x12xf32>) {
+  hip.concat(%ctx)
+    ins(%a, %b, %c, %d : memref<4x3xf32, strided<[6, 1]>>, memref<4x3xf32>,
+                         memref<4x3xf32>, memref<4x3xf32>)
+    outs(%out : memref<4x12xf32>) {axis = 1 : i64}
+  return
+}

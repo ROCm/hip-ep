@@ -354,6 +354,51 @@ func.func @topk_pending_k(%ctx: !hip.context, %n: i32, %source: memref<1xi32>,
 
 // -----
 
+// Stream-ordered copies over other buffers keep host scalars forwardable.
+// CHECK-LABEL: llvm.func @copy_ops_forward(
+// CHECK: llvm.store %arg1,
+// CHECK: llvm.call @wrap_strided_copy_nd
+// CHECK: llvm.call @wrap_concat
+// CHECK-NOT: llvm.call @hipdnn_ep_readback
+// CHECK: llvm.return %arg1 : i32
+func.func @copy_ops_forward(%ctx: !hip.context, %n: i32,
+                            %data: memref<4x8xf32>, %flipped: memref<4x8xf32>,
+                            %joined: memref<4x16xf32>) -> i32 {
+  %c0 = arith.constant 0 : index
+  %size = arith.constant 64 : index
+  %scratch = hip.get_host_scratch(%ctx, %size) : memref<?xi8>
+  %slot = memref.view %scratch[%c0][] : memref<?xi8> to memref<1xi32>
+  memref.store %n, %slot[%c0] : memref<1xi32>
+  hip.reverse(%ctx) ins(%data : memref<4x8xf32>)
+    outs(%flipped : memref<4x8xf32>) {axes = [1]}
+  hip.concat(%ctx) ins(%data, %flipped : memref<4x8xf32>, memref<4x8xf32>)
+    outs(%joined : memref<4x16xf32>) {axis = 1 : i64}
+  %r = hip.readback_scalar(%ctx, %slot : memref<1xi32>) -> i32
+  return %r : i32
+}
+
+// -----
+
+// A device copy into the scratch slot still invalidates the stored value.
+// CHECK-LABEL: llvm.func @copy_ops_overwrite(
+// CHECK: llvm.call @wrap_strided_copy_nd
+// CHECK: llvm.call @hipdnn_ep_readback_scalar
+// CHECK: llvm.return
+func.func @copy_ops_overwrite(%ctx: !hip.context, %n: i32,
+                              %source: memref<1xi32>) -> i32 {
+  %c0 = arith.constant 0 : index
+  %size = arith.constant 64 : index
+  %scratch = hip.get_host_scratch(%ctx, %size) : memref<?xi8>
+  %slot = memref.view %scratch[%c0][] : memref<?xi8> to memref<1xi32>
+  memref.store %n, %slot[%c0] : memref<1xi32>
+  hip.reverse(%ctx) ins(%source : memref<1xi32>)
+    outs(%slot : memref<1xi32>) {axes = [0]}
+  %r = hip.readback_scalar(%ctx, %slot : memref<1xi32>) -> i32
+  return %r : i32
+}
+
+// -----
+
 // A host-written K has no pending producer. Do not add a readback for TopK.
 // CHECK-LABEL: llvm.func @topk_host_k(
 // CHECK: llvm.store %arg1,

@@ -184,6 +184,54 @@ module {
     return %r : tensor<4x0xf32>
   }
 
+  // Test 4f: a step at least as wide as the axis selects one element. A
+  // step of -INT64_MAX must not overflow the length computation, and
+  // INT64_MIN must not be negated.
+  func.func @test_slice_huge_negative_step(%input: tensor<6xf32>)
+      -> (tensor<?xf32>, tensor<?xf32>) {
+    // CHECK-LABEL: func.func @test_slice_huge_negative_step
+    %starts = arith.constant dense<[5]> : tensor<1xi64>
+    %ends   = arith.constant dense<[-7]> : tensor<1xi64>
+    %axes   = arith.constant dense<[0]> : tensor<1xi64>
+    %max    = arith.constant dense<[-9223372036854775807]> : tensor<1xi64>
+    %min    = arith.constant dense<[-9223372036854775808]> : tensor<1xi64>
+    %a = "onnx.Slice"(%input, %starts, %ends, %axes, %max)
+        : (tensor<6xf32>, tensor<1xi64>, tensor<1xi64>,
+           tensor<1xi64>, tensor<1xi64>) -> tensor<?xf32>
+    %b = "onnx.Slice"(%input, %starts, %ends, %axes, %min)
+        : (tensor<6xf32>, tensor<1xi64>, tensor<1xi64>,
+           tensor<1xi64>, tensor<1xi64>) -> tensor<?xf32>
+
+    // CHECK-NOT: hip.slice
+    // CHECK-NOT: hip.reverse
+    // CHECK: %[[A:.*]] = tensor.extract_slice %{{.*}}[5] [1] [1] : tensor<6xf32> to tensor<1xf32>
+    // CHECK: tensor.cast %[[A]] : tensor<1xf32> to tensor<?xf32>
+    // CHECK: %[[B:.*]] = tensor.extract_slice %{{.*}}[5] [1] [1] : tensor<6xf32> to tensor<1xf32>
+    // CHECK: tensor.cast %[[B]] : tensor<1xf32> to tensor<?xf32>
+
+    return %a, %b : tensor<?xf32>, tensor<?xf32>
+  }
+
+  // Test 4g: a static flip declared with a dynamic result builds the view
+  // and reverse with the static shape, then casts to the declared type.
+  func.func @test_slice_flip_dynamic_result(%input: tensor<6xf32>) -> tensor<?xf32> {
+    // CHECK-LABEL: func.func @test_slice_flip_dynamic_result
+    %starts = arith.constant dense<[-1]> : tensor<1xi64>
+    %ends   = arith.constant dense<[-9223372036854775807]> : tensor<1xi64>
+    %axes   = arith.constant dense<[0]> : tensor<1xi64>
+    %steps  = arith.constant dense<[-1]> : tensor<1xi64>
+    %r = "onnx.Slice"(%input, %starts, %ends, %axes, %steps)
+        : (tensor<6xf32>, tensor<1xi64>, tensor<1xi64>,
+           tensor<1xi64>, tensor<1xi64>) -> tensor<?xf32>
+
+    // CHECK-NOT: hip.slice
+    // CHECK: %[[VIEW:.*]] = tensor.extract_slice %{{.*}}[0] [6] [1] : tensor<6xf32> to tensor<6xf32>
+    // CHECK: %[[REV:.*]] = hip.reverse(%{{.*}}) ins(%[[VIEW]] : tensor<6xf32>) outs(%{{.*}} : tensor<6xf32>) {axes = [0]}
+    // CHECK: tensor.cast %[[REV]] : tensor<6xf32> to tensor<?xf32>
+
+    return %r : tensor<?xf32>
+  }
+
   // Test 5: non-constant starts (block argument) also falls back to the
   // native op — the decompose pattern needs to read the values.
   func.func @test_slice_native_dynamic_starts(

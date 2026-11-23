@@ -4,6 +4,7 @@
  */
 
 #include "HipToLLVMUtils.h"
+#include "hip/Dialect/Transforms/BufferUtils.h"
 
 #include "llvm/ADT/DenseSet.h"
 
@@ -41,6 +42,18 @@ std::optional<int64_t> elementBytes(Type elemType) {
   if (!elemType.isIntOrFloat() || elemType.getIntOrFloatBitWidth() % 8 != 0)
     return std::nullopt;
   return elemType.getIntOrFloatBitWidth() / 8;
+}
+
+// Identity layout, or a static view whose elements form one flat run and so
+// differs from identity only by its descriptor offset.
+bool isContiguousView(MemRefType type) {
+  if (type.getLayout().isIdentity())
+    return true;
+  SmallVector<int64_t> strides;
+  int64_t offset;
+  return type.hasStaticShape() &&
+         succeeded(type.getStridesAndOffset(strides, offset)) &&
+         isContiguousRowMajor(type.getShape(), strides);
 }
 
 // hip.reverse(%ctx) ins(%in) outs(%out) {axes = [...]}
@@ -142,9 +155,11 @@ struct ReverseOpLowering : public ConvertOpToLLVMPattern<ReverseOp> {
 //   -> wrap_concat(state, out, num_inputs, src_ptrs, src_widths, outer,
 //                  elem_bytes)
 //
-// Inputs have identity layout (hip-promote-strided-operands). outer is the
-// product of the output dims before `axis`; an input's width is the product
-// of its dims from `axis` on:
+// The kernel reads each input and writes the output as packed rows from one
+// pointer. An input may be a contiguous view (hip-promote-strided-operands
+// keeps those), so its pointer includes the descriptor offset. The output
+// must have identity layout. outer is the product of the output dims before
+// `axis`; an input's width is the product of its dims from `axis` on:
 //
 //   ins(memref<8x2x3xf32>, memref<8x2x5xf32>) outs(memref<8x2x8xf32>), axis 2
 //   -> outer = 16, src_widths = [3, 5]
@@ -158,10 +173,18 @@ struct ConcatOpLowering : public ConvertOpToLLVMPattern<ConcatOp> {
     auto outputType = dyn_cast<MemRefType>(op.getOutput().getType());
     if (!outputType)
       return rewriter.notifyMatchFailure(op, "expected memref output");
+    if (!outputType.getLayout().isIdentity())
+      return rewriter.notifyMatchFailure(op,
+                                         "output must have identity layout");
     std::optional<int64_t> elemBytes =
         elementBytes(outputType.getElementType());
     if (!elemBytes)
       return rewriter.notifyMatchFailure(op, "unsupported element type");
+    if (!getTypeConverter()->convertType(outputType.getElementType()))
+      return rewriter.notifyMatchFailure(op, "unconvertible element type");
+    for (Value input : op.getInputs())
+      if (!isContiguousView(cast<MemRefType>(input.getType())))
+        return rewriter.notifyMatchFailure(op, "input must be contiguous");
     int64_t axis = op.getAxis();
 
     Value outer = i64Const(rewriter, loc, 1);
@@ -182,7 +205,8 @@ struct ConcatOpLowering : public ConvertOpToLLVMPattern<ConcatOp> {
             rewriter, loc, width,
             getMemRefDimSize(inputType, d, converted, rewriter, loc));
       widths.push_back(width);
-      srcPtrs.push_back(extractContiguousMemRefPtr(converted, rewriter, loc));
+      srcPtrs.push_back(extractMemRefDataPtr(
+          converted, inputType, getTypeConverter(), rewriter, loc));
     }
 
     auto ptrArrayType = LLVM::LLVMArrayType::get(ptrType, srcPtrs.size());

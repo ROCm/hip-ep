@@ -163,15 +163,25 @@ StridedCopyParams<IndexT> makeParams(const NormalisedCopy &c) {
   return p;
 }
 
+constexpr int64_t SC_TILE = int64_t(SC_BLOCK) * SC_ELEMS_PER_THREAD;
+
+int64_t gridBlocks(int64_t total) {
+  int64_t grid = (total + SC_TILE - 1) / SC_TILE;
+  return grid > (int64_t(1) << 20) ? int64_t(1) << 20 : grid;
+}
+
+// A block leaves the grid-stride loop only after stepping its base one grid
+// past the last tile, so 32-bit indexing needs that step to fit as well.
+bool fitsNarrowLoop(int64_t total) {
+  const int64_t lastBase = (total - 1) / SC_TILE * SC_TILE;
+  return lastBase + gridBlocks(total) * SC_TILE <= INT32_MAX;
+}
+
 template <typename IndexT>
 int launchStridedCopy(hipStream_t s, void *dst, const void *src,
                       int64_t vecBytes, const NormalisedCopy &c) {
   StridedCopyParams<IndexT> p = makeParams<IndexT>(c);
-  const int64_t tile = int64_t(SC_BLOCK) * SC_ELEMS_PER_THREAD;
-  int64_t grid64 = (c.total + tile - 1) / tile;
-  if (grid64 > (int64_t(1) << 20))
-    grid64 = int64_t(1) << 20; // grid-stride loop covers the remainder
-  dim3 grid((unsigned)grid64), blk(SC_BLOCK);
+  dim3 grid((unsigned)gridBlocks(c.total)), blk(SC_BLOCK);
   switch (vecBytes) {
   case 16:
     hipLaunchKernelGGL((strided_copy_kernel<uint4, IndexT>), grid, blk, 0, s,
@@ -226,14 +236,13 @@ extern "C" int hip_strided_copy_nd(void *stream, void *dst, const void *src,
     }
   }
 
-  // 32-bit indexing when the linear index and every offset reached fit.
+  // 32-bit indexing when the loop index and every offset reached fit.
   int64_t srcReach = 0, dstReach = 0;
   for (int i = 0; i < c.rank; ++i) {
     srcReach += (c.sizes[i] - 1) * std::llabs(c.srcStrides[i]);
     dstReach += (c.sizes[i] - 1) * std::llabs(c.dstStrides[i]);
   }
-  const int64_t tile = int64_t(SC_BLOCK) * SC_ELEMS_PER_THREAD;
-  const bool narrow = c.total + tile <= INT32_MAX && srcReach <= INT32_MAX &&
+  const bool narrow = fitsNarrowLoop(c.total) && srcReach <= INT32_MAX &&
                       dstReach <= INT32_MAX;
 
   hipStream_t s = static_cast<hipStream_t>(stream);
