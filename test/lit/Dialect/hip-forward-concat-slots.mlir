@@ -502,3 +502,56 @@ func.func @misaligned_slot_stays(
   memref.copy %out, %slot : memref<1x3x3x3xf16> to memref<1x3x3x3xf16, strided<[72, 9, 3, 1], offset: 45>>
   return %cat : memref<1x8x3x3xf16>
 }
+
+// -----
+
+// A multi-row join (hip.concat, outer extent 8) that feeds a packed slot of a
+// batch concat writes the slot directly. Outer [2, 4, 2, 8]; the second batch
+// starts at element 64, byte offset 256.
+
+// CHECK-LABEL: func.func @join_into_packed_slot
+// CHECK-NOT: memref.copy
+// CHECK: %[[CAT:.*]] = memref.alloc() : memref<2x4x2x8xf32>
+// CHECK: %[[SLOT:.*]] = hip.packed_view %[[CAT]][%{{.*}}] : memref<2x4x2x8xf32> to memref<1x4x2x8xf32>
+// CHECK: hip.concat
+// CHECK-SAME: outs(%[[SLOT]] : memref<1x4x2x8xf32>)
+// CHECK-NOT: memref.copy
+func.func @join_into_packed_slot(
+    %ctx: !hip.context, %a: memref<1x4x2x4xf32>, %b: memref<1x4x2x4xf32>)
+    -> memref<2x4x2x8xf32> {
+  %cat = memref.alloc() : memref<2x4x2x8xf32>
+  %join = memref.alloc() : memref<1x4x2x8xf32>
+  hip.concat(%ctx) ins(%a, %b : memref<1x4x2x4xf32>, memref<1x4x2x4xf32>)
+      outs(%join : memref<1x4x2x8xf32>) {axis = 3 : i64}
+  %slot = memref.subview %cat[1, 0, 0, 0] [1, 4, 2, 8] [1, 1, 1, 1]
+      : memref<2x4x2x8xf32> to memref<1x4x2x8xf32, strided<[64, 16, 8, 1], offset: 64>>
+  memref.copy %join, %slot : memref<1x4x2x8xf32> to memref<1x4x2x8xf32, strided<[64, 16, 8, 1], offset: 64>>
+  return %cat : memref<2x4x2x8xf32>
+}
+
+// -----
+
+// A flip (hip.reverse over a strided view) that feeds a packed slot writes
+// the slot directly; its input keeps the strided layout.
+
+// CHECK-LABEL: func.func @reverse_into_packed_slot
+// CHECK-NOT: memref.copy
+// CHECK: %[[CAT:.*]] = memref.alloc() : memref<1x8x2x2xf32>
+// CHECK: %[[SLOT:.*]] = hip.packed_view %[[CAT]][%{{.*}}] : memref<1x8x2x2xf32> to memref<1x4x2x2xf32>
+// CHECK: hip.reverse
+// CHECK-SAME: ins(%{{.*}} : memref<1x4x2x2xf32, strided<[24, 6, 2, 1], offset: 2>>)
+// CHECK-SAME: outs(%[[SLOT]] : memref<1x4x2x2xf32>)
+// CHECK-NOT: memref.copy
+func.func @reverse_into_packed_slot(
+    %ctx: !hip.context, %in: memref<1x4x3x2xf32>) -> memref<1x8x2x2xf32> {
+  %cat = memref.alloc() : memref<1x8x2x2xf32>
+  %rev = memref.alloc() : memref<1x4x2x2xf32>
+  %view = memref.subview %in[0, 0, 1, 0] [1, 4, 2, 2] [1, 1, 1, 1]
+      : memref<1x4x3x2xf32> to memref<1x4x2x2xf32, strided<[24, 6, 2, 1], offset: 2>>
+  hip.reverse(%ctx) ins(%view : memref<1x4x2x2xf32, strided<[24, 6, 2, 1], offset: 2>>)
+      outs(%rev : memref<1x4x2x2xf32>) {axes = [1]}
+  %slot = memref.subview %cat[0, 4, 0, 0] [1, 4, 2, 2] [1, 1, 1, 1]
+      : memref<1x8x2x2xf32> to memref<1x4x2x2xf32, strided<[32, 4, 2, 1], offset: 16>>
+  memref.copy %rev, %slot : memref<1x4x2x2xf32> to memref<1x4x2x2xf32, strided<[32, 4, 2, 1], offset: 16>>
+  return %cat : memref<1x8x2x2xf32>
+}

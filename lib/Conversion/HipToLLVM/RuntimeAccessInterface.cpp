@@ -47,6 +47,6 @@ void mlir::hip::registerRuntimeAccessOpInterfaceExternalModels(
               GatherElementsOp, ScatterElementsOp, CumSumOp, GeluOp, SigmoidOp,
               TanhOp, SoftplusOp, SwishOp, SqrtOp, ReciprocalOp, ReduceMeanOp,
               ReduceSumOp, RmsNormOp, SkipRmsNormOp, RopeOp, MatmulOp,
-              MatMulNBitsOp, QMoEOp, MiopenSoftmaxOp>(ctx);
+              MatMulNBitsOp, QMoEOp, MiopenSoftmaxOp, ReverseOp, ConcatOp>(ctx);
   });
 }

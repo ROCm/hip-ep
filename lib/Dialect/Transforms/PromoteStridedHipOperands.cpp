@@ -21,6 +21,30 @@
 // consumer's operand. This mirrors upstream linalg::promoteSubViews and
 // establishes that DPS-input memrefs have identity layout after this pass.
 //
+// Ops that read strided inputs
+// ----------------------------
+// hip.reverse lowers to a strided copy that reads its input through the memref
+// descriptor, so its input keeps its layout. Promoting it would add the very
+// copy the op exists to avoid.
+//
+// hip.concat reads each input from one offset-aware pointer, so a contiguous
+// view (one flat run with a descriptor offset) is read in place. Each strided
+// input still needs a copy before the kernel. When those copies plus the
+// kernel launch at least as often as one copy per input, the concat becomes
+// one copy per input into its output slot, which is what insert_slice
+// bufferizes to:
+//
+//   Before:
+//     hip.concat(%ctx) ins(%a, %b : memref<64x64x1xf32, strided<[128, 2, 1]>>,
+//                          memref<64x64x1xf32, strided<[128, 2, 1],
+//                                                      offset: 1>>)
+//                      outs(%out : memref<64x64x2xf32>) {axis = 2 : i64}
+//   After:
+//     %sa = memref.subview %out[0, 0, 0] [64, 64, 1] [1, 1, 1]
+//     memref.copy %a, %sa
+//     %sb = memref.subview %out[0, 0, 1] [64, 64, 1] [1, 1, 1]
+//     memref.copy %b, %sb
+//
 // DPS-init (output) operands
 // --------------------------
 // Inits are intentionally left untouched: promoting a write target requires
@@ -38,6 +62,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "hip/Dialect/IR/HipDialect.h"
+#include "hip/Dialect/Transforms/BufferUtils.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -52,6 +78,8 @@
 
 STATISTIC(NumOperandsPromoted,
           "Number of non-identity-layout DPS inputs promoted");
+STATISTIC(NumConcatsSplit,
+          "Number of hip.concat ops split into per-input slot copies");
 
 namespace mlir {
 namespace hip {
@@ -122,6 +150,57 @@ static Value materializeIdentityLayoutCopy(OpOperand &input,
   return allocOp.getResult();
 }
 
+/// One flat run of elements: identity layout, or static strides that differ
+/// from identity only by the descriptor offset.
+static bool isContiguousView(MemRefType type) {
+  if (type.getLayout().isIdentity())
+    return true;
+  SmallVector<int64_t> strides;
+  int64_t offset;
+  return type.hasStaticShape() &&
+         succeeded(type.getStridesAndOffset(strides, offset)) &&
+         isContiguousRowMajor(type.getShape(), strides);
+}
+
+/// Rewrites \p concat to one memref.copy per input into its output slot when
+/// promoting its strided inputs would launch at least as many copies.
+static bool splitStridedConcat(ConcatOp concat) {
+  auto outputType = dyn_cast<MemRefType>(concat.getOutput().getType());
+  if (!outputType || !outputType.hasStaticShape() || concat->getNumResults())
+    return false;
+  int64_t strided = llvm::count_if(concat.getInputs(), [](Value input) {
+    return !isContiguousView(cast<MemRefType>(input.getType()));
+  });
+  int64_t inputs = concat.getInputs().size();
+  if (strided == 0 || strided + 1 < inputs)
+    return false;
+  if (!llvm::all_of(concat.getInputs(), [](Value input) {
+        return cast<MemRefType>(input.getType()).hasStaticShape();
+      }))
+    return false;
+
+  OpBuilder builder(concat);
+  Location loc = concat.getLoc();
+  int64_t axis = concat.getAxis();
+  int64_t rank = outputType.getRank();
+  int64_t start = 0;
+  for (Value input : concat.getInputs()) {
+    auto inputType = cast<MemRefType>(input.getType());
+    SmallVector<OpFoldResult> offsets(rank, builder.getIndexAttr(0));
+    SmallVector<OpFoldResult> sizes, strides(rank, builder.getIndexAttr(1));
+    for (int64_t extent : inputType.getShape())
+      sizes.push_back(builder.getIndexAttr(extent));
+    offsets[axis] = builder.getIndexAttr(start);
+    Value slot = memref::SubViewOp::create(builder, loc, concat.getOutput(),
+                                           offsets, sizes, strides);
+    memref::CopyOp::create(builder, loc, input, slot);
+    start += inputType.getDimSize(axis);
+  }
+  concat.erase();
+  ++NumConcatsSplit;
+  return true;
+}
+
 struct PromoteStridedHipOperandsPass
     : public impl::PromoteStridedHipOperandsPassBase<
           PromoteStridedHipOperandsPass> {
@@ -146,10 +225,17 @@ void PromoteStridedHipOperandsPass::runOnOperation() {
 
   for (DestinationStyleOpInterface dpsOp : consumers) {
     Operation *consumer = dpsOp.getOperation();
+    if (isa<ReverseOp>(consumer))
+      continue;
+    auto concat = dyn_cast<ConcatOp>(consumer);
+    if (concat && splitStridedConcat(concat))
+      continue;
     SmallVector<Value> temporaries;
     for (OpOperand *input : dpsOp.getDpsInputOperands()) {
       auto type = dyn_cast<MemRefType>(input->get().getType());
       if (!type || !isNonIdentityMemRef(type))
+        continue;
+      if (concat && isContiguousView(type))
         continue;
       temporaries.push_back(materializeIdentityLayoutCopy(*input, consumer));
     }

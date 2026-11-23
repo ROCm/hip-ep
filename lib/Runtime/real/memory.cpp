@@ -171,6 +171,103 @@ int wrap_strided_copy(RuntimeState *state, void *dst_ptr, const void *src_ptr,
   return 0;
 }
 
+int wrap_strided_copy_nd(RuntimeState *state, void *dst_ptr,
+                         const void *src_ptr, int64_t elem_bytes, int64_t rank,
+                         const int64_t *sizes, const int64_t *src_strides,
+                         const int64_t *dst_strides) {
+  OP_PROFILE(
+      "strided_copy_nd",
+      [&] {
+        std::string s = "r" + std::to_string(rank) + ":";
+        for (int64_t i = 0; i < rank; ++i)
+          s += (i ? "x" : "") + std::to_string(sizes[i]);
+        return s + ":es" + std::to_string(elem_bytes);
+      },
+      state);
+  if (!state || (rank > 0 && (!sizes || !src_strides || !dst_strides))) {
+    fprintf(stderr, "wrap_strided_copy_nd: null argument\n");
+    return -1;
+  }
+  int64_t total = 1;
+  for (int64_t i = 0; i < rank; ++i)
+    total *= sizes[i];
+  if (total == 0)
+    return 0;
+  if (!dst_ptr || !src_ptr) {
+    fprintf(stderr, "wrap_strided_copy_nd: null pointer\n");
+    return -1;
+  }
+  hipStream_t stream =
+      static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+  int rc = hip_strided_copy_nd(static_cast<void *>(stream), dst_ptr, src_ptr,
+                               elem_bytes, static_cast<int>(rank), sizes,
+                               src_strides, dst_strides);
+  if (rc != 0)
+    fprintf(stderr,
+            "wrap_strided_copy_nd: kernel failed (rc=%d, rank=%lld, "
+            "elem_bytes=%lld)\n",
+            rc, (long long)rank, (long long)elem_bytes);
+  return rc;
+}
+
+int wrap_concat(RuntimeState *state, void *dst_ptr, int64_t num_inputs,
+                void *const *src_ptrs, const int64_t *src_widths, int64_t outer,
+                int64_t elem_bytes) {
+  OP_PROFILE(
+      "concat",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "n=%lld outer=%lld es=%lld",
+                 (long long)num_inputs, (long long)outer,
+                 (long long)elem_bytes);
+        return std::string(b);
+      },
+      state);
+  if (!state || num_inputs <= 0 || !src_ptrs || !src_widths) {
+    fprintf(stderr, "wrap_concat: invalid argument\n");
+    return -1;
+  }
+  int64_t dst_width = 0;
+  for (int64_t i = 0; i < num_inputs; ++i)
+    dst_width += src_widths[i];
+  if (outer == 0 || dst_width == 0)
+    return 0;
+  if (!dst_ptr) {
+    fprintf(stderr, "wrap_concat: null output\n");
+    return -1;
+  }
+  hipStream_t stream =
+      static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+  int rc = hip_concat(
+      static_cast<void *>(stream), dst_ptr, static_cast<int>(num_inputs),
+      const_cast<const void *const *>(src_ptrs), src_widths, outer, elem_bytes);
+  if (rc == 0)
+    return 0;
+
+  // Element size the kernel does not handle: one pitched copy per input.
+  RUNTIME_DEBUG_LOG("[REAL] wrap_concat: kernel rc=%d, falling back to "
+                    "hipMemcpy2DAsync per input\n",
+                    rc);
+  const size_t dst_pitch = static_cast<size_t>(dst_width) * elem_bytes;
+  size_t col_bytes = 0;
+  for (int64_t i = 0; i < num_inputs; ++i) {
+    const size_t width = static_cast<size_t>(src_widths[i]) * elem_bytes;
+    if (width != 0) {
+      hipError_t err = hipMemcpy2DAsync(
+          static_cast<char *>(dst_ptr) + col_bytes, dst_pitch, src_ptrs[i],
+          width, width, static_cast<size_t>(outer), hipMemcpyDeviceToDevice,
+          stream);
+      if (err != hipSuccess) {
+        fprintf(stderr, "wrap_concat: fallback 2D copy failed: %s\n",
+                hipGetErrorString(err));
+        return -1;
+      }
+    }
+    col_bytes += width;
+  }
+  return 0;
+}
+
 // Synchronize the stream, then read back a device-resident i32 scalar (e.g.
 // NonZero's non-zero count). The copy is enqueued after the producing kernel
 // on the same stream; the synchronize guarantees both have completed before
