@@ -5,15 +5,13 @@
 // Regression guard for the output-allocator KV-cache invariant.
 //
 // In allocator mode the EP callback hands the DLL's in-graph output shape to
-// GetOutput verbatim (no override). That is sound only because each dynamic-seq
-// present.* output is sized in-graph from its matching past input buffer's
-// actual extent -- under OGA past_present_share_buffer that is the max_length
-// capacity buffer, so GetOutput returns the pre-bound shared OrtValue and the
-// past==present pointer identity is preserved.
+// GetOutput verbatim (no override). A shared cache retains the actual past
+// buffer capacity, while a growing cache must also fit total_seq_len. Use the
+// greater extent so a shared OGA OrtValue stays bound and a separate growing
+// present buffer has room for this call's new tokens.
 //
 // This test pins that invariant: each dynamic present.* output must lower to a
-// hip.alloc_output whose dynamic operand is a memref.dim of the matching
-// past_key_values input.
+// hip.alloc_output whose extent is max(matching past capacity, total_seq_len).
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt %s --onnx-to-hip-pipeline 2>&1 | FileCheck %s
@@ -21,12 +19,14 @@
 // CHECK-LABEL: func.func @main_graph
 // CHECK-SAME:    %[[PK:[a-zA-Z0-9_]+]]: memref<1x8x?x128xf16> {onnx.name = "past_key_values.0.key"}
 // CHECK-SAME:    %[[PV:[a-zA-Z0-9_]+]]: memref<1x8x?x128xf16> {onnx.name = "past_key_values.0.value"}
-// present.0.key: dynamic dim comes from memref.dim of past_key (NOT attention_mask).
+// CHECK-SAME:    %[[TOTAL:[a-zA-Z0-9_]+]]: memref<i32> {onnx.name = "total_seq"}
+// CHECK:         %[[CAP:.*]] = hip.readback_dim(%{{.*}}, %[[TOTAL]] : memref<i32>) -> index
 // CHECK:         %[[DK:.*]] = memref.dim %[[PK]], %{{.*}} : memref<1x8x?x128xf16>
-// CHECK:         hip.alloc_output(%{{.*}}, %[[DK]]) {out_idx = 0 : i64} : memref<1x8x?x128xf16>
-// present.0.value: dynamic dim comes from memref.dim of past_value.
+// CHECK:         %[[CK:.*]] = arith.maxsi %[[DK]], %[[CAP]] : index
+// CHECK:         hip.alloc_output(%{{.*}}, %[[CK]]) {out_idx = 0 : i64} : memref<1x8x?x128xf16>
 // CHECK:         %[[DV:.*]] = memref.dim %[[PV]], %{{.*}} : memref<1x8x?x128xf16>
-// CHECK:         hip.alloc_output(%{{.*}}, %[[DV]]) {out_idx = 1 : i64} : memref<1x8x?x128xf16>
+// CHECK:         %[[CV:.*]] = arith.maxsi %[[DV]], %[[CAP]] : index
+// CHECK:         hip.alloc_output(%{{.*}}, %[[CV]]) {out_idx = 1 : i64} : memref<1x8x?x128xf16>
 
 module {
   func.func @main_graph(
