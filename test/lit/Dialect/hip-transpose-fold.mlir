@@ -198,4 +198,48 @@ module {
                              {perm = [0, 2, 1]} : tensor<2x4x3xf32>
     return %1 : tensor<2x4x3xf32>
   }
+
+  // --------------------------------------------------------------------------
+  // Negative: an inverse pair issued on two contexts is left alone. Nothing
+  // says the two share an execution state.
+  // --------------------------------------------------------------------------
+  // CHECK-LABEL: func.func @keep_inverse_pair_across_contexts
+  // CHECK:         hip.transpose(%arg0)
+  // CHECK:         hip.transpose(%arg1)
+  func.func @keep_inverse_pair_across_contexts(
+      %ctx0: !hip.context, %ctx1: !hip.context,
+      %kv: tensor<1x2x4x3xf16>) -> tensor<1x2x4x3xf16> {
+    %bsnh = tensor.empty() : tensor<1x4x2x3xf16>
+    %0 = hip.transpose(%ctx0) ins(%kv : tensor<1x2x4x3xf16>)
+                              outs(%bsnh : tensor<1x4x2x3xf16>)
+                              {perm = [0, 2, 1, 3]} : tensor<1x4x2x3xf16>
+    %bnsh = tensor.empty() : tensor<1x2x4x3xf16>
+    %1 = hip.transpose(%ctx1) ins(%0 : tensor<1x4x2x3xf16>)
+                              outs(%bnsh : tensor<1x2x4x3xf16>)
+                              {perm = [0, 2, 1, 3]} : tensor<1x2x4x3xf16>
+    return %1 : tensor<1x2x4x3xf16>
+  }
+
+  // --------------------------------------------------------------------------
+  // Negative: the same holds for a chain that would compose, which would
+  // otherwise move the first permutation onto the second context.
+  // --------------------------------------------------------------------------
+  // CHECK-LABEL: func.func @keep_chain_across_contexts
+  // CHECK:         hip.transpose(%arg0)
+  // CHECK-SAME:      perm = [1, 0, 2]
+  // CHECK:         hip.transpose(%arg1)
+  // CHECK-SAME:      perm = [0, 2, 1]
+  func.func @keep_chain_across_contexts(
+      %ctx0: !hip.context, %ctx1: !hip.context,
+      %x: tensor<2x3x4xf32>) -> tensor<3x4x2xf32> {
+    %a = tensor.empty() : tensor<3x2x4xf32>
+    %0 = hip.transpose(%ctx0) ins(%x : tensor<2x3x4xf32>)
+                              outs(%a : tensor<3x2x4xf32>)
+                              {perm = [1, 0, 2]} : tensor<3x2x4xf32>
+    %b = tensor.empty() : tensor<3x4x2xf32>
+    %1 = hip.transpose(%ctx1) ins(%0 : tensor<3x2x4xf32>)
+                              outs(%b : tensor<3x4x2xf32>)
+                              {perm = [0, 2, 1]} : tensor<3x4x2xf32>
+    return %1 : tensor<3x4x2xf32>
+  }
 }

@@ -108,14 +108,17 @@ bool permutesIntoResultType(Value source, Value result,
                       });
 }
 
-/// The Transpose that runs before `second`, only if it feeds `second` its data.
-/// One reached through the destination operand instead would make the rewrite
-/// drop a write.
+/// The Transpose that runs before `second`, only if it feeds `second` its data
+/// on the same context. One reached through the destination operand instead
+/// would make the rewrite drop a write, and one issued on another context
+/// cannot be assumed to share `second`'s execution state.
 TransposeOp getFirstTranspose(TransposeOp second) {
   auto first = second.getInput().getDefiningOp<TransposeOp>();
   if (!first || first->getNumResults() != 1)
     return nullptr;
   if (second.getInput() != first->getResult(0))
+    return nullptr;
+  if (first.getCtx() != second.getCtx())
     return nullptr;
   return first;
 }
@@ -131,8 +134,8 @@ struct FoldTransposeChain : public OpRewritePattern<TransposeOp> {
 
     TransposeOp first = getFirstTranspose(second);
     if (!first)
-      return rewriter.notifyMatchFailure(second,
-                                         "input is not a transpose result");
+      return rewriter.notifyMatchFailure(
+          second, "input is not a transpose result on the same context");
 
     SmallVector<int64_t> firstPerm, secondPerm, composed;
     if (!getPermutation(first, firstPerm) ||
