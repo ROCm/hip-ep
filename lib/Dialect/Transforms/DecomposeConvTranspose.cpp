@@ -251,7 +251,8 @@ DenseElementsAttr floatElements(RankedTensorType type,
 }
 
 /// A float hip.constant, or a DequantizeLinear of constants evaluated as
-/// `(q - zero_point) * scale`. Anything else stays on the MIOpen path.
+/// `(q - zero_point) * scale` in fp32, the same arithmetic as
+/// dequantize_linear_kernel. Anything else stays on the MIOpen path.
 FailureOr<DenseElementsAttr> filterData(Value weight,
                                         RankedTensorType weightType) {
   if (auto constant = weight.getDefiningOp<ConstantOp>())
@@ -302,7 +303,14 @@ FailureOr<DenseElementsAttr> filterData(Value weight,
         return failure();
       zp = zeroPoint[zpIndex];
     }
-    folded.push_back(static_cast<double>(q - zp) * (*scale)[param]);
+    // Mirror dequantize_linear_kernel: the centered integer is converted to
+    // fp32 once, multiplied by the fp32 scale, and only then rounded to the
+    // filter element type. Evaluating the product in double would give
+    // different values for wide integers, e.g. an i32 filter whose centered
+    // value is not exactly representable in fp32.
+    float centered = static_cast<float>(q - zp);
+    float product = centered * static_cast<float>((*scale)[param]);
+    folded.push_back(static_cast<double>(product));
   }
   return floatElements(weightType, folded);
 }

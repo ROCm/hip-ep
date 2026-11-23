@@ -24,6 +24,7 @@
 // 15. dequant_weight       - constant int8 filter dequant folds, then splits
 // 16. dequant_per_axis     - per-axis scale is applied before the channel swap
 // 17. dequant_runtime      - a non-constant quantized filter stays on MIOpen
+// 18. dequant_i32_fp32_arith - i32 filter folds with the kernel's fp32 rounding
 //
 // Cases 1-5 use a splat filter and so only pin structure. Cases 6 and 7 use
 // distinct per-tap values, which is what actually catches a wrong tap phase,
@@ -501,4 +502,38 @@ module {
   // CHECK-LABEL: func.func @dequant_runtime
   // CHECK: hip.dequantize_linear
   // CHECK: hip.conv_transpose
+
+  // --------------------------------------------------------------------------
+  // 18. i32 filter: 16777217 is not representable in fp32. The kernel converts
+  //     it to 16777216 before multiplying by 3, giving 50331648. Folding in
+  //     double would round 50331651 to 50331652 instead.
+  // --------------------------------------------------------------------------
+  func.func @dequant_i32_fp32_arith(%ctx: !hip.context,
+                                    %x: tensor<1x1x2x2xf32>)
+      -> tensor<1x1x2x2xf32> {
+    %q = hip.constant {value = dense<16777217> : tensor<1x1x1x1xi32>}
+        : tensor<1x1x1x1xi32>
+    %s = hip.constant {value = dense<3.000000e+00> : tensor<f32>} : tensor<f32>
+    %z = hip.constant {value = dense<0> : tensor<i32>} : tensor<i32>
+    %we = tensor.empty() : tensor<1x1x1x1xf32>
+    %w = hip.dequantize_linear(%ctx)
+        ins(%q, %s : tensor<1x1x1x1xi32>, tensor<f32>)
+        zero_point(%z : tensor<i32>) outs(%we : tensor<1x1x1x1xf32>)
+        {axis = 0 : i64, block_size = 0 : i64} : tensor<1x1x1x1xf32>
+    %init = tensor.empty() : tensor<1x1x2x2xf32>
+    %y = hip.conv_transpose(%ctx) ins(%x, %w : tensor<1x1x2x2xf32>,
+                                              tensor<1x1x1x1xf32>)
+        outs(%init : tensor<1x1x2x2xf32>)
+        {kernel_shape = [1, 1], strides = [1, 1], pads = [0, 0, 0, 0],
+         dilations = [1, 1], output_padding = [0, 0], group = 1 : i64}
+        : tensor<1x1x2x2xf32>
+    return %y : tensor<1x1x2x2xf32>
+  }
+
+  // CHECK-LABEL: func.func @dequant_i32_fp32_arith
+  // CHECK-NOT: hip.conv_transpose
+  // CHECK-NOT: hip.dequantize_linear
+  // 0x4C400000 is 50331648.0f; the double-precision fold gave 0x4C400001.
+  // CHECK: dense<0x4C400000> : tensor<1x1x1x1xf32>
+  // CHECK: hip.conv
 }
