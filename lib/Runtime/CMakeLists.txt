@@ -392,6 +392,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/size.cpp runtime_size.bc)
     compile_to_bitcode(real/pool.cpp runtime_pool.bc)
     compile_to_bitcode(real/conv.cpp runtime_conv.bc)
+    compile_to_bitcode(real/winograd_conv.cpp runtime_winograd_conv.bc)
     compile_to_bitcode(real/conv_transpose.cpp runtime_conv_transpose.bc)
     compile_to_bitcode(real/resize.cpp runtime_resize.bc)
     compile_to_bitcode(real/grid_sample.cpp runtime_grid_sample.bc)
@@ -499,6 +500,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_size.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_pool.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_conv.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_winograd_conv.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_conv_transpose.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_resize.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_grid_sample.bc

@@ -569,7 +569,9 @@ void mlir::hip::buildRocMlirPipeline(
 
 void mlir::hip::addRocMlirFusionPasses(
     OpPassManager &pm, const FuseRocMlirAnchorPassOptions &fuseOptions,
-    llvm::StringRef reportPath) {
+    llvm::StringRef reportPath, bool winograd) {
+  if (winograd)
+    pm.addNestedPass<func::FuncOp>(createWinogradConvPass());
   pm.addNestedPass<func::FuncOp>(createHoistPointwiseOverViewsPass());
   pm.addNestedPass<func::FuncOp>(createRocMlirPrepareQuantPass());
   pm.addNestedPass<func::FuncOp>(createFuseRocMlirElementwisePass());

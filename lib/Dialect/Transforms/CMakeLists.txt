@@ -53,6 +53,7 @@ add_library(HipDialectTransforms STATIC
   LoopBodyToOutParams.cpp
   LowerAllocs.cpp
   HoistPointwiseOverViews.cpp
+  WinogradConv.cpp
   MaterializeHostScalars.cpp
   OptimizeMemRefs.cpp
   Pipelines.cpp
