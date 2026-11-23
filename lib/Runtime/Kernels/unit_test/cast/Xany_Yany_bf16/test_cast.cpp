@@ -2,10 +2,13 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  *
- * Standalone unit test for hip_cast with bf16 on one side of the cast.
+ * Standalone unit test for hip_cast with bf16 on one side of the cast, and
+ * for integer <-> integer casts.
  *
- * Covers bf16 <-> {f32, f16, f64, i64, i32, i16, i8, u8} (16 pairs) and the
- * three "unsupported" exits of the bf16 dispatch. Every output is compared
+ * Covers bf16 <-> {f32, f16, f64, i64, i32, i16, i8, u8} (16 pairs), every
+ * pair of distinct {i64, i32, i16, i8, u8} (20 pairs, two's-complement
+ * truncation or extension) and the three "unsupported" exits of the dispatch
+ * (f64 -> i8 has no path at all). Every output is compared
  * bit-exactly with a CPU reference computed in this file with plain integer
  * bit operations; it does not use the HIP conversion intrinsics the kernel
  * uses.
@@ -231,11 +234,45 @@ void store_from_float(int dtype, std::vector<uint8_t>& out, int64_t i,
   }
 }
 
+bool is_integer(int dtype) {
+  return dtype == kI64 || dtype == kI32 || dtype == kI16 || dtype == kI8 ||
+         dtype == kU8;
+}
+
+int64_t load_as_int64(int dtype, const std::vector<uint8_t>& in, int64_t i) {
+  switch (dtype) {
+  case kI64: return get<int64_t>(in, i);
+  case kI32: return get<int32_t>(in, i);
+  case kI16: return get<int16_t>(in, i);
+  case kI8: return get<int8_t>(in, i);
+  case kU8: return get<uint8_t>(in, i);
+  default: std::abort();
+  }
+}
+
+// Keeps the low bits (two's complement), as ONNX Cast and torch .to().
+void store_from_int64(int dtype, std::vector<uint8_t>& out, int64_t i,
+                      int64_t v) {
+  const uint64_t bits = static_cast<uint64_t>(v);
+  switch (dtype) {
+  case kI64: put<int64_t>(out, i, v); break;
+  case kI32: put<uint32_t>(out, i, static_cast<uint32_t>(bits)); break;
+  case kI16: put<uint16_t>(out, i, static_cast<uint16_t>(bits)); break;
+  case kI8: put<uint8_t>(out, i, static_cast<uint8_t>(bits)); break;
+  case kU8: put<uint8_t>(out, i, static_cast<uint8_t>(bits)); break;
+  default: std::abort();
+  }
+}
+
 std::vector<uint8_t> reference(int src, int dst, const std::vector<uint8_t>& in,
                                int64_t n) {
   std::vector<uint8_t> out(static_cast<size_t>(n * dtype_size(dst)));
   for (int64_t i = 0; i < n; ++i) {
-    store_from_float(dst, out, i, load_as_float(src, in, i));
+    if (is_integer(src) && is_integer(dst)) {
+      store_from_int64(dst, out, i, load_as_int64(src, in, i));
+    } else {
+      store_from_float(dst, out, i, load_as_float(src, in, i));
+    }
   }
   return out;
 }
@@ -724,6 +761,13 @@ int main(int argc, char** argv) {
   for (int other : {kF32, kF16, kF64, kI64, kI32, kI16, kI8, kU8}) {
     pairs.push_back({kBF16, other});
     pairs.push_back({other, kBF16});
+  }
+  for (int src : {kI64, kI32, kI16, kI8, kU8}) {
+    for (int dst : {kI64, kI32, kI16, kI8, kU8}) {
+      if (src != dst) {
+        pairs.push_back({src, dst});
+      }
+    }
   }
 
   // The three -1 exits of launch_cast_bf16: unsupported output dtype,

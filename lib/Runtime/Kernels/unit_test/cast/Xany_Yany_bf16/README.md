@@ -1,7 +1,9 @@
 # cast / Xany_Yany_bf16
 
 Unit test for `hip_cast` (`hip/cast_kernel.hip`) when one side of the cast is
-bf16: bf16 <-> {f32, f16, f64, i64, i32, i16, i8, u8}, 16 pairs.
+bf16: bf16 <-> {f32, f16, f64, i64, i32, i16, i8, u8}, 16 pairs; and for the
+integer <-> integer fallback: every ordered pair of distinct
+{i64, i32, i16, i8, u8}, 20 pairs.
 
 ## Why one leaf for many dtypes
 
@@ -19,7 +21,9 @@ test with plain integer bit operations (it does not use the HIP intrinsics):
 
 - fp32 -> bf16 and fp32 -> fp16 round to nearest even; bf16 -> fp32 is exact;
   float -> integer truncates toward zero. f64 and i64 sources go through fp32
-  first (two roundings), the same as the kernel and PyTorch.
+  first (two roundings), the same as the kernel and PyTorch. Integer ->
+  integer keeps the destination's low bits (two's complement wrap), as C++
+  and PyTorch do.
 - Special values: +-0, +-inf, NaN (any NaN matches a NaN reference), rounding
   ties, fp32/fp16/bf16 subnormals, the largest finite bf16, overflow to inf.
   16-bit sources enumerate every bit pattern at the 70001-element size.
@@ -27,7 +31,7 @@ test with plain integer bit operations (it does not use the HIP intrinsics):
   twice with two different fill bytes and 64 guard elements on each side.
 - Unsupported pairs return -1 and leave the output untouched, one per exit of
   the bf16 dispatch: bf16 -> u16 (output dtype), u16 -> bf16 (input dtype)
-  and f64 -> i8 (neither side bf16). The kernel prints an "unsupported
+  and f64 -> i8 (neither side bf16, not both integer). The kernel prints an "unsupported
   conversion" line for each; that is expected.
 
 bf16 -> i8 / u8 / i16 / i32 / i64 is only checked with values that fit the
