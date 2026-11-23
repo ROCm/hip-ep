@@ -602,3 +602,45 @@ func.func @multi_domain_three_pools(
   hip.miopen.softmax(%ctx) ins(%alloc1 : memref<?x16xf32>) outs(%alloc2 : memref<?x16xf32>)
   return %alloc2 : memref<?x16xf32>
 }
+
+// ===== i1 masks: one byte per element =====
+//
+// Less/Where write one byte per i1 element. The mask (64x64 i1) and the bf16
+// result (64x64 bf16) are live together: the pool needs 4096 + 8192 = 12288
+// bytes. Packing the mask eight elements per byte reserved 512 and gave 8704.
+//
+// CHECK-LABEL: func.func @i1_mask_one_byte_per_element
+// CHECK:         %[[SIZE:.*]] = arith.constant 12288 : index
+// CHECK:         hip.get_pool(%{{.*}}, %[[SIZE]]) : memref<?xi8>
+func.func @i1_mask_one_byte_per_element(
+    %ctx: !hip.context,
+    %a: memref<64x64xf32>,
+    %b: memref<64x64xf32>,
+    %x: memref<64x64xbf16>,
+    %y: memref<64x64xbf16>) -> memref<64x64xbf16> {
+  %mask = memref.alloc() : memref<64x64xi1>
+  hip.less(%ctx) ins(%a, %b : memref<64x64xf32>, memref<64x64xf32>) outs(%mask : memref<64x64xi1>)
+  %out = memref.alloc() : memref<64x64xbf16>
+  hip.where(%ctx) ins(%mask, %x, %y : memref<64x64xi1>, memref<64x64xbf16>, memref<64x64xbf16>) outs(%out : memref<64x64xbf16>)
+  return %out : memref<64x64xbf16>
+}
+
+// ===== i1 masks: dynamic, an extent that is not a multiple of 8 =====
+//
+// The byte factor is per element: ?x7xi1 is 7 * n bytes. Rounding the static
+// part's bit count up to a byte (divideCeil(7, 8) = 1) gave n bytes, so the
+// write overran the slot whenever the extent is not a multiple of 8.
+//
+// CHECK-LABEL: func.func @i1_mask_dynamic_factor_is_per_element
+// CHECK:         %[[C7:.*]] = arith.constant 7 : index
+// CHECK:         arith.muli %{{.*}}, %[[C7]] : index
+// CHECK:         hip.get_pool({{.*}}) : memref<?xi8>
+func.func @i1_mask_dynamic_factor_is_per_element(
+    %ctx: !hip.context,
+    %a: memref<?x7xf32>,
+    %b: memref<?x7xf32>,
+    %n: index) -> memref<?x7xi1> {
+  %mask = memref.alloc(%n) : memref<?x7xi1>
+  hip.less(%ctx) ins(%a, %b : memref<?x7xf32>, memref<?x7xf32>) outs(%mask : memref<?x7xi1>)
+  return %mask : memref<?x7xi1>
+}

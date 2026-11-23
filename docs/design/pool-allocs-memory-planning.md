@@ -168,7 +168,10 @@ Each domain is partitioned into:
 
 ### Phase 3: static packing
 
-Static allocations use greedy best-fit gap packing in byte space. Allocations with disjoint lifetimes may reuse the same offset.
+Static allocations use greedy best-fit gap packing in byte space. Allocations with disjoint
+lifetimes may reuse the same offset. A fully static allocation's byte size is its element
+count times the element byte width. A sub-byte element such as `i1` occupies one byte,
+matching the runtime kernels and the dynamic `staticFactor` below.
 
 ### Phase 4: dynamic packing
 
@@ -178,7 +181,10 @@ Dynamic allocation size is:
 staticFactor × product(dynamic dimension SSA values)
 ```
 
-where `staticFactor` is the element byte width multiplied by all static dimensions.
+where `staticFactor` is the element byte width multiplied by all static dimensions. A
+sub-byte element such as `i1` occupies one byte, because the runtime kernels store one
+element per byte. The element width comes from `getElementStorageBytes`, which uses the
+default data layout, so a mask is never sized by its bit count.
 
 Static and dynamic sizes round each element up to whole bytes. A sub-byte element such as `i1` takes one byte, because kernels and the LLVM lowering index it per byte; bit-packing the buffer would let a mask write run into the next live buffer.
 

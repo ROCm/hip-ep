@@ -39,13 +39,17 @@ inline bool isContiguousRowMajor(ArrayRef<int64_t> shape,
   return true;
 }
 
-/// Bytes one element of \p type occupies in device memory. Sub-byte element
-/// types (e.g. i1) take one whole byte each: kernels and the LLVM lowering
-/// index them per byte, so buffers are never bit-packed.
-int64_t getElementStorageBytes(MemRefType type);
+/// Bytes one element of \p type occupies in a buffer, from the default data
+/// layout (the one HIP-to-LLVM uses), so the pool, slot reuse and scratch
+/// sizing agree. A sub-byte element such as i1 (or i4) occupies one whole byte:
+/// runtime kernels store one element per byte, so packing the allocation's bits
+/// would let a mask write spill into the next live buffer. Elements of 8 bits
+/// or more keep their natural size (bf16 2, f32 4, index 8).
+int64_t getElementStorageBytes(Type type);
 
 /// Byte size for a fully-static memref type; returns 0 when any dim is dynamic.
-/// Equals numElements * getElementStorageBytes(type).
+/// Element count times getElementStorageBytes: each element is rounded up to
+/// whole bytes, not the allocation's total bit count.
 int64_t getStaticByteSize(MemRefType type);
 
 /// Emit arith ops for: llvm::alignTo(value, alignment).

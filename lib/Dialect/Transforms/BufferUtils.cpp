@@ -12,21 +12,24 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Interfaces/DataLayoutInterfaces.h"
 
 #include "llvm/Support/MathExtras.h"
 
 using namespace mlir;
 
-int64_t mlir::hip::getElementStorageBytes(MemRefType type) {
-  // Round per element, not per buffer: an i1 element takes a whole byte.
-  return static_cast<int64_t>(
-      llvm::divideCeil(type.getElementTypeBitWidth(), 8));
+int64_t mlir::hip::getElementStorageBytes(Type type) {
+  const DataLayout dataLayout;
+  return static_cast<int64_t>(dataLayout.getTypeSize(type).getFixedValue());
 }
 
 int64_t mlir::hip::getStaticByteSize(MemRefType type) {
   if (!type.hasStaticShape())
     return 0;
-  return type.getNumElements() * getElementStorageBytes(type);
+  // Round each element up to whole bytes before multiplying. divideCeil of the
+  // whole allocation's bit count packs i1 eight-per-byte; Less/And/Not/Where
+  // then write one byte per element past the end of that slot.
+  return type.getNumElements() * getElementStorageBytes(type.getElementType());
 }
 
 Value mlir::hip::emitAlignUp(OpBuilder &builder, Location loc, Value value,
