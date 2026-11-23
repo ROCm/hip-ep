@@ -63,11 +63,13 @@ static bool matmul_hipdnn_to_hip_data_type(int64_t hipdnn_type,
 }
 
 struct MatmulCacheKey {
-  int64_t M, N, K, batch_count, data_type, b_batch_stride, transA, transB;
+  int64_t M, N, K, batch_count, data_type, a_batch_stride, b_batch_stride,
+      transA, transB;
   bool operator==(const MatmulCacheKey &o) const {
     return M == o.M && N == o.N && K == o.K && batch_count == o.batch_count &&
-           data_type == o.data_type && b_batch_stride == o.b_batch_stride &&
-           transA == o.transA && transB == o.transB;
+           data_type == o.data_type && a_batch_stride == o.a_batch_stride &&
+           b_batch_stride == o.b_batch_stride && transA == o.transA &&
+           transB == o.transB;
   }
 };
 
@@ -79,6 +81,7 @@ struct MatmulCacheKeyHash {
     hash_combine_val(h, k.K);
     hash_combine_val(h, k.batch_count);
     hash_combine_val(h, k.data_type);
+    hash_combine_val(h, k.a_batch_stride);
     hash_combine_val(h, k.b_batch_stride);
     hash_combine_val(h, k.transA);
     hash_combine_val(h, k.transB);
@@ -245,10 +248,11 @@ static MatmulCacheEntry *queryOrCreateMatmul(MatmulAlgoTable &table,
     // often lands in a fp16-NaN pattern from adjacent pool slots /
     // constants). Mis-setting sA = 0 for a per-batch B does the opposite:
     // every batch reads matrix 0 instead of its own.
-    // layB → user's A and layC → output are always per-batch (the BATCH
-    // partition comes from A's leading dim by construction).
+    // layB → user's A: M*K when A holds one matrix per batch (the batch
+    // came from A's leading dims), 0 when one A is shared by a batched B
+    // (wrap_hipblasLtMatmulStrided). layC → output is always per-batch.
     int64_t sA = key.b_batch_stride;
-    int64_t sB = M * K, sC = M * N;
+    int64_t sB = key.a_batch_stride, sC = M * N;
     MATMUL_CACHE_CHECK(hipblasLtMatrixLayoutSetAttribute(
         entry.layA, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &bc, sizeof(bc)));
     MATMUL_CACHE_CHECK(hipblasLtMatrixLayoutSetAttribute(
@@ -453,7 +457,7 @@ static void autotuneMatmul(hipblasLtHandle_t handle, hipStream_t stream,
 //===----------------------------------------------------------------------===//
 //
 // ONNX MatMul semantics: output = A @ B (row-major)
-//   A: [batch_count x M x K]
+//   A: [batch_count x M x K]  (or [M x K] with broadcast, Strided entry only)
 //   B: [batch_count x K x N]  (or [K x N] with broadcast)
 //   output: [batch_count x M x N]
 //
@@ -470,11 +474,12 @@ static void autotuneMatmul(hipblasLtHandle_t handle, hipStream_t stream,
 // fp32, fp16 and bf16 all use HIPBLAS_COMPUTE_32F for accumulation precision.
 //===----------------------------------------------------------------------===//
 
-int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
-                         const void *B, void *output, int64_t M, int64_t N,
-                         int64_t K, int64_t batch_count, int64_t data_type,
-                         int64_t b_batch_stride, int64_t transA,
-                         int64_t transB) {
+static int hipblasLtMatmulImpl(RuntimeState *state, int op_state_slot,
+                               const void *A, const void *B, void *output,
+                               int64_t M, int64_t N, int64_t K,
+                               int64_t batch_count, int64_t data_type,
+                               int64_t a_batch_stride, int64_t b_batch_stride,
+                               int64_t transA, int64_t transB) {
   OP_PROFILE(
       "matmul",
       [&] {
@@ -484,6 +489,10 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
         return std::string(b);
       },
       state);
+  // An empty result has nothing to compute. hipBLASLt would instead run one
+  // unbatched GEMM for batch_count 0 and write past the empty output.
+  if (batch_count == 0 || M == 0 || N == 0)
+    return 0;
   if (!state || !A || !B || !output) {
     fprintf(stderr, "Invalid arguments to wrap_hipblasLtMatmul\n");
     return -1;
@@ -525,12 +534,14 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
   const char *type_name = hipdnn_ep_datatype_name(data_type);
   int64_t elem_size = hipdnn_ep_datatype_size(data_type);
   RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: M=%lld, N=%lld, K=%lld, "
-                    "batch=%lld, b_batch_stride=%lld, transA=%lld, "
-                    "transB=%lld, data_type=%lld (%s), total_bytes=%lld\n",
+                    "batch=%lld, a_batch_stride=%lld, b_batch_stride=%lld, "
+                    "transA=%lld, transB=%lld, data_type=%lld (%s), "
+                    "total_bytes=%lld\n",
                     (long long)M, (long long)N, (long long)K,
-                    (long long)batch_count, (long long)b_batch_stride,
-                    (long long)transA, (long long)transB, (long long)data_type,
-                    type_name, (long long)(batch_count * M * N * elem_size));
+                    (long long)batch_count, (long long)a_batch_stride,
+                    (long long)b_batch_stride, (long long)transA,
+                    (long long)transB, (long long)data_type, type_name,
+                    (long long)(batch_count * M * N * elem_size));
 
   MatmulState *ms = MatmulState::get_op_state(state, op_state_slot);
   if (!ms || !ms->table) {
@@ -539,8 +550,9 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
     return -1;
   }
 
-  MatmulCacheKey key{M,      N,     K, batch_count, data_type, b_batch_stride,
-                     transA, transB};
+  MatmulCacheKey key{
+      M,      N,     K, batch_count, data_type, a_batch_stride, b_batch_stride,
+      transA, transB};
   MatmulCacheEntry *cached = queryOrCreateMatmul(*ms->table, handle, key);
   if (!cached) {
     fprintf(stderr,
@@ -608,6 +620,29 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: completed successfully\n");
   return 0;
+}
+
+// A carries the batch whenever there is one (the compiler takes batch_count
+// from A's leading dims), so it always advances by one [M, K] matrix.
+int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
+                         const void *B, void *output, int64_t M, int64_t N,
+                         int64_t K, int64_t batch_count, int64_t data_type,
+                         int64_t b_batch_stride, int64_t transA,
+                         int64_t transB) {
+  return hipblasLtMatmulImpl(state, op_state_slot, A, B, output, M, N, K,
+                             batch_count, data_type, M * K, b_batch_stride,
+                             transA, transB);
+}
+
+int wrap_hipblasLtMatmulStrided(RuntimeState *state, int op_state_slot,
+                                const void *A, const void *B, void *output,
+                                int64_t M, int64_t N, int64_t K,
+                                int64_t batch_count, int64_t data_type,
+                                int64_t a_batch_stride, int64_t b_batch_stride,
+                                int64_t transA, int64_t transB) {
+  return hipblasLtMatmulImpl(state, op_state_slot, A, B, output, M, N, K,
+                             batch_count, data_type, a_batch_stride,
+                             b_batch_stride, transA, transB);
 }
 
 int wrap_matmul_i32(RuntimeState *state, const void *A, const void *B,

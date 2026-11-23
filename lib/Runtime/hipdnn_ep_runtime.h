@@ -860,6 +860,17 @@ int wrap_hipblasLtMatmul(
     int64_t transA,         // 1 = swap A's last two dims before multiply
     int64_t transB);        // 1 = swap B's last two dims before multiply
 
+// wrap_hipblasLtMatmul with A's per-batch stride as an argument too, so one A
+// can be shared by a batched B: a_batch_stride 0 with b_batch_stride K*N runs
+// [M, K] x [batch, K, N] -> [batch, M, N]. wrap_hipblasLtMatmul is this with
+// a_batch_stride = M*K. The two strides are in elements.
+int wrap_hipblasLtMatmulStrided(RuntimeState *state, int op_state_slot,
+                                const void *A, const void *B, void *output,
+                                int64_t M, int64_t N, int64_t K,
+                                int64_t batch_count, int64_t data_type,
+                                int64_t a_batch_stride, int64_t b_batch_stride,
+                                int64_t transA, int64_t transB);
+
 // Int32 matmul. hipBLASLt has no int32 GEMM, and feeding i32 bits to the f32
 // entry point reads them as floats. Neither operand is transposed. The kernel
 // accumulates in int64 and wraps to int32. b_batch_stride is 0 when B is one
