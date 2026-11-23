@@ -35,13 +35,11 @@ module {
 
   // CHECK-LABEL: func.func @tile_unit_dims
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<1x4x1x8xf32>)
-  // CHECK-NOT: tensor.expand_shape
-  // CHECK: %[[SHAPE:.*]] = hip.constant {{.*}}dense<[1, 4, 3, 8]> : tensor<4xi64>
-  // CHECK: %[[INIT:.*]] = tensor.empty() : tensor<1x4x3x8xf32>
-  // CHECK: %[[B:.*]] = hip.expand(%[[CTX]]) ins(%[[IN]], %[[SHAPE]] : tensor<1x4x1x8xf32>, tensor<4xi64>) outs(%[[INIT]] : tensor<1x4x3x8xf32>)
-  // CHECK-NOT: tensor.collapse_shape
-  // CHECK-NOT: hip.tile
-  // CHECK: return %[[B]]
+  // CHECK-NEXT: %[[SHAPE:.*]] = hip.constant {value = dense<[1, 4, 3, 8]> : tensor<4xi64>} : tensor<4xi64>
+  // CHECK-NEXT: %[[INIT:.*]] = tensor.empty() : tensor<1x4x3x8xf32>
+  // CHECK-NEXT: %[[B:.*]] = hip.expand(%[[CTX]]) ins(%[[IN]], %[[SHAPE]] : tensor<1x4x1x8xf32>, tensor<4xi64>) outs(%[[INIT]] : tensor<1x4x3x8xf32>) : tensor<1x4x3x8xf32>
+  // CHECK-NEXT: return %[[B]] : tensor<1x4x3x8xf32>
+  // CHECK-NEXT: }
 
   // A repeated extent above one gets its own unit dim to broadcast, then
   // merges back with it; the repeated unit extent broadcasts in place.
@@ -53,12 +51,13 @@ module {
 
   // CHECK-LABEL: func.func @tile_general
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<2x1x3xf32>)
-  // CHECK: %[[E:.*]] = tensor.expand_shape %[[IN]] {{\[}}[0, 1], [2], [3]] output_shape [1, 2, 1, 3] : tensor<2x1x3xf32> into tensor<1x2x1x3xf32>
-  // CHECK: %[[SHAPE:.*]] = hip.constant {{.*}}dense<[2, 2, 4, 3]> : tensor<4xi64>
-  // CHECK: %[[B:.*]] = hip.expand(%[[CTX]]) ins(%[[E]], %[[SHAPE]] : tensor<1x2x1x3xf32>, tensor<4xi64>) outs({{.*}} : tensor<2x2x4x3xf32>)
-  // CHECK: %[[Y:.*]] = tensor.collapse_shape %[[B]] {{\[}}[0, 1], [2], [3]] : tensor<2x2x4x3xf32> into tensor<4x4x3xf32>
-  // CHECK-NOT: hip.tile
-  // CHECK: return %[[Y]]
+  // CHECK-NEXT: %[[E:.*]] = tensor.expand_shape %[[IN]] {{\[}}[0, 1], [2], [3]] output_shape [1, 2, 1, 3] : tensor<2x1x3xf32> into tensor<1x2x1x3xf32>
+  // CHECK-NEXT: %[[SHAPE:.*]] = hip.constant {value = dense<[2, 2, 4, 3]> : tensor<4xi64>} : tensor<4xi64>
+  // CHECK-NEXT: %[[INIT:.*]] = tensor.empty() : tensor<2x2x4x3xf32>
+  // CHECK-NEXT: %[[B:.*]] = hip.expand(%[[CTX]]) ins(%[[E]], %[[SHAPE]] : tensor<1x2x1x3xf32>, tensor<4xi64>) outs(%[[INIT]] : tensor<2x2x4x3xf32>) : tensor<2x2x4x3xf32>
+  // CHECK-NEXT: %[[Y:.*]] = tensor.collapse_shape %[[B]] {{\[}}[0, 1], [2], [3]] : tensor<2x2x4x3xf32> into tensor<4x4x3xf32>
+  // CHECK-NEXT: return %[[Y]] : tensor<4x4x3xf32>
+  // CHECK-NEXT: }
 
   // A zero repeat empties the result; keep hip.tile.
   func.func @tile_zero_repeat(%input: tensor<2x3xf32>) -> tensor<0x3xf32> {
@@ -68,8 +67,12 @@ module {
   }
 
   // CHECK-LABEL: func.func @tile_zero_repeat
-  // CHECK-NOT: hip.expand
-  // CHECK: hip.tile
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<2x3xf32>)
+  // CHECK-NEXT: %[[R:.*]] = hip.constant {{.*}}value = dense<[0, 1]> : tensor<2xi64>} : tensor<2xi64>
+  // CHECK-NEXT: %[[INIT:.*]] = tensor.empty() : tensor<0x3xf32>
+  // CHECK-NEXT: %[[Y:.*]] = hip.tile(%[[CTX]]) ins(%[[IN]], %[[R]] : tensor<2x3xf32>, tensor<2xi64>) outs(%[[INIT]] : tensor<0x3xf32>) : tensor<0x3xf32>
+  // CHECK-NEXT: return %[[Y]] : tensor<0x3xf32>
+  // CHECK-NEXT: }
 
   // Dynamic extents with constant repeats; keep hip.tile.
   func.func @tile_dynamic_const_repeats(%input: tensor<?x3xf32>) -> tensor<?x6xf32> {
@@ -79,8 +82,14 @@ module {
   }
 
   // CHECK-LABEL: func.func @tile_dynamic_const_repeats
-  // CHECK-NOT: hip.expand
-  // CHECK: hip.tile
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<?x3xf32>)
+  // CHECK-NEXT: %[[C0:.*]] = arith.constant 0 : index
+  // CHECK-NEXT: %[[R:.*]] = hip.constant {{.*}}value = dense<2> : tensor<2xi64>} : tensor<2xi64>
+  // CHECK-NEXT: %[[DIM:.*]] = tensor.dim %[[IN]], %[[C0]] : tensor<?x3xf32>
+  // CHECK-NEXT: %[[INIT:.*]] = tensor.empty(%[[DIM]]) : tensor<?x6xf32>
+  // CHECK-NEXT: %[[Y:.*]] = hip.tile(%[[CTX]]) ins(%[[IN]], %[[R]] : tensor<?x3xf32>, tensor<2xi64>) outs(%[[INIT]] : tensor<?x6xf32>) : tensor<?x6xf32>
+  // CHECK-NEXT: return %[[Y]] : tensor<?x6xf32>
+  // CHECK-NEXT: }
 
   // Every extent and repeat above one doubles the rank to 10, past what the
   // expand kernel takes; keep hip.tile.
@@ -91,6 +100,10 @@ module {
   }
 
   // CHECK-LABEL: func.func @tile_rank_cap
-  // CHECK-NOT: hip.expand
-  // CHECK: hip.tile
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<2x2x2x2x2xf32>)
+  // CHECK-NEXT: %[[R:.*]] = hip.constant {{.*}}value = dense<2> : tensor<5xi64>} : tensor<5xi64>
+  // CHECK-NEXT: %[[INIT:.*]] = tensor.empty() : tensor<4x4x4x4x4xf32>
+  // CHECK-NEXT: %[[Y:.*]] = hip.tile(%[[CTX]]) ins(%[[IN]], %[[R]] : tensor<2x2x2x2x2xf32>, tensor<5xi64>) outs(%[[INIT]] : tensor<4x4x4x4x4xf32>) : tensor<4x4x4x4x4xf32>
+  // CHECK-NEXT: return %[[Y]] : tensor<4x4x4x4x4xf32>
+  // CHECK-NEXT: }
 }
