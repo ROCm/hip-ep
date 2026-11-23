@@ -44,6 +44,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace mlir {
@@ -162,6 +163,16 @@ private:
 // skips, and so does any other value. The search then keeps rocMLIR's
 // default perfConfig.
 bool rocMlirSkipBenchmarking();
+
+// Median milliseconds of one launch of `func` from the code object `binary`
+// on the current HIP device, over `runs` timed launches after a warmup. The
+// kernel takes one pointer per entry of `bufferBytes`, each to a fresh
+// zero-filled device buffer of that size. std::nullopt when there is no HIP
+// runtime or device, or a HIP call fails, so callers fall back to a default.
+std::optional<double> benchmarkKernel(StringRef binary, StringRef func,
+                                      unsigned grid, unsigned block,
+                                      ArrayRef<size_t> bufferBytes,
+                                      unsigned runs = 20);
 
 // Reads HIPDNN_EP_ROCMLIR_AUTOTUNE for the search space only. Unset or empty
 // selects quick. "quick", "full", and "exhaustive" are the only accepted

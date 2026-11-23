@@ -13,16 +13,21 @@
 //===----------------------------------------------------------------------===//
 
 #include "hip/Compiler/WinogradKernel.h"
+#include "hip/Compiler/RocMlirAutotune.h"
 
 #include "hip/Dialect/IR/HipDialect.h"
 
+#include <llvm/ADT/STLExtras.h>
 #include <llvm/ADT/StringMap.h>
 #include <llvm/ADT/StringRef.h>
 #include <llvm/Support/FormatVariadic.h>
+#include <llvm/Support/ThreadPool.h>
+#include <llvm/Support/Threading.h>
 #include <mlir/IR/BuiltinAttributes.h>
 
 #include <algorithm>
 #include <cstddef>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -57,23 +62,15 @@ bool winogradKernelSupportsArch(llvm::StringRef arch) {
 
 WinogradConfig chooseWinogradConfig(int64_t n, int64_t c, int64_t h, int64_t w,
                                     int64_t k) {
+  (void)n;
   WinogradConfig config;
   const int64_t spatial = std::min(h, w);
-  // Independent (2x2 output tile, 16 output channels) units of work.
-  const int64_t units = n * ((h + 1) / 2) * ((w + 1) / 2) * ((k + 15) / 16);
   // From a sweep of the 20 MIGraphX fp16 configurations on gfx1151 over the
-  // shapes that the gate admits: fold-at-end with the T store wins most; with
-  // under ~4k units the grid is too small to fill the device, and splitting
-  // the channel sum across two waves wins by about 2x (it loses by 1.3-2.2x
-  // from 8k units up); a narrow output over a large image prefers three
-  // output blocks per group and the raw filter; large channel counts prefer
-  // eight waves.
-  if (units < 4096) {
-    config.waves = 2;
-    config.channelSplit = 2;
-    config.foldAtEnd = false;
-    config.fullTransform = true;
-  } else if (k <= 32 && spatial >= 256) {
+  // shapes that the gate admits: fold-at-end with the T store wins most; a
+  // narrow output over a large image prefers three output blocks per group
+  // and the raw filter; large channel counts prefer eight waves. With
+  // autotuning on, compileWinogradKernels times candidates per shape instead.
+  if (k <= 32 && spatial >= 256) {
     config.outBlocks = 3;
     config.foldAtEnd = false;
     config.fullTransform = true;
@@ -239,10 +236,23 @@ buildWinogradKernelSource(int64_t n, int64_t c, int64_t h, int64_t w, int64_t k,
   float acc[SLOTS][12] = {};
   for (int c0 = 0; c0 < C; c0 += CCH) {
     const int cn = C - c0 < CCH ? C - c0 : CCH;
+    // Issue every load of the chunk before the first store: the pixels sit
+    // in C different channel planes, so one dependent load at a time costs
+    // a full memory latency each.
+    constexpr int PER = (NP * CCH + 255) / 256;
+    float staged[PER > 0 ? PER : 1];
+#pragma unroll
+    for (int j = 0; j < PER; ++j) {
+      const int i = threadIdx.x + j * 256;
+      staged[j] = i < NP * cn
+          ? static_cast<float>(x[PIX[i % NP] + (c0 + i / NP) * HW]) : 0.f;
+    }
     __syncthreads();
-    for (int i = threadIdx.x; i < NP * cn; i += blockDim.x)
-      patch[(i % NP) * CCH + i / NP] =
-          static_cast<float>(x[PIX[i % NP] + (c0 + i / NP) * HW]);
+#pragma unroll
+    for (int j = 0; j < PER; ++j) {
+      const int i = threadIdx.x + j * 256;
+      if (i < NP * cn) patch[(i % NP) * CCH + i / NP] = staged[j];
+    }
     __syncthreads();
 #pragma unroll
     for (int sl = 0; sl < SLOTS; ++sl) {
@@ -466,57 +476,200 @@ FailureOr<std::string> compileSource(const WinogradKernelSource &src,
 
 } // namespace
 
+namespace {
+
+// MIGraphX fp16 configurations (winograd_conv_compiler::get_tuning_config)
+// timed per shape when autotuning is on: the defaults, eight waves, channel
+// splits across two waves, fewer waves, and three output blocks.
+WinogradConfig candidate(int64_t waves, int64_t outBlocks, int64_t split,
+                         bool foldAtEnd, bool fullTransform) {
+  WinogradConfig c;
+  c.waves = waves;
+  c.outBlocks = outBlocks;
+  c.channelSplit = split;
+  c.foldAtEnd = foldAtEnd;
+  c.fullTransform = fullTransform;
+  return c;
+}
+
+std::vector<WinogradConfig> tuningCandidates(int64_t n, int64_t c, int64_t h,
+                                             int64_t w, int64_t k) {
+  std::vector<WinogradConfig> out = {
+      chooseWinogradConfig(n, c, h, w, k), candidate(4, 1, 1, true, false),
+      candidate(8, 1, 1, false, true),     candidate(8, 1, 1, true, false),
+      candidate(2, 1, 1, true, false),     candidate(2, 1, 2, false, true),
+      candidate(4, 1, 2, false, true),     candidate(4, 3, 1, false, true)};
+  auto same = [](const WinogradConfig &a, const WinogradConfig &b) {
+    return a.waves == b.waves && a.outBlocks == b.outBlocks &&
+           a.channelSplit == b.channelSplit && a.foldAtEnd == b.foldAtEnd &&
+           a.fullTransform == b.fullTransform;
+  };
+  std::vector<WinogradConfig> unique;
+  for (const WinogradConfig &cfg : out)
+    if (llvm::none_of(unique,
+                      [&](const WinogradConfig &u) { return same(u, cfg); }))
+      unique.push_back(cfg);
+  return unique;
+}
+
+std::string configName(const WinogradConfig &c) {
+  return llvm::formatv("nw={0} kw={1} sk={2} fe={3} ft={4}", c.waves,
+                       c.outBlocks, c.channelSplit, c.foldAtEnd ? 1 : 0,
+                       c.fullTransform ? 1 : 0)
+      .str();
+}
+
+} // namespace
+
 LogicalResult compileWinogradKernels(ModuleOp module, llvm::StringRef arch,
                                      llvm::raw_ostream *log) {
-  struct Built {
-    std::string binary;
+  struct Kernel {
+    int64_t n, c, h, w, k;
+    bool hasBias;
+    std::string act;
+    double alpha;
+    WinogradConfig config;
     WinogradKernelSource src;
-    bool fullTransform;
+    std::string binary, error;
   };
-  llvm::StringMap<Built> cache;
-  MLIRContext *ctx = module.getContext();
-  WalkResult walked = module.walk([&](WinogradConvOp op) {
+  llvm::StringMap<size_t> byKey;
+  std::vector<Kernel> kernels;
+  std::vector<std::pair<WinogradConvOp, size_t>> uses;
+  module.walk([&](WinogradConvOp op) {
     auto x = cast<ShapedType>(op.getInput().getType()).getShape();
     auto wt = cast<ShapedType>(op.getWeights().getType()).getShape();
-    int64_t n = x[0], c = x[1], h = x[2], w = x[3], k = wt[0];
-    bool hasBias = static_cast<bool>(op.getBias());
-    StringRef act = op.getActivation();
-    double alpha = op.getAlpha().convertToDouble();
-    std::string key = llvm::formatv("{0}x{1}x{2}x{3}->{4} {5} {6} {7}", n, c, h,
-                                    w, k, hasBias, act, alpha)
-                          .str();
-    auto it = cache.find(key);
-    if (it == cache.end()) {
-      WinogradConfig config = chooseWinogradConfig(n, c, h, w, k);
-      WinogradKernelSource src =
-          buildWinogradKernelSource(n, c, h, w, k, config, hasBias, act, alpha);
-      std::string error;
-      FailureOr<std::string> binary = compileSource(src, arch, error);
-      if (failed(binary)) {
-        op.emitError() << "Winograd kernel build failed for " << key << ": "
-                       << error;
-        return WalkResult::interrupt();
-      }
-      if (log)
-        *log << "[winograd] built " << src.name << " for " << key << ": "
-             << binary->size() << " bytes, grid " << src.gridSize << " block "
-             << src.blockSize << "\n";
-      it = cache
-               .insert({key, Built{std::move(*binary), std::move(src),
-                                   config.fullTransform}})
-               .first;
-    }
-    const Built &b = it->second;
-    op.setKernelBinaryAttr(StringAttr::get(ctx, b.binary));
-    op.setKernelNameAttr(StringAttr::get(ctx, b.src.name));
-    op.setGridSizeAttr(
-        IntegerAttr::get(IntegerType::get(ctx, 64), b.src.gridSize));
-    op.setBlockSizeAttr(
-        IntegerAttr::get(IntegerType::get(ctx, 64), b.src.blockSize));
-    op.setFullTransformAttr(BoolAttr::get(ctx, b.fullTransform));
-    return WalkResult::advance();
+    Kernel kn{x[0],
+              x[1],
+              x[2],
+              x[3],
+              wt[0],
+              static_cast<bool>(op.getBias()),
+              op.getActivation().str(),
+              op.getAlpha().convertToDouble(),
+              {},
+              {},
+              {},
+              {}};
+    std::string key =
+        llvm::formatv("{0}x{1}x{2}x{3}->{4} {5} {6} {7}", kn.n, kn.c, kn.h,
+                      kn.w, kn.k, kn.hasBias, kn.act, kn.alpha)
+            .str();
+    auto [it, inserted] = byKey.try_emplace(key, kernels.size());
+    if (inserted)
+      kernels.push_back(std::move(kn));
+    uses.push_back({op, it->second});
   });
-  return failure(walked.wasInterrupted());
+  if (kernels.empty())
+    return success();
+
+  auto compileAll = [&](std::vector<Kernel> &list) {
+    llvm::DefaultThreadPool pool(llvm::hardware_concurrency());
+    for (Kernel &kn : list)
+      pool.async([&kn, arch] {
+        kn.src =
+            buildWinogradKernelSource(kn.n, kn.c, kn.h, kn.w, kn.k, kn.config,
+                                      kn.hasBias, kn.act, kn.alpha);
+        FailureOr<std::string> binary = compileSource(kn.src, arch, kn.error);
+        if (succeeded(binary))
+          kn.binary = std::move(*binary);
+      });
+    pool.wait();
+  };
+
+  // With autotuning on, time the candidate configurations of each distinct
+  // shape on the device (as the MIGraphX JIT does) and keep the fastest. The
+  // epilogue barely moves the time, so each shape is timed once, with the
+  // epilogue of its first use. Without a device the rule's choice stands.
+  for (Kernel &kn : kernels)
+    kn.config = chooseWinogradConfig(kn.n, kn.c, kn.h, kn.w, kn.k);
+  AutotuneSpace space;
+  if (rocMlirAutotuneFromEnv(space)) {
+    llvm::StringMap<size_t> shapeOf;
+    std::vector<Kernel> trials;
+    std::vector<size_t> trialShape;
+    std::vector<const Kernel *> shapes;
+    for (const Kernel &kn : kernels) {
+      std::string shape =
+          llvm::formatv("{0}x{1}x{2}x{3}->{4}", kn.n, kn.c, kn.h, kn.w, kn.k)
+              .str();
+      if (!shapeOf.try_emplace(shape, shapes.size()).second)
+        continue;
+      for (const WinogradConfig &cfg :
+           tuningCandidates(kn.n, kn.c, kn.h, kn.w, kn.k)) {
+        Kernel trial = kn;
+        trial.config = cfg;
+        trials.push_back(std::move(trial));
+        trialShape.push_back(shapes.size());
+      }
+      shapes.push_back(&kn);
+    }
+    compileAll(trials);
+    std::vector<std::optional<double>> best(shapes.size());
+    std::vector<WinogradConfig> bestConfig(shapes.size());
+    for (size_t i = 0; i < trials.size(); ++i) {
+      const Kernel &tr = trials[i];
+      if (tr.binary.empty())
+        continue;
+      std::vector<size_t> bytes = {
+          static_cast<size_t>(tr.n * tr.c * tr.h * tr.w * 2),
+          static_cast<size_t>((tr.config.fullTransform ? 9 : 12) * tr.k * tr.c *
+                              2)};
+      if (tr.hasBias)
+        bytes.push_back(static_cast<size_t>(tr.k * 2));
+      bytes.push_back(static_cast<size_t>(tr.n * tr.k * tr.h * tr.w * 2));
+      std::optional<double> ms = benchmarkKernel(
+          tr.binary, tr.src.name, tr.src.gridSize, tr.src.blockSize, bytes);
+      size_t s = trialShape[i];
+      if (log)
+        *log << "[winograd] tune " << tr.n << "x" << tr.c << "x" << tr.h << "x"
+             << tr.w << "->" << tr.k << " " << configName(tr.config) << ": "
+             << (ms ? llvm::formatv("{0:f4} ms", *ms).str() : "n/a") << "\n";
+      if (ms && (!best[s] || *ms < *best[s])) {
+        best[s] = ms;
+        bestConfig[s] = tr.config;
+      }
+    }
+    for (Kernel &kn : kernels) {
+      std::string shape =
+          llvm::formatv("{0}x{1}x{2}x{3}->{4}", kn.n, kn.c, kn.h, kn.w, kn.k)
+              .str();
+      size_t s = shapeOf.lookup(shape);
+      if (best[s])
+        kn.config = bestConfig[s];
+    }
+  }
+
+  compileAll(kernels);
+  for (auto &[op, index] : uses) {
+    const Kernel &kn = kernels[index];
+    if (kn.binary.empty()) {
+      op.emitError() << "Winograd kernel build failed for " << kn.n << "x"
+                     << kn.c << "x" << kn.h << "x" << kn.w << "->" << kn.k
+                     << ": " << kn.error;
+      return failure();
+    }
+  }
+  MLIRContext *ctx = module.getContext();
+  for (const Kernel &kn : kernels)
+    if (log)
+      *log << "[winograd] built " << kn.src.name << " for " << kn.n << "x"
+           << kn.c << "x" << kn.h << "x" << kn.w << "->" << kn.k << " "
+           << (kn.hasBias ? "true" : "false") << " " << kn.act << " "
+           << llvm::formatv("{0:f2}", kn.alpha) << ": " << kn.binary.size()
+           << " bytes, grid " << kn.src.gridSize << " block "
+           << kn.src.blockSize << ", " << configName(kn.config) << "\n";
+  for (auto &[op, index] : uses) {
+    const Kernel &kn = kernels[index];
+    WinogradConvOp conv = op;
+    conv.setKernelBinaryAttr(StringAttr::get(ctx, kn.binary));
+    conv.setKernelNameAttr(StringAttr::get(ctx, kn.src.name));
+    conv.setGridSizeAttr(
+        IntegerAttr::get(IntegerType::get(ctx, 64), kn.src.gridSize));
+    conv.setBlockSizeAttr(
+        IntegerAttr::get(IntegerType::get(ctx, 64), kn.src.blockSize));
+    conv.setFullTransformAttr(BoolAttr::get(ctx, kn.config.fullTransform));
+  }
+  return success();
 }
 
 } // namespace mlir::hip

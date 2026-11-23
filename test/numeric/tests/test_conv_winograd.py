@@ -11,7 +11,7 @@ that alone consumes it, runs as one hip.winograd_conv kernel built for its
 shape. These cases cover each epilogue (bias + LeakyRelu, ReLU without a bias,
 bias alone), odd spatial sizes (partial 2x2 output tiles), a batch of two, an
 input channel count that is not a multiple of 16, and small images whose
-configuration splits the channel sum across waves. The reference is the ORT
+output has few tiles. The reference is the ORT
 CPU EP. Winograd accumulates in fp32 through WMMA but transforms the input in
 fp16, so the tolerance is that of an fp16 conv.
 """
@@ -81,7 +81,7 @@ class TestConvWinograd:
             (2, 32, 32, 40, 24, True, "leaky_relu"),
             (1, 24, 40, 17, 19, True, "leaky_relu"),
             (1, 112, 112, 96, 112, True, "leaky_relu"),
-            # Few output tiles: the channel sum splits across two waves.
+            # Few output tiles, where channel-split configurations compete.
             (1, 456, 456, 12, 21, True, "leaky_relu"),
             (1, 768, 128, 36, 36, True, "none"),
         ],

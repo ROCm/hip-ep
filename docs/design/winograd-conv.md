@@ -71,14 +71,14 @@ set of fp16 image models.
 
 ## Configuration
 
-`chooseWinogradConfig` picks one of MIGraphX's fp16 configurations by shape: two
-waves that split the channel sum, with the raw filter, when the conv has under
-about 4096 (2x2 tile, 16 output channels) units of work, so that the grid
-still fills the device; otherwise four waves with fold-at-end and the `T` store
-by default, three output blocks with the raw filter for a narrow output over a
-large image, and eight waves for large channel counts. Each build takes about
-1-2 s, so the configurations are not tuned per model; MIGraphX instead
-benchmarks its 19 fp16 configurations for each shape at compile time.
+With `HIPDNN_EP_ROCMLIR_AUTOTUNE` set, `compileWinogradKernels` times eight of
+MIGraphX's fp16 configurations for each distinct conv shape on the device and
+keeps the fastest, as the MIGraphX JIT does with its 19. The candidates compile
+in parallel (each hiprtc build takes about 1-2 s); each is timed as the median
+of 20 launches on zero-filled buffers. Without autotuning, or without a device,
+`chooseWinogradConfig` picks by shape: four waves with fold-at-end and the `T`
+store by default, three output blocks with the raw filter for a narrow output
+over a large image, and eight waves for large channel counts.
 
 ## Cache identity
 
