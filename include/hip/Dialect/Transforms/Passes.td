@@ -85,6 +85,12 @@ def ConvertOnnxToHipPass : Pass<"convert-onnx-to-hip", "mlir::ModuleOp"> {
     Requires hip-add-context-arg to have run first so that !hip.context is
     available as function argument 0.
   }];
+  let options = [
+    Option<"convIntegerQuantConv", "conv-integer-quant-conv", "bool",
+           "false",
+           "Lower a static ConvInteger to hip.quant_conv. Set only on the "
+           "rocMLIR pipeline; hip.quant_conv has no lowering outside it">
+  ];
   let dependentDialects = [
     "mlir::hip::HipDialect",
     "mlir::arith::ArithDialect",

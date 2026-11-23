@@ -659,7 +659,8 @@ void populateQdqConversionPatterns(RewritePatternSet &patterns,
 void populateDynamicQuantizeLinearConversionPatterns(
     RewritePatternSet &patterns, MLIRContext *ctx);
 void populateConvIntegerConversionPatterns(RewritePatternSet &patterns,
-                                           MLIRContext *ctx);
+                                           MLIRContext *ctx,
+                                           bool quantConv = false);
 void populateMatMulIntegerConversionPatterns(RewritePatternSet &patterns,
                                              MLIRContext *ctx);
 

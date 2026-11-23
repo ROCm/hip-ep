@@ -501,6 +501,13 @@ extern "C" int hip_cast(
                        dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
                        static_cast<const int8_t*>(input),
                        static_cast<int32_t*>(output), num_elements);
+  } else if (input_dtype == HIP_DTYPE_INT32 && output_dtype == HIP_DTYPE_INT8) {
+    // Truncates. The rocMLIR ConvInteger rebase subtracts 128 from a uint8
+    // value in i32, which lands in [-128, 127], so the low 8 bits are exact.
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(cast_int_to_int_kernel<int32_t, int8_t>),
+                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const int32_t*>(input),
+                       static_cast<int8_t*>(output), num_elements);
   } else if (input_dtype == HIP_DTYPE_FLOAT32 && output_dtype == HIP_DTYPE_UINT8) {
     hipLaunchKernelGGL(cast_f32_to_ui8_kernel,
                        dim3(grid_size), dim3(kBlockSize), 0, hip_stream,

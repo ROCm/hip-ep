@@ -97,7 +97,8 @@ void buildOnnxToHipPipelineTail(OpPassManager &pm,
 /// bufferizes. \p handle, when non-null, inserts the hipDNN graph passes.
 void buildOnnxToHipPipelineHead(OpPassManager &pm,
                                 hipdnnHandle_t handle = nullptr,
-                                CompiledGraphMap output_graphs = {});
+                                CompiledGraphMap output_graphs = {},
+                                bool convIntegerQuantConv = false);
 
 /// Build the ONNX-to-HIP compilation pipeline.
 ///
