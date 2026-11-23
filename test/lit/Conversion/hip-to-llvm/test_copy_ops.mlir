@@ -45,6 +45,19 @@ module {
                      outs(%output : memref<8x2x8xf32, 1>) {axis = 2 : i64}
     return
   }
+
+  // A contiguous view is read in place: its pointer includes the descriptor
+  // offset.
+  func.func @concat_offset_input(
+      %ctx: !hip.context,
+      %a: memref<8x2x3xf32, strided<[6, 3, 1], offset: 48>, 1>,
+      %b: memref<8x2x5xf32, 1>,
+      %output: memref<8x2x8xf32, 1>) {
+    hip.concat(%ctx) ins(%a, %b : memref<8x2x3xf32, strided<[6, 3, 1], offset: 48>, 1>,
+                                  memref<8x2x5xf32, 1>)
+                     outs(%output : memref<8x2x8xf32, 1>) {axis = 2 : i64}
+    return
+  }
 }
 
 // CHECK-LABEL: llvm.func @reverse_strided_view
@@ -67,4 +80,9 @@ module {
 // CHECK-LABEL: llvm.func @concat_last_axis
 // CHECK: llvm.alloca {{.*}} x !llvm.array<2 x ptr>
 // CHECK: llvm.alloca {{.*}} x !llvm.array<2 x i64>
+// CHECK: llvm.call @wrap_concat({{.*}}) : (!llvm.ptr, !llvm.ptr, i64, !llvm.ptr, !llvm.ptr, i64, i64) -> i32
+
+// CHECK-LABEL: llvm.func @concat_offset_input
+// CHECK: %[[OFF:.*]] = llvm.extractvalue %{{.*}}[2]
+// CHECK: llvm.getelementptr inbounds %{{.*}}[%[[OFF]]] : (!llvm.ptr<1>, i64) -> !llvm.ptr<1>, f32
 // CHECK: llvm.call @wrap_concat({{.*}}) : (!llvm.ptr, !llvm.ptr, i64, !llvm.ptr, !llvm.ptr, i64, i64) -> i32

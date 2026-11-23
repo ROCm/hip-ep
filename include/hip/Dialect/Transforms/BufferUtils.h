@@ -39,8 +39,13 @@ inline bool isContiguousRowMajor(ArrayRef<int64_t> shape,
   return true;
 }
 
+/// Bits one element occupies in a device buffer. `i1` takes a whole byte: the
+/// runtime ABI and every bool kernel address it one byte per element. Other
+/// sub-byte types (packed quantized data) keep their packed width.
+int64_t getStorageBitWidth(MemRefType type);
+
 /// Byte size for a fully-static memref type; returns 0 when any dim is dynamic.
-/// Uses llvm::divideCeil to correctly handle sub-byte element types (e.g. i1).
+/// Uses llvm::divideCeil to handle packed sub-byte element types.
 int64_t getStaticByteSize(MemRefType type);
 
 /// Emit arith ops for: llvm::alignTo(value, alignment).

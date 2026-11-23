@@ -11,6 +11,8 @@
 
 #include "llvm/ADT/APInt.h"
 
+#include <limits>
+
 namespace mlir {
 namespace hip {
 namespace {
@@ -603,24 +605,30 @@ struct SliceDecompose : public mlir::RewritePattern {
         start += dim;
       if (end < 0)
         end += dim;
+      // The span is at most dim, so 1 + (span - 1) / step cannot overflow
+      // the way a ceiling division with a near-INT64 step would. Negating
+      // INT64_MIN overflows too; any step at least as wide as the span
+      // selects only the first element, so INT64_MAX stands in for it.
+      auto magnitude = [](int64_t negativeStep) {
+        return negativeStep == std::numeric_limits<int64_t>::min()
+                   ? std::numeric_limits<int64_t>::max()
+                   : -negativeStep;
+      };
       int64_t size;
       if (step > 0) {
         // Positive-step clamp per spec: start in [0, dim], end in [0, dim].
         start = std::clamp<int64_t>(start, 0, dim);
         end = std::clamp<int64_t>(end, 0, dim);
-        if (end < start)
-          end = start; // empty slice
-        size = (end - start + step - 1) / step;
+        size = end > start ? 1 + (end - start - 1) / step : 0;
       } else if (dim == 0) {
         size = 0;
-        step = -step;
       } else {
         // Negative-step clamp per spec: start in [0, dim-1], end in [-1,
         // dim-1].
         start = std::clamp<int64_t>(start, 0, dim - 1);
         end = std::clamp<int64_t>(end, -1, dim - 1);
-        step = -step;
-        size = start > end ? (start - end + step - 1) / step : 0;
+        step = magnitude(step);
+        size = start > end ? 1 + (start - end - 1) / step : 0;
         if (size > 0)
           start -= (size - 1) * step;
         if (size > 1)
@@ -634,23 +642,30 @@ struct SliceDecompose : public mlir::RewritePattern {
         else
           start = 0;
       }
+      // The stride of an axis with at most one element selects nothing, and
+      // a huge one would overflow the strides of the bufferized view.
+      if (size <= 1)
+        step = 1;
 
       offsets[axis] = rewriter.getIndexAttr(start);
       sizes[axis] = rewriter.getIndexAttr(size);
       strides[axis] = rewriter.getIndexAttr(step);
     }
 
-    // An unranked result has no declared shape to match, so it takes the sizes
-    // computed above. Keeping the inferred dynamic dims would declare `?` for
-    // a static extract_slice size, which fails verification.
-    if (!mlir::isa<mlir::RankedTensorType>(op->getResult(0).getType())) {
-      llvm::SmallVector<int64_t> shape;
-      for (mlir::OpFoldResult size : sizes) {
-        std::optional<int64_t> c = mlir::getConstantIntValue(size);
-        shape.push_back(c ? *c : mlir::ShapedType::kDynamic);
-      }
-      outType = mlir::RankedTensorType::get(shape, outType.getElementType());
+    // extract_slice must declare exactly the shape its sizes imply: a `?`
+    // over a static size fails verification. Build the view, reverse, and
+    // empty result with that shape, and cast back to a more dynamic declared
+    // result (`tensor<?xf32>` for a static flip) at the end. An unranked
+    // result has no declared shape and takes this one.
+    llvm::SmallVector<int64_t> sliceShape;
+    for (mlir::OpFoldResult size : sizes) {
+      std::optional<int64_t> c = mlir::getConstantIntValue(size);
+      sliceShape.push_back(c ? *c : mlir::ShapedType::kDynamic);
     }
+    auto sliceType =
+        mlir::RankedTensorType::get(sliceShape, outType.getElementType());
+    if (!mlir::isa<mlir::RankedTensorType>(op->getResult(0).getType()))
+      outType = sliceType;
 
     // Sanity check (only meaningful for static output dims): computed
     // sizes must match the IR-inferred output type. If they diverge we
@@ -668,22 +683,22 @@ struct SliceDecompose : public mlir::RewritePattern {
             op, "computed slice size does not match inferred output");
     }
 
+    auto replaceWith = [&](mlir::Value result) {
+      if (result.getType() != outType)
+        result = mlir::tensor::CastOp::create(rewriter, loc, outType, result);
+      rewriter.replaceOp(op, result);
+      return mlir::success();
+    };
+
     if (noInBoundsView) {
       llvm::SmallVector<mlir::Value> dynSizes;
-      for (int64_t i : llvm::seq<int64_t>(rank)) {
-        if (!outType.isDynamicDim(i))
-          continue;
-        auto dimVal = llvm::dyn_cast_if_present<mlir::Value>(sizes[i]);
-        if (!dimVal)
-          return rewriter.notifyMatchFailure(op, "missing dynamic slice size");
-        dynSizes.push_back(dimVal);
-      }
-      mlir::Value empty =
-          mlir::tensor::EmptyOp::create(rewriter, loc, outType.getShape(),
-                                        outType.getElementType(), dynSizes)
-              .getResult();
-      rewriter.replaceOp(op, empty);
-      return mlir::success();
+      for (int64_t i : llvm::seq<int64_t>(rank))
+        if (sliceType.isDynamicDim(i))
+          dynSizes.push_back(mlir::cast<mlir::Value>(sizes[i]));
+      return replaceWith(
+          mlir::tensor::EmptyOp::create(rewriter, loc, sliceType.getShape(),
+                                        sliceType.getElementType(), dynSizes)
+              .getResult());
     }
 
     mlir::Value context;
@@ -696,25 +711,24 @@ struct SliceDecompose : public mlir::RewritePattern {
 
     mlir::OperationState state(
         loc, mlir::tensor::ExtractSliceOp::getOperationName());
-    mlir::tensor::ExtractSliceOp::build(rewriter, state, outType, data, offsets,
-                                        sizes, strides);
+    mlir::tensor::ExtractSliceOp::build(rewriter, state, sliceType, data,
+                                        offsets, sizes, strides);
     mlir::Value result = rewriter.create(state)->getResult(0);
     if (!reversedAxes.empty()) {
       llvm::SmallVector<mlir::Value> dynSizes;
       for (int64_t i : llvm::seq<int64_t>(rank))
-        if (outType.isDynamicDim(i))
+        if (sliceType.isDynamicDim(i))
           dynSizes.push_back(
               mlir::tensor::DimOp::create(rewriter, loc, result, i));
       mlir::Value init =
-          mlir::tensor::EmptyOp::create(rewriter, loc, outType.getShape(),
-                                        outType.getElementType(), dynSizes);
+          mlir::tensor::EmptyOp::create(rewriter, loc, sliceType.getShape(),
+                                        sliceType.getElementType(), dynSizes);
       result =
           mlir::hip::ReverseOp::create(rewriter, loc, context, result, init,
                                        rewriter.getI64ArrayAttr(reversedAxes))
               ->getResult(0);
     }
-    rewriter.replaceOp(op, result);
-    return mlir::success();
+    return replaceWith(result);
   }
 };
 
@@ -761,11 +775,16 @@ resolveStaticSlice(mlir::RankedTensorType dataType,
       start = std::clamp<int64_t>(start, 0, dim - 1);
       end = std::clamp<int64_t>(end, -1, dim - 1);
     }
-    const int64_t extent = step > 0 ? (end - start + step - 1) / step
-                                    : (end - start + step + 1) / step;
+    // Overflow-safe ceiling division; see SliceDecompose.
+    const int64_t span = step > 0 ? end - start : start - end;
+    const int64_t stride = step > 0
+                               ? step
+                               : (step == std::numeric_limits<int64_t>::min()
+                                      ? std::numeric_limits<int64_t>::max()
+                                      : -step);
     starts[axis] = start;
     steps[axis] = step;
-    extents[axis] = std::max<int64_t>(extent, 0);
+    extents[axis] = span > 0 ? 1 + (span - 1) / stride : 0;
   }
   if (llvm::ArrayRef<int64_t>(extents) != resultType.getShape())
     return std::nullopt;
