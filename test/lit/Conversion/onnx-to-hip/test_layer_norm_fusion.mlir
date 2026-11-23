@@ -6,8 +6,9 @@
 // Pow(d, 2) or Mul(d, d) for the square; Div by Sqrt / Pow(., 0.5) or Mul by
 // Reciprocal(Sqrt) / Pow(., -0.5) / Div(1, Sqrt) for the normalization; with
 // or without the affine tail. A residual Add feeding the norm folds into
-// hip.skip_layer_norm. Chains over a non-last axis or with a non-constant
-// epsilon are left alone.
+// hip.skip_layer_norm when its operands' runtime extents are proven equal.
+// Chains over a non-last axis, with a non-constant epsilon, or in bf16 are
+// left alone.
 
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip --hip-fusion-transform %s | FileCheck %s
 
@@ -422,4 +423,100 @@ module {
   // CHECK: %[[Y:.*]] = hip.layer_norm(%[[CTX]])
   // CHECK-SAME: ins(%[[X]], %[[G]] :
   // CHECK: return %[[Y]]
+
+  // A packed chain ends in an expand, so the norm gets a new destination;
+  // it carries x's runtime batch.
+  func.func @ln_rank5_dynamic(%x: tensor<?x3x4x5x8xf32>, %g: tensor<8xf32>) -> tensor<?x3x4x5x8xf32> {
+    %eps = "onnx.Constant"() {value = dense<1.0E-5> : tensor<f32>} : () -> tensor<f32>
+    %mean = "onnx.ReduceMean"(%x) {axes = [-1], keepdims = 1 : si64} : (tensor<?x3x4x5x8xf32>) -> tensor<?x3x4x5x1xf32>
+    %d = "onnx.Sub"(%x, %mean) : (tensor<?x3x4x5x8xf32>, tensor<?x3x4x5x1xf32>) -> tensor<?x3x4x5x8xf32>
+    %sq = "onnx.Mul"(%d, %d) : (tensor<?x3x4x5x8xf32>, tensor<?x3x4x5x8xf32>) -> tensor<?x3x4x5x8xf32>
+    %var = "onnx.ReduceMean"(%sq) {axes = [-1], keepdims = 1 : si64} : (tensor<?x3x4x5x8xf32>) -> tensor<?x3x4x5x1xf32>
+    %ve = "onnx.Add"(%var, %eps) : (tensor<?x3x4x5x1xf32>, tensor<f32>) -> tensor<?x3x4x5x1xf32>
+    %s = "onnx.Sqrt"(%ve) : (tensor<?x3x4x5x1xf32>) -> tensor<?x3x4x5x1xf32>
+    %n = "onnx.Div"(%d, %s) : (tensor<?x3x4x5x8xf32>, tensor<?x3x4x5x1xf32>) -> tensor<?x3x4x5x8xf32>
+    %y = "onnx.Mul"(%n, %g) : (tensor<?x3x4x5x8xf32>, tensor<8xf32>) -> tensor<?x3x4x5x8xf32>
+    return %y : tensor<?x3x4x5x8xf32>
+  }
+
+  // CHECK-LABEL: func.func @ln_rank5_dynamic
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[X:.*]]: tensor<?x3x4x5x8xf32>, %[[G:.*]]: tensor<8xf32>)
+  // CHECK-NOT: hip.reduce_mean
+  // CHECK: %[[D:.*]] = tensor.dim %[[X]], %{{.*}} : tensor<?x3x4x5x8xf32>
+  // CHECK: %[[E:.*]] = tensor.empty(%[[D]]) : tensor<?x3x4x5x8xf32>
+  // CHECK: %[[Y:.*]] = hip.layer_norm(%[[CTX]]) ins(%[[X]], %[[G]] : {{.*}}) outs(%[[E]] :
+  // CHECK: return %[[Y]]
+
+  // The runtime LayerNorm reads any 2-byte element as fp16: bf16 is not fused.
+  func.func @bf16_chain_kept(%x: tensor<2x8xbf16>, %g: tensor<8xbf16>) -> tensor<2x8xbf16> {
+    %eps = "onnx.Constant"() {value = dense<1.0E-5> : tensor<bf16>} : () -> tensor<bf16>
+    %mean = "onnx.ReduceMean"(%x) {axes = [1], keepdims = 1 : si64} : (tensor<2x8xbf16>) -> tensor<2x1xbf16>
+    %d = "onnx.Sub"(%x, %mean) : (tensor<2x8xbf16>, tensor<2x1xbf16>) -> tensor<2x8xbf16>
+    %sq = "onnx.Mul"(%d, %d) : (tensor<2x8xbf16>, tensor<2x8xbf16>) -> tensor<2x8xbf16>
+    %var = "onnx.ReduceMean"(%sq) {axes = [1], keepdims = 1 : si64} : (tensor<2x8xbf16>) -> tensor<2x1xbf16>
+    %ve = "onnx.Add"(%var, %eps) : (tensor<2x1xbf16>, tensor<bf16>) -> tensor<2x1xbf16>
+    %s = "onnx.Sqrt"(%ve) : (tensor<2x1xbf16>) -> tensor<2x1xbf16>
+    %n = "onnx.Div"(%d, %s) : (tensor<2x8xbf16>, tensor<2x1xbf16>) -> tensor<2x8xbf16>
+    %y = "onnx.Mul"(%n, %g) : (tensor<2x8xbf16>, tensor<8xbf16>) -> tensor<2x8xbf16>
+    return %y : tensor<2x8xbf16>
+  }
+
+  // CHECK-LABEL: func.func @bf16_chain_kept
+  // CHECK-NOT: hip.layer_norm
+  // CHECK: hip.reduce_mean
+  // CHECK: hip.sqrt
+  // CHECK: return
+
+  // Two independent ?x16 arguments may hold [2, 16] and [1, 16]; hip.add
+  // broadcasts, the fused kernel would not, so the add stays.
+  func.func @dynamic_residual_unproven(%a: tensor<?x16xf32>, %b: tensor<?x16xf32>, %g: tensor<16xf32>) -> tensor<?x16xf32> {
+    %x = "onnx.Add"(%a, %b) : (tensor<?x16xf32>, tensor<?x16xf32>) -> tensor<?x16xf32>
+    %y = "onnx.LayerNormalization"(%x, %g) {axis = -1 : si64, epsilon = 9.99999974E-6 : f32} : (tensor<?x16xf32>, tensor<16xf32>) -> tensor<?x16xf32>
+    return %y : tensor<?x16xf32>
+  }
+
+  // CHECK-LABEL: func.func @dynamic_residual_unproven
+  // CHECK-NOT: hip.skip_layer_norm
+  // CHECK: hip.add
+  // CHECK: hip.layer_norm
+  // CHECK: return
+
+  // The second operand is sized from the first, so their extents are equal.
+  func.func @dynamic_residual_proven(%a: tensor<?x16xf32>, %g: tensor<16xf32>) -> tensor<?x16xf32> {
+    %b = "onnx.Mul"(%a, %a) : (tensor<?x16xf32>, tensor<?x16xf32>) -> tensor<?x16xf32>
+    %x = "onnx.Add"(%a, %b) : (tensor<?x16xf32>, tensor<?x16xf32>) -> tensor<?x16xf32>
+    %y = "onnx.LayerNormalization"(%x, %g) {axis = -1 : si64, epsilon = 9.99999974E-6 : f32} : (tensor<?x16xf32>, tensor<16xf32>) -> tensor<?x16xf32>
+    return %y : tensor<?x16xf32>
+  }
+
+  // CHECK-LABEL: func.func @dynamic_residual_proven
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[A:.*]]: tensor<?x16xf32>, %[[G:.*]]: tensor<16xf32>)
+  // CHECK: %[[B:.*]] = hip.mul(%[[CTX]]) ins(%[[A]], %[[A]] :
+  // CHECK-NOT: hip.add
+  // CHECK: %[[Y:.*]] = hip.skip_layer_norm(%[[CTX]]) ins(%[[A]], %[[B]], %[[G]] :
+  // CHECK: return %[[Y]]
+
+  // A shape query on the mean survives the fusion and reads x's batch.
+  func.func @mean_shape_used(%x: tensor<?x8xf32>, %g: tensor<8xf32>) -> (tensor<?x8xf32>, tensor<2xi64>) {
+    %eps = "onnx.Constant"() {value = dense<1.0E-5> : tensor<f32>} : () -> tensor<f32>
+    %mean = "onnx.ReduceMean"(%x) {axes = [1], keepdims = 1 : si64} : (tensor<?x8xf32>) -> tensor<?x1xf32>
+    %d = "onnx.Sub"(%x, %mean) : (tensor<?x8xf32>, tensor<?x1xf32>) -> tensor<?x8xf32>
+    %sq = "onnx.Mul"(%d, %d) : (tensor<?x8xf32>, tensor<?x8xf32>) -> tensor<?x8xf32>
+    %var = "onnx.ReduceMean"(%sq) {axes = [1], keepdims = 1 : si64} : (tensor<?x8xf32>) -> tensor<?x1xf32>
+    %ve = "onnx.Add"(%var, %eps) : (tensor<?x1xf32>, tensor<f32>) -> tensor<?x1xf32>
+    %s = "onnx.Sqrt"(%ve) : (tensor<?x1xf32>) -> tensor<?x1xf32>
+    %n = "onnx.Div"(%d, %s) : (tensor<?x8xf32>, tensor<?x1xf32>) -> tensor<?x8xf32>
+    %y = "onnx.Mul"(%n, %g) : (tensor<?x8xf32>, tensor<8xf32>) -> tensor<?x8xf32>
+    %shape = "onnx.Shape"(%mean) : (tensor<?x1xf32>) -> tensor<2xi64>
+    return %y, %shape : tensor<?x8xf32>, tensor<2xi64>
+  }
+
+  // CHECK-LABEL: func.func @mean_shape_used
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[X:.*]]: tensor<?x8xf32>, %[[G:.*]]: tensor<8xf32>)
+  // CHECK-NOT: hip.reduce_mean
+  // CHECK: %[[Y:.*]] = hip.layer_norm(%[[CTX]])
+  // CHECK: %[[D:.*]] = tensor.dim %[[X]], %{{.*}} : tensor<?x8xf32>
+  // CHECK: %[[D64:.*]] = arith.index_cast %[[D]]
+  // CHECK: %[[S:.*]] = tensor.from_elements %[[D64]], %{{.*}} : tensor<2xi64>
+  // CHECK: return %[[Y]], %[[S]]
 }

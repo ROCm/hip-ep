@@ -1981,12 +1981,16 @@ def Hip_SkipLayerNormOp :
       input_skip_bias_sum = input + skip [+ bias]
       output = (sum - mean(sum)) / sqrt(var(sum) + epsilon) * gamma [+ beta]
 
-    The sum is rounded to the element type before it is normalized, so the
-    result matches the unfused Add followed by LayerNormalization.
+    The adds run in fp32 in that order, as ORT's SkipLayerNormalization
+    does, and the sum is rounded once to the element type before it is
+    normalized.
 
     Inputs:
       input  (required, T) - [..., hidden]
-      skip   (required, T) - same shape as input
+      skip   (required, T) - same type as input. At runtime it may hold
+                             only the trailing rows, e.g. [1, S, hidden]
+                             against [B, S, hidden]; each block of input
+                             rows then reads all of skip
       gamma  (required, T) - [hidden]
       beta   (optional, T) - [hidden]
       bias   (optional, T) - [hidden], added to the sum before normalizing

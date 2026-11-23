@@ -953,6 +953,84 @@ class TestSkipLayerNormSizes:
         actual, expected = model_runner.run_sample(model, [x, skip_input])
         compare_outputs(actual, expected, atol=4e-3, rtol=1e-3)
 
+    def test_skip_layer_norm_bias_order_fp32(self, model_runner):
+        """input + skip + bias in ORT's order: (1e8 + s) rounds to a multiple of
+        8 before the -1e8 bias cancels it, so the sum is not s."""
+        hidden = 16
+        shape = [1, 2, hidden]
+        tp = TensorProto.FLOAT
+        X = helper.make_tensor_value_info("X", tp, shape)
+        S = helper.make_tensor_value_info("S", tp, shape)
+        Y = helper.make_tensor_value_info("Y", tp, shape)
+        Y3 = helper.make_tensor_value_info("Y3", tp, shape)
+        rng = np.random.default_rng(1502)
+        inits = [
+            numpy_helper.from_array(
+                rng.uniform(0.5, 1.5, [hidden]).astype(np.float32), name="gamma"
+            ),
+            numpy_helper.from_array(
+                rng.uniform(-0.5, 0.5, [hidden]).astype(np.float32), name="beta"
+            ),
+            numpy_helper.from_array(np.full([hidden], -1e8, np.float32), name="bias"),
+        ]
+        node = helper.make_node(
+            "SkipLayerNormalization",
+            ["X", "S", "gamma", "beta", "bias"],
+            ["Y", "", "", "Y3"],
+            domain="com.microsoft",
+            epsilon=1e-5,
+        )
+        model = make_model_from_nodes(
+            [node],
+            [X, S],
+            [Y, Y3],
+            initializers=inits,
+            extra_opsets=[helper.make_opsetid("com.microsoft", 1)],
+        )
+        x = np.full(shape, 1e8, np.float32)
+        s = np.tile(np.arange(1, hidden + 1, dtype=np.float32), (1, 2, 1))
+        actual, expected = model_runner.run_sample(model, [x, s])
+        compare_outputs(actual, expected, atol=1e-5, rtol=1e-5)
+
+    @pytest.mark.parametrize("dtype", [np.float16, np.float32])
+    def test_skip_layer_norm_broadcast_skip_dynamic(self, model_runner, dtype):
+        """A [1, S, H] skip against a [B, S, H] input, both typed [?, ?, H]: the
+        fused op reads the skip once per batch."""
+        hidden = 768
+        tp = _TENSOR_PROTO[dtype]
+        X = helper.make_tensor_value_info("X", tp, ["batch", "seq", hidden])
+        S = helper.make_tensor_value_info("S", tp, ["skip_batch", "seq", hidden])
+        Y = helper.make_tensor_value_info("Y", tp, ["batch", "seq", hidden])
+        Y3 = helper.make_tensor_value_info("Y3", tp, ["batch", "seq", hidden])
+        rng = np.random.default_rng(1503)
+        inits = [
+            numpy_helper.from_array(
+                rng.uniform(0.5, 1.5, [hidden]).astype(dtype), name="gamma"
+            ),
+            numpy_helper.from_array(
+                rng.uniform(-0.5, 0.5, [hidden]).astype(dtype), name="beta"
+            ),
+        ]
+        node = helper.make_node(
+            "SkipLayerNormalization",
+            ["X", "S", "gamma", "beta"],
+            ["Y", "", "", "Y3"],
+            domain="com.microsoft",
+            epsilon=1e-5,
+        )
+        model = make_model_from_nodes(
+            [node],
+            [X, S],
+            [Y, Y3],
+            initializers=inits,
+            extra_opsets=[helper.make_opsetid("com.microsoft", 1)],
+        )
+        x = rng.uniform(-2, 2, [3, 5, hidden]).astype(dtype)
+        s = rng.uniform(-2, 2, [1, 5, hidden]).astype(dtype)
+        actual, expected = model_runner.run_sample(model, [x, s])
+        atol = 1e-5 if dtype == np.float32 else 4e-3
+        compare_outputs(actual, expected, atol=atol, rtol=1e-3)
+
 
 def _make_instance_norm_model(input_shape: list[int], dtype=np.float32):
     """Build an ONNX InstanceNormalization model (scale/B as initializers)."""
