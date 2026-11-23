@@ -18,10 +18,9 @@
 //    so the D2H is from a stable device pointer.
 //  - Pad usually appears few times per graph.
 //
-// If the EP ever wants to avoid the stall, the right fix is to detect the
-// "pads is a graph-time constant" case in the OnnxToHip conversion and
-// fold the values into a host-side attribute (the way Reshape's shape
-// tensor is folded today). That's outside this op's scope.
+// When the pads are compile-time constants, the compiler records them as
+// `static_lower_pads` on hip.pad and calls wrap_pad_static instead, which
+// takes the pads from host memory and does not stall.
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
@@ -65,10 +64,17 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
       },
       state);
 
-  (void)output_shape;
-  (void)output_rank;
+  // The pool represents an empty tensor with a null data pointer. Padding to
+  // an empty result is therefore a valid no-op, before validating pointers.
+  if (output_shape && output_rank >= 0) {
+    int64_t out_num_elements = 1;
+    for (int64_t d = 0; d < output_rank; ++d)
+      out_num_elements *= output_shape[d];
+    if (out_num_elements == 0)
+      return 0;
+  }
 
-  if (!state || !data || !pads || !output || !data_shape) {
+  if (!state || !pads || !output || !data_shape) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_pad: null required argument\n");
     return -1;
   }
@@ -80,6 +86,18 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
   if (data_rank != output_rank) {
     fprintf(stderr, "[REAL] wrap_pad: data_rank(%lld) != output_rank(%lld)\n",
             (long long)data_rank, (long long)output_rank);
+    return -1;
+  }
+  int64_t data_num_elements = 1;
+  for (int64_t d = 0; d < data_rank; ++d)
+    data_num_elements *= data_shape[d];
+  // A constant-mode pad of an empty input never dereferences `data`: every
+  // output coordinate lies outside the input and the kernel writes the
+  // constant value. Empty tensors intentionally have a null data pointer.
+  if (!data && !(data_num_elements == 0 && mode_id == 0)) {
+    RUNTIME_DEBUG_LOG(
+        "[REAL] wrap_pad: null data for %lld-element input (mode=%lld)\n",
+        (long long)data_num_elements, (long long)mode_id);
     return -1;
   }
   if (pads_num_elements <= 0) {
@@ -189,4 +207,51 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
                  output_shape, lower_pads.data(), static_cast<int>(data_rank),
                  hip_dtype, static_cast<int>(mode_id),
                  have_cv ? static_cast<const void *>(cv_buf) : nullptr);
+}
+
+int wrap_pad_static(RuntimeState *state, void *data, void *output,
+                    const int64_t *data_shape, const int64_t *output_shape,
+                    const int64_t *lower_pads, int64_t rank, int64_t data_type,
+                    int64_t mode_id, const void *constant_value) {
+  OP_PROFILE(
+      "pad",
+      [&] {
+        char b[64];
+        const char *mn = (mode_id == 0)   ? "const"
+                         : (mode_id == 1) ? "refl"
+                         : (mode_id == 2) ? "edge"
+                                          : "wrap";
+        snprintf(b, sizeof(b), "r%lld:%s:%s:static", (long long)rank,
+                 hipdnn_ep_datatype_name(data_type), mn);
+        return std::string(b);
+      },
+      state);
+
+  if (!state || !data_shape || !output_shape || !lower_pads || rank <= 0) {
+    fprintf(stderr, "[REAL] wrap_pad_static: invalid arguments\n");
+    return -1;
+  }
+  int64_t out_num_elements = 1, data_num_elements = 1;
+  for (int64_t d = 0; d < rank; ++d) {
+    out_num_elements *= output_shape[d];
+    data_num_elements *= data_shape[d];
+  }
+  if (out_num_elements == 0)
+    return 0;
+  if (!output || (!data && !(data_num_elements == 0 && mode_id == 0))) {
+    RUNTIME_DEBUG_LOG("[REAL] wrap_pad_static: null data/output pointer\n");
+    return -1;
+  }
+  int hip_dtype = pad_hipdnn_to_hip_dtype(data_type);
+  if (hip_dtype < 0) {
+    fprintf(stderr,
+            "[REAL] wrap_pad_static: unsupported data_type=%s(%lld) "
+            "(supported: f16, f32, i32, i64)\n",
+            hipdnn_ep_datatype_name(data_type), (long long)data_type);
+    return -1;
+  }
+  return hip_pad(hipdnn_ep_state_get_stream(state), data, output, data_shape,
+                 output_shape, lower_pads, static_cast<int>(rank), hip_dtype,
+                 static_cast<int>(mode_id),
+                 mode_id == 0 ? constant_value : nullptr);
 }

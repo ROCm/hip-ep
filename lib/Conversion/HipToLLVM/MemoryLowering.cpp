@@ -696,8 +696,25 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
     if (!srcTy || !dstTy)
       return rewriter.notifyMatchFailure(op, "expected ranked memrefs");
 
-    if (srcTy.getShape() != dstTy.getShape())
-      return rewriter.notifyMatchFailure(op, "copy shape mismatch");
+    // memref.copy requires equal runtime extents, so a dimension that is
+    // dynamic on one side and static on the other has the static extent.
+    // Refining both types to the merged shape keeps copies such as
+    // memref<?x100x91xf32> -> memref<1x100x91xf32> on the device path; the
+    // default lowering would emit a host memcpy on device pointers.
+    if (srcTy.getShape() != dstTy.getShape()) {
+      if (srcTy.getRank() != dstTy.getRank())
+        return rewriter.notifyMatchFailure(op, "copy rank mismatch");
+      SmallVector<int64_t> merged;
+      for (auto [s, d] : llvm::zip_equal(srcTy.getShape(), dstTy.getShape())) {
+        if (!ShapedType::isDynamic(s) && !ShapedType::isDynamic(d) && s != d)
+          return rewriter.notifyMatchFailure(op, "copy shape mismatch");
+        merged.push_back(ShapedType::isDynamic(s) ? d : s);
+      }
+      srcTy = MemRefType::get(merged, srcTy.getElementType(), srcTy.getLayout(),
+                              srcTy.getMemorySpace());
+      dstTy = MemRefType::get(merged, dstTy.getElementType(), dstTy.getLayout(),
+                              dstTy.getMemorySpace());
+    }
 
     FailureOr<int64_t> elemBytesOr = tryElemSizeBytes(srcTy.getElementType());
     if (failed(elemBytesOr))
@@ -943,12 +960,54 @@ bool hasFlatRuntimeCopyLowering(MemRefType source, MemRefType target) {
          isContiguousRowMajor(target.getShape(), *targetStrides);
 }
 
+// hip.packed_view shifts the base aligned pointer by element_offset and
+// publishes an identity descriptor, so a bare-pointer lowering addresses the
+// span. The source offset is added too: a pool view keeps it at zero and
+// carries its shift in the aligned pointer, while a strided source keeps the
+// shift in the descriptor.
+struct PackedViewOpLowering : public ConvertOpToLLVMPattern<PackedViewOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(PackedViewOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    auto resultType = cast<MemRefType>(op.getResult().getType());
+    if (!resultType.getLayout().isIdentity())
+      return rewriter.notifyMatchFailure(op, "result is not identity");
+
+    Type llvmElemTy = typeConverter->convertType(resultType.getElementType());
+    if (!llvmElemTy)
+      return rewriter.notifyMatchFailure(op, "element type did not convert");
+
+    MemRefDescriptor source(adaptor.getSource());
+    Value aligned = source.alignedPtr(rewriter, loc);
+    Value allocated = source.allocatedPtr(rewriter, loc);
+    Value baseOffset = source.offset(rewriter, loc);
+    Value shift = LLVM::AddOp::create(rewriter, loc, baseOffset,
+                                      adaptor.getElementOffset());
+    Value dataPtr = LLVM::GEPOp::create(rewriter, loc, aligned.getType(),
+                                        llvmElemTy, aligned, shift)
+                        .getResult();
+
+    SmallVector<Value, 4> sizes;
+    SmallVector<Value, 4> strides;
+    Value sizeBytes;
+    getMemRefDescriptorSizes(loc, resultType, /*dynamicSizes=*/{}, rewriter,
+                             sizes, strides, sizeBytes, /*sizeInBytes=*/false);
+    MemRefDescriptor desc = createMemRefDescriptor(
+        loc, resultType, allocated, dataPtr, sizes, strides, rewriter);
+    rewriter.replaceOp(op, {desc});
+    return success();
+  }
+};
+
 void populateMemoryLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns) {
   patterns.add<AllocOpLowering, FreeOpLowering, GetPoolOpLowering,
                GetHostScratchOpLowering, AllocOutputOpLowering,
                GetConstantOpLowering, MemRefAllocOpLowering,
-               MemRefDeallocOpLowering>(converter);
+               MemRefDeallocOpLowering, PackedViewOpLowering>(converter);
   patterns.add<MemRefCopyOpLowering>(converter);
 }
 

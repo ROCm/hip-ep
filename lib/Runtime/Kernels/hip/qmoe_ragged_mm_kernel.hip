@@ -36,7 +36,9 @@ constexpr int kKTile = 32;
 constexpr int kThreadsPerBlock = 128;
 // HIP reports WGPs in multiProcessorCount on RDNA; each WGP contains two CUs.
 constexpr int kComputeUnitsPerWgp = 2;
-constexpr int kMaxTopK = 16;
+constexpr int kMaxTopK = 32;
+static_assert(kMaxTopK <= 32, "qmoe_reduce_sorted_pairs_kernel tracks used "
+                              "slots in a uint32_t mask");
 constexpr int kGemvTileN = 16;
 constexpr int64_t kTwoWindowMinRows = 512;
 
@@ -742,55 +744,112 @@ hipError_t launch_ragged_matmul_nbits(
   return hipGetLastError();
 }
 
-__global__ void qmoe_reduce_sorted_pairs_kernel(
+constexpr int kReduceBlock = 128;
+// Rows a reduce thread holds in registers at once. Holding all kMaxTopK rows
+// spills at kVec = 8.
+constexpr int kReduceRowBatch = 16;
+
+template <int kVec>
+struct alignas(2 * kVec) HalfVec {
+  __half h[kVec];
+};
+
+// One block per token. Contributions are accumulated in ascending expert-id
+// order (ties to the lower slot; INT32_MAX ids are skipped), with an fp16
+// round after every contribution, to match the host loop this replaced. The
+// order is resolved once per token into LDS; each thread then sums kVec
+// contiguous columns, issuing the row loads of each batch of up to
+// kReduceRowBatch rows before its first add.
+template <int kVec>
+__global__ void __launch_bounds__(kReduceBlock) qmoe_reduce_sorted_pairs_kernel(
     const __half *__restrict__ sorted_expert_output,
     const int32_t *__restrict__ pair_to_sorted,
     const int32_t *__restrict__ expert_indices,
     const __half *__restrict__ expert_weights,
+    const float *__restrict__ row_scale,
+    const __half *__restrict__ fc2_bias,
     __half *__restrict__ output,
     int64_t num_tokens,
     int64_t width,
     int k) {
-  const int64_t idx =
-      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (idx >= num_tokens * width) {
-    return;
-  }
+  __shared__ int64_t s_row_base[kMaxTopK];
+  __shared__ float s_weight[kMaxTopK];
+  __shared__ float s_scale[kMaxTopK];
+  __shared__ int64_t s_bias_base[kMaxTopK];
+  __shared__ int s_count;
 
-  const int64_t token = idx / width;
-  const int64_t col = idx - token * width;
-  uint32_t used = 0;
-  __half accum = __float2half(0.0f);
-
-  // Match the old host loop: contributions are accumulated in ascending
-  // expert-id order, with an fp16 store/round after every contribution.
-  for (int rank = 0; rank < k; ++rank) {
-    int best_slot = -1;
-    int32_t best_expert = INT32_MAX;
+  const int64_t token = blockIdx.x;
+  const int tid = static_cast<int>(threadIdx.x);
+  const int32_t *ids = expert_indices + token * k;
+  if (tid < k) {
+    const int32_t expert = ids[tid];
+    int rank = 0;
     for (int slot = 0; slot < k; ++slot) {
-      if ((used & (1u << slot)) != 0) {
-        continue;
-      }
-      const int32_t expert = expert_indices[token * k + slot];
-      if (expert < best_expert) {
-        best_expert = expert;
-        best_slot = slot;
-      }
+      const int32_t other = ids[slot];
+      rank += other < expert || (other == expert && slot < tid);
     }
-    if (best_slot < 0) {
-      break;
+    if (expert != INT32_MAX) {
+      const int32_t sorted_row = pair_to_sorted[token * k + tid];
+      s_row_base[rank] = static_cast<int64_t>(sorted_row) * width;
+      s_weight[rank] = static_cast<float>(expert_weights[token * k + tid]);
+      s_scale[rank] = row_scale ? row_scale[sorted_row] : 1.0f;
+      s_bias_base[rank] = static_cast<int64_t>(expert) * width;
     }
-    used |= 1u << best_slot;
-    const int64_t pair = token * k + best_slot;
-    const int32_t sorted_row = pair_to_sorted[pair];
-    const float old_value = static_cast<float>(accum);
-    const float weight = static_cast<float>(expert_weights[pair]);
-    const float value =
-        static_cast<float>(sorted_expert_output[
-            static_cast<int64_t>(sorted_row) * width + col]);
-    accum = __float2half(old_value + weight * value);
   }
-  output[idx] = accum;
+  if (tid == 0) {
+    int valid = 0;
+    for (int slot = 0; slot < k; ++slot) valid += ids[slot] != INT32_MAX;
+    s_count = valid;
+  }
+  __syncthreads();
+
+  using Vec = HalfVec<kVec>;
+  const int n = s_count;
+  const int64_t vec_cols = width / kVec;
+  __half *out_row = output + token * width;
+  for (int64_t c = tid; c < vec_cols; c += kReduceBlock) {
+    Vec acc;
+#pragma unroll
+    for (int j = 0; j < kVec; ++j) acc.h[j] = __float2half(0.0f);
+    for (int r0 = 0; r0 < n; r0 += kReduceRowBatch) {
+      Vec v[kReduceRowBatch];
+#pragma unroll
+      for (int r = 0; r < kReduceRowBatch; ++r) {
+        if (r0 + r < n)
+          v[r] = *reinterpret_cast<const Vec *>(sorted_expert_output +
+                                                s_row_base[r0 + r] + c * kVec);
+      }
+#pragma unroll
+      for (int r = 0; r < kReduceRowBatch; ++r) {
+        // continue, not break: an early exit stops the full unroll and moves v
+        // to scratch memory.
+        if (r0 + r >= n) continue;
+        const float weight = s_weight[r0 + r];
+        const float s = s_scale[r0 + r];
+        float value[kVec];
+#pragma unroll
+        for (int j = 0; j < kVec; ++j) value[j] = static_cast<float>(v[r].h[j]);
+        // The fc2 GEMM saw act / s and no bias, so the true value is s * v + b.
+        // Adding b after the rescale keeps a large bias from swamping v's fp16
+        // mantissa. s is a power of two and uniform across the block.
+        if (s != 1.0f) {
+#pragma unroll
+          for (int j = 0; j < kVec; ++j) value[j] *= s;
+        }
+        if (fc2_bias) {
+          const Vec b = *reinterpret_cast<const Vec *>(
+              fc2_bias + s_bias_base[r0 + r] + c * kVec);
+#pragma unroll
+          for (int j = 0; j < kVec; ++j) value[j] += static_cast<float>(b.h[j]);
+        }
+#pragma unroll
+        for (int j = 0; j < kVec; ++j)
+          acc.h[j] =
+              __float2half(static_cast<float>(acc.h[j]) + weight * value[j]);
+      }
+    }
+    *reinterpret_cast<Vec *>(out_row + c * kVec) = acc;
+  }
 }
 
 } // namespace
@@ -936,8 +995,9 @@ extern "C" int hip_qmoe_ragged_matmul_nbits(
 extern "C" int hip_qmoe_reduce_sorted_pairs(
     void *stream, const void *sorted_expert_output,
     const void *pair_to_sorted, const void *expert_indices,
-    const void *expert_weights, void *output, int64_t num_tokens,
-    int64_t width, int64_t k, int64_t element_size_bytes) {
+    const void *expert_weights, const void *row_scale, const void *fc2_bias,
+    void *output, int64_t num_tokens, int64_t width, int64_t k,
+    int64_t element_size_bytes) {
   if (!stream || !sorted_expert_output || !pair_to_sorted ||
       !expert_indices || !expert_weights || !output) {
     fprintf(stderr,
@@ -953,17 +1013,37 @@ extern "C" int hip_qmoe_reduce_sorted_pairs(
     return -1;
   }
 
-  constexpr int block = 256;
-  const int64_t elems = num_tokens * width;
-  const int grid = static_cast<int>((elems + block - 1) / block);
+  // 16-byte row loads need 8-column rows and 16-byte aligned base pointers.
+  const bool vec8 =
+      width % 8 == 0 &&
+      ((reinterpret_cast<uintptr_t>(sorted_expert_output) |
+        reinterpret_cast<uintptr_t>(output) |
+        reinterpret_cast<uintptr_t>(fc2_bias)) &
+       15) == 0;
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
-  hipLaunchKernelGGL(
-      qmoe_reduce_sorted_pairs_kernel, dim3(grid), dim3(block), 0, hip_stream,
-      static_cast<const __half *>(sorted_expert_output),
-      static_cast<const int32_t *>(pair_to_sorted),
-      static_cast<const int32_t *>(expert_indices),
-      static_cast<const __half *>(expert_weights),
-      static_cast<__half *>(output), num_tokens, width, static_cast<int>(k));
+  const dim3 grid(static_cast<unsigned>(num_tokens));
+  (void)hipGetLastError();
+  if (vec8) {
+    hipLaunchKernelGGL(
+        qmoe_reduce_sorted_pairs_kernel<8>, grid, dim3(kReduceBlock), 0,
+        hip_stream, static_cast<const __half *>(sorted_expert_output),
+        static_cast<const int32_t *>(pair_to_sorted),
+        static_cast<const int32_t *>(expert_indices),
+        static_cast<const __half *>(expert_weights),
+        static_cast<const float *>(row_scale),
+        static_cast<const __half *>(fc2_bias), static_cast<__half *>(output),
+        num_tokens, width, static_cast<int>(k));
+  } else {
+    hipLaunchKernelGGL(
+        qmoe_reduce_sorted_pairs_kernel<1>, grid, dim3(kReduceBlock), 0,
+        hip_stream, static_cast<const __half *>(sorted_expert_output),
+        static_cast<const int32_t *>(pair_to_sorted),
+        static_cast<const int32_t *>(expert_indices),
+        static_cast<const __half *>(expert_weights),
+        static_cast<const float *>(row_scale),
+        static_cast<const __half *>(fc2_bias), static_cast<__half *>(output),
+        num_tokens, width, static_cast<int>(k));
+  }
 
   hipError_t err = hipGetLastError();
   if (err != hipSuccess) {

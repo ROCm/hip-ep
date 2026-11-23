@@ -254,11 +254,11 @@ cp "$LOCAL_DIR/bin/onnxruntime_providers_shared.dll" "$ORT_HOME/lib/"
 cd ..  # Go to workspace directory (sibling of hip-ep)
 # Clone with full history: `git apply --3way` below needs the blob each PR was
 # prepared from, which lives at that PR's merge base.
-git clone -b v0.17.0 https://github.com/microsoft/onnxruntime-genai.git
+git clone -b v0.19.0 https://github.com/microsoft/onnxruntime-genai.git
 cd onnxruntime-genai
 git submodule update --init --recursive
 
-for pr in 2685 2691; do
+for pr in 2875; do
   curl -fsSL "https://github.com/microsoft/onnxruntime-genai/pull/${pr}.diff" \
     -o "/tmp/oga-${pr}.diff"
   git apply --whitespace=nowarn --3way --exclude='test/*' "/tmp/oga-${pr}.diff"
@@ -374,7 +374,7 @@ source, `benchmark_e2e.py` samples one that can exceed `max_length`, so
 
 `benchmark_e2e.py` runs with the default `-e follow_config`, so the model's
 `genai_config.json` selects the EP via `provider_options`. With the upstream OGA
-(v0.17.0, DeviceType AMDGPU) this is the AMD GPU umbrella
+(v0.19.0, DeviceType AMDGPU) this is the AMD GPU umbrella
 (`provider_options [{ "AMDGPU": {"profile": "hip"} }]`), which loads
 `amdgpu-ep.dll` and needs the umbrella DLLs colocated (see
 `.github/workflows/windows-build-real.yml`); the default wheel ships only the hipgpu
@@ -499,7 +499,7 @@ present there too.
 
 The EP is selected by the model's `genai_config.json` `provider_options` and
 auto-discovered next to `onnxruntime-genai.dll` -- do NOT pass `--ep_library`
-(upstream `model_benchmark` rejects it). With the upstream OGA (v0.17.0) the
+(upstream `model_benchmark` rejects it). With the upstream OGA (v0.19.0) the
 EP is the AMD GPU umbrella (`provider_options [{ "AMDGPU":
 {"profile": "hip"} }]`), so `amdgpu-ep.dll` must sit next to the OGA DLLs (see
 `.github/workflows/windows-build-real.yml`).

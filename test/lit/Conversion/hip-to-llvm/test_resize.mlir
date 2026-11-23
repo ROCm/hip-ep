@@ -68,6 +68,42 @@ module {
     return
   }
 
+  // Test 4b: dynamic input H/W resized to a static output (shape inference
+  // pinned the output from a constant sizes vector).
+  func.func @resize_dynamic_in_static_out_f32(
+      %ctx: !hip.context,
+      %x: memref<1x3x?x?xf32, 1>,
+      %y: memref<1x3x300x300xf32, 1>) {
+    // CHECK-LABEL: llvm.func @resize_dynamic_in_static_out_f32
+    hip.resize(%ctx) ins(%x : memref<1x3x?x?xf32, 1>)
+                     outs(%y : memref<1x3x300x300xf32, 1>)
+                     {mode = 1, coord_transform = 1, nearest_mode = 2}
+    // CHECK-NOT: hip.resize
+    // CHECK: llvm.call @wrap_resize
+    return
+  }
+
+  // Test 4c: dynamic channel resized to a different static extent.
+  func.func @resize_dynamic_channel_f32(
+      %ctx: !hip.context,
+      %x: memref<1x?x8x8xf32, 1>,
+      %y: memref<1x3x8x8xf32, 1>) {
+    // CHECK-LABEL: llvm.func @resize_dynamic_channel_f32
+    hip.resize(%ctx) ins(%x : memref<1x?x8x8xf32, 1>)
+                     outs(%y : memref<1x3x8x8xf32, 1>)
+                     {mode = 1, coord_transform = 1, nearest_mode = 2}
+    // CHECK-NOT: hip.resize
+    // The dynamic input channel is the first window input and the static
+    // 3-channel extent is the first window output. spatial_rank is the second
+    // constant 3: the first is that output extent. A copied channel would pass
+    // the input extent as prefix C instead.
+    // CHECK: %[[IN_CHANNEL:.*]] = llvm.extractvalue %{{.*}}[3, 1]
+    // CHECK: %[[OUT_CHANNEL:.*]] = llvm.mlir.constant(3 : i64) : i64
+    // CHECK: %[[SPATIAL_RANK:.*]] = llvm.mlir.constant(3 : i64) : i64
+    // CHECK: llvm.call @wrap_resize(%{{[^,]*}}, %{{[^,]*}}, %{{[^,]*}}, %{{[^,]*}}, %[[SPATIAL_RANK]], %{{[^,]*}}, %{{[^,]*}}, %[[IN_CHANNEL]], %{{[^,]*}}, %{{[^,]*}}, %[[OUT_CHANNEL]],
+    return
+  }
+
   // Test 5: channels-last. Lowered as N, C=1, spatial_rank=3, window (H, W, C).
   // The channel extent is unchanged, so that window axis is copied.
   func.func @resize_nhwc_static_f32(
@@ -161,6 +197,26 @@ module {
     // CHECK-DAG: llvm.mlir.constant(1.100000e+00 : f64) : f64
     // CHECK-DAG: llvm.mlir.constant(1.500000e+00 : f64) : f64
     // CHECK: llvm.call @wrap_resize_scaled
+    return
+  }
+
+  // Test 10: runtime window scales are passed through in window order; the
+  // unused third slot is 0.
+  func.func @resize_runtime_scales_f32(
+      %ctx: !hip.context, %sh: f64, %sw: f64,
+      %x: memref<1x256x?x?xf32, 1>,
+      %y: memref<1x256x?x?xf32, 1>) {
+    // CHECK-LABEL: llvm.func @resize_runtime_scales_f32
+    // CHECK-SAME: %[[SH:[^:]+]]: f64, %[[SW:[^:]+]]: f64
+    hip.resize(%ctx) ins(%x : memref<1x256x?x?xf32, 1>)
+                     scales(%sh, %sw : f64, f64)
+                     outs(%y : memref<1x256x?x?xf32, 1>)
+                     {mode = 0, coord_transform = 0, nearest_mode = 0,
+                      prefix_count = 2, spatial_rank = 2}
+    // CHECK: %[[ZERO:.*]] = llvm.mlir.constant(0.000000e+00 : f64) : f64
+    // CHECK: llvm.call @wrap_resize_scaled(
+    // CHECK-SAME: %[[SH]], %[[SW]], %[[ZERO]])
+    // CHECK-NOT: hip.resize
     return
   }
 }
