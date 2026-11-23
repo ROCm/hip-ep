@@ -556,6 +556,25 @@ class TestLayerNormalization:
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1e-5, rtol=1e-5)
 
+    @pytest.mark.parametrize("hidden", [2, 64, 1152])
+    def test_layer_norm_large_mean_fp32(self, model_runner, hidden):
+        """Rows whose mean is large next to their spread.
+
+        A one-pass E[x^2] - E[x]^2 variance cancels here: x = [8192, 8193]
+        gives 0 instead of 0.25 in fp32 and outputs of about +-158 instead of
+        +-1. hidden=2 is exactly that row. One fp32 ulp at 8192 is ~1e-3, so
+        the CPU reference itself differs by a few 1e-3 after dividing by the
+        ~0.3 stddev.
+        """
+        input_shape = [3, hidden]
+        model = _make_layer_norm_model(input_shape, np.float32, with_bias=True)
+        rng = np.random.default_rng(1106)
+        x = (8192.0 + rng.uniform(-1, 1, input_shape)).astype(np.float32)
+        if hidden == 2:
+            x[0] = [8192.0, 8193.0]
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=5e-3, rtol=1e-3)
+
     @pytest.mark.parametrize("num_patches", [256, 1024])
     def test_layer_norm_qwen35b_vision_shape(self, model_runner, num_patches):
         """LN exactly as it appears 55x in Qwen3.5-35B vision.onnx:
