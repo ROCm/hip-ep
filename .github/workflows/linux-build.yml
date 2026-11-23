@@ -22,7 +22,7 @@ concurrency:
 env:
   # Pins (kept in lockstep with cmake/deps.txt).
   # LLVM/MLIR/LLD are cloned from deps.txt llvm_project. The hash column is a
-  # branch name, so the llvm-install cache key is that branch's current tip.
+  # full commit, and the llvm-install cache key is that commit.
   # rocmlirTriton's vendored external/llvm-project is not built.
   ONNXRUNTIME_VERSION: "1.31.0"
   # Space-separated microsoft/onnxruntime PR numbers `git apply`-ed on top of
@@ -41,8 +41,15 @@ env:
   SCCACHE_CACHE_SIZE: "200M"
 
 jobs:
+  build_required:
+    uses: ./.github/workflows/build-required.yml
+
   build-linux:
-    # No draft-PR gate: the cache-priming strategy needs every PR push.
+    needs: build_required
+    if: needs.build_required.outputs.run == 'true'
+    # No draft-PR gate: cache priming needs every code change, including
+    # drafts. build-required.yml skips this job for a documentation or
+    # Jekyll diff on a pull request or merge group. Pushes always build.
     runs-on: ubuntu-latest
     steps:
       # MorphiZen is vendored in-tree as a git subtree under morphizen,
@@ -135,20 +142,22 @@ jobs:
       # -----------------------------------------------------------------------
       # LLVM/MLIR/LLD/Clang from source -> llvm-install (cached). Caching is a CI
       # concern, so the prefix build lives here (not in build.py). Source is
-      # deps.txt llvm_project (a branch; the cache key is its current tip).
+      # deps.txt llvm_project (a pinned commit, which is also the cache key).
       # Recipe matches cmake/deps.cmake's from-source fallback: clang;mlir;lld,
-      # X86 only, RTTI on, zlib/zstd off, INSTALL_UTILS on.
+      # X86 only, RTTI on, zlib/zstd off, INSTALL_UTILS on. The install holds
+      # only LLVM_DISTRIBUTION_COMPONENTS, which also scopes the exported CMake
+      # targets so find_package does not expect the omitted tools.
       # -----------------------------------------------------------------------
-      - name: Resolve LLVM branch tip
+      - name: Resolve LLVM commit
         id: llvm
         run: |
           set -euo pipefail
           LINE=$(grep -E '^llvm_project;' cmake/deps.txt)
           LLVM_URL=$(echo "$LINE" | cut -d';' -f2)
           LLVM_REF=$(echo "$LINE" | cut -d';' -f3)
-          LLVM_COMMIT=$(git ls-remote "$LLVM_URL" "refs/heads/$LLVM_REF" | awk '{print $1}')
-          if [ -z "$LLVM_COMMIT" ]; then
-            echo "ERROR: no tip for $LLVM_URL refs/heads/$LLVM_REF" >&2
+          LLVM_COMMIT="$LLVM_REF"
+          if ! [[ "$LLVM_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "ERROR: deps.txt llvm_project must pin a full commit, got '$LLVM_REF'" >&2
             exit 1
           fi
           echo "url=$LLVM_URL" >> "$GITHUB_OUTPUT"
@@ -160,15 +169,15 @@ jobs:
         uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/llvm-install
-          # Keyed on the resolved branch tip: a protobuf/ORT bump must not
-          # evict the multi-hour LLVM cache, and a moved tip must.
-          key: linux-llvm-${{ steps.llvm.outputs.commit }}
+          # Keyed on the pinned commit: a protobuf/ORT bump must not
+          # evict the multi-hour LLVM cache, and an LLVM bump must.
+          key: linux-llvm-dist-${{ steps.llvm.outputs.commit }}
 
       - name: Build LLVM/MLIR/LLD from source
         if: steps.cache-llvm.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          # Shallow clone of the branch tip. The cmake project lives at llvm/.
+          # Shallow fetch of the pinned commit. The cmake project lives at llvm/.
           SRC="${{ runner.workspace }}/llvm-project"
           git init "$SRC"
           git -C "$SRC" remote add origin "${{ steps.llvm.outputs.url }}"
@@ -189,12 +198,16 @@ jobs:
             -DLLVM_BUILD_TOOLS=ON \
             -DLLVM_INSTALL_UTILS=ON \
             -DLLVM_PARALLEL_LINK_JOBS=4 \
+            -DLLVM_TOOL_LTO_BUILD=OFF \
+            -DLLVM_TOOL_REMARKS_SHLIB_BUILD=OFF \
+            -DLLVM_DISTRIBUTION_COMPONENTS="clang;clang-resource-headers;llvm-link;llvm-config;llvm-tblgen;mlir-tblgen;mlir-pdll;mlir-linalg-ods-yaml-gen;mlir-opt;lld;FileCheck;not;count;split-file;llvm-headers;llvm-libraries;cmake-exports;mlir-headers;mlir-libraries;mlir-cmake-exports;lld-headers;lld-libraries;lld-cmake-exports" \
             -DCMAKE_CXX_VISIBILITY_PRESET=hidden \
             -DCMAKE_C_VISIBILITY_PRESET=hidden \
             -DCMAKE_VISIBILITY_INLINES_HIDDEN=ON \
             -DCMAKE_C_COMPILER_LAUNCHER=sccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
-          cmake --build "${{ runner.workspace }}/build-llvm" --target install
+          cmake --build "${{ runner.workspace }}/build-llvm" --target install-distribution
+          du -sh "${{ runner.workspace }}"/llvm-install/{bin,include,lib}
           rm -rf "$SRC" "${{ runner.workspace }}/build-llvm"
 
       # -----------------------------------------------------------------------

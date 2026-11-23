@@ -483,6 +483,20 @@ int wrap_matmul_i32(RuntimeState *state, const void *A, const void *B,
   return 0;
 }
 
+// Pre-fill for a hip.rocmlir argument. The mock has no device buffer to fill.
+int wrap_rocmlir_prefill(RuntimeState *state, void *buffer, int64_t count,
+                         int64_t element_bytes, uint64_t pattern) {
+  (void)buffer;
+  (void)pattern;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_rocmlir_prefill\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_rocmlir_prefill(count=%lld, element_bytes=%lld)\n",
+             (long long)count, (long long)element_bytes);
+  return 0;
+}
+
 // RocMLIR dispatch (hip.rocmlir). Empty for now: the generated IR builds the
 // kernargs buffer and passes the embedded GPU binary + launch geometry, but
 // this wrapper does not yet load the module or launch the kernel.
@@ -607,6 +621,48 @@ int wrap_group_query_attention_ring_f16(
     int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
     int64_t seq_len_new_kv, int32_t has_host_length, int32_t host_length_value,
     void *key_bias, int64_t key_bias_batch, int64_t key_bias_len) {
+  return wrap_group_query_attention_host_length(
+      state, op_state_slot, query, key, value, past_key, past_value, seqlens_k,
+      total_seq_len, cos_cache, sin_cache, position_ids, attention_bias,
+      head_sink, k_scale, v_scale, output, present_key, present_value,
+      output_qk, num_heads, kv_num_heads, scale, do_rotary, rotary_interleaved,
+      softcap, local_window_size, smooth_softmax, qk_output, k_quant_type,
+      v_quant_type, kv_cache_bit_width, no_causal, batch_size, seq_len_q,
+      seq_len_kv, past_buf_seq, head_dim, element_size_bytes, attn_bias_batch,
+      attn_bias_num_heads, kv_bnsd, seq_len_new_kv, has_host_length,
+      host_length_value, key_bias, key_bias_batch, key_bias_len);
+}
+
+int wrap_group_query_attention_v5(
+    RuntimeState *state, int op_state_slot,
+    // Inputs 1-7 (core GQA)
+    void *query, void *key, void *value, void *past_key, void *past_value,
+    void *seqlens_k, void *total_seq_len,
+    // Inputs 8-10 (RoPE)
+    void *cos_cache, void *sin_cache, void *position_ids,
+    // Inputs 11-14 (advanced features)
+    void *attention_bias, void *head_sink, void *k_scale, void *v_scale,
+    // Outputs
+    void *output, void *present_key, void *present_value, void *output_qk,
+    // Attributes (13)
+    int64_t num_heads, int64_t kv_num_heads, float scale, int64_t do_rotary,
+    int64_t rotary_interleaved, float softcap, int64_t local_window_size,
+    int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
+    int64_t v_quant_type, int64_t kv_cache_bit_width, int32_t no_causal,
+    // Shape values (6)
+    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
+    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
+    int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
+    int64_t seq_len_new_kv, int32_t has_host_length, int32_t host_length_value,
+    void *key_bias, int64_t key_bias_batch, int64_t key_bias_len,
+    int64_t past_key_width, int64_t past_value_width, int64_t present_key_width,
+    int64_t present_value_width, int32_t fp16_tensors) {
+  (void)fp16_tensors;
+  (void)past_key_width;
+  (void)past_value_width;
+  (void)present_key_width;
+  (void)present_value_width;
+  // The mock records dispatch only; codec execution requires the real runtime.
   return wrap_group_query_attention_host_length(
       state, op_state_slot, query, key, value, past_key, past_value, seqlens_k,
       total_seq_len, cos_cache, sin_cache, position_ids, attention_bias,
@@ -1412,6 +1468,31 @@ int wrap_grid_sample(RuntimeState *state, void *input, void *grid, void *output,
              (long long)padding_mode, (long long)align_corners);
   (void)input;
   (void)grid;
+  (void)output;
+  return 0;
+}
+
+int wrap_roi_align(RuntimeState *state, void *input, void *rois,
+                   void *batch_indices, void *output, int64_t data_type,
+                   int64_t n, int64_t c, int64_t in_h, int64_t in_w,
+                   int64_t num_rois, int64_t out_h, int64_t out_w,
+                   int64_t sampling_ratio, float spatial_scale,
+                   int64_t half_pixel, int64_t mode) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_roi_align\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_roi_align(dtype=%s(%lld), N=%lld, C=%lld, "
+             "in=%lldx%lld, rois=%lld, out=%lldx%lld, sampling_ratio=%lld, "
+             "spatial_scale=%f, half_pixel=%lld, mode=%lld)\n",
+             hipdnn_ep_datatype_name(data_type), (long long)data_type,
+             (long long)n, (long long)c, (long long)in_h, (long long)in_w,
+             (long long)num_rois, (long long)out_h, (long long)out_w,
+             (long long)sampling_ratio, (double)spatial_scale,
+             (long long)half_pixel, (long long)mode);
+  (void)input;
+  (void)rois;
+  (void)batch_indices;
   (void)output;
   return 0;
 }
@@ -2884,6 +2965,22 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
   return 0;
 }
 
+int wrap_pad_static(RuntimeState *state, void *data, void *output,
+                    const int64_t *data_shape, const int64_t *output_shape,
+                    const int64_t *lower_pads, int64_t rank, int64_t data_type,
+                    int64_t mode_id, const void *constant_value) {
+  (void)constant_value;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_pad_static\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_pad_static(rank=%lld, data_type=%s(%lld), "
+             "mode=%lld)\n",
+             (long long)rank, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type, (long long)mode_id);
+  return 0;
+}
+
 int wrap_tile(RuntimeState *state, void *input, void *repeats, void *output,
               const int64_t *input_shape, int64_t input_rank,
               const int64_t *output_shape, int64_t output_rank,
@@ -2994,6 +3091,26 @@ int wrap_slice_typed(RuntimeState *state, void *data, void *starts, void *ends,
              (long long)starts_num_elements, (long long)axes_num_elements,
              axes ? "yes" : "null", (long long)steps_num_elements,
              steps ? "yes" : "null", hipdnn_ep_datatype_name(data_type),
+             (long long)data_type);
+  return 0;
+}
+
+int wrap_slice_static(RuntimeState *state, void *data, void *output,
+                      const int64_t *data_shape, const int64_t *output_shape,
+                      const int64_t *starts, const int64_t *steps, int64_t rank,
+                      int64_t data_type) {
+  (void)data;
+  (void)output;
+  (void)data_shape;
+  (void)output_shape;
+  (void)starts;
+  (void)steps;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_slice_static\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_slice_static(rank=%lld, data_type=%s(%lld))\n",
+             (long long)rank, hipdnn_ep_datatype_name(data_type),
              (long long)data_type);
   return 0;
 }

@@ -26,7 +26,7 @@ concurrency:
 env:
   # Pins (kept in lockstep with cmake/deps.txt).
   # LLVM/MLIR/LLD are cloned from deps.txt llvm_project. The hash column is a
-  # branch name, so the llvm-install cache key is that branch's current tip.
+  # full commit, and the llvm-install cache key is that commit.
   # rocmlirTriton's vendored external/llvm-project is not built. The AMDGPU
   # target set keeps this prefix separate from Linux Build.
   ONNXRUNTIME_VERSION: "1.31.0"
@@ -46,12 +46,19 @@ env:
   SCCACHE_CACHE_SIZE: "200M"
 
 jobs:
+  build_required:
+    uses: ./.github/workflows/build-required.yml
+
   # LLVM and ONNX Runtime finish in this job so their caches are saved before
   # the six-hour runner limit. The hip-ep link is the next job and gets its
   # own budget. A single job built both, then died while linking and never
   # stored the LLVM prefix.
   deps-linux-rmt:
-    # No draft-PR gate: the cache-priming strategy needs every PR push.
+    needs: build_required
+    if: needs.build_required.outputs.run == 'true'
+    # No draft-PR gate: cache priming needs every code change, including
+    # drafts. build-required.yml skips this job for a documentation or
+    # Jekyll diff on a pull request or merge group. Pushes always build.
     runs-on: ubuntu-latest
     continue-on-error: true
     outputs:
@@ -147,20 +154,20 @@ jobs:
       # -----------------------------------------------------------------------
       # LLVM/MLIR/LLD/Clang from source -> llvm-install (cached). Caching is a CI
       # concern, so the prefix build lives here (not in build.py). Source is
-      # deps.txt llvm_project (a branch; the cache key is its current tip).
+      # deps.txt llvm_project (a pinned commit, which is also the cache key).
       # Recipe matches cmake/deps.cmake's RMT from-source fallback:
       # clang;mlir;lld, X86 and AMDGPU, RTTI on, zlib/zstd off, INSTALL_UTILS on.
       # -----------------------------------------------------------------------
-      - name: Resolve LLVM branch tip
+      - name: Resolve LLVM commit
         id: llvm
         run: |
           set -euo pipefail
           LINE=$(grep -E '^llvm_project;' cmake/deps.txt)
           LLVM_URL=$(echo "$LINE" | cut -d';' -f2)
           LLVM_REF=$(echo "$LINE" | cut -d';' -f3)
-          LLVM_COMMIT=$(git ls-remote "$LLVM_URL" "refs/heads/$LLVM_REF" | awk '{print $1}')
-          if [ -z "$LLVM_COMMIT" ]; then
-            echo "ERROR: no tip for $LLVM_URL refs/heads/$LLVM_REF" >&2
+          LLVM_COMMIT="$LLVM_REF"
+          if ! [[ "$LLVM_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "ERROR: deps.txt llvm_project must pin a full commit, got '$LLVM_REF'" >&2
             exit 1
           fi
           echo "url=$LLVM_URL" >> "$GITHUB_OUTPUT"
@@ -172,7 +179,7 @@ jobs:
         uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/llvm-install
-          # Keyed on the resolved branch tip, with an AMDGPU prefix so this
+          # Keyed on the pinned commit, with an AMDGPU prefix so this
           # does not collide with the X86 Linux Build cache.
           key: linux-llvm-amdgpu-${{ steps.llvm.outputs.commit }}
 
@@ -180,7 +187,7 @@ jobs:
         if: steps.cache-llvm.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          # Shallow clone of the branch tip. The cmake project lives at llvm/.
+          # Shallow fetch of the pinned commit. The cmake project lives at llvm/.
           SRC="${{ runner.workspace }}/llvm-project"
           git init "$SRC"
           git -C "$SRC" remote add origin "${{ steps.llvm.outputs.url }}"

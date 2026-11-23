@@ -320,8 +320,20 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   // can merge a tiny host-written shape buffer into a larger allocation that
   // exceeds the host-scalar pass's size limit. Pooling would then place the
   // host store in device memory. Later layout promotion creates copy-only
-  // temporaries; it does not introduce host loads or stores.
-  pm.addNestedPass<func::FuncOp>(mlir::hip::createMaterializeHostScalarsPass());
+  // temporaries; it does not introduce host loads or stores. Module-level:
+  // every function shares the one scratch buffer, so slots are laid out
+  // across the module.
+  pm.addPass(mlir::hip::createMaterializeHostScalarsPass());
+
+  // 5c. Drop the memref.copy that bufferized concat inserts for a packed
+  //     slot. The producer and every other reader of that buffer are
+  //     retargeted at an identity hip.packed_view of the slot, so a skip
+  //     connection reads the concat buffer. Chained concats become a prefix
+  //     view of the outer buffer, and a dense block shares one buffer. Runs
+  //     after host-scalar placement, which cannot see a host store through a
+  //     packed view, and before hip-optimize-memrefs so the private alloc is
+  //     erased instead of being pooled.
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createForwardConcatSlotsPass());
 
   // 6. Reuse compatible buffers after host-scalar placement.
   pm.addNestedPass<func::FuncOp>(mlir::hip::createOptimizeMemRefsPass());
@@ -550,10 +562,34 @@ void mlir::hip::buildRocMlirPipeline(
   // rocMLIR has no transposed-convolution anchor, so split conv_transpose into
   // plain convolutions before anything tries to outline a kernel around it.
   pm.addPass(mlir::hip::createDecomposeConvTransposePass());
-  pm.addPass(mlir::hip::createFuseROCMlirPass());
-  pm.addPass(func::createDuplicateFunctionEliminationPass());
+  addRocMlirFusionPasses(pm, FuseRocMlirAnchorPassOptions());
   pm.addPass(mlir::hip::createConvertHipToTosaPass());
   pm.addPass(mlir::createCanonicalizerPass());
+}
+
+void mlir::hip::addRocMlirFusionPasses(
+    OpPassManager &pm, const FuseRocMlirAnchorPassOptions &fuseOptions,
+    llvm::StringRef reportPath) {
+  pm.addNestedPass<func::FuncOp>(createHoistPointwiseOverViewsPass());
+  pm.addNestedPass<func::FuncOp>(createRocMlirPrepareQuantPass());
+  pm.addNestedPass<func::FuncOp>(createFuseRocMlirElementwisePass());
+  pm.addNestedPass<func::FuncOp>(createFuseRocMlirAnchorPass(fuseOptions));
+  pm.addPass(func::createDuplicateFunctionEliminationPass());
+  if (!reportPath.empty()) {
+    FuseROCMlirReportPassOptions reportOptions;
+    reportOptions.output = reportPath.str();
+    pm.addPass(createFuseROCMlirReportPass(reportOptions));
+  }
+}
+
+void mlir::hip::buildRocMlirFusionPipeline(
+    OpPassManager &pm, const RocMlirFusionPipelineOptions &options) {
+  FuseRocMlirAnchorPassOptions fuseOptions;
+  fuseOptions.arch = options.arch;
+  fuseOptions.gemmGemmAccelTypes.assign(options.gemmGemmAccelTypes.begin(),
+                                        options.gemmGemmAccelTypes.end());
+  fuseOptions.int4Weights = options.int4Weights;
+  addRocMlirFusionPasses(pm, fuseOptions, options.report);
 }
 
 void mlir::hip::registerHipPipelines() {
@@ -576,4 +612,9 @@ void mlir::hip::registerHipPipelines() {
 
   PassPipelineRegistration<RocMlirPipelineOptions>(
       "rocmlir-pipeline", "RocMLIR pipeline", buildRocMlirPipeline);
+
+  PassPipelineRegistration<RocMlirFusionPipelineOptions>(
+      "hip-rocmlir-fusion",
+      "Fuse main_graph into rocMLIR kernels and merge duplicate kernels",
+      buildRocMlirFusionPipeline);
 }

@@ -76,6 +76,21 @@ module {
     return %scan : tensor<?x?xf32>
   }
 
+  // The chunk is computed inside the body, so its dynamic inner extent is not
+  // available before the loop. The seed uses 0 there. The first executed
+  // iteration replaces that seed.
+  func.func @inner_extent_in_body(%A: tensor<?xf32>) -> tensor<?x?xf32> {
+    %M = "onnx.Constant"() {value = dense<2> : tensor<i64>} : () -> tensor<i64>
+    %cond_init = "onnx.Constant"() {value = dense<1> : tensor<i1>} : () -> tensor<i1>
+    %scan = "onnx.Loop"(%M, %cond_init) ({
+    ^bb0(%iter: tensor<i64>, %cond_in: tensor<i1>):
+      %cond_out = "onnx.Identity"(%cond_in) : (tensor<i1>) -> tensor<i1>
+      %chunk = "onnx.Add"(%A, %A) : (tensor<?xf32>, tensor<?xf32>) -> tensor<?xf32>
+      "onnx.Yield"(%cond_out, %chunk) : (tensor<i1>, tensor<?xf32>) -> ()
+    }) : (tensor<i64>, tensor<i1>) -> tensor<?x?xf32>
+    return %scan : tensor<?x?xf32>
+  }
+
   // cond_init is a function argument, so it may be the result of a GPU kernel.
   func.func @gpu_cond(%cond: tensor<i1>, %A: tensor<4xf32>) -> tensor<?x4xf32> {
     %M = "onnx.Constant"() {value = dense<2> : tensor<i64>} : () -> tensor<i64>
@@ -122,6 +137,14 @@ module {
 // CHECK-LABEL: func.func @dynamic_inner
 // CHECK: %[[DIM:.*]] = tensor.dim %arg1, %{{.*}} : tensor<?xf32>
 // CHECK: tensor.empty(%{{.*}}, %[[DIM]]) : tensor<?x?xf32>
+
+// CHECK-LABEL: func.func @inner_extent_in_body
+// CHECK-NOT: tensor.dim
+// CHECK: %[[Z0:.*]] = arith.constant 0 : index
+// CHECK: %[[Z1:.*]] = arith.constant 0 : index
+// CHECK: tensor.empty(%[[Z0]], %[[Z1]]) : tensor<?x?xf32>
+// CHECK: scf.while
+// CHECK: scf.if
 
 // CHECK-LABEL: func.func @gpu_cond
 // CHECK: hip.readback_scalar

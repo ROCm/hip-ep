@@ -61,7 +61,7 @@ description: >-
 #    of environment variables -- far enough that patching the previous
 #    release's prose is not a repair. Download and inspect the release archives
 #    before updating either package page.
-hip_ep_version: "v0.5.1"
+hip_ep_version: "v0.5.3"
 
 markdown: kramdown
 highlighter: rouge
@@ -188,14 +188,20 @@ docs_nav:
         url: "/docs/models/gemma/"
       - label: GPT-OSS
         url: "/docs/models/gpt-oss/"
+      - label: Laguna
+        url: "/docs/models/laguna/"
+      - label: Nemotron
+        url: "/docs/models/nemotron/"
+      - label: Mistral
+        url: "/docs/models/mistral/"
       - label: Llama
         url: "/docs/models/llama/"
       - label: DeepSeek
         url: "/docs/models/deepseek/"
-      - label: Mistral
-        url: "/docs/models/mistral/"
       - label: Phi
         url: "/docs/models/phi/"
+      - label: Step
+        url: "/docs/models/step/"
 
   - label: Benchmarks
     url: "/docs/benchmarks/"

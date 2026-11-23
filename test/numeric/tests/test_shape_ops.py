@@ -20,7 +20,7 @@ data dtype set is:
     Tile      : f16, f32, i32, i64
     Expand    : f16, f32, i32, i64
     Pad       : f16, f32, i32, i64       (modes: constant, reflect, edge, wrap)
-    GatherND  : f16, f32, i32, i64       (indices: int64 only)
+    GatherND  : f16, f32, i32, i64, i8, u8 (indices: int64 only)
     Slice     : f16, f32, i32, i64       (starts/ends/axes/steps: int32 or int64)
     ScatterND : f16, f32, i32, i64       (indices: int64 only;
                                           reductions: none, add, mul, min, max)
@@ -235,8 +235,9 @@ def _make_pad_model(
     pads: list[int],
     mode: str,
     constant_value=None,
+    axes: list[int] | None = None,
 ):
-    """ONNX-18 Pad: data, pads, constant_value? (axes omitted)."""
+    """ONNX-18 Pad: data, pads, constant_value?, axes?."""
     tp = np_to_onnx_type(dtype)
     X = helper.make_tensor_value_info("X", tp, list(input_shape))
     pads_init = numpy_helper.from_array(np.array(pads, dtype=np.int64), name="pads")
@@ -251,10 +252,25 @@ def _make_pad_model(
         input_names.append("constant_value")
 
     rank = len(input_shape)
+    if axes is not None:
+        if constant_value is None:
+            input_names.append("")
+        initializers.append(
+            numpy_helper.from_array(np.array(axes, dtype=np.int64), name="axes")
+        )
+        input_names.append("axes")
+        full = [0] * (2 * rank)
+        for slot, axis in enumerate(axes):
+            a = axis % rank
+            full[a] = pads[slot]
+            full[a + rank] = pads[slot + len(axes)]
+        pads = full
     out_shape = [input_shape[i] + pads[i] + pads[i + rank] for i in range(rank)]
     Y = helper.make_tensor_value_info("Y", tp, out_shape)
     node = helper.make_node("Pad", input_names, ["Y"], mode=mode)
-    return make_model_from_nodes([node], [X], [Y], initializers=initializers)
+    return make_model_from_nodes(
+        [node], [X], [Y], initializers=initializers, opset=18 if axes else 17
+    )
 
 
 class TestPad:
@@ -322,6 +338,72 @@ class TestPad:
         model = _make_pad_model(np.float16, shape, pads, mode=mode)
         rng = np.random.default_rng(404)
         x = rng.uniform(-2.0, 2.0, shape).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+    # Constant pads and fill values are resolved at compile time and passed
+    # to the kernel from host memory; these cover each supported element type
+    # with a non-zero fill.
+    @pytest.mark.parametrize(
+        "dtype,cval",
+        [
+            (np.float32, 2.5),
+            (np.float16, -1.25),
+            (np.int32, -3),
+            (np.int64, 7),
+        ],
+    )
+    def test_pad_constant_fill_nchw(self, model_runner, dtype, cval):
+        shape = [1, 3, 5, 6]
+        pads = [0, 0, 2, 1, 0, 0, 1, 3]
+        model = _make_pad_model(
+            dtype, shape, pads, mode="constant", constant_value=cval
+        )
+        rng = np.random.default_rng(405)
+        if np.issubdtype(dtype, np.integer):
+            x = rng.integers(-10, 10, shape, dtype=dtype)
+        else:
+            x = rng.uniform(-2.0, 2.0, shape).astype(dtype)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+    @pytest.mark.parametrize("mode", ["constant", "reflect", "edge", "wrap"])
+    @pytest.mark.parametrize("dtype", [np.float32, np.float16])
+    def test_pad_modes_nchw(self, model_runner, mode, dtype):
+        shape = [2, 3, 5, 6]
+        pads = [0, 0, 2, 3, 0, 0, 1, 2]
+        model = _make_pad_model(dtype, shape, pads, mode=mode)
+        rng = np.random.default_rng(406)
+        x = rng.uniform(-2.0, 2.0, shape).astype(dtype)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+    @pytest.mark.parametrize(
+        "axes,pads,mode,cval",
+        [
+            ([2, 3], [1, 2, 2, 1], "reflect", None),
+            ([-1], [2, 3], "constant", 3.0),
+            ([3, 1], [1, 0, 2, 1], "edge", None),
+        ],
+    )
+    def test_pad_axes(self, model_runner, axes, pads, mode, cval):
+        shape = [1, 2, 5, 6]
+        model = _make_pad_model(
+            np.float32, shape, pads, mode=mode, constant_value=cval, axes=axes
+        )
+        rng = np.random.default_rng(407)
+        x = rng.uniform(-2.0, 2.0, shape).astype(np.float32)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+    @pytest.mark.parametrize("mode", ["constant", "edge"])
+    def test_pad_negative_crops(self, model_runner, mode):
+        """A negative pad removes elements from that side."""
+        shape = [1, 2, 6, 7]
+        pads = [0, 0, -1, 2, 0, 0, 1, -3]
+        model = _make_pad_model(np.float32, shape, pads, mode=mode)
+        rng = np.random.default_rng(408)
+        x = rng.uniform(-2.0, 2.0, shape).astype(np.float32)
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=0)
 
@@ -406,20 +488,43 @@ class TestGatherND:
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=0)
 
+    @pytest.mark.parametrize("dtype", [np.uint8, np.int8], ids=["u8", "i8"])
+    def test_gather_nd_byte_dtypes(self, model_runner, dtype):
+        """1-byte data through the shared byte-copy kernel.
+
+        Uses the full dtype range so u8 values above 127 and negative i8
+        values would be corrupted by any sign/width mix-up. The numeric
+        backend disables CPU fallback, so an unsupported dtype fails the
+        session instead of silently running on the CPU.
+        """
+        data_shape = [2, 3, 4]
+        indices = np.array([[1, 2], [0, 0], [1, 0], [0, 2]], dtype=np.int64)
+        out_shape = [4, 4]
+        model = _make_gather_nd_model(
+            dtype, data_shape, list(indices.shape), indices, out_shape
+        )
+        info = np.iinfo(dtype)
+        x = np.linspace(info.min, info.max, num=24).round().astype(dtype)
+        x = x.reshape(data_shape)
+        actual, expected = model_runner.run_sample(model, [x])
+        ref = x[indices[:, 0], indices[:, 1]]
+        np.testing.assert_array_equal(expected[0], ref)
+        assert actual[0].dtype == dtype
+        np.testing.assert_array_equal(actual[0], ref)
+
 
 # ---------------------------------------------------------------------------
 # Slice
 # ---------------------------------------------------------------------------
 #
 # The graph-constant + positive-stride case is folded to
-# `tensor.extract_slice` upstream; this test exercises the runtime fallback
-# kernel by:
-#   (a) feeding `starts` / `ends` as *graph inputs* (non-constant) -- forces
-#       the runtime D2H + host-side resolution path, OR
-#   (b) using negative steps -- the fold rejects this case so it falls
-#       through to the runtime kernel as well.
-#
-# Both paths run the same `hip_slice` kernel.
+# `tensor.extract_slice` upstream. The other cases run the `hip_slice` kernel
+# through one of two paths:
+#   (a) parameters fed as *graph inputs* (non-constant) take the runtime path:
+#       D2H readback and host-side resolution in wrap_slice;
+#   (b) constant negative steps over a static input are resolved at compile
+#       time and passed from host memory (wrap_slice_static), with no
+#       readback.
 
 
 def _make_slice_model(
@@ -435,11 +540,10 @@ def _make_slice_model(
 ):
     """Build a Slice model.
 
-    If ``constant_indices`` is True, starts/ends/axes/steps become initializers
-    -- but the runtime still sees them as non-constant if any step is
-    negative (the compile-time fold only handles positive steps). If
-    ``constant_indices`` is False they become graph inputs, guaranteeing the
-    runtime kernel path.
+    If ``constant_indices`` is True, starts/ends/axes/steps become
+    initializers: positive steps fold to an extract_slice, and negative steps
+    take the compile-time (wrap_slice_static) path. If ``constant_indices`` is
+    False they become graph inputs, guaranteeing the runtime readback path.
     """
     tp = np_to_onnx_type(dtype)
     index_tp = np_to_onnx_type(index_dtype)
@@ -538,9 +642,8 @@ class TestSlice:
     @pytest.mark.parametrize(
         "dtype,shape,starts,ends,axes,steps,out_shape",
         [
-            # Negative step: reverses elements along axis 0. The compile-time
-            # fold rejects negative steps -> goes through the runtime kernel
-            # even with constant indices.
+            # Negative step: reverses elements along axis 0. Constant indices
+            # resolve at compile time, so these take the wrap_slice_static path.
             #
             # Note on the negative-end sentinel:
             #   ONNX Slice spec normalises `end += dim` for any end < 0,
@@ -562,7 +665,7 @@ class TestSlice:
     def test_slice_negative_step(
         self, model_runner, dtype, shape, starts, ends, axes, steps, out_shape
     ):
-        """Negative step ALWAYS goes through the runtime kernel."""
+        """Constant negative steps take the compile-time path."""
         model, _ = _make_slice_model(
             dtype,
             shape,
@@ -579,6 +682,90 @@ class TestSlice:
         else:
             x = rng.uniform(-2.0, 2.0, shape).astype(dtype)
         actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
+    @pytest.mark.parametrize(
+        "dtype,shape,starts,ends,axes,steps,out_shape",
+        [
+            # Negative start, step -2, stopping before index 1: 6, 4, 2.
+            (np.float16, [3, 8], [-2], [1], [1], [-2], [3, 3]),
+            # A start past the end clamps to the last element; step -3 gives
+            # 9, 6, 3, 0.
+            (np.int64, [10], [100], [-100], [0], [-3], [4]),
+            # Two axes with mixed signs: rows 4..1, columns 1 and 3.
+            (np.int32, [5, 6], [4, 1], [0, 5], [0, 1], [-1, 2], [4, 2]),
+        ],
+    )
+    def test_slice_negative_step_runtime(
+        self, model_runner, dtype, shape, starts, ends, axes, steps, out_shape
+    ):
+        """Negative steps fed as graph inputs keep the runtime readback path."""
+        model, _ = _make_slice_model(
+            dtype,
+            shape,
+            starts,
+            ends,
+            axes,
+            steps,
+            out_shape,
+            constant_indices=False,
+        )
+        rng = np.random.default_rng(506)
+        if np.issubdtype(dtype, np.integer):
+            x = rng.integers(-50, 50, shape, dtype=dtype)
+        else:
+            x = rng.uniform(-2.0, 2.0, shape).astype(dtype)
+        feeds = [
+            x,
+            np.array(starts, dtype=np.int64),
+            np.array(ends, dtype=np.int64),
+            np.array(axes, dtype=np.int64),
+            np.array(steps, dtype=np.int64),
+        ]
+        actual, expected = model_runner.run_sample(model, feeds)
+        compare_outputs(actual, expected, atol=0)
+
+    # Constant negative-step slices over static inputs are resolved at compile
+    # time (ONNX negative-index and clamping rules) and passed to the kernel
+    # from host memory.
+    @pytest.mark.parametrize(
+        "dtype,shape,starts,ends,axes,steps,out_shape",
+        [
+            # Flip of the innermost axis with the INT64 end sentinel.
+            (np.float32, [4, 6], [-1], [-(2**63) + 1], [1], [-1], [4, 6]),
+            (np.float16, [1, 3, 4, 5], [-1], [-(2**63)], [3], [-1], [1, 3, 4, 5]),
+            # Flip of an outer axis, addressed with a negative axis.
+            (np.float32, [2, 3, 4], [-1], [-(2**63)], [-3], [-1], [2, 3, 4]),
+            # step -3 from the last element: 9, 6, 3, 0.
+            (np.int64, [10], [9], [-(2**63)], [0], [-3], [4]),
+            # Negative start, step -2, stopping before index 1: 6, 4, 2.
+            (np.float16, [3, 8], [-2], [1], [1], [-2], [3, 3]),
+            # A start past the end clamps to the last element.
+            (np.float16, [6], [100], [-100], [0], [-1], [6]),
+            # Two axes with mixed signs: rows 4..1, columns 1 and 3.
+            (np.int32, [5, 6], [4, 1], [0, 5], [0, 1], [-1, 2], [4, 2]),
+        ],
+    )
+    def test_slice_negative_step_static(
+        self, model_runner, dtype, shape, starts, ends, axes, steps, out_shape
+    ):
+        model, _ = _make_slice_model(
+            dtype,
+            shape,
+            starts,
+            ends,
+            axes,
+            steps,
+            out_shape,
+            constant_indices=True,
+        )
+        rng = np.random.default_rng(505)
+        if np.issubdtype(dtype, np.integer):
+            x = rng.integers(-50, 50, shape, dtype=dtype)
+        else:
+            x = rng.uniform(-2.0, 2.0, shape).astype(dtype)
+        actual, expected = model_runner.run_sample(model, [x])
+        assert actual[0].shape == tuple(out_shape)
         compare_outputs(actual, expected, atol=0)
 
     def test_slice_negative_indices(self, model_runner):

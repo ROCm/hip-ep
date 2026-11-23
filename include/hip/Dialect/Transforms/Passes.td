@@ -177,11 +177,154 @@ def OptimizeMemRefsPass : Pass<"hip-optimize-memrefs", "mlir::func::FuncOp"> {
   ];
 }
 
-def FuseROCMlirPass : Pass<"hip-fuse-rocmlir", "mlir::func::FuncOp"> {
+def HoistPointwiseOverViewsPass
+    : Pass<"hip-hoist-pointwise-over-views", "mlir::func::FuncOp"> {
+  let summary = "Move pointwise ops above the views that follow an anchor";
+  let description = [{
+    A pointwise op that HIP-to-TOSA converts, whose other inputs are constant
+    scalars and whose result type is that of its one tensor input, maps each
+    element of that input on its own, so it commutes with ops that only move
+    elements. The pass looks only at the top-level block of main_graph, the
+    block that the anchor fusion plans. When that input is a chain of
+    single-use element-move ops (reshapes, transposes, slices) over the
+    single-use result of a gemm or convolution anchor, the op is rebuilt on
+    the anchor's result and the chain is replayed after it. The anchor fusion
+    then takes the op into the kernel's epilogue instead of running it as a
+    kernel of its own behind a view it cannot absorb, such as the crop after
+    a decomposed ConvTranspose. The op then also computes the elements that
+    the chain drops, so the anchor's result may have at most 50% more
+    elements than the op's input.
+  }];
+  let dependentDialects = ["mlir::tensor::TensorDialect"];
+}
+
+def RocMlirPrepareQuantPass
+    : Pass<"hip-rocmlir-prepare-quant", "mlir::func::FuncOp"> {
+  let summary = "Prepare the quantize trees of main_graph for rocMLIR kernels";
+  let description = [{
+    First splits each static 4-bit hip.matmul_nbits into hip.unpack_int4, a
+    blocked dequantize and a transposed hip.matmul, so the fusion treats it
+    as a matmul anchor. Then moves each per-tensor quantize backward through
+    the element-move ops that feed it, so those ops run on 8- or 16-bit
+    values. Then replaces each QLinearConv and QLinearMatMul whose requantize
+    multiplier is below 2^-33 on every channel with a constant of its output
+    zero point, and rewrites each QLinearConv and QLinearMatMul with ui8
+    weights or a non-zero weight zero point into hip.quant_conv /
+    hip.quant_matmul on i8 weights w - offset, a second integer op over a
+    filter of the shifted weight zero points zw' (the zw' * window-sum term of
+    the zero-point correction), their difference, and the requantize
+    epilogue; the constant correction terms go into the i32 bias. Last,
+    rebiases each unsigned 8-bit tree that ends in a planned integer anchor
+    to signed 8-bit. The order matters: the sinking fixes the final shape of
+    each tree, and the rebias then plans the QLinear and dequantized
+    convolutions on i8 inputs. Only main_graph is changed.
+  }];
+  let dependentDialects = ["mlir::tensor::TensorDialect"];
+}
+
+def FuseRocMlirElementwisePass
+    : Pass<"hip-fuse-rocmlir-elementwise", "mlir::func::FuncOp"> {
+  let summary = "Group the pointwise ops of main_graph into "
+                "hip.rocmlir_elementwise modules";
+  let description = [{
+    Walks main_graph in block order. From each pointwise op that is in no
+    module yet, the pass grows a module through the readers of the module,
+    and wraps the module in one hip.rocmlir_elementwise op. A module holds
+    the pointwise ops that HIP-to-TOSA converts, transposes, static
+    reshapes, dequantizes and quantizes. A module ends
+    where an anchor epilogue must end: before an op that broadcasts a module
+    value, after a quantize, and at an op whose other input depends on the
+    module. A dequantize only starts a module. Broadcasts, slices and
+    dynamic reshapes stay outside as module inputs. No input or result is an
+    integer wider than 32 bits, no result is rank 0, and a module of views
+    alone is not made. Inline scalar constants stay outside as inputs.
+    hip-fuse-rocmlir-anchor consumes the modules.
+  }];
+  let dependentDialects = [
+    "mlir::tensor::TensorDialect"
+  ];
+}
+
+def InlineRocMlirElementwisePass
+    : Pass<"hip-inline-rocmlir-elementwise", "mlir::func::FuncOp"> {
+  let summary = "Inline every hip.rocmlir_elementwise body back into its "
+                "function";
+  let description = [{
+    Replaces each hip.rocmlir_elementwise op with the ops of its body. With
+    hip-fuse-rocmlir-elementwise before it, the function computes what it
+    computed before the grouping.
+  }];
+}
+
+def FuseRocMlirAnchorPass
+    : Pass<"hip-fuse-rocmlir-anchor", "mlir::func::FuncOp"> {
+  let summary = "Outline each convolution, matmul and gemm anchor of "
+                "main_graph with its hip.rocmlir_elementwise modules into a "
+                "rocMLIR kernel";
+  let description = [{
+    Plans every kernel first and outlines them after. In block order, each
+    anchor takes the modules that read its result as its epilogue, when the
+    module keeps the shape of every value it reads from the kernel and reads
+    no value that depends on the kernel. A quantized anchor continues through
+    the modules that read its quantized results, and writes no float value
+    that a dequantize widened. A transpose or static reshape outside any
+    module, read from the kernel, is also an epilogue op, and so is a chain
+    of single-use reshapes that leads to such a view or to a module. Then each
+    anchor takes, as a prologue of an activation operand, a module that only
+    the anchor reads. A module with several inputs, or one input and a
+    dequantize or quantize, joins only while the anchor reloads its operand
+    few times, because the kernel recomputes the module on every reload.
+    Every module that no anchor takes is inlined back before the outline, so
+    a kernel can still absorb its views and unary ops one by one. A
+    QLinearConv, a QLinearMatMul and a convolution of dequantizes become
+    integer anchors only when their kernel outlines; a declined op keeps its
+    HIP kernel. A module that no anchor takes and that saves a launch stays
+    whole and becomes a rock.elementwise kernel. After the outline, a
+    matmul or gemm kernel whose only result feeds the A operand of the next
+    gemm merges into it when the gemm-elementwise-gemm shape gates pass.
+    Only main_graph is changed. Run hip-rocmlir-prepare-quant and
+    hip-fuse-rocmlir-elementwise before it.
+  }];
+  let options = [
+    Option<"arch", "arch", "std::string", /*default=*/"\"\"",
+           "Target GPU architecture, stamped as rock.arch on each outlined "
+           "kernel. Empty leaves rock.arch unset.">,
+    ListOption<"gemmGemmAccelTypes", "gemm-gemm-accel-types", "std::string",
+               "Gemm element types (as printed, e.g. f16) that have matrix "
+               "acceleration on the target. Both gemms of a "
+               "gemm-elementwise-gemm kernel must read a listed type; an "
+               "empty list merges no pair.">,
+    Option<"int4Weights", "int4-weights", "bool", /*default=*/"false",
+           "Take the packed-int4 weight dequantize of a 1x1 convolution, or "
+           "of the B operand of a matmul or gemm (per column or blocked along "
+           "K, signed or unsigned), into its kernel, which then reads the "
+           "4-bit weights. rocMLIR packs an i4 operand under only some "
+           "perfConfigs, so this needs autotuning, which skips the ones that "
+           "fail.">
+  ];
   let dependentDialects = [
     "mlir::arith::ArithDialect",
     "mlir::tensor::TensorDialect",
     "mlir::ub::UBDialect"
+  ];
+}
+
+def FuseROCMlirReportPass
+    : Pass<"hip-rocmlir-fusion-report", "mlir::ModuleOp"> {
+  let summary = "Write one JSON line per rocMLIR kernel dispatch";
+  let description = [{
+    Appends a JSON-lines record for every hip.rocmlir dispatch and one record
+    per host function to the output file. A kernel record holds the first
+    anchor op, the multiset of op names in the kernel, the kernel signature
+    and a hash of the kernel body with its symbol name removed. A host record
+    holds the multiset of op names left in that function. Two fusion
+    pipelines make the same kernels when their records are equal as
+    multisets, independent of kernel names and kernel order. The IR is not
+    changed.
+  }];
+  let options = [
+    Option<"output", "output", "std::string", /*default=*/"\"-\"",
+           "File the records are appended to; '-' writes to stderr.">
   ];
 }
 
@@ -220,15 +363,27 @@ def DecomposeConvTransposePass
     rocMLIR anchors kernel outlining on gemm / convolution / attention, so a
     `hip.conv_transpose` reaching `convert-hip-to-tosa` leaves the outlined
     region without an anchor and the backend rejects it. Emitting plain
-    `hip.conv` ops instead lets the existing `hip-fuse-rocmlir` and
+    `hip.conv` ops instead lets the existing rocMLIR fusion and
     `convert-hip-to-tosa` machinery claim the kernel unchanged, with no new
     anchor op and no new TOSA op.
 
     The per-residue tap selection, spatial flip, and channel swap apply only
     to the filter, so they are constant-folded into fresh `hip.constant`s
     rather than emitted as ops -- TOSA has no strided slice to lower a tap
-    stride to. Reassembly is one strided `tensor.insert_slice` per residue,
-    which bufferizes to a `memref.subview` plus a copy.
+    stride to. When every residue shares a kernel shape and padding, their
+    filters are stacked on the output-channel axis into one convolution whose
+    result is viewed as [N, S0, S1, M, Ht0, Ht1] and transposed to
+    [N, M, Ht0, S0, Ht1, S1] (DepthToSpace); the anchor fusion folds that
+    transpose into the convolution's store. Residues whose tap counts differ
+    are zero-padded to the largest count when the padded filters cost at most
+    twice the real taps, and then take the same path. A constant bias is tiled
+    once per residue into the wide convolution. A single-use `hip.add` of a
+    per-channel constant after the op (`Add(y, Reshape(b))`, the exporters'
+    form of a bias) folds into that bias the same way, so an activation
+    behind it can reach the convolution's epilogue instead of becoming a
+    prologue of the next convolution. The other residues stay on one
+    convolution each, with the bias, and one strided `tensor.insert_slice`
+    each, which bufferizes to a `memref.subview` plus a copy.
 
     Rank-4 inputs must be statically shaped. A rank-3 input is expanded to
     rank 4 with a unit height so dynamic batch and width stay legal; the
@@ -260,6 +415,40 @@ def FoldBatchNormPass
     Inline and file-backed carriers are read; memory-address carriers are
     not, so a batch norm over memory-backed weights is left in place.
   }];
+}
+
+def ForwardConcatSlotsPass : Pass<"hip-forward-concat-slots", "mlir::func::FuncOp"> {
+  let summary = "Write a packed concat slot in place and share it with its readers";
+  let description = [{
+    A bufferized concat is one `memref.copy` per input into a `memref.subview`
+    of the concat buffer. When the slot is a packed row-major span (    batch-1
+    channel concat, or any concat whose slice has no gaps) and the source is
+    a private alloc that something writes, the pass builds an identity
+    `hip.packed_view` of that span, retargets the writer and every other reader
+    at it, and erases the copy and the private alloc. A skip connection then
+    reads the concat buffer instead of keeping its own copy. A buffer copied
+    into two concats is aliased into the first one; the second copy stays.
+
+    A concat buffer whose only uses are those slot writes plus one copy of the
+    whole buffer into a packed prefix of another buffer is replaced by that
+    prefix, so a chain of concats does not copy the growing tensor.
+
+    A concat buffer filled entirely by slot copies, whose inputs a later
+    concat copies again at the same offsets (a dense block), becomes a
+    `hip.packed_view` prefix of the later buffer and the repeated copies go
+    away. Chained, a dense block shares one buffer and each input lands in it
+    once.
+
+    A strided slot (batch greater than 1 on a middle axis, or a concat of
+    rows) is left on `memref.copy`: a dense store from the slot pointer would
+    write the wrong addresses. So is a slot whose byte offset is not a
+    multiple of 16: rocMLIR kernels declare their pointers 16-byte aligned.
+  }];
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::hip::HipDialect",
+    "mlir::memref::MemRefDialect"
+  ];
 }
 
 def PromoteStridedHipOperandsPass
@@ -385,7 +574,7 @@ def HoistAllocSizeArithPass
 }
 
 def MaterializeHostScalarsPass
-    : Pass<"hip-materialize-host-scalars", "mlir::func::FuncOp"> {
+    : Pass<"hip-materialize-host-scalars", "mlir::ModuleOp"> {
   let summary = "Redirect small host-accessed memref.alloc ops to a host-mapped "
                 "scratch buffer";
   let description = [{
@@ -393,6 +582,10 @@ def MaterializeHostScalarsPass
     scratch instead of the device pool. Follow aliases to find host loads
     and stores. Integer and index buffers qualify. Float buffers also need
     a HIP consumer. Reject unknown users.
+
+    Tiny inline constant globals read by HIP ops get a scratch region too,
+    filled by host stores of the initial value. Mutable globals and globals
+    with `hip.external_data` are left alone.
 
     A small copy-filled integer shape buffer can also qualify when it has
     an explicit scalar readback. Require bounded contiguous aliases, scalar
@@ -402,7 +595,9 @@ def MaterializeHostScalarsPass
 
     Replace each allocation with a separate aligned `memref.view` of one
     `hip.get_host_scratch` buffer. Keep payload accesses in their original
-    order. HIP-to-LLVM checks redundant readbacks separately.
+    order. HIP-to-LLVM checks redundant readbacks separately. Every function
+    shares that buffer, so slots are laid out across the module (disjoint per
+    function) and every function requests the module total.
 
     Run after linalg-to-loops and before `hip-optimize-memrefs`. Buffer reuse
     can otherwise merge a host-written buffer into an allocation above the

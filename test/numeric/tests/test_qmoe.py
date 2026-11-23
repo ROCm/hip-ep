@@ -309,6 +309,31 @@ class TestQMoE:
         actual, expected = model_runner.run_sample(model, [x, router])
         compare_outputs(actual, expected, atol=1e-1, rtol=2e-2, cos_threshold=0.99)
 
+    def test_four_bit_zero_points_decode(self, model_runner):
+        """4-bit weights with zero points at seq_len=1, the W4A8 fused decode
+        path. Three 32-element blocks per row leave each packed zero-point row
+        with a padded high nibble.
+        """
+        hidden = 96
+        intermediate = 192
+        num_experts = 8
+        model = _make_qmoe_model(
+            1,
+            1,
+            hidden,
+            intermediate,
+            num_experts,
+            top_k=4,
+            with_zero_points=True,
+        )
+
+        rng = np.random.default_rng(41)
+        x = rng.uniform(-1, 1, [1, 1, hidden]).astype(np.float16)
+        router = rng.standard_normal([1, num_experts]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x, router])
+        compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)
+
     @pytest.mark.parametrize(
         "seq_len,hidden,intermediate,num_experts,top_k",
         [
@@ -434,9 +459,10 @@ class TestQMoE:
     def test_qmoe_gpt_oss_shape_skewed_routing(self, model_runner, seq_len):
         """GPT-OSS-20B shapes with routing skewed toward low expert ids, so
         expert slices range from a single row to hundreds of rows. Prefill
-        cuts experts of <= 16 rows into one tile and larger ones into several
-        32-row tiles; this covers both kinds, an expert spanning many tiles,
-        and the routed-pair reduction over unevenly filled experts.
+        cuts experts into one 16-, 32- or 64-row tile by row count and those
+        above 64 rows into 128-row LDS-staged tiles; this covers every class,
+        an expert spanning many tiles, and the routed-pair reduction over
+        unevenly filled experts.
         """
         model = _make_qmoe_model(
             1,
@@ -465,8 +491,8 @@ class TestQMoE:
     def test_qmoe_qwen38_flash_shape_skewed_routing(self, model_runner, seq_len):
         """Qwen3.8-Flash-Next expert shapes (hidden 2560, fused gate/up 1280,
         top-10): the prefill grouped GEMMs run at K = 2560 and K = 640, which
-        pick their own small-M configs. Skewed routing yields both 16-row and
-        32-row tiles.
+        pick their own small-M configs. Skewed routing yields tiles of every
+        class, including 128-row tiles at seq_len 512.
         """
         hidden, intermediate, num_experts, top_k = 2560, 1280, 64, 10
         model = _make_qmoe_model(
