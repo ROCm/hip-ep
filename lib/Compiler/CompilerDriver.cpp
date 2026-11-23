@@ -337,18 +337,18 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
     logPhase("compileToObject");
 
     // Symbols exported from the generated DLL:
-    //   inference_init/compute/cleanup       — runtime entry points
-    //   inference_get_metadata_json          — model metadata query
-    //   test_hip_from_dll                    — diagnostic hook for hip-test
-    //   hipdnn_ep_runtime_begin_compute      — per-Compute() cache invalidation
-    //   hipdnn_ep_set_output_allocator       — EP installs the output allocator
+    //   inference_init/compute/cleanup       â€” runtime entry points
+    //   inference_get_metadata_json          â€” model metadata query
+    //   test_hip_from_dll                    â€” diagnostic hook for hip-test
+    //   hipdnn_ep_runtime_begin_compute      â€” per-Compute() cache invalidation
+    //   hipdnn_ep_set_output_allocator       â€” EP installs the output allocator
     //                                          before inference_compute
-    //   hipdnn_ep_runtime_flush_op_profile   — HIPDNN_EP_PERF per-op resolve +
+    //   hipdnn_ep_runtime_flush_op_profile   â€” HIPDNN_EP_PERF per-op resolve +
     //                                          print hook (called by EP AFTER
     //                                          its wall_ms window closes so the
     //                                          resolve cost doesn't pollute
     //                                          TPS)
-    //   hipdnn_ep_runtime_add_cpu_profile    — EP pushes its outer (whole-
+    //   hipdnn_ep_runtime_add_cpu_profile    â€” EP pushes its outer (whole-
     //                                          Compute) steady_clock total into
     //                                          the per-op table + trace for
     //                                          bubble detection (before flush).
@@ -728,12 +728,12 @@ bool CompilerDriver::runMLIRPasses(
     }
     // Strict mode (opt-in): when HIPDNN_EP_STRICT=1 is set, abort so the
     // cpptrace SIGABRT handler prints a backtrace pinpointing the failing
-    // pass. Use this when verifying that a model is fully offloaded — any
+    // pass. Use this when verifying that a model is fully offloaded â€” any
     // graph MorphiZenEP claims but cannot compile is a regression, and
     // catching it as a crash beats silent CPU fallback masking the bug
     // (e.g. accuracy tests passing cosine=1.0 because they compare CPU vs
     // CPU). Default behaviour returns false so ORT's CPU fallback handles
-    // the graph normally — required for multi-session pipelines where
+    // the graph normally â€” required for multi-session pipelines where
     // MorphiZenEP is registered only for HipDataTransferImpl visibility
     // (e.g. multi-stage VLM pipelines where embedding / vision sub-sessions
     // are intentionally not claimed by the EP).
@@ -861,7 +861,7 @@ void CompilerDriver::discoverInTreeLibraries(
 
   // hip_get_env, not std::getenv: this code runs inside the static-CRT EP DLL
   // when invoked from the EP. std::getenv there has its own (empty) CRT env
-  // table and silently returned NULL, leaving library_paths empty — lld then
+  // table and silently returned NULL, leaving library_paths empty â€” lld then
   // failed with "could not open 'amdhip64.lib'" and the EP fell back to CPU.
   std::string dist = hip_get_env("THEROCK_DIST");
   if (dist.empty())

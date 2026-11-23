@@ -680,7 +680,7 @@ def RelaxMultiDynExpandShapePass
     Workaround for upstream `expand-strided-metadata` (LLVM as of our
     prebuilt) asserting "There must be at most one dynamic size per group"
     when a `memref.expand_shape` carries a reassociation group containing
-    more than one dynamic output dim — even though the op carries explicit
+    more than one dynamic output dim â€” even though the op carries explicit
     `output_shape` operands that fully determine every dim's size.
 
     This pass matches exactly that case and rewrites the op into a
@@ -690,7 +690,7 @@ def RelaxMultiDynExpandShapePass
     downstream LLVM-conversion patterns.
 
     Single-dyn-per-group `memref.expand_shape` and all `memref.collapse_shape`
-    are left untouched — upstream handles those correctly.
+    are left untouched â€” upstream handles those correctly.
 
     Canonical IR pattern that triggers a match (ONNX `Range -> Reshape`
     materialising 2-D position_ids):
