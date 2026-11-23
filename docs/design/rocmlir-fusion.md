@@ -411,16 +411,17 @@ the A operand of the second gemm through pointwise ops and row-only reshapes
 
 ## Options
 
-`arch` and `gemm-gemm-accel-types` describe the target. `standalone-elementwise`
-and `int4-weights` are the fusion switches.
-
+`arch` and `gemm-gemm-accel-types` describe the target. `standalone-elementwise`,
+`int4-weights` and `attention` are the fusion switches, and
+`attention-f32-min-score-bytes` sets the f32 attention threshold.
 | Option | EP value | Effect |
 |---|---|---|
 | `arch=<gfx>` | detected | Stamps `rock.arch` on each kernel. |
-| `gemm-gemm-accel-types=<types>` | detected | The element types for the gemm-gemm gate. |
+| `gemm-gemm-accel-types=<types>` | detected | The element types for the gemm-gemm and attention gates. |
 | `standalone-elementwise=<bool>` | `true`; `false` with `HIPDNN_EP_ROCMLIR_NO_STANDALONE_ELEMENTWISE=1` | Outlines a module that no anchor takes as an elementwise kernel. |
 | `int4-weights=<bool>` | on when rocMLIR autotuning is on | Takes packed-int4 weight dequantizes into the kernel. |
-
+| `attention=<bool>` | on, off with `HIPDNN_EP_ROCMLIR_NO_ATTENTION=1` | Merges gemm -> softmax -> gemm into one attention kernel. |
+| `attention-f32-min-score-bytes=<n>` | the device's L2 cache size | f32 attention merges only when its score matrix is larger than this; 0 never merges f32. |
 ## Tests and tools
 
 - `test/lit/Dialect/hip-fuse-rocmlir*.mlir` check the kernels of the whole

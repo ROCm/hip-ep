@@ -117,7 +117,10 @@ void dumpPreFusionIR(mlir::ModuleOp module,
      << llvm::join(fuseOpts.gemmGemmAccelTypes, ",")
      << " standalone-elementwise="
      << (fuseOpts.standaloneElementwise ? "true" : "false")
-     << " int4-weights=" << (fuseOpts.int4Weights ? "true" : "false") << "\n";
+     << " int4-weights=" << (fuseOpts.int4Weights ? "true" : "false")
+     << " attention=" << (fuseOpts.attention ? "true" : "false")
+     << " attention-f32-min-score-bytes=" << fuseOpts.attentionF32MinScoreBytes
+     << "\n";
   module->print(os);
 }
 #endif
@@ -126,6 +129,40 @@ OnnxDialectKind onnxDialectKind() {
   return hipsrPipelineRequested() ? OnnxDialectKind::Modeled
                                   : OnnxDialectKind::Stub;
 }
+} // namespace
+
+namespace {
+// FNV-1a over the shipped LUT bytes. The model cache key is the graph, so two
+// compiles that pick different perfConfigs must not share an artifact. The
+// provider consults only the embedded tools/problem-cache/lut/*.fb; hashing
+// those bytes makes a changed table fail the recorded/current check the same
+// way a changed autotune space does. hip-rocmlir-compiler's --problem-cache
+// is not part of this string: the provider never reads it.
+#if defined(ENABLE_ROCMLIRTRITON) && defined(HIPDNN_EP_LINK_HIP_HOST) &&       \
+    defined(HIPDNN_HIP_RUNTIME_LIB)
+std::string shippedProblemCacheFingerprint() {
+  uint64_t hash = 14695981039346656037ull;
+  for (size_t blob = 0; blob < kRocmlirProblemCacheBlobCount; ++blob) {
+    const unsigned char *bytes = kRocmlirProblemCacheBlobs[blob];
+    const size_t size = kRocmlirProblemCacheBlobSizes[blob];
+    if (!bytes || size == 0)
+      continue;
+    for (size_t i = 0; i < size; ++i) {
+      hash ^= bytes[i];
+      hash *= 1099511628211ull;
+    }
+  }
+  static constexpr char kHex[] = "0123456789abcdef";
+  std::string hex(16, '0');
+  for (int nibble = 15; nibble >= 0; --nibble) {
+    hex[static_cast<size_t>(nibble)] = kHex[hash & 0xfu];
+    hash >>= 4;
+  }
+  return hex;
+}
+#else
+std::string shippedProblemCacheFingerprint() { return {}; }
+#endif
 } // namespace
 
 std::string rocMlirArtifactTarget() {
@@ -138,13 +175,21 @@ std::string rocMlirArtifactTarget() {
     std::string target = mlir::hip::resolveRocMlirArch();
     // Which perfConfig each kernel was tuned to is baked into the embedded
     // HSACO. Autotune runs unless HIP_ROCMLIR_SKIP_BENCHMARKING is set, so
-    // the target string records the space. There is no +lut= suffix. An
-    // artifact
-    // built with another space must not be reused: the cache is keyed on the
-    // graph alone.
+    // the target string records the space and the shipped LUT that supplied
+    // tiles before the search. An artifact built with the other setting, or
+    // against other LUT bytes, must not be reused: the cache is keyed on the
+    // graph alone. Skip-benchmarking does not consult the LUT, so it has no
+    // +lut= suffix.
     mlir::hip::AutotuneSpace space;
-    if (!target.empty() && mlir::hip::rocMlirAutotuneFromEnv(space))
+    if (!target.empty() && mlir::hip::rocMlirAutotuneFromEnv(space)) {
       target += std::string("+autotune=") + mlir::hip::autotuneSpaceName(space);
+      const std::string lut = shippedProblemCacheFingerprint();
+      if (!lut.empty())
+        target += "+lut=" + lut;
+    }
+    // Whether attention was fused is baked into the kernels the same way.
+    if (!target.empty() && hip_env_is_on("HIPDNN_EP_ROCMLIR_NO_ATTENTION"))
+      target += "+no-attention";
     // The same holds for the kernel plan: without standalone elementwise
     // kernels the leftover modules run as HIP ops, a different artifact.
     if (!target.empty() &&
@@ -292,18 +337,18 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
     logPhase("compileToObject");
 
     // Symbols exported from the generated DLL:
-    //   inference_init/compute/cleanup       â€” runtime entry points
-    //   inference_get_metadata_json          â€” model metadata query
-    //   test_hip_from_dll                    â€” diagnostic hook for hip-test
-    //   hipdnn_ep_runtime_begin_compute      â€” per-Compute() cache invalidation
-    //   hipdnn_ep_set_output_allocator       â€” EP installs the output allocator
+    //   inference_init/compute/cleanup       — runtime entry points
+    //   inference_get_metadata_json          — model metadata query
+    //   test_hip_from_dll                    — diagnostic hook for hip-test
+    //   hipdnn_ep_runtime_begin_compute      — per-Compute() cache invalidation
+    //   hipdnn_ep_set_output_allocator       — EP installs the output allocator
     //                                          before inference_compute
-    //   hipdnn_ep_runtime_flush_op_profile   â€” HIPDNN_EP_PERF per-op resolve +
+    //   hipdnn_ep_runtime_flush_op_profile   — HIPDNN_EP_PERF per-op resolve +
     //                                          print hook (called by EP AFTER
     //                                          its wall_ms window closes so the
     //                                          resolve cost doesn't pollute
     //                                          TPS)
-    //   hipdnn_ep_runtime_add_cpu_profile    â€” EP pushes its outer (whole-
+    //   hipdnn_ep_runtime_add_cpu_profile    — EP pushes its outer (whole-
     //                                          Compute) steady_clock total into
     //                                          the per-op table + trace for
     //                                          bubble detection (before flush).
@@ -487,6 +532,11 @@ bool CompilerDriver::runMLIRPasses(
       // i4 filter; the default perfConfig is one of them for f32.
       mlir::hip::AutotuneSpace int4Space;
       fuseOpts.int4Weights = mlir::hip::rocMlirAutotuneFromEnv(int4Space);
+      // HIPDNN_EP_ROCMLIR_NO_ATTENTION=1 keeps attention as two gemm kernels
+      // and a softmax, to compare the two paths.
+      fuseOpts.attention = !hip_env_is_on("HIPDNN_EP_ROCMLIR_NO_ATTENTION");
+      fuseOpts.attentionF32MinScoreBytes =
+          mlir::hip::resolveRocMlirL2CacheBytes();
       if (mlir::failed(headPm.run(module))) {
         error_message = "ONNX->HIP passes before the rocMLIR fusion failed";
         return false;
@@ -678,12 +728,12 @@ bool CompilerDriver::runMLIRPasses(
     }
     // Strict mode (opt-in): when HIPDNN_EP_STRICT=1 is set, abort so the
     // cpptrace SIGABRT handler prints a backtrace pinpointing the failing
-    // pass. Use this when verifying that a model is fully offloaded â€” any
+    // pass. Use this when verifying that a model is fully offloaded — any
     // graph MorphiZenEP claims but cannot compile is a regression, and
     // catching it as a crash beats silent CPU fallback masking the bug
     // (e.g. accuracy tests passing cosine=1.0 because they compare CPU vs
     // CPU). Default behaviour returns false so ORT's CPU fallback handles
-    // the graph normally â€” required for multi-session pipelines where
+    // the graph normally — required for multi-session pipelines where
     // MorphiZenEP is registered only for HipDataTransferImpl visibility
     // (e.g. multi-stage VLM pipelines where embedding / vision sub-sessions
     // are intentionally not claimed by the EP).
@@ -811,7 +861,7 @@ void CompilerDriver::discoverInTreeLibraries(
 
   // hip_get_env, not std::getenv: this code runs inside the static-CRT EP DLL
   // when invoked from the EP. std::getenv there has its own (empty) CRT env
-  // table and silently returned NULL, leaving library_paths empty â€” lld then
+  // table and silently returned NULL, leaving library_paths empty — lld then
   // failed with "could not open 'amdhip64.lib'" and the EP fell back to CPU.
   std::string dist = hip_get_env("THEROCK_DIST");
   if (dist.empty())

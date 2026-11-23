@@ -1347,6 +1347,9 @@ public:
     });
     if (remaining.wasInterrupted())
       return signalPassFailure();
+    if (attention)
+      fuseAttentionKernels(funcOp, counter, gemmGemmAccelTypes,
+                           attentionF32MinScoreBytes);
     fuseGemmGemmKernels(funcOp, counter, gemmGemmAccelTypes);
   }
 
