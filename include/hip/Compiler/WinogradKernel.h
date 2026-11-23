@@ -40,6 +40,11 @@ struct WinogradConfig {
   bool fullTransform = false; // FT: read the raw filter g, not T = G g
 };
 
+/// Output channels per 256-thread block of the generated `<name>_fixup`
+/// kernel. wrap_winograd_conv (lib/Runtime/real/winograd_conv.cpp) launches
+/// ceil(K / this) blocks and must use the same value.
+inline constexpr int64_t kFixupChannels = 16;
+
 /// The configuration used for an [N, C, H, W] -> [N, K, H, W] conv.
 WinogradConfig chooseWinogradConfig(int64_t n, int64_t c, int64_t h, int64_t w,
                                     int64_t k);

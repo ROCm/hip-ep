@@ -45,11 +45,12 @@ Loading those rows per element inside the kernel spills registers (the kernel
 already uses 256 VGPRs) and halves its speed. Instead, the generated code
 object also holds `<name>_fixup`, which recomputes those at most 12 positions
 per output channel as a direct convolution from the filter store, with the
-same epilogue, and the runtime launches it right after the conv kernel. One
-32-lane group computes one (position, output channel) pair and splits the
-input channels across its lanes; a serial channel loop per thread would cost
-about as much as the conv kernel at a few hundred channels. The vendored
-headers stay byte-identical to upstream.
+same epilogue, and the runtime launches it right after the conv kernel. The
+12 positions read at most 24 distinct input pixels per channel; each block of
+the fixup takes 16 output channels for all 12 positions, stages those pixels
+for a chunk of input channels in LDS, and streams each output channel's filter
+once. Reading the filter once per position instead costs as much as the conv
+kernel on small images. The vendored headers stay byte-identical to upstream.
 
 hiprtc is resolved at call time, like the HIP runtime in
 `RocMlirKernelCompiler.cpp`, so it adds no load-time dependency. The headers
@@ -70,11 +71,14 @@ set of fp16 image models.
 
 ## Configuration
 
-`chooseWinogradConfig` picks one of MIGraphX's fp16 configurations by shape: four
-waves with fold-at-end and the `T` store by default, three output blocks with
-the raw filter for a narrow output over a large image, and eight waves for
-large channel counts. Each build takes about 1-2 s, so the configurations are
-not tuned per model.
+`chooseWinogradConfig` picks one of MIGraphX's fp16 configurations by shape: two
+waves that split the channel sum, with the raw filter, when the conv has under
+about 4096 (2x2 tile, 16 output channels) units of work, so that the grid
+still fills the device; otherwise four waves with fold-at-end and the `T` store
+by default, three output blocks with the raw filter for a narrow output over a
+large image, and eight waves for large channel counts. Each build takes about
+1-2 s, so the configurations are not tuned per model; MIGraphX instead
+benchmarks its 19 fp16 configurations for each shape at compile time.
 
 ## Cache identity
 

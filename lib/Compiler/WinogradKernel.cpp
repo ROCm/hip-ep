@@ -57,14 +57,23 @@ bool winogradKernelSupportsArch(llvm::StringRef arch) {
 
 WinogradConfig chooseWinogradConfig(int64_t n, int64_t c, int64_t h, int64_t w,
                                     int64_t k) {
-  (void)n;
   WinogradConfig config;
   const int64_t spatial = std::min(h, w);
+  // Independent (2x2 output tile, 16 output channels) units of work.
+  const int64_t units = n * ((h + 1) / 2) * ((w + 1) / 2) * ((k + 15) / 16);
   // From a sweep of the 20 MIGraphX fp16 configurations on gfx1151 over the
-  // shapes that the gate admits: fold-at-end with the T store wins most; a
-  // narrow output over a large image prefers three output blocks per group
-  // and the raw filter; large channel counts prefer eight waves.
-  if (k <= 32 && spatial >= 256) {
+  // shapes that the gate admits: fold-at-end with the T store wins most; with
+  // under ~4k units the grid is too small to fill the device, and splitting
+  // the channel sum across two waves wins by about 2x (it loses by 1.3-2.2x
+  // from 8k units up); a narrow output over a large image prefers three
+  // output blocks per group and the raw filter; large channel counts prefer
+  // eight waves.
+  if (units < 4096) {
+    config.waves = 2;
+    config.channelSplit = 2;
+    config.foldAtEnd = false;
+    config.fullTransform = true;
+  } else if (k <= 32 && spatial >= 256) {
     config.outBlocks = 3;
     config.foldAtEnd = false;
     config.fullTransform = true;
@@ -165,66 +174,144 @@ buildWinogradKernelSource(int64_t n, int64_t c, int64_t h, int64_t w, int64_t k,
   // instead spills registers and halves the speed, so `<name>_fixup`
   // recomputes those at most 12 positions per output channel directly, with
   // the same epilogue, after the main kernel. The filter comes from the
-  // store: g, or T = G g with g0 = T0, g1 = T1 - T2, g2 = T3. One 32-lane
-  // group takes one (position, channel) pair and splits the input channels,
-  // so the store reads stay contiguous; a serial channel loop per thread costs
-  // about as much as the conv kernel itself at a few hundred channels.
-  std::string fixupParams = params;
+  // store: g, or T = G g with g0 = T0, g1 = T1 - T2, g2 = T3.
+  //
+  // The 12 positions read at most 24 distinct input pixels per channel. Each
+  // block takes kFixupChannels output channels for all 12 positions: it
+  // stages those pixels for a chunk of input channels in LDS, and each wave
+  // streams the filter of one output channel once, contiguously, and
+  // accumulates all 12 positions. Reading the filter per position instead
+  // costs as much as the conv kernel on small images.
+  struct Pos {
+    int64_t n, h, w;
+  };
+  std::vector<Pos> positions;
+  for (int p = 0; p < 12; ++p)
+    positions.push_back(
+        p < 4 ? Pos{0, p / 2, p % 2}
+              : Pos{n - 1, h - 4 + (p - 4) / 2, w - 2 + (p - 4) % 2});
+  std::vector<int64_t> pixels;
+  std::string taps, outs;
+  for (const Pos &pos : positions) {
+    bool valid = pos.h >= 0 && pos.h < h && pos.w >= 0 && pos.w < w;
+    outs += (outs.empty() ? "" : ", ") +
+            std::to_string(valid ? (pos.n * k * h + pos.h) * w + pos.w : -1);
+    std::string row;
+    for (int t = 0; t < 9; ++t) {
+      int64_t ih = pos.h + t / 3 - 1, iw = pos.w + t % 3 - 1;
+      int64_t index = -1;
+      if (valid && ih >= 0 && ih < h && iw >= 0 && iw < w) {
+        int64_t offset = (pos.n * c * h + ih) * w + iw;
+        auto it = llvm::find(pixels, offset);
+        index = it - pixels.begin();
+        if (it == pixels.end())
+          pixels.push_back(offset);
+      }
+      row += (t ? ", " : "") + std::to_string(index);
+    }
+    taps += (taps.empty() ? "{" : ", {") + row + "}";
+  }
+  std::string pixelList;
+  for (int64_t offset : pixels)
+    pixelList += (pixelList.empty() ? "" : ", ") + std::to_string(offset);
+
   std::string fixupCall = hasBias                ? "winograd_post{}(v, b[k])"
                           : activation != "none" ? "winograd_post{}(v)"
                                                  : "v";
+  std::string filterTap = config.fullTransform
+                              ? "at(r, s, c)"
+                              : "r == 0 ? at(0, s, c) : r == 2 ? at(3, s, c) : "
+                                "at(1, s, c) - at(2, s, c)";
   std::string fixup =
-      llvm::formatv(
-          "__global__ void __launch_bounds__(256) {0}_fixup({1}) {{\n"
-          "  constexpr int N = {2}, C = {3}, H = {4}, W = {5}, K = {6};\n"
-          "  const half* x = static_cast<const half*>(p0);\n"
-          "  const half* u = static_cast<const half*>(p1);\n"
-          "  {7}"
-          "  half* y = static_cast<half*>(p{8});\n"
-          "  const int lane = threadIdx.x % 32;\n"
-          "  const int t = blockIdx.x * (blockDim.x / 32) + threadIdx.x / 32;\n"
-          "  const int pos = t / K, k = t % K;\n"
-          "  if (pos >= 12) return;\n"
-          "  int n, h, w;\n"
-          "  if (pos < 4) {{ n = 0; h = pos / 2; w = pos % 2; }\n"
-          "  else {{ n = N - 1; h = H - 4 + (pos - 4) / 2; w = W - 2 + (pos - "
-          "4) % 2; }\n"
-          "  if (h < 0 || h >= H || w < 0 || w >= W) return;\n"
-          "  auto at = [&](int i, int j, int c) {{\n"
-          "    return static_cast<float>(u[((i * 3 + j) * K + k) * C + c]); "
-          "};\n"
-          "  float acc = 0.f;\n"
-          "  for (int c = lane; c < C; c += 32)\n"
-          "    for (int r = 0; r < 3; ++r) {{\n"
-          "      const int ih = h + r - 1;\n"
-          "      if (ih < 0 || ih >= H) continue;\n"
-          "      for (int s = 0; s < 3; ++s) {{\n"
-          "        const int iw = w + s - 1;\n"
-          "        if (iw < 0 || iw >= W) continue;\n"
-          "        const float g = {9};\n"
-          "        acc += g * static_cast<float>(x[((static_cast<long>(n) * C "
-          "+ c) * H + ih) * W + iw]);\n"
-          "      }\n"
-          "    }\n"
-          "  for (int off = 16; off > 0; off /= 2)\n"
-          "    acc += __shfl_down(acc, off, 32);\n"
-          "  if (lane != 0) return;\n"
-          "  const half v = static_cast<half>(acc);\n"
-          "  y[((static_cast<long>(n) * K + k) * H + h) * W + w] = {10};\n"
-          "}\n",
-          "{NAME}", fixupParams, n, c, h, w, k,
-          hasBias ? "const half* b = static_cast<const half*>(p2);\n  " : "",
-          nargs - 1,
-          config.fullTransform ? "at(r, s, c)"
-                               : "r == 0 ? at(0, s, c) : r == 2 ? at(3, s, c) "
-                                 ": at(1, s, c) - at(2, s, c)",
-          fixupCall)
-          .str();
+      R"(__global__ void __launch_bounds__(256) @NAME@_fixup(@PARAMS@) {
+  constexpr int C = @C@, K = @K@, NP = @NP@;
+  constexpr long HW = @HW@;
+  constexpr long PIX[NP > 0 ? NP : 1] = {@PIX@};
+  constexpr signed char TAP[12][9] = {@TAP@};
+  constexpr long OUT[12] = {@OUT@};
+  constexpr int KPB = @KPB@, CCH = C < 256 ? C : 256, SLOTS = KPB / 4;
+  __shared__ float patch[(NP > 0 ? NP : 1) * CCH];
+  const half* x = static_cast<const half*>(p0);
+  const half* u = static_cast<const half*>(p1);
+  @BIAS@half* y = static_cast<half*>(p@OUTARG@);
+  const int waves = blockDim.x / warpSize, wave = threadIdx.x / warpSize;
+  const int lane = threadIdx.x % warpSize, k0 = blockIdx.x * KPB;
+  float acc[SLOTS][12] = {};
+  for (int c0 = 0; c0 < C; c0 += CCH) {
+    const int cn = C - c0 < CCH ? C - c0 : CCH;
+    __syncthreads();
+    for (int i = threadIdx.x; i < NP * cn; i += blockDim.x)
+      patch[(i % NP) * CCH + i / NP] =
+          static_cast<float>(x[PIX[i % NP] + (c0 + i / NP) * HW]);
+    __syncthreads();
+#pragma unroll
+    for (int sl = 0; sl < SLOTS; ++sl) {
+      const int kl = wave + sl * waves, k = k0 + kl;
+      if (kl >= KPB || k >= K) break;
+      auto at = [&](int i, int j, int ch) {
+        return static_cast<float>(u[((i * 3 + j) * K + k) * static_cast<long>(C) + ch]);
+      };
+      for (int cl = lane; cl < cn; cl += warpSize) {
+        const int c = c0 + cl;
+        float g[9];
+#pragma unroll
+        for (int r = 0; r < 3; ++r)
+#pragma unroll
+          for (int s = 0; s < 3; ++s)
+            g[r * 3 + s] = @FILTER@;
+#pragma unroll
+        for (int p = 0; p < 12; ++p) {
+          if (OUT[p] < 0) continue;
+          float a = 0.f;
+#pragma unroll
+          for (int t = 0; t < 9; ++t)
+            if (TAP[p][t] >= 0) a += g[t] * patch[TAP[p][t] * CCH + cl];
+          acc[sl][p] += a;
+        }
+      }
+    }
+  }
+#pragma unroll
+  for (int sl = 0; sl < SLOTS; ++sl) {
+    const int kl = wave + sl * waves, k = k0 + kl;
+    if (kl >= KPB || k >= K) break;
+#pragma unroll
+    for (int p = 0; p < 12; ++p) {
+      if (OUT[p] < 0) continue;
+      float sum = acc[sl][p];
+      for (int off = warpSize / 2; off > 0; off /= 2)
+        sum += __shfl_down(sum, off);
+      if (lane == 0) {
+        const half v = static_cast<half>(sum);
+        y[OUT[p] + k * HW] = @CALL@;
+      }
+    }
+  }
+}
+)";
+  auto fill = [&](llvm::StringRef key, const std::string &value) {
+    for (size_t at; (at = fixup.find(key.str())) != std::string::npos;)
+      fixup.replace(at, key.size(), value);
+  };
+  fill("@PARAMS@", params);
+  fill("@C@", std::to_string(c));
+  fill("@K@", std::to_string(k));
+  fill("@NP@", std::to_string(pixels.size()));
+  fill("@HW@", std::to_string(h * w));
+  fill("@PIX@", pixelList.empty() ? "0" : pixelList);
+  fill("@TAP@", taps);
+  fill("@OUT@", outs);
+  fill("@KPB@", std::to_string(kFixupChannels));
+  fill("@BIAS@",
+       hasBias ? "const half* b = static_cast<const half*>(p2);\n  " : "");
+  fill("@OUTARG@", std::to_string(nargs - 1));
+  fill("@FILTER@", filterTap);
+  fill("@CALL@", fixupCall);
 
   WinogradKernelSource out;
   out.name = "hip_winograd_conv_" + activation.str() + (hasBias ? "_bias" : "");
-  size_t at = fixup.find("{NAME}");
-  fixup.replace(at, 6, out.name);
+  for (size_t at; (at = fixup.find("@NAME@")) != std::string::npos;)
+    fixup.replace(at, 6, out.name);
   out.source =
       llvm::formatv("#include <migraphx/kernels/winograd_conv.hpp>\n"
                     "#include <migraphx/kernels/integral_constant.hpp>\n"
