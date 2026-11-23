@@ -32,6 +32,7 @@
 
 #include "gelu_fusion.hpp"
 #include "linear_attention_group_fold.hpp"
+#include "matmul_nbits_group.hpp"
 #include "patch_embed_conv_to_gemm.hpp"
 #include "swiglu_fusion.hpp"
 
@@ -855,6 +856,8 @@ inline void registerNativeHelpers(mlir::PDLPatternModule &pdlPatterns) {
 /// declines -- which is the whole reason QConvFusion roots at `hip.conv`
 /// rather than at the `hip.quantize_linear` it replaces.
 constexpr unsigned kPatchEmbedConvToGemmBenefit = 5;
+/// No other pattern roots at `hip.matmul_nbits`.
+constexpr unsigned kMatMulNBitsGroupBenefit = 1;
 
 /// The SwiGLU and GELU fusions are rooted at `hip.mul` but match disjoint
 /// chains (a sigmoid gate, a tanh or erf activation), so their benefits are
@@ -884,6 +887,8 @@ inline mlir::LogicalResult run(mlir::ModuleOp module,
   populateGeluFusionPattern(patterns, mlir::PatternBenefit(kGeluFusionBenefit));
   populateLinearAttentionGroupFoldPattern(
       patterns, mlir::PatternBenefit(kLinearAttentionGroupFoldBenefit));
+  populateMatMulNBitsGroupPattern(
+      patterns, mlir::PatternBenefit(kMatMulNBitsGroupBenefit));
 
   // pdl patterns here
   if (pdlBuffer.getBufferSize() != 0) {
