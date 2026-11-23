@@ -74,7 +74,9 @@ Each case appends one row to `out/results.csv` (see `unit_test/README.md`),
 `fixed:fp16:nhwc:split:offset:silu1` (the op has one fixed path). A case that
 passes is timed after its check with the shared timer
 (`common/hip_adaptive_timing.h`) on rotated copies of its inputs, and its row
-carries that `time_ms`; `TIMING` selects the timer preset.
+carries that `time_ms`; `TIMING` selects the timer preset. A shape below 2^20
+elements is checked but not timed (`time_ms` 0): a call takes only a few
+microseconds, too short for the event timer on some HIP runtimes.
 
 `OFFLOAD` defaults to `--offload-arch=gfx11-generic` (gfx115x); pass
 `--offload-arch=gfx1170` or `gfx1171` for those chips.

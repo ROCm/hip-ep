@@ -54,6 +54,10 @@ using Elem = __half;
 constexpr const char *kLeaf = "group_norm/Xfp16_Wfp16_Yfp16";
 
 constexpr int kGuardElements = 32;
+// A shape this small takes a few microseconds per call. On some HIP runtimes
+// the event timer then returns non-positive elapsed times, and the shared
+// timer rejects the case. Smaller shapes are checked for correctness only.
+constexpr int64_t kMinTimedElements = int64_t(1) << 20;
 constexpr unsigned char kFillByte = 0x7f;
 
 struct Shape {
@@ -628,7 +632,7 @@ bool run_case(const Shape &s, uint64_t seed, int channels_last,
   result.finish(rel_l2, pass);
   // Timed after the check, so the timed launches never feed the comparison.
   // The copies keep the skew of a misaligned case.
-  if (pass) {
+  if (pass && s.n * s.c * s.spatial >= kMinTimedElements) {
     ColdCopies copies({{d_x.get(), data_bytes + skew},
                        {d_gamma.get(), s.c * sizeof(T)},
                        {d_beta.get(), s.c * sizeof(T)}});
@@ -878,7 +882,7 @@ bool parse_options(int argc, char **argv, Options *o) {
 
 } // namespace
 
-int main(int argc, char **argv) {
+int main(int argc, char **argv) try {
   Options options;
   if (!parse_options(argc, argv, &options)) {
     usage(argv[0]);
@@ -915,4 +919,7 @@ int main(int argc, char **argv) {
 
   std::cout << (all_pass ? "ALL PASS" : "SOME FAIL") << '\n';
   return all_pass ? 0 : 1;
+} catch (const std::exception &error) {
+  std::fprintf(stderr, "%s\n", error.what());
+  return 2;
 }
