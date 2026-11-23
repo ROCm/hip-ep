@@ -560,6 +560,10 @@ static std::string logical_hash(const Case& c,const Host& h){
 }
 static void run_compare(const Case& c){
   if(c.error!="none")throw std::invalid_argument("compare requires normal case");
+  const char* rank_request=std::getenv("HIPDNN_UT_COMPARE_RANK");
+  const std::string rank_side=rank_request?rank_request:"";
+  if(!rank_side.empty()&&rank_side!="page"&&rank_side!="flash")throw std::invalid_argument("compare rank side must be page or flash");
+  const bool complete_only=std::getenv("HIPDNN_UT_COMPARE_COMPLETE_ONLY")&&std::string(std::getenv("HIPDNN_UT_COMPARE_COMPLETE_ONLY"))=="1";
   Host h=prepare(c);std::vector<int> active;for(int b=0;b<c.B;++b)if(c.q[b])active.push_back(b);
   if(active.empty())throw std::invalid_argument("compare requires at least one active request");
   const int A=int(active.size()),T=h.desc.tokens;
@@ -617,7 +621,35 @@ static void run_compare(const Case& c){
       const char* dense_pin=std::getenv("HIPDNN_UT_FLASH_CFG");
       const bool force_dense=dense_pin&&*dense_pin;
       const auto dense_geometry=force_dense?requested_config(h.desc,dense_pin):GqaPagedConfig{};
+      std::vector<HipdnnUtOriginalConfig> native_configs;bool force_native=false;
+      auto native_name=[&](const std::vector<HipdnnUtOriginalConfig>& values){std::string name;for(const auto& g:values){if(!name.empty())name+="|";name+="wmma="+std::to_string(g.wmma)+";"+config_string(g.geometry);}return name;};
+      const char* native_pin=std::getenv("HIPDNN_UT_FLASH_NATIVE_CFG");
+      if(native_pin&&*native_pin){
+        if(force_dense)throw std::invalid_argument("conflicting original Flash pins");
+        std::istringstream requests(native_pin);std::string request;
+        while(std::getline(requests,request,'|')){
+          HipdnnUtOriginalConfig g{};
+          g.geometry={timing::rankConfigInt(request,"splits"),timing::rankConfigInt(request,"bkv"),timing::rankConfigInt(request,"hb"),timing::rankConfigInt(request,"qw"),timing::rankConfigInt(request,"mt"),timing::rankConfigInt(request,"nd")};
+          g.wmma=timing::rankConfigInt(request,"wmma");
+          if(!kDecode&&g.wmma)throw std::invalid_argument("prefill native pin has decode WMMA flag");
+          native_configs.push_back(g);
+        }
+        if(native_configs.empty()||(native_configs.size()!=1&&(batched||native_configs.size()!=size_t(A))))throw std::invalid_argument("native Flash pin request count differs");
+        const int n=hipdnn_ut_original_candidates(kDecode,c.H,c.G,c.D,maximum,c.window,nullptr,0);
+        std::vector<HipdnnUtOriginalConfig> legal(n);
+        if(n<=0||hipdnn_ut_original_candidates(kDecode,c.H,c.G,c.D,maximum,c.window,legal.data(),n)!=n)throw std::invalid_argument("native Flash pin enumeration failed");
+        for(const auto& g:native_configs){bool valid=false;for(const auto& l:legal)if(l.wmma==g.wmma&&config_string(l.geometry)==config_string(g.geometry))valid=true;if(!valid)throw std::invalid_argument("native Flash pin is outside original legal candidates");}
+        force_native=true;
+      }
       auto dense_flash=[&](const void* Q,const void* K,const void* V)->int{
+        if(force_native){
+          const auto& native_config=native_configs.front();
+          if(kDecode)return hipdnn_ut_original_native_decode(Q,K,V,out.ptr(),partial.ptr(),A,c.H,c.G,c.D,maximum,capacity,scale,lengths.ptr(),c.window,&native_config);
+          if(batched)return hipdnn_ut_original_prefill_configured(Q,K,V,out.ptr(),A,c.H,c.G,c.q[active[0]],maximum,c.D,capacity,c.past[active[0]],scale,c.window,&native_config.geometry);
+          for(int a=0;a<A;++a){const int b=active[a];const size_t qo=size_t(h.cum[b])*c.H*c.D*2,bo=size_t(a)*c.G*capacity*c.D*2;
+            const int rc=hipdnn_ut_original_prefill_configured(static_cast<const unsigned char*>(Q)+qo,static_cast<const unsigned char*>(K)+bo,static_cast<const unsigned char*>(V)+bo,static_cast<unsigned char*>(out.ptr())+qo,1,c.H,c.G,c.q[b],post[b],c.D,capacity,c.past[b],scale,c.window,&native_configs[native_configs.size()==1?0:a].geometry);if(rc)return rc;}
+          return 0;
+        }
         if(force_dense){
           if(kDecode)return hipdnn_ut_original_decode_configured(Q,K,V,out.ptr(),partial.ptr(),A,c.H,c.G,c.D,maximum,capacity,scale,lengths.ptr(),c.window,&dense_geometry);
           if(batched)return hipdnn_ut_original_prefill_configured(Q,K,V,out.ptr(),A,c.H,c.G,c.q[active[0]],maximum,c.D,capacity,c.past[active[0]],scale,c.window,&dense_geometry);
@@ -647,7 +679,7 @@ static void run_compare(const Case& c){
       if(public_entry()){GqaPagedConfig actual{};if(hip_paged_attention_f16_last_config_v2(&actual,sizeof(actual))||config_string(actual)!=config_string(config))throw std::runtime_error("public Page actual geometry differs");}check(hipDeviceSynchronize());int device_status=0;check(hipMemcpy(&device_status,page.workspace.ptr(),4,hipMemcpyDeviceToHost));
       page_output=output_floats(page.o);
       if(device_status||!matches(page.kp.download(),h.expected_k.data(),h.expected_k.size()*2)||!matches(page.vp.download(),h.expected_v.data(),h.expected_v.size()*2))throw std::runtime_error("compare Page status/cache FAIL");
-      if(dense_complete(keys.ptr(),values.ptr()))throw std::runtime_error("original Flash rejects shape");check(hipDeviceSynchronize());dense_output=output_floats(out);original_config=hipdnn_ut_original_config();
+      if(dense_complete(keys.ptr(),values.ptr()))throw std::runtime_error("original Flash rejects shape");check(hipDeviceSynchronize());dense_output=output_floats(out);original_config=force_native?"fixed:original-native:"+native_name(native_configs):hipdnn_ut_original_config();
       if(original_config.empty())throw std::runtime_error("original Flash configuration unavailable");
       auto original_k=keys.download();auto original_v=values.download();auto original_q=c.rotary?qr.download():q.download();auto original_new_k=c.rotary?kr.download():k.download();
       auto expected_original_k=dk,expected_original_v=dv;
@@ -672,10 +704,59 @@ static void run_compare(const Case& c){
         };
         auto page_launch=[&](int i){auto d=page.desc;if(i){d.k_pool=cache[i-1]->pk.ptr();d.v_pool=cache[i-1]->pv.ptr();}return page_complete_entry(nullptr,&d,page.workspace.ptr(),workspace,&config,sizeof(config));};
         auto dense_launch=[&](int i){return dense_complete(i?cache[i-1]->dk.ptr():keys.ptr(),i?cache[i-1]->dv.ptr():values.ptr());};
+        if(!rank_side.empty()){
+          if(public_entry()||(pin&&*pin)||force_dense||force_native||std::getenv("HIPDNN_PAGED_ATTENTION_PRODUCTION_PREPARE"))throw std::invalid_argument("compare ranking conflicts with production prepare/public/pins");
+          timing::RankOptions options;
+          std::vector<GqaPagedConfig> page_configs;
+          std::vector<std::vector<HipdnnUtOriginalConfig>> flash_configs;
+          if(rank_side=="page"){
+#ifndef HIPDNN_UT_RANK_PAGED_ADAPTER
+            throw std::invalid_argument("Page compare rank requires RANK=1 build");
+#else
+            const int count=hipdnn_ut_paged_config_count(&h.desc);std::set<std::string> seen;
+            for(int id=0;id<count;++id){GqaPagedConfig g;if(hipdnn_ut_paged_config(&h.desc,id,&g))throw std::runtime_error("Page candidate enumeration failed");const auto name=config_string(g);if(seen.insert(name).second){page_configs.push_back(g);options.configs.push_back(name);}}
+            options.select=[&](size_t i){config=page_configs.at(i);};
+#endif
+          }else{
+            // Freeze every original public online selection, including each
+            // active ragged request, before measuring any candidate.
+            std::vector<HipdnnUtOriginalConfig> defaults;
+            for(int a=0;a<(batched?1:A);++a){const int b=active[a];HipdnnUtOriginalConfig g{};
+              if(hipdnn_ut_original_selected(kDecode,batched?A:1,c.H,c.G,c.D,c.q[b],batched?maximum:post[b],c.window,&g))throw std::runtime_error("original online selection cache missing");
+              defaults.push_back(g);
+            }
+            flash_configs.push_back(defaults);options.configs.push_back(native_name(defaults));
+            const int count=hipdnn_ut_original_candidates(kDecode,c.H,c.G,c.D,maximum,c.window,nullptr,0);
+            if(count<=0)throw std::runtime_error("Original Flash candidate enumeration failed");
+            std::vector<HipdnnUtOriginalConfig> candidates(count);
+            if(hipdnn_ut_original_candidates(kDecode,c.H,c.G,c.D,maximum,c.window,candidates.data(),count)!=count)throw std::runtime_error("Original Flash candidate count changed");
+            std::set<std::string> seen{options.configs.front()};
+            for(const auto& g:candidates){const std::vector<HipdnnUtOriginalConfig> v{g};const auto name=native_name(v);if(seen.insert(name).second){flash_configs.push_back(v);options.configs.push_back(name);}}
+            options.select=[&](size_t i){force_native=true;native_configs=flash_configs.at(i);};
+          }
+          options.validate=[&](size_t i){
+            options.select(i);
+            const bool is_page=rank_side=="page";
+            if((is_page?page_launch(0):dense_launch(0)))throw std::runtime_error("complete rank candidate launch failed");check(hipDeviceSynchronize());
+            auto acc=accuracy(output_floats(is_page?page.o:out),h.reference);
+            if(acc.nonfinite||!(acc.rel<(kDecode?2e-2:2e-3)))throw std::runtime_error("complete rank candidate CPU precision FAIL");
+            int device_state=0;check(hipMemcpy(&device_state,page.workspace.ptr(),4,hipMemcpyDeviceToHost));
+            if(device_state||!matches(page.kp.download(),h.expected_k.data(),h.expected_k.size()*2)||!matches(page.vp.download(),h.expected_v.data(),h.expected_v.size()*2)||!matches(keys.download(),expected_original_k.data(),dense_elems*2)||!matches(values.download(),expected_original_v.data(),dense_elems*2)||!matches(q.download(),h.q.data(),h.q.size()*2)||!matches(k.download(),h.k.data(),h.k.size()*2)||!matches(v.download(),h.v.data(),h.v.size()*2)||!matches(page.q.download(),h.q.data(),h.q.size()*2)||!matches(page.k.download(),h.k.data(),h.k.size()*2)||!matches(page.v.download(),h.v.data(),h.v.size()*2)||!matches(page.cum.download(),h.cum.data(),h.cum.size()*4)||!matches(page.past.download(),h.past.data(),h.past.size()*4)||!matches(page.table.download(),h.table.data(),h.table.size()*4)||!matches(lengths.download(),seq.data(),seq.size()*4))throw std::runtime_error("complete rank candidate cache/readonly/metadata FAIL");
+            return acc.rel;
+          };
+          const std::string rank_shape=shape+"_entry"+rank_side+"_complete_rank";
+          timing::CaseScope scope(kLeaf,rank_shape,rank_side=="page"?"hip_paged_attention_f16_configured_v2":"original_RoPE_append_Flash");
+          // The owning rank engine retains screen/standard/conditional
+          // confirm and all valid groups, emitting the winner and configs.
+          timing::adaptiveRotatedMeanMs(nullptr,rotation,rank_side=="page"?std::function<int(int)>(page_launch):std::function<int(int)>(dense_launch),flag,[&](const int* p){hold_stream<<<1,1>>>(p);},warm,size_t(128)<<20,"paged_flash_compare",rank_side=="page"?"hip_paged_attention_f16_configured_v2":"original_RoPE_append_Flash",timing::NoPreparation{},&options);
+          check(hipDeviceSynchronize());check(hipHostFree(flag));flag=nullptr;
+          return;
+        }
         // Alternate side order by the logical query/history dimensions.
         const bool dense_first=c.compare_order!=0;
         if(dense_first){dense_ms=measure("dense_complete","original_RoPE_append_Flash",original_config,da.rel,dense_launch);page_ms=measure("page_complete",(public_entry()?"hip_paged_attention_f16":"hip_paged_attention_f16_configured_v2"),config_source+":"+config_string(config),pa.rel,page_launch);}
         else{page_ms=measure("page_complete",(public_entry()?"hip_paged_attention_f16":"hip_paged_attention_f16_configured_v2"),config_source+":"+config_string(config),pa.rel,page_launch);dense_ms=measure("dense_complete","original_RoPE_append_Flash",original_config,da.rel,dense_launch);}
+        if(!complete_only){
         bare_ms=measure("dense_bare","original_Flash_attention",original_config,da.rel,[&](int i){return dense_flash(c.rotary?qr.ptr():q.ptr(),i?cache[i-1]->dk.ptr():keys.ptr(),i?cache[i-1]->dv.ptr():values.ptr());});
         keys.upload(common_k.data());values.upload(common_v.data());for(auto& x:cache){x->dk.upload(common_k.data());x->dv.upload(common_v.data());}
         auto page_core=[&](int i){auto d=page.desc;if(i){d.k_pool=cache[i-1]->pk.ptr();d.v_pool=cache[i-1]->pv.ptr();}GqaPagedArgs pg{d.block_table,d.cum,d.past_seqlens,static_cast<const int32_t*>(posts.ptr()),static_cast<const int32_t*>(status.ptr()),c.S,c.M,c.G,gqa_paged_page_shift(c.S)};return gqa_paged_attention_f16_launch(nullptr,d,common_q.ptr(),static_cast<float*>(page_part.ptr()),pg,config);};
@@ -684,9 +765,15 @@ static void run_compare(const Case& c){
         if(pca.nonfinite||dca.nonfinite||!(pca.rel<(kDecode?2e-2:2e-3))||!(dca.rel<(kDecode?2e-2:2e-3)))throw std::runtime_error("common post-RoPE core precision FAIL");
         page_core_ms=measure("page_core","gqa_paged_attention_f16_launch",config_string(config),pca.rel,page_core);
         dense_common_ms=measure("dense_common_core","original_Flash_common_FP16",original_config,dca.rel,[&](int i){return dense_flash(common_q.ptr(),i?cache[i-1]->dk.ptr():keys.ptr(),i?cache[i-1]->dv.ptr():values.ptr());});
+        }
         check(hipDeviceSynchronize());check(hipHostFree(flag));flag=nullptr;
       }catch(...){if(flag){check(hipDeviceSynchronize());check(hipHostFree(flag));}throw;}
     }
+  }
+  if(complete_only){
+    auto pa=accuracy(page_output,h.reference),da=accuracy(dense_output,h.reference),pd=accuracy(page_output,dense_output);
+    std::printf("COMPARE_RESULT {\"shape\":%s,\"scope\":\"complete-only\",\"page_config\":%s,\"dense_config\":%s,\"page_complete_us\":%.17g,\"dense_complete_us\":%.17g,\"dense_bare_us\":null,\"page_core_us\":null,\"dense_common_core_us\":null,\"ratio\":%.17g,\"percent\":%.17g,\"page_cpu_relL2\":%.17g,\"page_cpu_max_abs\":%.17g,\"dense_cpu_relL2\":%.17g,\"dense_cpu_max_abs\":%.17g,\"page_dense_relL2\":%.17g,\"page_dense_max_abs\":%.17g,\"rope_K_storage_differences\":%zu,\"rope_Q_storage_differences\":%zu,\"nonfinite\":0,\"storage_guards\":true,\"verdict\":\"PASS\"}\n",timing::jsonString(shape).c_str(),timing::jsonString(config_source+":"+config_string(config)).c_str(),timing::jsonString(original_config).c_str(),page_ms*1000,dense_ms*1000,page_ms/dense_ms,(page_ms/dense_ms-1)*100,pa.rel,pa.absolute,da.rel,da.absolute,pd.rel,pd.absolute,rope_k_diff,rope_q_diff);
+    return;
   }
   auto pa=accuracy(page_output,h.reference),da=accuracy(dense_output,h.reference),pd=accuracy(page_output,dense_output),pca=accuracy(page_core_output,h.reference),dca=accuracy(dense_common_output,h.reference),pcdc=accuracy(page_core_output,dense_common_output);
   std::printf("COMPARE_RESULT {\"shape\":%s,\"page_config\":%s,\"dense_config\":%s,\"page_complete_us\":%.17g,\"dense_complete_us\":%.17g,\"dense_bare_us\":%.17g,\"page_core_us\":%.17g,\"dense_common_core_us\":%.17g,\"ratio\":%.17g,\"percent\":%.17g,\"delta_us\":%.17g,\"page_cpu_relL2\":%.17g,\"page_cpu_max_abs\":%.17g,\"dense_cpu_relL2\":%.17g,\"dense_cpu_max_abs\":%.17g,\"page_dense_relL2\":%.17g,\"page_dense_max_abs\":%.17g,\"precision_increment\":%.17g,\"page_core_cpu_relL2\":%.17g,\"dense_common_core_cpu_relL2\":%.17g,\"core_page_dense_relL2\":%.17g,\"core_page_dense_max_abs\":%.17g,\"rope_K_storage_differences\":%zu,\"rope_Q_storage_differences\":%zu,\"nonfinite\":0,\"storage_guards\":true,\"baseline\":\"a762-original-public-online-no-LUT\",\"verdict\":\"PASS\"}\n",timing::jsonString(shape).c_str(),timing::jsonString(config_source+":"+config_string(config)).c_str(),timing::jsonString(original_config).c_str(),page_ms*1000,dense_ms*1000,bare_ms*1000,page_core_ms*1000,dense_common_ms*1000,page_ms/dense_ms,(page_ms/dense_ms-1)*100,(page_ms-dense_ms)*1000,pa.rel,pa.absolute,da.rel,da.absolute,pd.rel,pd.absolute,pa.rel-da.rel,pca.rel,dca.rel,pcdc.rel,pcdc.absolute,rope_k_diff,rope_q_diff);

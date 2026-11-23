@@ -176,3 +176,22 @@ selects that route for the original Flash comparison (conflicts with public/pin)
 The C `hip_paged_attention_f16_prepare_v2` API returns a size-checked config for
 caller-owned reuse. V2 decode splits=0 denotes adaptive selection; the original
 C two-int configured ABI continues to reject explicit splits=0.
+
+For a complete-entry comparison, set HIPDNN_UT_COMPARE_COMPLETE_ONLY=1 to
+skip the bare/core diagnostic timings. Both complete timings, CPU precision
+and storage/readonly/guard checks remain; omitted timings are JSON null.
+
+In a COMPARE=1 RANK=1 build, HIPDNN_UT_COMPARE_RANK=page|flash ranks the selected
+side's complete callback through the existing native screen/standard/conditional
+confirm engine. Page enumerates its own production candidates and default.
+Flash enumerates its original production candidates, including supported WMMA
+decode and D96 routes; its actual online selection is frozen before timing,
+including each active ragged request. UT_RANK contains every candidate and
+the measured winner. Ranking conflicts with public/preparation/config pins.
+
+A qualified original Flash winner can be frozen with HIPDNN_UT_FLASH_NATIVE_CFG:
+wmma=0|1;splits=N;bkv=N;hb=N;qw=N;mt=N;nd=N. For a per-request prefill selection,
+separate each active request's descriptor with a pipe. Native pins must match
+the original candidate space and conflict with HIPDNN_UT_FLASH_CFG. Final Page
+winners use the existing HIPDNN_PAGED_ATTENTION_CFG. Config queries and search
+remain outside complete-call event intervals.

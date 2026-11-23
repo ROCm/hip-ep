@@ -11,3 +11,12 @@ extern "C" const char* hipdnn_ut_original_config();
 
 extern "C" int hipdnn_ut_original_prefill_configured(const void*,const void*,const void*,void*,int,int,int,int,int,int,int,int,float,int,const GqaPagedConfig*);
 extern "C" int hipdnn_ut_original_decode_configured(const void*,const void*,const void*,void*,void*,int,int,int,int,int,int,float,const void*,int,const GqaPagedConfig*);
+
+// UT-only native descriptors retain the original Flash candidate space.
+struct HipdnnUtOriginalConfig {
+  GqaPagedConfig geometry;
+  int wmma;
+};
+extern "C" int hipdnn_ut_original_candidates(int,int,int,int,int,int,HipdnnUtOriginalConfig*,int);
+extern "C" int hipdnn_ut_original_selected(int,int,int,int,int,int,int,int,HipdnnUtOriginalConfig*);
+extern "C" int hipdnn_ut_original_native_decode(const void*,const void*,const void*,void*,void*,int,int,int,int,int,int,float,const void*,int,const HipdnnUtOriginalConfig*);
