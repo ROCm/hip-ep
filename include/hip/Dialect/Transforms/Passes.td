@@ -88,8 +88,9 @@ def ConvertOnnxToHipPass : Pass<"convert-onnx-to-hip", "mlir::ModuleOp"> {
   let options = [
     Option<"convIntegerQuantConv", "conv-integer-quant-conv", "bool",
            "false",
-           "Lower a static ConvInteger to hip.quant_conv. Set only on the "
-           "rocMLIR pipeline; hip.quant_conv has no lowering outside it">
+           "Lower a static ConvInteger to hip.quant_conv and a static "
+           "MatMulInteger to hip.quant_matmul. Set only on the rocMLIR "
+           "pipeline; those ops have no lowering outside it">
   ];
   let dependentDialects = [
     "mlir::hip::HipDialect",

@@ -45,6 +45,10 @@
 // Rank is 2..4. hip.sub rejects rank > 4, and hip.matmul rejects rank < 2,
 // so the numpy rank-1 promotion is left unconverted.
 //
+// On the rocMLIR pipeline (conv-integer-quant-conv) a fully static
+// MatMulInteger in @main_graph's entry block, with a rank-2 B, is lowered to
+// an int8 hip.quant_matmul instead. See tryLowerQuantMatmul.
+//
 //===----------------------------------------------------------------------===//
 
 #include "OnnxToHipUtils.h"
@@ -174,10 +178,256 @@ static mlir::Value subtractZeroPoint(mlir::PatternRewriter &rewriter,
       ->getResult(0);
 }
 
-/// onnx.MatMulInteger -> hip.cast / hip.sub / hip.matmul / hip.cast.
+/// hip.quant_matmul takes signless i8 for B. uint8 is shifted by 128 into that
+/// range and a signed int8 tensor is the same bits under a different type.
+static mlir::Value toSigned8(mlir::PatternRewriter &rewriter,
+                             mlir::Location loc, mlir::Value context,
+                             mlir::Value value) {
+  auto type = mlir::cast<mlir::RankedTensorType>(value.getType());
+  mlir::Type elem = type.getElementType();
+  if (elem.isSignlessInteger(8))
+    return value;
+  if (elem.isSignedInteger(8)) {
+    auto dstType =
+        mlir::RankedTensorType::get(type.getShape(), rewriter.getI8Type());
+    return mlir::tensor::BitcastOp::create(rewriter, loc, dstType, value)
+        .getResult();
+  }
+  mlir::Value wide = castTo(rewriter, loc, context, value,
+                            rewriter.getI32Type(), /*onnxTo=*/6);
+  auto offsetType = mlir::RankedTensorType::get({}, rewriter.getI32Type());
+  mlir::Value offset = mlir::hip::ConstantOp::create(
+      rewriter, loc, offsetType,
+      mlir::DenseElementsAttr::get(offsetType,
+                                   rewriter.getI32IntegerAttr(128)));
+  mlir::Value shifted = subtractZeroPoint(rewriter, loc, context, wide, offset);
+  return castTo(rewriter, loc, context, shifted, rewriter.getI8Type(),
+                /*onnxTo=*/3);
+}
+
+/// Splat constant of \p type.
+static mlir::Value splatConstant(mlir::PatternRewriter &rewriter,
+                                 mlir::Location loc,
+                                 mlir::RankedTensorType type, int64_t value) {
+  return mlir::hip::ConstantOp::create(
+      rewriter, loc, type,
+      mlir::DenseElementsAttr::get(
+          type, rewriter.getIntegerAttr(type.getElementType(), value)));
+}
+
+/// Elementwise \p OpT with numpy broadcasting between \p lhs and \p rhs.
+template <typename OpT>
+static mlir::Value emitBroadcastBinary(mlir::PatternRewriter &rewriter,
+                                       mlir::Location loc, mlir::Value context,
+                                       mlir::Value lhs, mlir::Value rhs) {
+  auto lhsType = mlir::cast<mlir::RankedTensorType>(lhs.getType());
+  auto rhsType = mlir::cast<mlir::RankedTensorType>(rhs.getType());
+  llvm::SmallVector<int64_t> shape;
+  if (!mlir::OpTrait::util::getBroadcastedShape(lhsType.getShape(),
+                                                rhsType.getShape(), shape))
+    return {};
+  auto type = mlir::RankedTensorType::get(shape, lhsType.getElementType());
+  mlir::Value init = createEmptyTensor(rewriter, loc, type, lhs);
+  return OpT::create(rewriter, loc, context, lhs, rhs, init)->getResult(0);
+}
+
+/// A zero point as an i32 tensor with the rebase \p offset already removed: a
+/// rank-0 scalar, or [1, N] for a per-column vector. Returns null for any
+/// other zero point shape.
+static mlir::Value rebasedZeroPoint(mlir::PatternRewriter &rewriter,
+                                    mlir::Location loc, mlir::Value context,
+                                    mlir::Value zp, bool allowPerColumn,
+                                    int64_t offset) {
+  auto zpType = mlir::cast<mlir::RankedTensorType>(zp.getType());
+  if (!zpType.hasStaticShape())
+    return {};
+  mlir::RankedTensorType shaped;
+  if (zpType.getNumElements() == 1)
+    shaped = mlir::RankedTensorType::get({}, zpType.getElementType());
+  else if (allowPerColumn && zpType.getRank() == 1)
+    shaped = mlir::RankedTensorType::get({1, zpType.getDimSize(0)},
+                                         zpType.getElementType());
+  else
+    return {};
+  mlir::Value value = reshapeTo(rewriter, loc, zp, shaped);
+  value = castTo(rewriter, loc, context, value, rewriter.getI32Type(),
+                 /*onnxTo=*/6);
+  if (offset == 0)
+    return value;
+  auto valueType = mlir::cast<mlir::RankedTensorType>(value.getType());
+  auto offsetType = mlir::RankedTensorType::get({}, rewriter.getI32Type());
+  mlir::Value offsetValue = splatConstant(rewriter, loc, offsetType, offset);
+  mlir::Value init = createEmptyTensor(rewriter, loc, valueType, value);
+  return mlir::hip::SubOp::create(rewriter, loc, context, value, offsetValue,
+                                  init)
+      ->getResult(0);
+}
+
+/// Static MatMulInteger as an int8 hip.quant_matmul. Returns failure when the
+/// matmul cannot be formed, and the caller keeps the cast/sub/hip.matmul
+/// lowering.
+///
+/// Let a' = a - offA and b' = b - offB, where the offset is 128 for uint8 and
+/// 0 for int8; the quant op applies those offsets. With za = a_zp - offA and
+/// zb = b_zp - offB:
+///
+///   sum_k (a - a_zp)(b - b_zp)
+///     = qmm(a, b') - za * colsum(b') - zb * rowsum(a') + za * zb * K
+///
+/// colsum(b') is qmm(ones[1, K], b') and rowsum(a') is qmm(a, ones[K, 1]). The
+/// correction terms are elementwise i32 ops that rocMLIR fuses into the
+/// quantized GEMM epilogue. A zero point equal to its offset has no term.
+static mlir::LogicalResult
+tryLowerQuantMatmul(mlir::PatternRewriter &rewriter, mlir::Operation *op,
+                    mlir::Value context, mlir::Location loc,
+                    mlir::RankedTensorType aType, mlir::RankedTensorType bType,
+                    mlir::RankedTensorType resultType) {
+  if (!inMainGraphEntry(op))
+    return mlir::failure();
+  // hip.quant_matmul is [M, K] x [K, N] with a signless i32 accumulator.
+  if (!aType.hasStaticShape() || !bType.hasStaticShape() ||
+      !resultType.hasStaticShape() || bType.getRank() != 2 ||
+      !resultType.getElementType().isSignlessInteger(32))
+    return mlir::failure();
+
+  const int64_t rank = aType.getRank();
+  const int64_t k = bType.getDimSize(0);
+  const int64_t n = bType.getDimSize(1);
+  if (aType.getDimSize(rank - 1) != k)
+    return mlir::failure();
+  int64_t m = 1;
+  for (int64_t i : llvm::seq<int64_t>(rank - 1))
+    m *= aType.getDimSize(i);
+
+  mlir::Value a = op->getOperand(0);
+  mlir::Value b = op->getOperand(1);
+  mlir::Value aZp = realOperand(op, 2);
+  mlir::Value bZp = realOperand(op, 3);
+  const bool aUnsigned = aType.getElementType().isUnsignedInteger(8);
+  const bool bUnsigned = bType.getElementType().isUnsignedInteger(8);
+  const int64_t offA = aUnsigned ? 128 : 0;
+  const int64_t offB = bUnsigned ? 128 : 0;
+
+  // Reject zero-point shapes the correction terms cannot express before any op
+  // is created. a_zero_point must be a single value, because a per-row vector
+  // would need its own M-wide term. b_zero_point may also be per column.
+  auto singleValue = [](mlir::Value zp) {
+    auto type = mlir::cast<mlir::RankedTensorType>(zp.getType());
+    return type.hasStaticShape() && type.getNumElements() == 1;
+  };
+  if (aZp && !singleValue(aZp))
+    return mlir::failure();
+  if (bZp && !singleValue(bZp)) {
+    auto type = mlir::cast<mlir::RankedTensorType>(bZp.getType());
+    if (!type.hasStaticShape() || type.getRank() != 1 ||
+        type.getDimSize(0) != n)
+      return mlir::failure();
+  }
+
+  // An omitted uint8 zero point is 0, which is -128 once rebased, so its
+  // term is required. An omitted signed zero point is already 0.
+  auto zeroPointFor = [&](mlir::Value zp, mlir::RankedTensorType type,
+                          bool isUnsigned) -> mlir::Value {
+    if (zp || !isUnsigned)
+      return zp;
+    auto zpType = mlir::RankedTensorType::get({}, type.getElementType());
+    return mlir::hip::ConstantOp::create(
+        rewriter, loc, zpType,
+        mlir::DenseElementsAttr::get(
+            zpType, rewriter.getIntegerAttr(type.getElementType(), 0)));
+  };
+  aZp = zeroPointFor(aZp, aType, aUnsigned);
+  bZp = zeroPointFor(bZp, bType, bUnsigned);
+  const bool needsA = aZp && !rebasedZeroPointIsZero(aZp);
+  const bool needsB = bZp && !rebasedZeroPointIsZero(bZp);
+
+  mlir::Value za, zb;
+  if (needsA)
+    za = rebasedZeroPoint(rewriter, loc, context, aZp,
+                          /*allowPerColumn=*/false, offA);
+  if (needsB)
+    zb = rebasedZeroPoint(rewriter, loc, context, bZp,
+                          /*allowPerColumn=*/true, offB);
+
+  // Fold A's batch dimensions into M.
+  if (rank > 2) {
+    llvm::SmallVector<mlir::ReassociationIndices> reassoc(2);
+    for (int64_t i : llvm::seq<int64_t>(rank - 1))
+      reassoc[0].push_back(i);
+    reassoc[1].push_back(rank - 1);
+    auto flatType = mlir::RankedTensorType::get({m, k}, aType.getElementType());
+    a = mlir::tensor::CollapseShapeOp::create(rewriter, loc, flatType, a,
+                                              reassoc)
+            .getResult();
+  }
+  // The quant op takes ui8 or signless i8 for A; a signed int8 is a bitcast.
+  if (aType.getElementType().isSignedInteger(8))
+    a = toSigned8(rewriter, loc, context, a);
+  b = toSigned8(rewriter, loc, context, b);
+
+  mlir::Type i32 = rewriter.getI32Type();
+  mlir::Type i8 = rewriter.getI8Type();
+  auto qmm = [&](mlir::Value lhs, mlir::Value rhs, int64_t rows,
+                 int64_t cols) -> mlir::Value {
+    auto type = mlir::RankedTensorType::get({rows, cols}, i32);
+    mlir::Value init = mlir::tensor::EmptyOp::create(
+        rewriter, loc, type.getShape(), type.getElementType());
+    return mlir::hip::QuantMatmulOp::create(
+               rewriter, loc, mlir::TypeRange{type}, context, lhs, rhs, init)
+        .getResult(0);
+  };
+
+  mlir::Value acc = qmm(a, b, m, n);
+  if (za) {
+    mlir::Value ones = splatConstant(
+        rewriter, loc, mlir::RankedTensorType::get({1, k}, i8), 1);
+    mlir::Value colsum = qmm(ones, b, 1, n);
+    mlir::Value term = emitBroadcastBinary<mlir::hip::MulOp>(
+        rewriter, loc, context, za, colsum);
+    acc = emitBroadcastBinary<mlir::hip::SubOp>(rewriter, loc, context, acc,
+                                                term);
+  }
+  if (zb) {
+    mlir::Value ones = splatConstant(
+        rewriter, loc, mlir::RankedTensorType::get({k, 1}, i8), 1);
+    mlir::Value rowsum = qmm(a, ones, m, 1);
+    mlir::Value term = emitBroadcastBinary<mlir::hip::MulOp>(
+        rewriter, loc, context, rowsum, zb);
+    acc = emitBroadcastBinary<mlir::hip::SubOp>(rewriter, loc, context, acc,
+                                                term);
+  }
+  if (za && zb) {
+    mlir::Value kConst =
+        splatConstant(rewriter, loc, mlir::RankedTensorType::get({}, i32), k);
+    mlir::Value zbK = emitBroadcastBinary<mlir::hip::MulOp>(
+        rewriter, loc, context, zb, kConst);
+    mlir::Value term =
+        emitBroadcastBinary<mlir::hip::MulOp>(rewriter, loc, context, za, zbK);
+    acc = emitBroadcastBinary<mlir::hip::AddOp>(rewriter, loc, context, acc,
+                                                term);
+  }
+
+  if (rank > 2) {
+    llvm::SmallVector<mlir::ReassociationIndices> reassoc(2);
+    for (int64_t i : llvm::seq<int64_t>(rank - 1))
+      reassoc[0].push_back(i);
+    reassoc[1].push_back(rank - 1);
+    acc = mlir::tensor::ExpandShapeOp::create(rewriter, loc, resultType, acc,
+                                              reassoc)
+              .getResult();
+  }
+  rewriter.replaceOp(op, acc);
+  return mlir::success();
+}
+
+/// onnx.MatMulInteger -> hip.cast / hip.sub / hip.matmul / hip.cast, or an
+/// int8 hip.quant_matmul when \p quantMatmul is set and the shapes are static.
 struct MatMulIntegerToHip : public mlir::RewritePattern {
-  MatMulIntegerToHip(mlir::MLIRContext *ctx)
-      : RewritePattern("onnx.MatMulInteger", /*benefit=*/1, ctx) {}
+  MatMulIntegerToHip(mlir::MLIRContext *ctx, bool quantMatmul)
+      : RewritePattern("onnx.MatMulInteger", /*benefit=*/1, ctx),
+        quantMatmul(quantMatmul) {}
+
+  bool quantMatmul = false;
 
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op,
@@ -287,6 +537,10 @@ MatMulIntegerToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value context = *ctxOrFailure;
   mlir::Location loc = op->getLoc();
 
+  if (quantMatmul && mlir::succeeded(tryLowerQuantMatmul(
+                         rewriter, op, context, loc, aType, bType, resultType)))
+    return mlir::success();
+
   // ONNX FLOAT is datatype 1 and INT32 is 6. The cast kernel is selected
   // from the buffer types, not from this attribute.
   // A dynamic K has no compile-time bound, so the dot product stays in i32.
@@ -359,8 +613,9 @@ MatMulIntegerToHip::matchAndRewrite(mlir::Operation *op,
 } // namespace
 
 void populateMatMulIntegerConversionPatterns(RewritePatternSet &patterns,
-                                             MLIRContext *ctx) {
-  patterns.add<MatMulIntegerToHip>(ctx);
+                                             MLIRContext *ctx,
+                                             bool quantMatmul) {
+  patterns.add<MatMulIntegerToHip>(ctx, quantMatmul);
 }
 
 } // namespace hip

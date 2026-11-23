@@ -184,29 +184,6 @@ static mlir::Value subtractZeroPoint(mlir::PatternRewriter &rewriter,
       ->getResult(0);
 }
 
-/// True when every element of a constant zero point is the rebase offset, so
-/// the correction convolution is the zero tensor. A non-constant zero point
-/// is not known to be zero.
-static bool rebasedZeroPointIsZero(mlir::Value zp) {
-  auto cst = zp.getDefiningOp<mlir::hip::ConstantOp>();
-  if (!cst || !cst.getValue())
-    return false;
-  auto attr = mlir::dyn_cast<mlir::DenseIntElementsAttr>(*cst.getValue());
-  if (!attr)
-    return false;
-  auto elem = mlir::cast<mlir::RankedTensorType>(zp.getType()).getElementType();
-  const bool ui8 = elem.isUnsignedInteger(8);
-  if (!ui8 && !elem.isSignlessInteger(8))
-    return false;
-  for (const llvm::APInt &value : attr) {
-    const int64_t n =
-        ui8 ? static_cast<int64_t>(value.getZExtValue()) : value.getSExtValue();
-    if (n != (ui8 ? 128 : 0))
-      return false;
-  }
-  return true;
-}
-
 /// hip.quant_conv takes signless i8. uint8 is shifted by 128 into that range.
 static mlir::Value toSigned8(mlir::PatternRewriter &rewriter,
                              mlir::Location loc, mlir::Value context,
@@ -269,15 +246,6 @@ materializeOmittedUnsignedZeroPoint(mlir::PatternRewriter &rewriter,
   return mlir::hip::ConstantOp::create(
       rewriter, loc, zpType,
       mlir::DenseElementsAttr::get(zpType, rewriter.getIntegerAttr(elem, 0)));
-}
-
-/// FuseRocMlirAnchorPass outlines anchors only from @main_graph's entry
-/// block. A hip.quant_conv left in any other function, including an outlined
-/// Loop, Scan, or If body, has no lowering.
-static bool inMainGraphEntry(mlir::Operation *op) {
-  auto func = op->getParentOfType<mlir::func::FuncOp>();
-  return func && func.getSymName() == "main_graph" && !func.getBody().empty() &&
-         op->getBlock() == &func.getBody().front();
 }
 
 /// Static ConvInteger as int8 hip.quant_conv. Returns failure when the conv
