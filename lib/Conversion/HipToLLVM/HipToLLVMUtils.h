@@ -75,6 +75,7 @@ inline constexpr const char *kWrapSkipSimplifiedLayerNormMixed =
     "wrap_skip_simplified_layer_norm_mixed";
 inline constexpr const char *kWrapLayerNormalization =
     "wrap_layer_normalization";
+inline constexpr const char *kWrapSkipLayerNorm = "wrap_skip_layer_norm";
 inline constexpr const char *kWrapInstanceNormalization =
     "wrap_instance_normalization";
 inline constexpr const char *kWrapBatchNormalization =

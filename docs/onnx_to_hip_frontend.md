@@ -73,7 +73,9 @@ existing `--convert-hip-to-llvm` pipeline.
 | `RMSNormalization` | `hip.rms_norm` | `rms_norm_kernel.hip` |
 | `SimplifiedLayerNormalization` | `hip.rms_norm` | `rms_norm_kernel.hip` |
 | `GridSample` | `hip.grid_sample` | custom HIP kernel |
-| `SkipLayerNormalization` | `hip.add` + `hip.layer_norm` | decomposed, including the optional input bias |
+| `SkipLayerNormalization` | `hip.skip_layer_norm` | `layer_norm_kernel.hip`, including the optional input bias; a broadcasting skip falls back to `hip.add` + `hip.layer_norm` |
+| residual `Add` + `LayerNormalization` (fused) | `hip.skip_layer_norm` | `layer_norm_kernel.hip` |
+| primitive LayerNorm chain (fused) | `hip.layer_norm` | `layer_norm_kernel.hip` |
 | `SkipSimplifiedLayerNormalization` | `hip.skip_rms_norm` | `skip_rms_norm_kernel.hip` |
 | `BranchwiseRMSNorm` (`com.microsoft`) | `hip.rms_norm` | `rms_norm_kernel.hip`; per-branch gain via grouped scale |
 | `GatedRMSNorm` (`com.microsoft`) | `hip.gated_rms_norm` | `rms_norm_kernel.hip` |
@@ -88,6 +90,22 @@ existing `--convert-hip-to-llvm` pipeline.
 
 Both RMS-norm kernels are block-per-row with FP32 accumulation, and take a
 packed `__half2` path for fp16 rows of even width.
+
+A LayerNorm over the last axis written as primitives
+(`ReduceMean`, `Sub`, `Pow(., 2)` or `Mul(d, d)`, `ReduceMean`, `Add(eps)`,
+then `Div` by `Sqrt` / `Pow(., 0.5)` or `Mul` by `Reciprocal(Sqrt)` /
+`Pow(., -0.5)` / `Div(1, Sqrt)`, with an optional per-channel scale and bias)
+lowers to those HIP ops. `hip-fusion-transform` then folds the chain into
+`hip.layer_norm`, which accumulates in fp32. With no per-channel scale the
+norm takes a constant scale of ones. A last-axis `hip.layer_norm` whose input
+is a same-shape `hip.add` becomes `hip.skip_layer_norm`, which also writes
+the sum when later ops read it.
+
+`layer_norm_kernel.hip` normalizes each row with a group of threads (one wave
+up to 256 16-byte chunks, e.g. 2048 fp16 or 1024 fp32 elements) that keeps the
+row in registers, several rows per block. Ragged or unaligned rows, and rows
+wider than the register budget, use a block-per-row fallback. Both use
+shifted two-pass FP32 statistics.
 
 ### Attention
 
