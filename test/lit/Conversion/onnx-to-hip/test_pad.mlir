@@ -34,7 +34,7 @@ module {
   // Opset <= 10: one data operand, pad amounts in the pads attribute.
   // CHECK-LABEL: func.func @pad_attribute
   // CHECK: %[[PADS:.*]] = hip.constant {{.*}}dense<[0, 0, 4, 4, 0, 0, 4, 4]> : tensor<8xi64>{{.*}} : tensor<8xi64>
-  // CHECK: hip.pad({{.*}}) ins({{.*}}, %[[PADS]] : tensor<1x3x224x224xf32>, tensor<8xi64>) outs({{.*}} : tensor<1x3x232x232xf32>) {mode = "reflect"}
+  // CHECK: hip.pad({{.*}}) ins({{.*}}, %[[PADS]] : tensor<1x3x224x224xf32>, tensor<8xi64>) outs({{.*}} : tensor<1x3x232x232xf32>) {mode = "reflect", static_lower_pads = array<i64: 0, 0, 4, 4>}
   func.func @pad_attribute(%data: tensor<1x3x224x224xf32>) -> tensor<1x3x232x232xf32> {
     %r = "onnx.Pad"(%data) {mode = "reflect", pads = [0, 0, 4, 4, 0, 0, 4, 4], value = 0.000000e+00 : f32}
         : (tensor<1x3x224x224xf32>) -> tensor<1x3x232x232xf32>
@@ -151,7 +151,7 @@ module {
   }
 
   // CHECK-LABEL: func.func @pad_legacy_attrs
-  // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<3x4xf32>, tensor<4xi64>) outs({{.*}} : tensor<5x6xf32>) {mode = "reflect"}
+  // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<3x4xf32>, tensor<4xi64>) outs({{.*}} : tensor<5x6xf32>) {mode = "reflect", static_lower_pads = array<i64: 1, 1>}
 
   // The legacy `value` attribute is the older spelling of `constant_value`, so
   // a non-zero fill has to become the cval operand rather than be dropped.
@@ -160,8 +160,10 @@ module {
     return %r : tensor<5x6xf32>
   }
 
+  // A compile-time cval is recorded with the pads, so the pad stays on the
+  // host-only path.
   // CHECK-LABEL: func.func @pad_legacy_value
-  // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<3x4xf32>, tensor<4xi64>) cval({{.*}} : tensor<f32>) outs({{.*}} : tensor<5x6xf32>)
+  // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<3x4xf32>, tensor<4xi64>) cval({{.*}} : tensor<f32>) outs({{.*}} : tensor<5x6xf32>) {static_constant_value = 2.500000e+00 : f32, static_lower_pads = array<i64: 1, 1>}
 
   // A zero fill is the default on both schemas, so it needs no cval operand.
   func.func @pad_legacy_zero_value(%data: tensor<3x4xf32>) -> tensor<5x6xf32> {
@@ -215,7 +217,7 @@ module {
   }
 
   // CHECK-LABEL: func.func @pad_legacy_dense_pads
-  // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<3x4xf32>, tensor<4xi64>) outs({{.*}} : tensor<5x6xf32>) {mode = "edge"}
+  // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<3x4xf32>, tensor<4xi64>) outs({{.*}} : tensor<5x6xf32>) {mode = "edge", static_lower_pads = array<i64: 1, 1>}
 
   // A non-zero fill on integer data cannot be materialized. The rewrite has
   // to decline before it creates the pads constant, not after.

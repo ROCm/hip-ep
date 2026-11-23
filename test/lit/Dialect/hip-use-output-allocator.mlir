@@ -424,3 +424,57 @@ func.func @expand_logits_class(%ctx: !hip.context, %n: index) -> memref<1x?x92xf
        : memref<?x92xf16> into memref<1x?x92xf16>
   return %ret : memref<1x?x92xf16>
 }
+
+// --- Loop-carried output: the alloc inside the scf.while region runs every
+//     iteration and only reaches the return through the loop result, so it
+//     stays a memref.alloc. The loop result is copied into one
+//     hip.alloc_output after the loop. ---
+// CHECK-LABEL: func.func @loop_carried_output
+// CHECK:         scf.while
+// CHECK-NOT:     hip.alloc_output
+// CHECK:         memref.alloc
+// CHECK:         scf.condition
+// CHECK:       } do {
+// CHECK:       }
+// CHECK:         %[[OUT:.*]] = hip.alloc_output(%{{.*}}, %{{.*}}) {out_idx = 0 : i64} : memref<?x4xf32>
+// CHECK-NEXT:    memref.copy %{{.*}}, %[[OUT]]
+// CHECK-NOT:     hip.alloc_output
+// CHECK:         return %[[OUT]]
+func.func @loop_carried_output(%ctx: !hip.context, %init: memref<?x4xf32>,
+                               %n: index) -> memref<?x4xf32> {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %r:2 = scf.while (%i = %c0, %acc = %init)
+      : (index, memref<?x4xf32>) -> (index, memref<?x4xf32>) {
+    %cond = arith.cmpi slt, %i, %n : index
+    %d = memref.dim %acc, %c0 : memref<?x4xf32>
+    %copy = memref.alloc(%d) : memref<?x4xf32>
+    memref.copy %acc, %copy : memref<?x4xf32> to memref<?x4xf32>
+    scf.condition(%cond) %i, %copy : index, memref<?x4xf32>
+  } do {
+  ^bb0(%j: index, %body: memref<?x4xf32>):
+    %next = arith.addi %j, %c1 : index
+    scf.yield %next, %body : index, memref<?x4xf32>
+  }
+  return %r#1 : memref<?x4xf32>
+}
+
+// --- Rank-increasing memref.reshape: [?x4] viewed as [?x?x4]. The two
+//     dynamic result extents are not known at the allocation, so the compute
+//     buffer stays a memref.alloc and the returned view is copied into a
+//     rank-3 hip.alloc_output. ---
+// CHECK-LABEL: func.func @reshape_rank_increase
+// CHECK:         %[[DATA:.*]] = memref.alloc(%{{.*}}) : memref<?x4xf32>
+// CHECK:         %[[VIEW:.*]] = memref.reshape %[[DATA]](%{{.*}})
+// CHECK:         %[[D0:.*]] = memref.dim %[[VIEW]], %c0
+// CHECK:         %[[D1:.*]] = memref.dim %[[VIEW]], %c1
+// CHECK:         %[[OUT:.*]] = hip.alloc_output(%{{.*}}, %[[D0]], %[[D1]]) {out_idx = 0 : i64} : memref<?x?x4xf32>
+// CHECK:         memref.copy %[[VIEW]], %[[OUT]]
+// CHECK:         return %[[OUT]]
+func.func @reshape_rank_increase(%ctx: !hip.context, %n: index,
+                                 %shape: memref<3xi64>) -> memref<?x?x4xf32> {
+  %data = memref.alloc(%n) : memref<?x4xf32>
+  %ret = memref.reshape %data(%shape)
+      : (memref<?x4xf32>, memref<3xi64>) -> memref<?x?x4xf32>
+  return %ret : memref<?x?x4xf32>
+}

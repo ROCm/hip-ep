@@ -20,8 +20,9 @@ PoolDomainOp::getEntrySuccessorOperands(RegionSuccessor successor) {
 }
 
 ValueRange PoolDomainOp::getSuccessorInputs(RegionSuccessor successor) {
-  return successor.isParent() ? ValueRange(getResults())
-                              : ValueRange(getBody().getArguments());
+  // The parent-op successor is the exit edge, so its inputs are the results.
+  return successor.isOperation() ? ValueRange(getResults())
+                                 : ValueRange(getBody().getArguments());
 }
 
 void PoolDomainOp::getSuccessorRegions(
@@ -36,8 +37,5 @@ void PoolDomainOp::getSuccessorRegions(
     llvm::report_fatal_error(
         "hipsr.pool_domain received an unexpected branch point");
   }
-  // TODO: Current llvm couldn't construct RegionSuccessor from op
-  // When it does, use the following:
-  // regions.emplace_back(getOperation());
-  regions.emplace_back(nullptr);
+  regions.emplace_back(getOperation());
 }

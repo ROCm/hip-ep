@@ -36,9 +36,9 @@ module {
 
 // CHECK-LABEL: llvm.func @test_gqa_lowering
 // CHECK: %[[ABSENT:.*]] = llvm.mlir.constant(0 : i32) : i32
-// CHECK: llvm.call @wrap_group_query_attention_host_length({{.*}}, %[[ABSENT]], %[[ABSENT]]) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f32, i64, i64, f32, i64, i64, i64, i64, i64, i64, i32, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i32, i32) -> i32
+// CHECK: llvm.call @wrap_group_query_attention_host_length({{.*}}, %[[ABSENT]], %[[ABSENT]], {{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f32, i64, i64, f32, i64, i64, i64, i64, i64, i64, i32, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i32, i32, !llvm.ptr, i64, i64) -> i32
 
-// Verify 45 parameters:
+// Verify 48 parameters:
 // - 19 pointers: state, query, key, value, past_key, past_value, seqlens_k, total_seq_len,
 //                cos_cache(NULL), sin_cache(NULL), position_ids(NULL), attention_bias(NULL),
 //                head_sink(NULL), k_scale(NULL), v_scale(NULL),
@@ -57,3 +57,4 @@ module {
 // - 1 i32: op_state_slot (per-instance GqaState; threaded by
 //          --assign-op-state-slots, replaces shared RuntimeState::gqa_gemm_cache)
 // - 2 i32: has_host_length=0, host_length_value=0 (runtime readback)
+// - 3 key bias params: key_bias(NULL), key_bias_batch=0, key_bias_len=0

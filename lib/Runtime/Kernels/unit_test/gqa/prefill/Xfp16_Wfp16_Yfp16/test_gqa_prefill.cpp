@@ -25,7 +25,18 @@
 // Pure prefill: past_len = 0, total_seq = sq. Self-contained random inputs.
 // ============================================================
 
+#include "../../../common/ut_gpu_execution_scope.h"
+#include "../../../common/ut_gqa_rank_input.h"
 #include <hip/hip_runtime.h>
+#include "../../../common/hip_adaptive_timing.h"
+#ifdef HIPDNN_UT_GPU_PHASE_HEADER
+#include HIPDNN_UT_GPU_PHASE_HEADER
+#elif !defined(HIPDNN_UT_GPU_PHASE_LINKED)
+namespace hipdnn_ep_test {
+struct GpuPhase { void begin() {} void finish(bool = false) {} void timingBegin() {} void timingEnd() {} };
+}
+#endif
+
 #include <hip/hip_fp16.h>
 
 #include <algorithm>
@@ -85,6 +96,7 @@ class CsvWriter {
   }
   ~CsvWriter() { if (f_) std::fclose(f_); }
   void write(const CsvRow& r) {
+    timing::emitCsvBinding(r.shape, r.config, r.verdict, r.rel_l2, r.time_ms);
     if (!f_) return;
     std::fprintf(f_, "%s,%s,%s,%s,%s,%s,%.6f,%.6e,%s\n",
                  env_or("HIPDNN_RESULTS_OP", "unknown"),
@@ -199,10 +211,11 @@ inline bool warmTiming() {
 
 // Copies of a K and a V cache laid out [planes, rows, row_bytes], of which a
 // launch reads rows [lo, hi) of every plane. Copy c keeps those rows
-// c * (hi - lo) rows further into each plane of a buffer whose plane stride is
-// rows(), so the copies cost what a launch reads rather than the whole cache
-// (a sliding window reads a small part of it). A launch on copy c passes k(c),
-// v(c) and rows() in place of the cache pointers and their max_seq.
+// farther into each plane of a bank with the ORIGINAL cache plane stride.
+// Slots hold the attended row span, including the existing tile margin; when
+// another slot cannot fit inside that capacity, a new bank holds it. A launch
+// on copy c passes k(c), v(c) and the original rows() as max_seq. Rotation must
+// not replace a model's cache capacity with the number of copied rows.
 class ColdKvCopies {
  public:
   ColdKvCopies(const void* k, const void* v, int planes, int rows,
@@ -215,8 +228,10 @@ class ColdKvCopies {
     const int n = 1 + static_cast<int>(std::min<size_t>(
                           kColdMaxCopies - 1,
                           (kColdRotationBytes + bytes_ - 1) / bytes_));
-    const int copy_rows = hi + (n - 1) * span_;
-    const size_t buf_bytes = static_cast<size_t>(planes) * copy_rows * row_bytes;
+    copies_per_bank_ = 1 + (rows - hi) / span_;
+    const int banks = (n + copies_per_bank_ - 1) / copies_per_bank_;
+    bank_bytes_ = static_cast<size_t>(planes) * rows * row_bytes;
+    const size_t buf_bytes = static_cast<size_t>(banks) * bank_bytes_;
     if (hipMalloc(&kbuf_, buf_bytes) != hipSuccess ||
         hipMalloc(&vbuf_, buf_bytes) != hipSuccess) {
       std::fprintf(stderr, "cold-cache copies do not fit; timing on warm caches\n");
@@ -225,28 +240,34 @@ class ColdKvCopies {
     }
     (void)hipMemset(kbuf_, 0, buf_bytes);
     (void)hipMemset(vbuf_, 0, buf_bytes);
-    // The copies sit back to back from row lo of every plane: copy 0 comes
-    // from the cache, then the run of filled copies doubles until all n are.
-    const size_t src_pitch = static_cast<size_t>(rows) * row_bytes;
-    const size_t dst_pitch = static_cast<size_t>(copy_rows) * row_bytes;
+    // Fill each bank from the original cache, then double the populated slots
+    // within it. Every 2D copy and every timed launch keeps that same pitch.
+    const size_t pitch = static_cast<size_t>(rows) * row_bytes;
     const size_t off = static_cast<size_t>(lo) * row_bytes;
     const size_t span_bytes = static_cast<size_t>(span_) * row_bytes;
-    (void)hipMemcpy2D(kbuf_ + off, dst_pitch, static_cast<const char*>(k) + off,
-                      src_pitch, span_bytes, planes, hipMemcpyDeviceToDevice);
-    (void)hipMemcpy2D(vbuf_ + off, dst_pitch, static_cast<const char*>(v) + off,
-                      src_pitch, span_bytes, planes, hipMemcpyDeviceToDevice);
-    for (int filled = 1; filled < n;) {
-      const int more = std::min(filled, n - filled);
-      (void)hipMemcpy2D(kbuf_ + off + filled * span_bytes, dst_pitch,
-                        kbuf_ + off, dst_pitch, more * span_bytes, planes,
-                        hipMemcpyDeviceToDevice);
-      (void)hipMemcpy2D(vbuf_ + off + filled * span_bytes, dst_pitch,
-                        vbuf_ + off, dst_pitch, more * span_bytes, planes,
-                        hipMemcpyDeviceToDevice);
-      filled += more;
+    for (int bank = 0; bank < banks; ++bank) {
+      const size_t base = static_cast<size_t>(bank) * bank_bytes_ + off;
+      const int slots = std::min(copies_per_bank_, n - bank * copies_per_bank_);
+      (void)hipMemcpy2D(kbuf_ + base, pitch, static_cast<const char*>(k) + off,
+                        pitch, span_bytes, planes, hipMemcpyDeviceToDevice);
+      (void)hipMemcpy2D(vbuf_ + base, pitch, static_cast<const char*>(v) + off,
+                        pitch, span_bytes, planes, hipMemcpyDeviceToDevice);
+      for (int filled = 1; filled < slots;) {
+        const int more = std::min(filled, slots - filled);
+        (void)hipMemcpy2D(kbuf_ + base + filled * span_bytes, pitch,
+                          kbuf_ + base, pitch, more * span_bytes, planes,
+                          hipMemcpyDeviceToDevice);
+        (void)hipMemcpy2D(vbuf_ + base + filled * span_bytes, pitch,
+                          vbuf_ + base, pitch, more * span_bytes, planes,
+                          hipMemcpyDeviceToDevice);
+        filled += more;
+      }
     }
     count_ = n;
-    rows_ = copy_rows;
+    std::printf("GQA_KV_ROTATION capacity=%d planes=%d span=%d copies=%d "
+                "copies_per_bank=%d banks=%d allocated_bytes=%zu\n",
+                rows_, planes, span_, count_, copies_per_bank_, banks,
+                2 * buf_bytes);
   }
   ~ColdKvCopies() { release(); }
   ColdKvCopies(const ColdKvCopies&) = delete;
@@ -260,7 +281,8 @@ class ColdKvCopies {
 
  private:
   size_t offset(int c) const {
-    return static_cast<size_t>(c) * span_ * row_bytes_;
+    return static_cast<size_t>(c / copies_per_bank_) * bank_bytes_ +
+           static_cast<size_t>(c % copies_per_bank_) * span_ * row_bytes_;
   }
   void release() {
     if (kbuf_) (void)hipFree(kbuf_);
@@ -274,6 +296,8 @@ class ColdKvCopies {
   size_t row_bytes_;
   int span_ = 0;
   size_t bytes_ = 0;
+  size_t bank_bytes_ = 0;
+  int copies_per_bank_ = 1;
   int count_ = 1;
   char* kbuf_ = nullptr;
   char* vbuf_ = nullptr;
@@ -302,43 +326,16 @@ inline int* holdReleaseFlag() {
   return flag;
 }
 
-// Mean milliseconds per launch over `iters` back-to-back launches on `stream`,
-// launch(c) reading copy c. Untimed launches over the rotation go first, until
-// kColdSettleBytes have been read.
+// The shared UT policy selects the actual call count from a device pilot.
+// launch(c) invokes the complete op with operand copy c.
 template <class Launch>
-double rotatedMeanMs(hipStream_t stream, int iters, const ColdKvCopies& copies,
-                     Launch&& launch) {
-  const int n = copies.count();
-  int turn = 0;
-  if (n > 1) {
-    const size_t settle = std::min<size_t>(
-        n, (kColdSettleBytes + copies.bytes() - 1) / copies.bytes());
-    for (size_t i = 0; i < settle; ++i) launch(turn++ % n);
-  }
-  // Drained, so the hold below holds the timed launches rather than being
-  // released while earlier launches are still queued ahead of it.
-  (void)hipStreamSynchronize(stream);
-  volatile int* release = holdReleaseFlag();
-  void* release_dev = nullptr;
-  if (release &&
-      hipHostGetDevicePointer(&release_dev, const_cast<int*>(release), 0) ==
-          hipSuccess) {
-    *release = 0;
-    holdStreamKernel<<<1, 1, 0, stream>>>(static_cast<const int*>(release_dev));
-  }
-  hipEvent_t start, stop;
-  (void)hipEventCreate(&start);
-  (void)hipEventCreate(&stop);
-  (void)hipEventRecord(start, stream);
-  for (int i = 0; i < iters; ++i) launch(turn++ % n);
-  (void)hipEventRecord(stop, stream);
-  if (release) *release = 1;
-  (void)hipEventSynchronize(stop);
-  float ms = 0.0f;
-  (void)hipEventElapsedTime(&ms, start, stop);
-  (void)hipEventDestroy(start);
-  (void)hipEventDestroy(stop);
-  return iters > 0 ? ms / iters : 0.0;
+double rotatedMeanMs(hipStream_t stream, int /*legacy_iters*/, const ColdKvCopies& copies,
+                     Launch&& launch, const char* complete_entry = nullptr,
+                     const timing::RankOptions* ranking = nullptr) {
+  return timing::adaptiveRotatedMeanMs(
+      stream, copies, launch, holdReleaseFlag(),
+      [&](const int* flag) { holdStreamKernel<<<1, 1, 0, stream>>>(flag); },
+      warmTiming(), kColdSettleBytes, "gqa_prefill_xfp16_wfp16_yfp16", complete_entry, timing::NoPreparation{}, ranking);
 }
 }  // namespace hipdnn_ep_test
 
@@ -376,10 +373,8 @@ extern "C" int hip_gqa_flash_prefill(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
     int past_len, float scale, int local_window_size, const void* head_sink,
-    int num_heads, int smooth_softmax);
-
-#ifdef HIPDNN_LUT_LINKED_EXTERNALLY
-#include "gqa_autotune.h"
+    int num_heads, int smooth_softmax, const void* key_bias,
+    int key_bias_stride);
 
 extern "C" int hip_gqa_flash_prefill_v3_configured(
     void* stream_ptr,
@@ -387,7 +382,13 @@ extern "C" int hip_gqa_flash_prefill_v3_configured(
     int B, int Hq, int G, int sq, int skv, int d, int max_seq, int past_len,
     float scale, int local_window_size, const void* head_sink,
     int num_heads, int smooth_softmax,
-    int hb, int qw, int mt, int bkv, int nd);
+    int hb, int qw, int mt, int bkv, int nd,
+    const void* key_bias, int key_bias_stride);
+
+#ifdef HIPDNN_LUT_LINKED_EXTERNALLY
+#include "gqa_autotune.h"
+
+
 
 static void* gqa_policy() {
   static void* p = hip_gqa_autotune_create(nullptr);
@@ -440,7 +441,34 @@ struct Case {
   // Sliding window; <= 0 is full attention. Convention matches
   // causal_mask_kernel_impl: key k is masked when k < past_len + q - window + 1.
   int window;
+  // > 0: a key_bias row per batch masks b*pad keys of batch b: the last ones
+  // (right padding, so every query row keeps a real key) or, with left_pad,
+  // the first ones.
+  int pad;
+  // Bias of a padded key. The fp16 lower bound is what the ONNX mask uses.
+  float pad_value = -65504.0f;
+  // Left padding leaves the first query rows of a padded batch with no real
+  // key. Their output is unspecified (ONNX gives NaN), so only rows with a
+  // real key are compared, and every output must be finite.
+  bool left_pad = false;
+  int nd = 0, hb = 0, bkv = 0;
+  float scale = 0.0f;
+  bool has_scale = false;
+  int max_seq = 0;  // 0 keeps the existing compact-cache cases.
 };
+
+// key_bias rows [B, skv]: 0 for a real key, pad_value for padding. Empty when
+// the case has no padding.
+static std::vector<float> make_key_bias(const Case& c, int skv) {
+  if (c.pad <= 0) return {};
+  std::vector<float> kb((size_t)c.B * skv, 0.0f);
+  for (int b = 0; b < c.B; ++b) {
+    const int n = std::min(skv, b * c.pad);
+    const int k0 = c.left_pad ? 0 : skv - n;
+    for (int k = k0; k < k0 + n; ++k) kb[(size_t)b * skv + k] = c.pad_value;
+  }
+  return kb;
+}
 
 // CPU fp32 reference: causal GQA attention. Q/O BSHD, K/V cache BNSD. O(sq^2)
 // per (b,hq) -- threaded over the B*H (batch, query-head) pairs (each is
@@ -452,7 +480,8 @@ static void cpu_reference(const std::vector<float>& Q,
                           const std::vector<float>& V, std::vector<float>& O,
                           int B, int H, int G, int D, int sq, int max_seq,
                           int past_len, float scale, int sink_mode,
-                          const std::vector<float>& sink, int window) {
+                          const std::vector<float>& sink, int window,
+                          const std::vector<float>& kb) {
   const int HPG = H / G;
   const int total = past_len + sq;
   auto bhRange = [&](int idx0, int idx1) {
@@ -472,7 +501,7 @@ static void cpu_reference(const std::vector<float>& Q,
           const float* kp = &K[((size_t)(b * G + hkv) * max_seq + k) * D];
           float dot = 0.0f;
           for (int e = 0; e < D; ++e) dot += q[e] * kp[e];
-          scores[k] = dot * scale;
+          scores[k] = dot * scale + (kb.empty() ? 0.0f : kb[(size_t)b * total + k]);
           if (scores[k] > m) m = scores[k];
         }
         float l = 0.0f;
@@ -533,15 +562,41 @@ static std::string case_shape(const Case& c) {
   if (c.window > 0) s += "_win" + std::to_string(c.window);
   if (c.sink_mode == kSinkPerHead || c.sink_mode == kSinkBoth) s += "_sink";
   if (c.sink_mode == kSinkSmooth || c.sink_mode == kSinkBoth) s += "_smooth";
+  if (c.pad > 0) s += (c.left_pad ? "_lpad" : "_pad") + std::to_string(c.pad);
+  if (c.pad > 0 && std::isinf(c.pad_value)) s += "_ninf";
+  else if (c.pad > 0 && c.pad_value < -65504.0f) s += "_m3e38";
+  if (c.max_seq > 0) s += "_cap" + std::to_string(c.max_seq);
+  char scale_buf[32];
+  std::snprintf(scale_buf, sizeof(scale_buf), "%.9g",
+                static_cast<double>(c.has_scale ? c.scale : 1.0f / std::sqrt(static_cast<float>(c.D))));
+  if (c.has_scale) s += "_scale" + std::string(scale_buf);
   return s;
 }
 
-static bool run_case(const Case& c, int iters) {
+static bool run_case(const Case& c, int iters, const hipdnn_ep_test::timing::RankRow* rank_row = nullptr) {
+  hipdnn_ep_test::timing::CaseScope timing_case("gqa/prefill/Xfp16_Wfp16_Yfp16", case_shape(c), "hip_gqa_flash_prefill");
+  const UtGqaShape rank_shape{c.B, c.H, c.G, c.D, c.sq, c.sq + c.past, c.window, 0, 64};
+  if (rank_row && std::getenv("HIPDNN_UT_RANK_CATALOG")) {
+#ifdef HIPDNN_UT_RANK_GQA_ADAPTER
+    hipdnn_ep_test::timing::printGqaCatalog(rank_shape);
+    return true;
+#else
+    throw std::runtime_error("UT rank: GQA catalog requires standalone RANK=1 build");
+#endif
+  }
   const int B = c.B, H = c.H, G = c.G, D = c.D, sq = c.sq;
   const int past_len = c.past;
   const int skv = past_len + sq;   // total_seq
-  const int max_seq = skv;         // cache buffer holds exactly total_seq
-  const float scale = 1.0f / std::sqrt((float)D);
+  const int max_seq = c.max_seq > 0 ? c.max_seq : skv;
+  const float scale = c.has_scale ? c.scale : 1.0f / std::sqrt((float)D);
+  if (B <= 0 || H <= 0 || G <= 0 || H % G != 0 || D <= 0 || sq <= 0 ||
+      past_len < 0 || max_seq < skv || !std::isfinite(scale) || scale < 0.0f) {
+    std::fprintf(stderr, "invalid GQA dimensions, cache capacity or scale\n");
+    return false;
+  }
+  std::printf("GQA_LAYOUT B=%d H=%d G=%d D=%d sq=%d skv=%d capacity=%d "
+              "scale=%.9g q=BSHD kv=BNSD causal=1\n",
+              B, H, G, D, sq, skv, max_seq, static_cast<double>(scale));
 
   const size_t qn = (size_t)B * sq * H * D;
   const size_t kn = (size_t)B * G * max_seq * D;
@@ -564,14 +619,18 @@ static bool run_case(const Case& c, int iters) {
     sinkf[h] = __half2float(sinkh[h]);
   }
 
+  const std::vector<float> Kb = make_key_bias(c, skv);
   cpu_reference(Qf, Kf, Vf, Oref, B, H, G, D, sq, max_seq, past_len, scale,
-                c.sink_mode, sinkf, c.window);
+                c.sink_mode, sinkf, c.window, Kb);
 
   std::vector<__half> Qh(qn), Kh(kn), Vh(kn);
   for (size_t i = 0; i < qn; ++i) Qh[i] = __float2half(Qf[i]);
   for (size_t i = 0; i < kn; ++i) { Kh[i] = __float2half(Kf[i]); Vh[i] = __float2half(Vf[i]); }
 
   __half *dQ, *dK, *dV, *dO, *dSink;
+  hipdnn_ep_test::GpuExecutionScope gpu_execution([] { HIP_CHECK(hipDeviceSynchronize()); });
+  hipdnn_ep_test::GpuPhase gpu_phase;
+  gpu_phase.begin();
   HIP_CHECK(hipMalloc(&dQ, qn * sizeof(__half)));
   HIP_CHECK(hipMalloc(&dK, kn * sizeof(__half)));
   HIP_CHECK(hipMalloc(&dV, kn * sizeof(__half)));
@@ -581,6 +640,26 @@ static bool run_case(const Case& c, int iters) {
   HIP_CHECK(hipMemcpy(dK, Kh.data(), kn * sizeof(__half), hipMemcpyHostToDevice));
   HIP_CHECK(hipMemcpy(dV, Vh.data(), kn * sizeof(__half), hipMemcpyHostToDevice));
   HIP_CHECK(hipMemcpy(dSink, sinkh.data(), (size_t)H * sizeof(__half), hipMemcpyHostToDevice));
+  // A windowed call over a separate past buffer leaves the cache rows below
+  // past_len - window + 1, rounded down to 64 (window_copy_lo in gqa.cpp),
+  // unwritten, so they can hold NaN. Poison them (0xFFFF is an fp16 NaN): a
+  // kernel read below that bound then fails the case. The reference never
+  // reads them.
+  if (c.window > 0 && past_len - c.window + 1 >= 64) {
+    const int unwritten = (past_len - c.window + 1) / 64 * 64;
+    const size_t row_bytes = (size_t)D * sizeof(__half);
+    HIP_CHECK(hipMemset2D(dK, max_seq * row_bytes, 0xFF, unwritten * row_bytes, B * G));
+    HIP_CHECK(hipMemset2D(dV, max_seq * row_bytes, 0xFF, unwritten * row_bytes, B * G));
+  }
+  __half* dKb = nullptr;
+  if (!Kb.empty()) {
+    std::vector<__half> Kbh(Kb.size());
+    for (size_t i = 0; i < Kb.size(); ++i) Kbh[i] = __float2half(Kb[i]);
+    HIP_CHECK(hipMalloc(&dKb, Kbh.size() * sizeof(__half)));
+    HIP_CHECK(hipMemcpy(dKb, Kbh.data(), Kbh.size() * sizeof(__half),
+                        hipMemcpyHostToDevice));
+  }
+  const int kb_stride = B > 1 ? skv : 0;
 
   // Route through the unified entry (same path the runtime takes); it dispatches
   // v6x / v8x by head dim internally.
@@ -595,6 +674,42 @@ static bool run_case(const Case& c, int iters) {
                        : (c.sink_mode == kSinkSmooth)  ? "smooth"
                        : (c.sink_mode == kSinkBoth)    ? "both"
                                                        : "-";
+  if (rank_row) {
+#ifndef HIPDNN_UT_RANK_GQA_ADAPTER
+    throw std::runtime_error("UT rank: GQA requires standalone RANK=1 build");
+#else
+    {
+    const hipdnn_ep_test::ColdKvCopies rank_kv(dK, dV, B * G, max_seq,
+        static_cast<size_t>(D) * sizeof(__half), c.window > 0 ? std::max(0, past_len - c.window) : 0, skv);
+    UtGqaConfig selected;
+    auto choose = [&](const UtGqaConfig& config) { selected = config; };
+    auto rank_launch = [&](const void* k, const void* v, int rows) -> int {
+      return hip_gqa_flash_prefill_v3_configured(nullptr, dQ, k, v, dO, B, H, G,
+        sq, skv, D, rows, past_len, scale, window_arg, sink_arg, H, smooth_arg,
+        selected.hb, selected.qw, selected.mt, selected.bkv, selected.nd, dKb, kb_stride);
+    };
+    auto validate = [&]() {
+      if (rank_launch(dK, dV, max_seq)) throw std::runtime_error("UT rank: GQA candidate launch failed");
+      HIP_CHECK(hipDeviceSynchronize());
+      std::vector<__half> raw(qn);
+      HIP_CHECK(hipMemcpy(raw.data(), dO, raw.size() * sizeof(__half), hipMemcpyDeviceToHost));
+      std::vector<float> output(raw.size());
+      for (size_t i = 0; i < raw.size(); ++i) output[i] = __half2float(raw[i]);
+      const double error = rel_l2(output, Oref);
+      if (!(error < 2e-3)) throw std::runtime_error("UT rank: GQA candidate CPU reference FAIL");
+      return error;
+    };
+    const auto options = hipdnn_ep_test::timing::gqaRankOptions(rank_shape, *rank_row, choose, validate);
+    hipdnn_ep_test::rotatedMeanMs(nullptr, 0, rank_kv, [&](int i) {
+      return rank_launch(rank_kv.k(i), rank_kv.v(i), rank_kv.rows());
+    }, "hip_gqa_flash_prefill_v3_configured", &options);
+    }
+    hipFree(dQ); hipFree(dK); hipFree(dV); hipFree(dO); hipFree(dSink); hipFree(dKb);
+    gpu_phase.finish(true);
+    return true;
+#endif
+  }
+
   bool use_lookup = false;
 #ifdef HIPDNN_LUT_LINKED_EXTERNALLY
   hipdnn_ep::GqaPrefillResult lut_res{};
@@ -614,22 +729,34 @@ static bool run_case(const Case& c, int iters) {
     hip_gqa_autotune_resolve_prefill(gqa_policy(), &lut_req, &lut_res);
   }
   auto launch = [&](const void* k, const void* v, int kv_rows) {
+    if (c.nd > 0) {
+      return hip_gqa_flash_prefill_v3_configured(
+          nullptr, dQ, k, v, dO, B, H, G, sq, skv, D, kv_rows, past_len,
+          scale, window_arg, sink_arg, H, smooth_arg, c.hb, 0, 0, c.bkv, c.nd,
+          dKb, kb_stride);
+    }
     if (use_lookup) {
       return hip_gqa_flash_prefill_v3_configured(
           nullptr, dQ, k, v, dO, B, H, G, sq, skv, D, kv_rows, past_len,
           scale, window_arg, sink_arg, H, smooth_arg, lut_res.config.hb,
           lut_res.config.qw, lut_res.config.mt, lut_res.config.bkv,
-          lut_res.config.nd);
+          lut_res.config.nd, dKb, kb_stride);
     }
     return hip_gqa_flash_prefill(nullptr, dQ, k, v, dO, B, H, G, sq, skv, D,
                                   kv_rows, past_len, scale, window_arg,
-                                  sink_arg, H, smooth_arg);
+                                  sink_arg, H, smooth_arg, dKb, kb_stride);
   };
 #else
   auto launch = [&](const void* k, const void* v, int kv_rows) {
+    if (c.nd > 0) {
+      return hip_gqa_flash_prefill_v3_configured(
+          nullptr, dQ, k, v, dO, B, H, G, sq, skv, D, kv_rows, past_len,
+          scale, window_arg, sink_arg, H, smooth_arg, c.hb, 0, 0, c.bkv, c.nd,
+          dKb, kb_stride);
+    }
     return hip_gqa_flash_prefill(nullptr, dQ, k, v, dO, B, H, G, sq, skv, D,
                                     kv_rows, past_len, scale, window_arg,
-                                    sink_arg, H, smooth_arg);
+                                    sink_arg, H, smooth_arg, dKb, kb_stride);
   };
 #endif
 
@@ -669,31 +796,69 @@ static bool run_case(const Case& c, int iters) {
       csv.write(row);
     }
     hipFree(dQ); hipFree(dK); hipFree(dV); hipFree(dO); hipFree(dSink);
+    if (dKb) hipFree(dKb);
+    gpu_phase.finish(true);
     return ok;
   }
   if (rc != 0) { fprintf(stderr, "%s: kernel returned %d\n", c.name, rc); return false; }
 
   std::vector<__half> Oh(qn);
   HIP_CHECK(hipMemcpy(Oh.data(), dO, qn * sizeof(__half), hipMemcpyDeviceToHost));
+  gpu_phase.finish();
+  gpu_execution.finish();
   std::vector<float> Oout(qn);
   for (size_t i = 0; i < qn; ++i) Oout[i] = __half2float(Oh[i]);
-  const double err = rel_l2(Oout, Oref);
+  bool finite = true;
+  for (float x : Oout) finite = finite && std::isfinite(x);
+  std::vector<float> cmp_out, cmp_ref;
+  for (int b = 0; b < B; ++b)
+    for (int s = 0; s < sq; ++s) {
+      const int kmax = past_len + s;
+      const int kmin = (c.window > 0 && kmax - c.window + 1 > 0)
+                           ? kmax - c.window + 1
+                           : 0;
+      bool has_key = Kb.empty();
+      for (int k = kmin; k <= kmax && !has_key; ++k)
+        has_key = Kb[(size_t)b * skv + k] == 0.0f;
+      if (!has_key) continue;
+      const size_t row = (size_t)(b * sq + s) * H * D;
+      cmp_out.insert(cmp_out.end(), Oout.begin() + row,
+                     Oout.begin() + row + (size_t)H * D);
+      cmp_ref.insert(cmp_ref.end(), Oref.begin() + row,
+                     Oref.begin() + row + (size_t)H * D);
+    }
+  const double err = finite ? rel_l2(cmp_out, cmp_ref) : INFINITY;
 
   // The rows a launch reads: from the window's start below the first query
   // when there is a window, else every key.
+  double ms = 0.0;
+  hipdnn_ep_test::GpuExecutionScope gpu_timing([] { HIP_CHECK(hipDeviceSynchronize()); });
+  gpu_phase.begin();
+  {
   const hipdnn_ep_test::ColdKvCopies kv(
       dK, dV, B * G, max_seq, static_cast<size_t>(D) * sizeof(__half),
       c.window > 0 ? std::max(0, past_len - c.window) : 0, skv);
-  double ms = 0.0;
   hipdnn_ep_test::captureLogLines(
       "HIPDNN_GQA_AUTOTUNE_LOG", "_cfg_capture.tmp", [&]() {
         for (int i = 0; i < 10; ++i) launch(kv.k(0), kv.v(0), kv.rows());
         HIP_CHECK(hipDeviceSynchronize());
+        gpu_phase.timingBegin();
         ms = hipdnn_ep_test::rotatedMeanMs(nullptr, iters, kv, [&](int i) {
-          launch(kv.k(i), kv.v(i), kv.rows());
-        });
+          return launch(kv.k(i), kv.v(i), kv.rows());
+        }, (use_lookup || c.nd > 0) ? "hip_gqa_flash_prefill_v3_configured"
+                      : "hip_gqa_flash_prefill");
+        gpu_phase.timingEnd();
       });
 
+  }
+  hipFree(dQ); hipFree(dK); hipFree(dV); hipFree(dO); hipFree(dSink);
+  if (dKb) hipFree(dKb);
+  gpu_phase.finish(true);
+  gpu_timing.finish();
+
+  if (c.nd > 0) {
+    launched_cfg = "pin:nd=" + std::to_string(c.nd) + " hb=" + std::to_string(c.hb) + " bkv=" + std::to_string(c.bkv);
+  }
   const bool pass = err < 2e-3;
   printf("%-16s B%d H%d G%d(hpg%d) D%-3d sq=%-5d past=%-5d %-6s w=%-5d | relL2=%.2e  latency=%.4f ms  %s (%s)\n",
          c.name, B, H, G, H / G, D, sq, past_len, sink_tag, c.window, err, ms,
@@ -705,7 +870,7 @@ static bool run_case(const Case& c, int iters) {
 #ifdef HIPDNN_LUT_LINKED_EXTERNALLY
     CsvRow row;
     row.shape = case_shape(c);
-    if (use_lookup) {
+    if (use_lookup && c.nd == 0) {
       char config_buf[96];
       std::snprintf(config_buf, sizeof(config_buf),
                     "lookup:hb=%d qw=%d mt=%d bkv=%d nd=%d (%s)",
@@ -732,11 +897,30 @@ static bool run_case(const Case& c, int iters) {
 #endif
   }
 
-  hipFree(dQ); hipFree(dK); hipFree(dV); hipFree(dO); hipFree(dSink);
   return pass;
 }
 
 int main(int argc, char** argv) {
+  if (hipdnn_ep_test::timing::rankRequested()) {
+    try {
+      const auto rows = hipdnn_ep_test::timing::readRankRows("gqa/prefill/Xfp16_Wfp16_Yfp16");
+      for (size_t i = 0; i < rows.size(); ++i) {
+        const auto fields = hipdnn_ep_test::timing::rankShapeFields(rows[i].shape);
+        auto value = [&](const char* name, int fallback = 0) {
+          const auto it = fields.find(name); return it == fields.end() ? fallback : it->second;
+        };
+        Case c{"rank", value("B"), value("H"), value("G"), value("D"), value("sq"), value("past"), value("sink") + 2 * value("smooth"), false, value("win"), 0};
+        if (c.B <= 0 || c.H <= 0 || c.G <= 0 || c.H % c.G || c.D <= 0 ||
+            case_shape(c) != rows[i].shape)
+          throw std::invalid_argument("UT rank: malformed or unsupported GQA shape");
+        if (!run_case(c, 0, &rows[i])) return 1;
+      }
+      HIP_CHECK(hipDeviceSynchronize()); return 0;
+    } catch (const std::exception& error) {
+      std::fprintf(stderr, "UT rank: %s\n", error.what()); return 1;
+    }
+  }
+  hipdnn_ep_test::timing::printTimingMode();
   const int coverage_tier = hipdnn_ep_test::resolveCoverageTier(argc, argv);
 
   int iters = 100;
@@ -755,6 +939,24 @@ int main(int argc, char** argv) {
     else if (a == "--sq") { next(single.sq); have_single = true; }
     else if (a == "--past") { next(single.past); have_single = true; }
     else if (a == "--window") { next(single.window); have_single = true; }
+    else if (a == "--nd") { next(single.nd); have_single = true; }
+    else if (a == "--hb") { next(single.hb); have_single = true; }
+    else if (a == "--bkv") { next(single.bkv); have_single = true; }
+    else if (a == "--max-seq" && i + 1 < argc) {
+      next(single.max_seq);
+      if (single.max_seq <= 0) { std::fprintf(stderr, "--max-seq must be positive\n"); return 1; }
+      have_single = true;
+    }
+    else if (a == "--scale" && i + 1 < argc) {
+      char* end = nullptr;
+      single.scale = std::strtof(argv[++i], &end);
+      if (!end || end == argv[i] || *end || !std::isfinite(single.scale) || single.scale < 0.0f) {
+        std::fprintf(stderr, "--scale must be finite and non-negative\n"); return 1;
+      }
+      single.has_scale = true;
+      have_single = true;
+    }
+    else if (a == "--pad") { next(single.pad); have_single = true; }
   }
 
   if (have_single) {
@@ -899,33 +1101,52 @@ int main(int argc, char** argv) {
       // window have to follow each wave's own rows.
       {"hpg3-d64-both",  1, 24,  8,  64, 1000, 512,  kSinkBoth,   false, 0},
       {"mha-d64-both",   2, 16, 16,  64, 777,  300,  kSinkBoth,   false, 128},
+
+      // ---- Per-key bias (key-padding mask), appended so indices 0-74 are
+      // unchanged. Laguna-S: full layers H48 G8 (hpg6), sliding layers H72 G8
+      // (hpg9) with a 512-key window; batch 2 pads batch 1. ----
+      {"laguna-s-full",  1, 48,  8, 128, 1000, 0,    kSinkNone,   false, 0},
+      {"laguna-s-pad",   2, 48,  8, 128, 1000, 0,    kSinkNone,   false, 0,   250},
+      {"laguna-s-swa",   1, 72,  8, 128, 1000, 0,    kSinkNone,   false, 512},
+      {"laguna-s-swa-pd",2, 72,  8, 128, 1000, 1000, kSinkNone,   false, 512, 300},
+      // Only d128 builds a key-bias instance; the other head dims decline.
+      {"pad-d64-win",    2, 64,  8,  64, 777,  0,    kSinkNone,   true,  128, 200},
+      {"pad-d96",        2, 32, 32,  96, 512,  0,    kSinkNone,   true,  0,   100},
+      {"pad-d256",       2, 16,  2, 256, 512,  0,    kSinkNone,   true,  0,   100},
+      // Left padding with -inf: batch 1's first KV tiles are fully masked,
+      // with and without a window, and from a past chunk.
+      {"lpad-inf",       2, 48,  8, 128, 1000, 0,    kSinkNone,   false, 0,   250, -INFINITY, true},
+      {"lpad-inf-win",   2, 72,  8, 128, 1000, 0,    kSinkNone,   false, 128, 250, -INFINITY, true},
+      {"lpad-3e38-past", 2, 48,  8, 128, 777,  200,  kSinkNone,   false, 0,   300, -3.4e38f,  true},
   };
   const size_t kNumCases = sizeof(cases) / sizeof(cases[0]);
 
-  // tier1 (26 rows) still touches D{64,96,128,256}, every sink_mode, window
+  // tier1 (30 rows) still touches D{64,96,128,256}, every sink_mode, window
   // on/off, window 1, a window wider than the sequence, chunked-prefill
   // (past>0), batch 2, the d128-must-decline case and 2 of the sq=128 rows
   // (the cheapest shape), plus one row per prefill route the first rows
   // miss: a d256 group of 6, a group of 2, the declined d256 window, a d128
   // group not divisible by 4 with and without a window, d128 MHA, d96
-  // plain / windowed / with a sink, a d256 group of 5, a d64 group of 3 and
-  // d64 MHA with the sink, smooth and a window together.
-  static const size_t kTier1[] = {0,  3,  7,  9,  11, 13, 15, 17, 18,
-                                  23, 24, 25, 29, 30, 40, 43, 44, 47,
-                                  50, 55, 56, 64, 66, 69, 73, 74};
+  // plain / windowed / with a sink, a d256 group of 5, a d64 group of 3,
+  // d64 MHA with the sink, smooth and a window together, and the key bias
+  // with and without a window, right- and -inf left-padded.
+  static const size_t kTier1[] = {0,  3,  7,  9,  11, 13, 15, 17, 18, 23,
+                                  24, 25, 29, 30, 40, 43, 44, 47, 50, 55,
+                                  56, 64, 66, 69, 73, 74, 76, 78, 82, 83};
   // tier2 (~65% by case count, but includes ALL the cheap sq=128 additions
   // since they cost almost nothing -- see kTier2 vs tier3 wall time in
   // RESULT.md) still excludes the 2 new expensive sq=8192 rows (kept
   // tier3-only, a deliberate budget trade-off documented in RESULT.md).
-  // The prefill routing and head_dim 96 rows (39-74) are all in tier2, and
-  // so is every tier1 row.
+  // The prefill routing, head_dim 96 and key bias rows (39-84) are all in
+  // tier2, and so is every tier1 row.
   static const size_t kTier2[] = {0,  1,  3,  4,  6,  7,  9,  10, 11, 12,
                                   13, 14, 15, 16, 17, 18, 19, 20, 21, 23,
                                   24, 25, 26, 28, 29, 30, 31, 32, 33, 34,
                                   35, 36, 39, 40, 41, 42, 43, 44, 45, 46,
                                   47, 48, 49, 50, 51, 52, 53, 54, 55, 56,
                                   57, 58, 59, 60, 61, 62, 63, 64, 65, 66,
-                                  67, 68, 69, 70, 71, 72, 73, 74};
+                                  67, 68, 69, 70, 71, 72, 73, 74, 75, 76,
+                                  77, 78, 79, 80, 81, 82, 83, 84};
   const size_t* idxs = coverage_tier == 1 ? kTier1
                      : coverage_tier == 2 ? kTier2
                                           : nullptr;
