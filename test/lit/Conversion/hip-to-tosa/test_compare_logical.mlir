@@ -50,7 +50,7 @@
 // - The hip context and the DPS outs operand are both dropped
 // - The pass is a no-op on functions without rock.kernel
 // - Dynamic shapes, un-broadcastable operands, mismatched operand element
-//   types, non-i1 operands to the logical ops, ui8 booleans, unsigned
+//   types, non-i1 operands to the logical ops, ui8 booleans, ui32 and ui64
 //   comparison operands, and the float and integer widths outside the TOSA
 //   allow-lists (f64, f8, i4) all stay hip ops without failing the pass
 // ============================================================================
@@ -284,14 +284,16 @@ func.func @less_ui8_result(%ctx: !hip.context, %x: tensor<2x8xf32>,
 }
 
 // ONNX Equal/Less also accept unsigned operands. TOSA integers are signless,
-// so comparing them as TOSA would read a ui8 255 as -1.
+// so comparing them as TOSA would read a ui32 4294967295 as -1. ui8 and ui16
+// compare in i32 (test_unsigned_widen.mlir); ui32 has no wider type that
+// rocMLIR takes, so it stays a hip op.
 // CHECK-LABEL: func.func @equal_unsigned_operands
 // CHECK: hip.equal
 // CHECK-NOT: tosa.equal
-func.func @equal_unsigned_operands(%ctx: !hip.context, %x: tensor<2x8xui8>,
-                                   %y: tensor<2x8xui8>, %init: tensor<2x8xi1>)
+func.func @equal_unsigned_operands(%ctx: !hip.context, %x: tensor<2x8xui32>,
+                                   %y: tensor<2x8xui32>, %init: tensor<2x8xi1>)
     -> tensor<2x8xi1> attributes {rock.kernel} {
-  %r = hip.equal(%ctx) ins(%x, %y : tensor<2x8xui8>, tensor<2x8xui8>)
+  %r = hip.equal(%ctx) ins(%x, %y : tensor<2x8xui32>, tensor<2x8xui32>)
                        outs(%init : tensor<2x8xi1>) : tensor<2x8xi1>
   return %r : tensor<2x8xi1>
 }

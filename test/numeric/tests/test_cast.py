@@ -32,6 +32,16 @@ def _make_cast_model(from_dtype, to_onnx_type: int, shape: list[int]):
 
 
 class TestCast:
+    def test_cast_f32_to_uint8(self, model_runner):
+        model = _make_cast_model(np.float32, TensorProto.UINT8, [2, 4])
+        x = np.array(
+            [[0.0, 0.25, 1.75, 42.99], [127.5, 200.125, 254.875, 255.0]],
+            dtype=np.float32,
+        )
+
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
+
     @pytest.mark.parametrize(
         "from_dtype,to_onnx_type,shape",
         [
