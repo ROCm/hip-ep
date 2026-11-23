@@ -8,15 +8,12 @@
 // CHECK-SAME: %[[PV:[a-zA-Z0-9_]+]]: memref<1x4x?x?xf16> {onnx.name = "past_key_values.3.value"}
 // CHECK-DAG: %[[C3:.*]] = arith.constant 3 : index
 // CHECK-DAG: %[[C2:.*]] = arith.constant 2 : index
-// CHECK: %[[TOTAL:.*]] = hip.readback_dim
 // CHECK: %[[KC:.*]] = memref.dim %[[PK]], %[[C2]] : memref<1x4x?x?xf16>
-// CHECK: %[[KCAP:.*]] = arith.maxsi %[[KC]], %[[TOTAL]] : index
 // CHECK: %[[KW:.*]] = memref.dim %[[PK]], %[[C3]] : memref<1x4x?x?xf16>
-// CHECK: hip.alloc_output(%{{.*}}, %[[KCAP]], %[[KW]]) {out_idx = 0 : i64} : memref<1x4x?x?xf16>
+// CHECK: hip.alloc_output(%{{.*}}, %[[KC]], %[[KW]]) {out_idx = 0 : i64} : memref<1x4x?x?xf16>
 // CHECK: %[[VC:.*]] = memref.dim %[[PV]], %[[C2]] : memref<1x4x?x?xf16>
-// CHECK: %[[VCAP:.*]] = arith.maxsi %[[VC]], %[[TOTAL]] : index
 // CHECK: %[[VW:.*]] = memref.dim %[[PV]], %[[C3]] : memref<1x4x?x?xf16>
-// CHECK: hip.alloc_output(%{{.*}}, %[[VCAP]], %[[VW]]) {out_idx = 1 : i64} : memref<1x4x?x?xf16>
+// CHECK: hip.alloc_output(%{{.*}}, %[[VC]], %[[VW]]) {out_idx = 1 : i64} : memref<1x4x?x?xf16>
 
 module {
   func.func @main_graph(
