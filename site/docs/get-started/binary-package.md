@@ -1,6 +1,6 @@
 ---
 title: Run models with the binary package
-description: Download the HIP EP v0.5.1 Windows test package, select AMDGPU in an existing model directory, and run its text or vision-language benchmark.
+description: Download the HIP EP v0.5.3 Windows test package, select AMDGPU in an existing model directory, and run its text or vision-language benchmark.
 ---
 
 The Windows GPU test package is a portable HIP EP installation. It contains the
@@ -8,9 +8,9 @@ EP and OGA/ONNX Runtime binaries, the user-mode ROCm runtime, and the MSVC/UCRT
 import libraries needed by the JIT linker. Extracting the archive is the only
 installation step; it does not register system components.
 
-This guide covers release **v0.5.1** on Strix Halo, Strix Point, Krackan Point,
+This guide covers release **v0.5.3** on Strix Halo, Strix Point, Krackan Point,
 and GPT2. It assumes that Windows and the graphics driver are already installed.
-The v0.5.1 procedure uses `GPT2` as its fourth target label. Because that is not
+The v0.5.3 procedure uses `GPT2` as its fourth target label. Because that is not
 a retail adapter name, confirm the matching product with the release owner
 before using that target.
 
@@ -34,7 +34,7 @@ names and configurations, but it does not distribute the ready-to-run directorie
 ## 2. Download and extract the test package
 
 Download
-[`hipep_0.5.1_windows.zip`](https://github.com/ROCm/hip-ep/releases/download/v0.5.1/hipep_0.5.1_windows.zip).
+[`hipep_0.5.3_windows.zip`](https://github.com/ROCm/hip-ep/releases/download/v0.5.3/hipep_0.5.3_windows.zip).
 The archive contains the portable `bin/`, `lib/`, and `wheels/` directories.
 Models are distributed separately.
 
@@ -42,7 +42,7 @@ Models are distributed separately.
 
 ```powershell
 mkdir gpu-test-package
-tar -xf hipep_0.5.1_windows.zip -C gpu-test-package
+tar -xf hipep_0.5.3_windows.zip -C gpu-test-package
 ```
 
 Use an existing model directory and edit only its `genai_config.json` before
@@ -51,7 +51,7 @@ running. Text models use `model_benchmark.exe`. Vision-language models use
 
 ```text
 <working-directory>\
-  hipep_0.5.1_windows.zip
+  hipep_0.5.3_windows.zip
   gpu-test-package\
     bin\
     lib\

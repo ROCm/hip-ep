@@ -166,7 +166,7 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
     # Build include flags
     # NOTE: -I and path are separate list items to handle paths with spaces
     # (e.g., "C:/Program Files/..."). Clang supports "-I" "<path>" as two args.
-    set(COMPILE_FLAGS "")
+    set(COMPILE_FLAGS "-DHIP_EP_TURBOQUANT_ENABLED=${HIP_EP_TURBOQUANT_ENABLED}")
     if(HIP_EP_RING_ENABLED)
         list(APPEND COMPILE_FLAGS "-DHIP_EP_RING_ENABLED=${HIP_EP_RING_ENABLED}")
     endif()

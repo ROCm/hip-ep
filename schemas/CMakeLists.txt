@@ -31,6 +31,7 @@ set(FBS_SCHEMAS
     ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/hip/autotune/gqa/gqa_autotune.fbs
     ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/hip/autotune/matmul_nbits/matmul_nbits_autotune.fbs
     ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/hip/autotune/gemm/gemm_autotune.fbs
+    ${CMAKE_SOURCE_DIR}/tools/problem-cache/problem_cache.fbs
 )
 
 set(GENERATED_HEADERS "")

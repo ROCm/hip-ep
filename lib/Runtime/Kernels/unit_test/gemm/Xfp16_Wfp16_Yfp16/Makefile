@@ -184,7 +184,7 @@ test: direct
 	$(call RUN_CMD,$(TARGET_DIRECT)) --coverage $(COVERAGE)
 
 test_custom: direct
-	$(call RUN_CMD,$(TARGET_DIRECT)) $(M) $(N) $(K) $(TA) $(TB)
+	$(call RUN_CMD,$(TARGET_DIRECT)) --m $(M) --n $(N) --k $(K) --ta $(TA) --tb $(TB)
 
 build: direct
 ifneq ($(PKG_DIR),)

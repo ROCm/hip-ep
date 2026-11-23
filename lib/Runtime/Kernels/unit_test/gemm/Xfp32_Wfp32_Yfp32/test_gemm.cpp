@@ -575,23 +575,47 @@ int main(int argc, char** argv) {
       {64, 4096, 14336, 0, 0, 1, 4096, 1.0f, 0.25f, "TiledFma-Nn-bias"},
   };
 
+  int m = 128, n = 512, k = 256, ta = 0, tb = 1;
+  bool customRequested = false;
   std::vector<int> positional;
   for (int i = 1; i < argc; ++i) {
-    if (std::strcmp(argv[i], "--coverage") == 0) {
-      ++i;
+    if (std::strcmp(argv[i], "--coverage") == 0 ||
+        std::strcmp(argv[i], "--timing") == 0) {
+      if (++i == argc) return 2;
       continue;
     }
-    if (std::strcmp(argv[i], "--timing") == 0) {
-      ++i;
-      continue;
+    int* target = nullptr;
+    if (std::strcmp(argv[i], "--m") == 0) target = &m;
+    else if (std::strcmp(argv[i], "--n") == 0) target = &n;
+    else if (std::strcmp(argv[i], "--k") == 0) target = &k;
+    else if (std::strcmp(argv[i], "--ta") == 0) target = &ta;
+    else if (std::strcmp(argv[i], "--tb") == 0) target = &tb;
+    if (target) {
+      if (++i == argc) return 2;
+      *target = std::atoi(argv[i]);
+      customRequested = true;
+    } else {
+      if (argv[i][0] == '-') {
+        std::fprintf(stderr, "unknown GEMM argument: %s\n", argv[i]);
+        return 2;
+      }
+      positional.push_back(std::atoi(argv[i]));
     }
-    positional.push_back(std::atoi(argv[i]));
   }
-  if (positional.size() >= 5) {
-    const int ta = positional[3], tb = positional[4];
-    const Case custom{positional[0], positional[1], positional[2], ta, tb,
-                       ta ? positional[0] : 1, ta ? 1 : positional[1], 1.0f, 0.0f,
-                       "custom"};
+  if (!positional.empty()) {
+    if (customRequested || positional.size() != 5) return 2;
+    m = positional[0]; n = positional[1]; k = positional[2];
+    ta = positional[3]; tb = positional[4];
+    customRequested = true;
+  }
+  if (customRequested) {
+    if (m <= 0 || n <= 0 || k <= 0 || (ta != 0 && ta != 1) ||
+        (tb != 0 && tb != 1)) {
+      std::fprintf(stderr, "GEMM requires positive M/N/K and TA/TB in {0,1}\n");
+      return 2;
+    }
+    const Case custom{m, n, k, ta, tb, ta ? m : 1, ta ? 1 : n,
+                      1.0f, 0.0f, "custom"};
     return runCase(custom);
   }
 

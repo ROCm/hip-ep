@@ -37,3 +37,10 @@ for `rank-seed --from-lut` through `rank-build` and private FB compilation.
 `RANK_KERNEL_OBJ` accepts an existing adapter object only for a matching
 source/include/compiler/flag closure. Production DLL builds expose no ranking
 controls.
+
+The single-case interface is `--m M --n N --k K --ta 0|1 --tb 0|1`,
+with defaults `M=128 N=512 K=256 TA=0 TB=1`. Supplying any shape or
+transpose flag selects one custom case; dimensions must be positive. The
+legacy positional `M N K TA TB` form remains supported. `make test_custom`
+uses the same named flags and defaults. [`ut_interface.json`](../../ut_interface.json)
+records the parameters, constraints and runnable examples.

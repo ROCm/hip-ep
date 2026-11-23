@@ -5,8 +5,9 @@
 
 // Package entry point for standalone custom-kernel unit tests. The leaf
 // executables remain separate so CI identifies the failing op/dtype directly;
-// this program selects the matching GPU-arch directory, runs every leaf
-// serially, and writes their combined report to bin/out/results.csv.
+// this program selects the matching GPU-arch directory, runs every leaf (or the
+// one named by --leaf) serially, and writes their combined report to
+// bin/out/results.csv.
 
 #include <hip/hip_runtime.h>
 
@@ -155,11 +156,33 @@ static HANDLE inheritableStdHandle(DWORD id) {
 // diagnostics with freopen(). The leaf therefore starts with stderr on
 // `stderr_log`, named in HIPDNN_KERNEL_UT_STDERR, and reads back what each case
 // appends.
+// Windows command-line quoting for one argument (CommandLineToArgvW rules).
+static std::string quoteArgument(const std::string& argument) {
+  if (!argument.empty() && argument.find_first_of(" \t\"") == std::string::npos)
+    return argument;
+  std::string quoted = "\"";
+  size_t backslashes = 0;
+  for (const char c : argument) {
+    if (c == '\\') {
+      ++backslashes;
+      continue;
+    }
+    quoted.append(c == '"' ? backslashes * 2 + 1 : backslashes, '\\');
+    backslashes = 0;
+    quoted.push_back(c);
+  }
+  quoted.append(backslashes * 2, '\\');
+  quoted.push_back('"');
+  return quoted;
+}
+
 static bool runLeaf(const fs::path& executable, const fs::path& working_dir,
-                    const fs::path& stderr_log, int coverage, DWORD& exit_code,
+                    const fs::path& stderr_log,
+                    const std::vector<std::string>& arguments, DWORD& exit_code,
                     double& elapsed_ms) {
-  std::string command = "\"" + executable.string() + "\" --coverage " +
-                        std::to_string(coverage);
+  std::string command = "\"" + executable.string() + "\"";
+  for (const std::string& argument : arguments)
+    command += " " + quoteArgument(argument);
   std::vector<char> command_buffer(command.begin(), command.end());
   command_buffer.push_back('\0');
 
@@ -214,8 +237,17 @@ int main(int argc, char** argv) {
   const char* timing_env = std::getenv("HIPDNN_UT_TIMING");
   std::string timing = timing_env && timing_env[0] ? timing_env : "standard";
   int coverage = 3;
+  std::string only_leaf;
+  bool pass_through = false;
+  std::vector<std::string> leaf_arguments;
   for (int i = 1; i < argc; ++i) {
-    if (std::strcmp(argv[i], "--arch") == 0 && i + 1 < argc)
+    if (std::strcmp(argv[i], "--") == 0) {
+      pass_through = true;
+      leaf_arguments.assign(argv + i + 1, argv + argc);
+      break;
+    } else if (std::strcmp(argv[i], "--leaf") == 0 && i + 1 < argc)
+      only_leaf = argv[++i];
+    else if (std::strcmp(argv[i], "--arch") == 0 && i + 1 < argc)
       arch = argv[++i];
     else if (std::strcmp(argv[i], "--mode") == 0 && i + 1 < argc)
       mode = argv[++i];
@@ -226,7 +258,11 @@ int main(int argc, char** argv) {
     else if (std::strcmp(argv[i], "--help") == 0) {
       std::printf("Usage: hipdnn-kernel-ut.exe [--arch gfxNNNN] "
                   "[--mode lookup|autotune] [--coverage 1|2|3] "
-                  "[--timing screen|standard|confirm]\n");
+                  "[--timing screen|standard|confirm] "
+                  "[--leaf <op>/<leaf> [-- <leaf arguments>]]\n"
+                  "Without --, a leaf receives --coverage <N>. After --, the "
+                  "named leaf receives exactly the remaining arguments; "
+                  "ut_interface.json lists them.\n");
       return 0;
     } else {
       std::fprintf(stderr, "unrecognized argument: %s\n", argv[i]);
@@ -248,6 +284,22 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "--coverage must be 1, 2, or 3\n");
     return 2;
   }
+  if (pass_through && only_leaf.empty()) {
+    std::fprintf(stderr, "leaf arguments after -- require --leaf <op>/<leaf>\n");
+    return 2;
+  }
+  if (!only_leaf.empty()) {
+    bool known = false;
+    for (const Leaf& leaf : kLeaves)
+      known = known || only_leaf == std::string(leaf.op) + "/" + leaf.name;
+    if (!known) {
+      std::fprintf(stderr, "unknown --leaf %s; packaged leaves:\n", only_leaf.c_str());
+      for (const Leaf& leaf : kLeaves)
+        std::fprintf(stderr, "  %s/%s\n", leaf.op, leaf.name);
+      return 2;
+    }
+  }
+  if (!pass_through) leaf_arguments = {"--coverage", std::to_string(coverage)};
   if (arch.empty()) arch = detectedArch();
   if (arch.empty()) {
     std::fprintf(stderr, "could not detect GPU architecture; pass --arch gfxNNNN\n");
@@ -290,6 +342,8 @@ int main(int argc, char** argv) {
 
   bool passed = true;
   for (const Leaf& leaf : kLeaves) {
+    if (!only_leaf.empty() && only_leaf != std::string(leaf.op) + "/" + leaf.name)
+      continue;
     // Ring's generic package slice is validated only on Strix Halo.
     // On gfx1151 a missing executable or failed device guard must fail CI.
     if (std::strcmp(leaf.op, "gqa/ring") == 0 && detectedArch() != "gfx1151") {
@@ -315,7 +369,7 @@ int main(int argc, char** argv) {
         out_dir / (executable.stem().string() + ".stderr.log");
     const bool launched =
         fs::is_regular_file(executable) &&
-        runLeaf(executable, bin, stderr_log, coverage, exit_code, elapsed_ms);
+        runLeaf(executable, bin, stderr_log, leaf_arguments, exit_code, elapsed_ms);
     const bool leaf_passed = launched && exit_code == 0;
     std::printf("[%s/%s] %s (%.1f ms)\n", leaf.op, leaf.name,
                 leaf_passed ? "PASS" : "FAIL", elapsed_ms);

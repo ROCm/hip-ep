@@ -141,13 +141,39 @@ int main() {
     if (++bad <= 2) return std::numeric_limits<double>::quiet_NaN();
     return double(n);
   });
-  assert(recovered.invalid_batches == 2 && recovered.invalid_calls == 2);
+  // The first two batches are excluded warm-up batches.
+  assert(recovered.warmup_invalid_batches == 2 && recovered.invalid_batches == 0 &&
+         recovered.invalid_calls == 0);
   bool failed = false;
   attempts = 0;
   try {
     (void)measure(Policy{}, [&](uint32_t) { ++attempts; return -1.0; });
-  } catch (const std::runtime_error&) { failed = true; }
-  assert(failed && attempts == 3);
+  } catch (const InvalidTimingShare&) { failed = true; }
+  assert(failed && attempts == 9);
+
+  // Three leading invalid one-call warm-up batches (observed on gfx1151 for
+  // microsecond kernels) are discarded; the measured data is unaffected.
+  attempts = 0;
+  auto leading = measure(Policy::standard(), [&](uint32_t n) {
+    return ++attempts <= 3 ? -0.003 : 0.01 * n;
+  });
+  assert(leading.warmup_invalid_batches == 3 && leading.invalid_batches == 0);
+  assert(std::abs(leading.mean_ms / 0.01 - 1.0) < 1e-10);
+
+  // The same three invalid batches after warm-up still fail the cell.
+  bool measuring = false;
+  int measured_invalid = 0;
+  failed = false;
+  try {
+    (void)measureInterleaved(Policy::standard(), 1,
+        [&](size_t, uint32_t n) {
+          return measuring && ++measured_invalid <= 3 ? -0.003 : 0.01 * n;
+        }, [&] { measuring = true; });
+  } catch (const InvalidTimingShare&) { failed = true; }
+  assert(failed && measured_invalid == 3);
+  Policy relaxed = Policy::standard();
+  relaxed.warmup_invalid_limit = 9;
+  try { relaxed.validate(); assert(false); } catch (const std::invalid_argument&) {}
 
   // Sporadic invalid batches in a long measurement are discarded: one in
   // every 997 attempts stays far below the 1% allowance.
@@ -161,13 +187,14 @@ int main() {
   assert(std::abs(sporadic.mean_ms / 0.01 - 1.0) < 1e-10);
 
   // Invalid retries cannot reset at every new batch. Valid slow samples stay.
+  // Seven warm-up attempts (three invalid) precede the measured batches.
   attempts = 0;
   try {
     (void)measure(Policy::screen(), [&](uint32_t n) {
       return (++attempts % 2 == 0) ? 0.0 : double(n);
     });
     assert(false);
-  } catch (const std::runtime_error&) { assert(attempts == 6); }
+  } catch (const InvalidTimingShare&) { assert(attempts == 12); }
   attempts = 0;
   auto slow = measure(Policy::screen(), [&](uint32_t n) {
     return (++attempts == 4 ? 300.0 : 1.0) * n;  // two warm-up batches first
@@ -327,7 +354,8 @@ int main() {
         if (candidate == 1 && ++invalid_batches <= 2) return 0.0;
         return double(n) * (candidate ? 0.9 : 1.0);
       });
-  assert(recovered_rank[1].invalid_batches == 2 && recovered_rank[0].invalid_batches == 0);
+  assert(recovered_rank[1].warmup_invalid_batches == 2 && recovered_rank[1].invalid_batches == 0 &&
+         recovered_rank[0].warmup_invalid_batches == 0);
   assert(decideRank(recovered_rank, 0).winner == 1);
   try {
     (void)measureInterleaved(Policy::screen(), 2,
