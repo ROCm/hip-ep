@@ -172,10 +172,12 @@ int main(int argc, char **argv) {
     } else if (arg == "--autotune") {
       autotuneFlagSeen = true;
       autotuneEnabled = true;
+      autotune.tuningTypeProvided = true;
       autotune.space = mlir::hip::AutotuneSpace::Quick;
     } else if (llvm::StringRef(arg).starts_with("--autotune=")) {
       autotuneFlagSeen = true;
       autotuneEnabled = true;
+      autotune.tuningTypeProvided = true;
       llvm::StringRef kind = llvm::StringRef(arg).drop_front(11);
       if (!mlir::hip::parseAutotuneSpace(kind, autotune.space)) {
         llvm::errs() << "error: unknown autotune space '" << kind
@@ -246,7 +248,11 @@ int main(int argc, char **argv) {
         << "  --autotune[=quick|full|exhaustive]\n"
         << "                       Override the default quick autotune space "
            "and\n"
-        << "                       embed the fastest GPU candidate.\n"
+        << "                       embed the fastest GPU candidate. A given\n"
+        << "                       tuning type skips the shipped "
+           "problem-cache\n"
+        << "                       LUT. --problem-cache is still consulted "
+           "first.\n"
         << "  --autotune-bench=adaptive|simple\n"
         << "                       How candidates are timed (default: "
            "adaptive, or\n"
@@ -269,9 +275,9 @@ int main(int argc, char **argv) {
            "the\n"
         << "                       differences being searched for.\n"
         << "  --problem-cache <file.fb>\n"
-        << "                       Before searching, use this LUT FlatBuffer\n"
-        << "                       instead of the shipped table.\n"
-        << "                       An identical problem string is\n"
+        << "                       Takes priority over the search. Use this\n"
+        << "                       LUT FlatBuffer instead of the shipped\n"
+        << "                       table. An identical problem string is\n"
         << "                       compiled as stored. HIP_ROCMLIR_PROBLEM_"
            "CACHE\n"
         << "                       sets the same path. A conv miss requires\n"

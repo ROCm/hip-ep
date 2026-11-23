@@ -18,13 +18,12 @@ namespace hip::compiler {
 /// ENABLE_ROCMLIRTRITON).
 ///
 /// The string is the GPU arch, plus `+autotune=<space>` when benchmarking is
-/// on, plus `+lut=<fingerprint>` of the shipped problem-cache bytes. The
-/// provider does not read HIP_ROCMLIR_PROBLEM_CACHE, so that fingerprint is
-/// the shipped table only. The model cache / EPContext identity is derived
+/// on. There is no `+lut=` suffix, whether or not the shipped problem-cache
+/// LUT was consulted. The model cache / EPContext identity is derived
 /// from the graph alone, so an artifact that carries an arch-specific HSACO
-/// could otherwise be reused on a different GPU, after HIPDNN_EP_ROCMLIR or
-/// the autotune space changes, or after the shipped LUT changes. The level-1
-/// pass records this value and the custom op refuses a mismatch.
+/// could otherwise be reused on a different GPU, or after HIPDNN_EP_ROCMLIR
+/// or the autotune space changes. The level-1 pass records this value and the
+/// custom op refuses a mismatch.
 std::string rocMlirArtifactTarget();
 
 } // namespace hip::compiler
