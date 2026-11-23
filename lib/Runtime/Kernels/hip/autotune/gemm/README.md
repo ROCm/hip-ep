@@ -10,6 +10,27 @@ schema v2 shares its dtype vocabulary with every other op via `../common/`.
 The installed format is v3: point and fallback config indices are `uint8`,
 with fewer than 256 distinct configs; the current table contains 62.
 
+## Dense and attention split
+
+[PR #1518](https://github.com/ROCm/hip-ep/pull/1518) contains the custom dense
+GEMM kernel, dense Gemm/MatMul runtime adapters, compiler lowering, LUT and
+native unit-test leaves. Decomposed GQA/MHA, linear attention and the existing
+wave64 dequantized MatMulNBits prefill retain their hipBLASLt implementation
+in this branch. Their custom GEMM replacements and GQA present-cache fixes
+are in [draft PR #1618](https://github.com/ROCm/hip-ep/pull/1618), stacked on
+the dense branch.
+
+The required gfx1151 kernel comparison uses native `confirm` timing for each
+requested complete call: custom/hipBLASLt must be at most 1.05, with error
+against the FP32 CPU reference no greater than hipBLASLt's. Attention adapter
+qualification includes its casts and loops. Kernel timing and model results
+have separate scopes; the user's Jenkins genai CI owns model regression.
+
+A LUT refresh qualifies code and selections together over the complete
+requested and affected key set. Preserve missing graph/input bindings in the
+coverage report. Host JSON/FB roundtrip checks establish structural preservation;
+performance and numerical acceptance require the source-bound native evidence.
+
 ## Refresh through native UT ranking
 
 The three `unit_test/gemm/X{fp16,bf16,fp32}_W*_Y*` leaves implement native
