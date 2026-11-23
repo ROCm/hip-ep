@@ -5,6 +5,8 @@
 
 #include "HipToLLVMUtils.h"
 
+#include <limits>
+
 namespace mlir {
 namespace hip {
 namespace {
@@ -459,6 +461,8 @@ struct PowOpLowering : public ConvertOpToLLVMPattern<PowOp> {
 
 // hip.swiglu(ctx, gate, up, output)
 //   -> wrap_swiglu(state, gate, up, output, num_elements, data_type)
+// The clamped form (activation_alpha / activation_beta / swiglu_limit):
+//   -> wrap_swiglu_clamped(<same>, alpha, beta, limit : f32)
 struct SwigluOpLowering : public ConvertOpToLLVMPattern<SwigluOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -508,6 +512,37 @@ struct SwigluOpLowering : public ConvertOpToLLVMPattern<SwigluOp> {
           op, "promoted SwiGLU requires f16 input/output");
 
     Value dataTypeVal = createI64Const(dataType);
+    if (op.isClamped()) {
+      // wrap_swiglu_clamped(..., alpha, beta, limit : f32); limit 0 (no
+      // clamp) is passed as +inf.
+      Type f32Type = rewriter.getF32Type();
+      auto createF32Const = [&](float value) -> Value {
+        return LLVM::ConstantOp::create(rewriter, loc, f32Type,
+                                        rewriter.getF32FloatAttr(value));
+      };
+      const float limit = op.getSwigluLimit().convertToFloat();
+      SmallVector<Type, 9> clampedTypes = {ptrType, ptrType, ptrType,
+                                           ptrType, i64Type, i64Type,
+                                           f32Type, f32Type, f32Type};
+      FailureOr<LLVM::LLVMFuncOp> clampedFn = LLVM::lookupOrCreateFn(
+          rewriter, module, kWrapSwigluClamped, clampedTypes, i32Type);
+      if (failed(clampedFn))
+        return failure();
+      SmallVector<Value, 9> clampedArgs = {
+          statePtr,
+          gatePtr,
+          upPtr,
+          outputPtr,
+          numElements,
+          dataTypeVal,
+          createF32Const(op.getActivationAlpha().convertToFloat()),
+          createF32Const(op.getActivationBeta().convertToFloat()),
+          createF32Const(
+              limit != 0.0f ? limit : std::numeric_limits<float>::infinity())};
+      LLVM::CallOp::create(rewriter, loc, *clampedFn, clampedArgs);
+      rewriter.eraseOp(op);
+      return success();
+    }
     SmallVector<Type, 6> paramTypes = {ptrType, ptrType, ptrType,
                                        ptrType, i64Type, i64Type};
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(

@@ -1995,9 +1995,10 @@ def Hip_RopeOp : Hip_DpsOp_WithInfer<"rope"> {
     Example:
     ```mlir
     hip.rope(%ctx)
-        ins(%input, %position_ids, %cos_cache, %sin_cache :
-            memref<1x128x4096xf16, 1>, memref<1x128xi64, 1>,
+        ins(%input, %cos_cache, %sin_cache :
+            memref<1x128x4096xf16, 1>,
             memref<131072x64xf16, 1>, memref<131072x64xf16, 1>)
+        position_ids(%position_ids : memref<1x128xi64, 1>)
         outs(%output : memref<1x128x4096xf16, 1>)
         {interleaved = 0 : i64, num_heads = 32 : i64, rotary_embedding_dim = 128 : i64}
     ```
@@ -2016,17 +2017,16 @@ def Hip_RopeOp : Hip_DpsOp_WithInfer<"rope"> {
   );
 
   // position_ids is the only optional operand; MLIR resolves its presence from
-  // the operand count (no AttrSizedOperandSegments needed). Each optional group
-  // must LEAD with the `,` literal: a group's first parsable element has to be a
-  // literal / variable / custom directive, so a bare `type(...)` directive
-  // cannot open the type-list group. Anchoring on $position_ids omits it from
-  // both the value and type lists when absent; the present-form IR prints
-  // identically to before.
+  // the operand count (no AttrSizedOperandSegments needed). It has a keyword
+  // clause of its own: as a `,`-led group between $input and $cos_cache, an
+  // op without it printed three operands that the parser, committing to the
+  // group at the first `,`, read as input, position_ids and cos_cache.
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(`
-        $input (`,` $position_ids^)? `,` $cos_cache `,` $sin_cache `:`
-        type($input) (`,` type($position_ids)^)? `,` type($cos_cache) `,` type($sin_cache)
+        $input `,` $cos_cache `,` $sin_cache `:`
+        type($input) `,` type($cos_cache) `,` type($sin_cache)
     `)`
+    (`position_ids` `(` $position_ids^ `:` type($position_ids) `)`)?
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
@@ -3016,11 +3016,29 @@ def Hip_SwigluOp : Hip_DpsOp_AutoReify<"swiglu"> {
     bf16, and f64. With promote_activation, f16 inputs and output use f32
     sigmoid and multiply intermediates; only the final result rounds to f16.
 
+    `activation_alpha`, `activation_beta` and `swiglu_limit` select the
+    clamped form `hip.qmoe` applies between its projections (GPT-OSS's
+    SwiGLU), element-wise:
+
+      g = min(gate, swiglu_limit)
+      u = clamp(up, -swiglu_limit, swiglu_limit)
+      output = g / (1 + exp(-activation_alpha * g)) * (u + activation_beta)
+
+    `swiglu_limit` 0 (the default) clamps nothing. With the defaults (alpha
+    1, beta 0, limit 0) the op is the plain SwiGLU above. The clamped form
+    computes in f32 and rounds once, for f16, bf16 and f32; it does not
+    combine with promote_activation.
+
     Example:
     ```mlir
     hip.swiglu(%ctx) ins(%gate, %up : memref<3x4xf16, 1>,
                                       memref<3x4xf16, 1>)
                        outs(%output : memref<3x4xf16, 1>)
+    hip.swiglu(%ctx) ins(%gate, %up : memref<3x4xf32, 1>,
+                                      memref<3x4xf32, 1>)
+                       outs(%output : memref<3x4xf32, 1>)
+                       {activation_alpha = 1.702 : f32,
+                        activation_beta = 1.0 : f32, swiglu_limit = 7.0 : f32}
     ```
   }];
 
@@ -3029,8 +3047,34 @@ def Hip_SwigluOp : Hip_DpsOp_AutoReify<"swiglu"> {
     Hip_TensorOrMemRef:$gate,
     Hip_TensorOrMemRef:$up,
     Hip_TensorOrMemRef:$output,
-    DefaultValuedAttr<BoolAttr, "false">:$promote_activation
+    DefaultValuedAttr<BoolAttr, "false">:$promote_activation,
+    DefaultValuedAttr<F32Attr, "1.0f">:$activation_alpha,
+    DefaultValuedAttr<F32Attr, "0.0f">:$activation_beta,
+    DefaultValuedAttr<F32Attr, "0.0f">:$swiglu_limit
   );
+
+  // Plain SwiGLU, the clamped form's attributes at their defaults.
+  let builders = [
+    OpBuilder<(ins "::mlir::TypeRange":$result_tensors, "::mlir::Value":$ctx,
+                   "::mlir::Value":$gate, "::mlir::Value":$up,
+                   "::mlir::Value":$output,
+                   CArg<"bool", "false">:$promote_activation), [{
+      build($_builder, $_state, result_tensors, ctx, gate, up, output,
+            promote_activation, ::llvm::APFloat(1.0f), ::llvm::APFloat(0.0f),
+            ::llvm::APFloat(0.0f));
+    }]>
+  ];
+
+  let extraClassDeclaration = [{
+    /// True when the clamped form's attributes differ from plain SwiGLU's.
+    bool isClamped() {
+      return getActivationAlpha().convertToFloat() != 1.0f ||
+             getActivationBeta().convertToFloat() != 0.0f ||
+             getSwigluLimit().convertToFloat() != 0.0f;
+    }
+  }];
+
+  let hasVerifier = 1;
 
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $gate `,` $up `:` type($gate) `,` type($up) `)`
@@ -4030,9 +4074,9 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp_AutoReify<"causal_conv_with_state", [A
     Example (1D):
     ```mlir
     hip.causal_conv_with_state(%ctx)
-        ins(%input, %weight, %bias, %past_state :
-            tensor<1x64x128xf16>, tensor<64x1x4xf16>,
-            tensor<64xf16>, tensor<1x64x3xf16>)
+        ins(%input, %weight : tensor<1x64x128xf16>, tensor<64x1x4xf16>)
+        bias(%bias : tensor<64xf16>)
+        past_state(%past_state : tensor<1x64x3xf16>)
         outs(%output, %present_state :
              tensor<1x64x128xf16>, tensor<1x64x3xf16>)
         {activation = "silu", ndim = 1 : i64}
@@ -4064,14 +4108,10 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp_AutoReify<"causal_conv_with_state", [A
 
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(`
-        $input `,` $weight
-        (`,` $bias^)?
-        (`,` $past_state^)?
-        `:`
-        type($input) `,` type($weight)
-        (`,` type($bias)^)?
-        (`,` type($past_state)^)?
+        $input `,` $weight `:` type($input) `,` type($weight)
     `)`
+    (`bias` `(` $bias^ `:` type($bias) `)`)?
+    (`past_state` `(` $past_state^ `:` type($past_state) `)`)?
     `outs` `(`
         $output `,` $present_state
         `:`
