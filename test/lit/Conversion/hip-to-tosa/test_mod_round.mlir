@@ -4,10 +4,10 @@
 // ============================================================================
 // TEST PURPOSE:
 // Verify that hip.round and hip.mod, the lowerings of ONNX Round and ONNX Mod,
-// become TOSA inside a rock.kernel function. Both are already in FuseROCMlir's
-// pointwise list, so either one sitting behind a matmul is outlined into the
-// kernel whether or not this pass can lower it; left unconverted it reaches
-// rocMLIR as a hip op that rocMLIR cannot compile.
+// become TOSA inside a rock.kernel function. Both are already in the rocMLIR
+// fusion's pointwise list, so either one sitting behind a matmul is outlined
+// into the kernel whether or not this pass can lower it; left unconverted it
+// reaches rocMLIR as a hip op that rocMLIR cannot compile.
 //
 // TOSA has an op for neither, so each is spelled out. Both expansions are
 // exact -- nothing here approximates.
@@ -44,7 +44,7 @@
 // - Signless i32 and i64, the only widths tosa.intdiv accepts, both convert
 // - A lower-rank divisor is reshaped with leading 1s first, since TOSA
 //   broadcasts size-1 dimensions only once both operands carry the result rank
-// - Each op converts behind a matmul anchor, the shape hip-fuse-rocmlir makes
+// - Each op converts behind a matmul anchor, the shape the rocMLIR fusion makes
 // - Float mod is rejected with the reason named: fmod needs the exact truncated
 //   quotient, which a reciprocal and a multiply cannot supply
 // - Integer widths tosa.intdiv cannot take are rejected with the type named
@@ -97,6 +97,23 @@ func.func @round_f32(%ctx: !hip.context, %x: tensor<4xf32>,
   %r = hip.round(%ctx) ins(%x : tensor<4xf32>)
                        outs(%init : tensor<4xf32>) : tensor<4xf32>
   return %r : tensor<4xf32>
+}
+
+// -----
+
+// A one-element vector into a scalar is reshaped, then the same expansion
+// runs at the result type.
+// CHECK-LABEL: func.func @round_unit_to_scalar
+// CHECK: %[[X:.*]] = tosa.reshape %arg1
+// CHECK: tosa.floor %[[X]]
+// CHECK: tosa.select
+// CHECK-NOT: hip.round
+func.func @round_unit_to_scalar(%ctx: !hip.context, %x: tensor<1xf32>,
+                                %init: tensor<f32>) -> tensor<f32>
+    attributes {rock.kernel} {
+  %r = hip.round(%ctx) ins(%x : tensor<1xf32>)
+                       outs(%init : tensor<f32>) : tensor<f32>
+  return %r : tensor<f32>
 }
 
 // -----
@@ -230,10 +247,10 @@ func.func @mod_rank_extending(%ctx: !hip.context, %a: tensor<4x8xi32>,
 // -----
 
 //===----------------------------------------------------------------------===//
-// Behind an anchor, in the shape hip-fuse-rocmlir produces.
+// Behind an anchor, in the shape the rocMLIR fusion produces.
 //===----------------------------------------------------------------------===//
 
-// The reason for converting these at all. Both ops are in FuseROCMlir's
+// The reason for converting these at all. Both ops are in the rocMLIR fusion's
 // pointwise list, so a round after a matmul is outlined into the kernel whether
 // or not it can be lowered; left unconverted it reaches rocMLIR as a hip op fed
 // by a ub.poison context, neither of which rocMLIR knows.
@@ -320,6 +337,19 @@ func.func @round_int(%ctx: !hip.context, %x: tensor<4xi32>,
   %r = hip.round(%ctx) ins(%x : tensor<4xi32>)
                        outs(%init : tensor<4xi32>) : tensor<4xi32>
   return %r : tensor<4xi32>
+}
+
+// -----
+
+// A length-4 vector is not a scalar. The input stays a different type from
+// the result, so the expansion is not built.
+func.func @round_nonunit_to_scalar(%ctx: !hip.context, %x: tensor<4xf32>,
+                                   %init: tensor<f32>) -> tensor<f32>
+    attributes {rock.kernel} {
+  // expected-error @+1 {{failed to legalize operation 'hip.round'}}
+  %r = hip.round(%ctx) ins(%x : tensor<4xf32>)
+                       outs(%init : tensor<f32>) : tensor<f32>
+  return %r : tensor<f32>
 }
 
 // -----

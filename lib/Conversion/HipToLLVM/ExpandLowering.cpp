@@ -7,6 +7,28 @@
 
 namespace mlir {
 namespace hip {
+
+// wrap_expand only copies elements, so a type without a runtime identifier
+// (i1, ui32, ui64, ...) is passed as the integer type of the same width.
+static int64_t getExpandDataType(Type elemType) {
+  int64_t dataType = getHipdnnDataType(elemType);
+  if (dataType != HIPDNN_EP_DATATYPE_UNSUPPORTED || !elemType.isIntOrFloat())
+    return dataType;
+  switch (elemType.getIntOrFloatBitWidth()) {
+  case 1:
+  case 8:
+    return HIPDNN_EP_DATATYPE_INT8;
+  case 16:
+    return HIPDNN_EP_DATATYPE_INT16;
+  case 32:
+    return HIPDNN_EP_DATATYPE_INT32;
+  case 64:
+    return HIPDNN_EP_DATATYPE_INT64;
+  default:
+    return HIPDNN_EP_DATATYPE_UNSUPPORTED;
+  }
+}
+
 namespace {
 
 // hip.expand(ctx, input, shape, output)
@@ -27,7 +49,7 @@ struct ExpandOpLowering : public ConvertOpToLLVMPattern<ExpandOp> {
     auto inType = cast<MemRefType>(op.getInput().getType());
     auto outType = cast<MemRefType>(op.getOutput().getType());
 
-    int64_t dataType = getHipdnnDataType(inType.getElementType());
+    int64_t dataType = getExpandDataType(inType.getElementType());
     if (dataType < 0)
       return rewriter.notifyMatchFailure(op, "unsupported element type");
 

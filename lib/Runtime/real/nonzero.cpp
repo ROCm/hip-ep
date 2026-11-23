@@ -8,6 +8,8 @@
 #include "../op_profile.h"
 #include "hip_custom_kernels.h"
 
+#include <hip/hip_runtime.h>
+
 #include <cstdio>
 
 static int nonzero_hipdnn_to_hip_dtype(int64_t hipdnn_type) {
@@ -44,11 +46,24 @@ int wrap_nonzero(RuntimeState *state, void *input, void *output,
       },
       state);
 
+  if (state && count_ptr && input_num_elements == 0 && input_rank > 0) {
+    hipStream_t s = static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+    hipError_t err = hipMemsetAsync(count_ptr, 0, sizeof(int32_t), s);
+    if (err != hipSuccess) {
+      fprintf(stderr,
+              "[REAL] wrap_nonzero: empty-input hipMemsetAsync failed: %s\n",
+              hipGetErrorString(err));
+      return -1;
+    }
+    RUNTIME_DEBUG_LOG("[REAL] wrap_nonzero: empty input -- count=0\n");
+    return 0;
+  }
+
   if (!state || !input || !output || !count_ptr || !input_dims) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_nonzero: null required argument\n");
     return -1;
   }
-  if (input_num_elements <= 0 || input_rank <= 0) {
+  if (input_num_elements < 0 || input_rank <= 0) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_nonzero: invalid dimensions "
                       "(input_num_elements=%lld, input_rank=%lld)\n",
                       (long long)input_num_elements, (long long)input_rank);

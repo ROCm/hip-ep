@@ -3,9 +3,9 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Licensed under the MIT License.
 #
-"""Compile-time guard for the arch-gated LDS barrier in matmul_nbits_wmma_core.h.
+"""Compile-time guard for the arch-gated LDS barrier in hip_arch_compat.h.
 
-The kernel's ``HIPDNN_LDS_BARRIER`` macro must emit the raw ``s_barrier``
+The kernels' ``HIPDNN_LDS_BARRIER`` macro must emit the raw ``s_barrier``
 instruction only on architectures that provide it (gfx9 / gfx10 / gfx11) and
 fall back to ``__syncthreads()`` everywhere else. A newer GPU family that
 retired ``s_barrier`` but was wrongly routed to the raw asm fails to
@@ -40,7 +40,7 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.normpath(os.path.join(HERE, "..", "..", ".."))
 KERNEL = os.path.join(
-    REPO_ROOT, "lib", "Runtime", "Kernels", "include", "matmul_nbits_wmma_core.h"
+    REPO_ROOT, "lib", "Runtime", "Kernels", "include", "hip_arch_compat.h"
 )
 
 # arch -> True if the standalone s_barrier instruction is expected in device asm

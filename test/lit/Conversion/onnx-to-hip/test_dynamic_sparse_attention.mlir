@@ -51,7 +51,7 @@ module {
   // CHECK: %[[VB:.*]] = tensor.dim %[[PV]], %[[C0]]
   // CHECK: %[[VCAP:.*]] = tensor.dim %[[PV]], %[[C2]]
   // CHECK: %[[PVI:.*]] = tensor.empty(%[[VB]], %[[VCAP]]) : tensor<?x2x?x256xf16>
-  // CHECK: %[[R:.*]]:3 = hip.dynamic_sparse_attention(%[[CTX]]) ins(%[[Q]], %[[K]], %[[V]], %[[PK]], %[[PV]], %[[IDX]], %[[CNT]], %[[SEQ]] : tensor<?x?x6144xf16>, tensor<?x?x512xf16>, tensor<?x?x512xf16>, tensor<?x2x?x256xf16>, tensor<?x2x?x256xf16>, tensor<?x2051xi32>, tensor<?xi32>, tensor<?xi32>) outs(%[[OUT]], %[[PKI]], %[[PVI]] : tensor<?x?x6144xf16>, tensor<?x2x?x256xf16>, tensor<?x2x?x256xf16>) {kv_num_heads = 2 : i64, num_heads = 24 : i64, scale = 6.250000e-02 : f32}
+  // CHECK: %[[R:.*]]:3 = hip.dynamic_sparse_attention(%[[CTX]]) ins(%[[Q]] : tensor<?x?x6144xf16>) kv(%[[K]], %[[V]] : tensor<?x?x512xf16>, tensor<?x?x512xf16>) cache(%[[PK]], %[[PV]] : tensor<?x2x?x256xf16>, tensor<?x2x?x256xf16>) select(%[[IDX]], %[[CNT]], %[[SEQ]] : tensor<?x2051xi32>, tensor<?xi32>, tensor<?xi32>) outs(%[[OUT]], %[[PKI]], %[[PVI]] : tensor<?x?x6144xf16>, tensor<?x2x?x256xf16>, tensor<?x2x?x256xf16>) {kv_num_heads = 2 : i64, num_heads = 24 : i64, scale = 6.250000e-02 : f32}
   // CHECK: return %[[R]]#0, %[[R]]#1, %[[R]]#2
 
   func.func @dsa_dynamic_cache_head_size(
@@ -84,7 +84,7 @@ module {
   // CHECK-NOT: tensor.cast
   // CHECK: %[[PKI:.*]] = tensor.empty(%{{.*}}, %{{.*}}, %{{.*}}) : tensor<?x2x?x?xf16>
   // CHECK: %[[PVI:.*]] = tensor.empty(%{{.*}}, %{{.*}}, %{{.*}}) : tensor<?x2x?x?xf16>
-  // CHECK: %[[R:.*]]:3 = hip.dynamic_sparse_attention(%{{.*}}) ins(%{{.*}}, %{{.*}}, %{{.*}}, %[[PK]], %[[PV]], {{.*}} : tensor<?x?x6144xf16>, tensor<?x?x512xf16>, tensor<?x?x512xf16>, tensor<?x2x?x?xf16>, tensor<?x2x?x?xf16>, {{.*}}) outs(%{{.*}}, %[[PKI]], %[[PVI]] : tensor<?x?x6144xf16>, tensor<?x2x?x?xf16>, tensor<?x2x?x?xf16>)
+  // CHECK: %[[R:.*]]:3 = hip.dynamic_sparse_attention(%{{.*}}) ins(%{{.*}} : tensor<?x?x6144xf16>) kv({{.*}}) cache(%[[PK]], %[[PV]] : tensor<?x2x?x?xf16>, tensor<?x2x?x?xf16>) select({{.*}}) outs(%{{.*}}, %[[PKI]], %[[PVI]] : tensor<?x?x6144xf16>, tensor<?x2x?x?xf16>, tensor<?x2x?x?xf16>)
   // CHECK-NOT: tensor.cast
   // CHECK: return %[[R]]#0, %[[R]]#1, %[[R]]#2
 
