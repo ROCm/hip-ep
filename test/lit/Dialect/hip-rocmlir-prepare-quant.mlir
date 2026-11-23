@@ -19,3 +19,7 @@
 // RUN: hip-mlir-opt --split-input-file --hip-rocmlir-prepare-quant %S/hip-fuse-rocmlir-qlinear-conv.mlir > %t.qconv.one
 // RUN: hip-mlir-opt --split-input-file --hip-rocmlir-prepare-quant --hip-rocmlir-prepare-quant %S/hip-fuse-rocmlir-qlinear-conv.mlir > %t.qconv.two
 // RUN: diff %t.qconv.one %t.qconv.two
+
+// RUN: hip-mlir-opt --split-input-file --hip-rocmlir-prepare-quant %S/hip-rocmlir-split-asymmetric-qlinear.mlir > %t.asym.one
+// RUN: hip-mlir-opt --split-input-file --hip-rocmlir-prepare-quant --hip-rocmlir-prepare-quant %S/hip-rocmlir-split-asymmetric-qlinear.mlir > %t.asym.two
+// RUN: diff %t.asym.one %t.asym.two
