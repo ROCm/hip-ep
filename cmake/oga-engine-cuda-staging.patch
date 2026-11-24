@@ -1,0 +1,14 @@
+diff --git a/build.py b/build.py
+index 41c0cec..553a4e2 100644
+--- a/build.py
++++ b/build.py
+@@ -845,7 +845,8 @@ def build(args: argparse.Namespace, env: dict[str, str]):
+         util.run(csharp_build_command, cwd=REPO_ROOT / "test" / "csharp")
+ 
+     engine_benchmark_dir = args.build_dir / "benchmark" / "engine"
+-    if args.build_engine_benchmark and util.is_linux() and engine_benchmark_dir.is_dir():
++    # CUDA dependency staging requires a CUDA-enabled GenAI build.
++    if args.build_engine_benchmark and args.use_cuda and util.is_linux() and engine_benchmark_dir.is_dir():
+         util.setup_engine_benchmark_dependencies(args.build_dir, engine_benchmark_dir)
+ 
+ 
