@@ -4,6 +4,24 @@ Licensed under the MIT License.
 -->
 # Native QSA audit and paper handoff
 
+<!-- QWEN_EIGHT_PERFORMANCE_BEGIN -->
+## Latest eight-selector performance
+
+This packet's identities, performance, accuracy and memory files remain the historical four-selector evidence; the eight-selector evidence is a separate packet.
+
+**Decode throughput improved over four selectors at every measured length.** Prefill is slower at 4K/16K and slightly faster at 32K. All eight weights, including the overlapping four positions, come from checkpoint 640; this is not a layer-count-only change.
+
+| Context | Eight vs four: prefill | Eight vs four: decode |
+|---|---:|---:|
+| 4K | -5.21% | +0.71% |
+| 16K | -6.31% | +1.94% |
+| 32K | +0.92% | +5.31% |
+
+Eight uses one warmup and three measured requests at batch one, with 64 common teacher-forced decode inputs. Default/four controls are reused across runs (two warmups, six requests, two resident sessions sharing cache buffers); Eight has one resident session. No paired confidence interval or isolated layer-count causal claim applies. Both prefill and decode use QSA at all eight selected layers.
+
+Eight-selector BFCL/GSM8K accuracy and application-memory comparisons have not been run on hip-ep. The source checkpoint still misses its fixed 32K PPL gate. Historical four-selector accuracy, memory and paired intervals do not transfer to Eight. See the [eight-selector report](../../experiments/qwen-qsa-eight-selector-results.md) and [raw-data paper handoff](../qwen-eight-hip-ep/README.md).
+<!-- QWEN_EIGHT_PERFORMANCE_END -->
+
 This packet records the Qwen/Qwen3.8-27B port to hip-ep on **Radeon 8060S,
 gfx1151, Windows**. It includes the frozen selector identity, raw measurements,
 protocols, validation receipts and explicit missing results. The branch is local;

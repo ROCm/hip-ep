@@ -13,6 +13,10 @@
       "sha256": "ed0d50ba77f2d4046e35f159b1d9d5071d36d3026515e2306b1eb61b58bc6f16",
       "bytes": 207
     },
+    "documentation.json": {
+      "sha256": "212b08aec58394b87db308af83562654a10e434e702b8be326ebf941844b91e7",
+      "bytes": 2238
+    },
     "eight-140w-archive.json": {
       "sha256": "d814845a56abe03068ee4935d89ac2a5f1ecfb7a61896275b2732fc565d1ec98",
       "bytes": 238
@@ -238,8 +242,8 @@
       "bytes": 864
     },
     "README.md": {
-      "sha256": "b3942a8970949dec71ce63ae81e46583333713869f7f717d7f34e37b5ded0adb",
-      "bytes": 14159
+      "sha256": "ad86d87c3628e99bf31e96c1a0644603ab48a5089397b7da643b1ce1b95a7919",
+      "bytes": 15188
     },
     "status.json": {
       "sha256": "fb50e1a7454a198d5d3507131906243c2afcad4bbe92603aedfffd069eabb78d",

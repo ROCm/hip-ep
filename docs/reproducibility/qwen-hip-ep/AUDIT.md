@@ -4,6 +4,24 @@ Licensed under the MIT License.
 -->
 # Audit of the native QSA change
 
+<!-- QWEN_EIGHT_PERFORMANCE_BEGIN -->
+## Latest eight-selector performance
+
+The audit below describes the historical implementation/merge checks. Eight reuses the measured native build; no new merged-candidate throughput campaign is claimed.
+
+**Decode throughput improved over four selectors at every measured length.** Prefill is slower at 4K/16K and slightly faster at 32K. All eight weights, including the overlapping four positions, come from checkpoint 640; this is not a layer-count-only change.
+
+| Context | Eight vs four: prefill | Eight vs four: decode |
+|---|---:|---:|
+| 4K | -5.21% | +0.71% |
+| 16K | -6.31% | +1.94% |
+| 32K | +0.92% | +5.31% |
+
+Eight uses one warmup and three measured requests at batch one, with 64 common teacher-forced decode inputs. Default/four controls are reused across runs (two warmups, six requests, two resident sessions sharing cache buffers); Eight has one resident session. No paired confidence interval or isolated layer-count causal claim applies. Both prefill and decode use QSA at all eight selected layers.
+
+Eight-selector BFCL/GSM8K accuracy and application-memory comparisons have not been run on hip-ep. The source checkpoint still misses its fixed 32K PPL gate. Historical four-selector accuracy, memory and paired intervals do not transfer to Eight. See the [eight-selector report](../../experiments/qwen-qsa-eight-selector-results.md) and [raw-data paper handoff](../qwen-eight-hip-ep/README.md).
+<!-- QWEN_EIGHT_PERFORMANCE_END -->
+
 Scope: the complete local OLMo+Qwen stack relative to local`origin/main`, including
 custom kernels, graph export, BF16 import, compiler lowering, per-node state,
 shared dense GQA changes and experiment records. Upstream-only changes are not

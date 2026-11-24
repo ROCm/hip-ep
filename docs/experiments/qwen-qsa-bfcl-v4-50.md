@@ -4,6 +4,24 @@ Licensed under the MIT License.
 -->
 # Qwen native BFCL v4: paired 50-case pilot
 
+<!-- QWEN_EIGHT_PERFORMANCE_BEGIN -->
+## Latest eight-selector performance
+
+All accuracy results below belong to the historical four-selector checkpoint. The eight-selector BFCL numbers in planning documents are duration estimates, not accuracy results.
+
+**Decode throughput improved over four selectors at every measured length.** Prefill is slower at 4K/16K and slightly faster at 32K. All eight weights, including the overlapping four positions, come from checkpoint 640; this is not a layer-count-only change.
+
+| Context | Eight vs four: prefill | Eight vs four: decode |
+|---|---:|---:|
+| 4K | -5.21% | +0.71% |
+| 16K | -6.31% | +1.94% |
+| 32K | +0.92% | +5.31% |
+
+Eight uses one warmup and three measured requests at batch one, with 64 common teacher-forced decode inputs. Default/four controls are reused across runs (two warmups, six requests, two resident sessions sharing cache buffers); Eight has one resident session. No paired confidence interval or isolated layer-count causal claim applies. Both prefill and decode use QSA at all eight selected layers.
+
+Eight-selector BFCL/GSM8K accuracy and application-memory comparisons have not been run on hip-ep. The source checkpoint still misses its fixed 32K PPL gate. Historical four-selector accuracy, memory and paired intervals do not transfer to Eight. See the [eight-selector report](qwen-qsa-eight-selector-results.md) and [raw-data paper handoff](../reproducibility/qwen-eight-hip-ep/README.md).
+<!-- QWEN_EIGHT_PERFORMANCE_END -->
+
 The same pinned Qwen/Qwen3.8-27B W4A16 backbone runs with default attention and frozen QSA at layers27/31/35/39 on Radeon8060S/gfx1151. Batch1, one resident full-model session at a time, measured native binaries, no training or calibration. All50 cases run in both variants.
 
 The seed42 selection contains two cases from each of13 single-turn categories and six from each of four multi-turn categories:26 single-turn and24 multi-turn. The public AST checker control is excluded. This is an unweighted component pilot, **not the official BFCLv4 overall score**. Web-search, memory and format-sensitivity components are excluded. The [official BFCL source](https://github.com/ShishirPatil/gorilla/tree/6ea57973c7a6097fd7c5915698c54c17c5b1b6c8/berkeley-function-call-leaderboard) supplies prompts, parsers, simulator backends and scoring.

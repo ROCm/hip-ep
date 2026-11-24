@@ -323,6 +323,9 @@ def main():
     ]
     path = ROOT / "docs/experiments/qwen-qsa-bfcl-v4-50.md"
     path.write_text("\n".join(lines), encoding="utf-8")
+    from performance_docs import update_documents
+
+    update_documents()
     print(
         json.dumps(
             {

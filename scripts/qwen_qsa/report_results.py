@@ -12,6 +12,7 @@ from pathlib import Path
 from audit_memory import audit_memory
 from audit_performance import audit_performance
 from evaluate_default import answer
+from performance_docs import update_documents
 from verify_handoff import ROOT, SOURCE, WORK, sha
 
 
@@ -659,6 +660,7 @@ def main():
     ]
     output = ROOT / "docs/experiments/qwen-qsa-native-gqa-results.md"
     output.write_text("\n".join(lines), encoding="utf-8")
+    update_documents()
     (WORK / "report.json").write_text(
         json.dumps(
             {

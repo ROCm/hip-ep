@@ -4,6 +4,24 @@ Licensed under the MIT License.
 -->
 # Qwen trained-selector port: native default and QSA
 
+<!-- QWEN_EIGHT_PERFORMANCE_BEGIN -->
+## Latest eight-selector performance
+
+The historical four-selector campaign and its quality tables remain below.
+
+**Decode throughput improved over four selectors at every measured length.** Prefill is slower at 4K/16K and slightly faster at 32K. All eight weights, including the overlapping four positions, come from checkpoint 640; this is not a layer-count-only change.
+
+| Context | Eight vs four: prefill | Eight vs four: decode |
+|---|---:|---:|
+| 4K | -5.21% | +0.71% |
+| 16K | -6.31% | +1.94% |
+| 32K | +0.92% | +5.31% |
+
+Eight uses one warmup and three measured requests at batch one, with 64 common teacher-forced decode inputs. Default/four controls are reused across runs (two warmups, six requests, two resident sessions sharing cache buffers); Eight has one resident session. No paired confidence interval or isolated layer-count causal claim applies. Both prefill and decode use QSA at all eight selected layers.
+
+Eight-selector BFCL/GSM8K accuracy and application-memory comparisons have not been run on hip-ep. The source checkpoint still misses its fixed 32K PPL gate. Historical four-selector accuracy, memory and paired intervals do not transfer to Eight. See the [eight-selector report](qwen-qsa-eight-selector-results.md) and [raw-data paper handoff](../reproducibility/qwen-eight-hip-ep/README.md).
+<!-- QWEN_EIGHT_PERFORMANCE_END -->
+
 ## Current evidence
 
 Fresh 64-block native default quality is complete and independently audited. Four-block architecture diagnostics pass native HIP and frozen Hugging Face numerical controls. Native QSA integration passes kernel, complete-operator and full-model numerical/dispatch controls. Matched 4K PPL/GSM results are below; long-document QSA accuracy and performance remain separate qualifications.

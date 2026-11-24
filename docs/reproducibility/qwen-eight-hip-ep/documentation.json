@@ -1,0 +1,47 @@
+{
+  "source_performance_sha256": "bed3190aca4590fcc1ad85d566a7442e630e5dbbe348a0193400f554f762ff49",
+  "generator_sha256": "c97ca54a42c1a59b020e68560e89a17af3e503967e815ef6dac6494f584dc14d",
+  "document_hash_normalization": "UTF-8 text with LF line endings",
+  "documents": {
+    "docs/experiments/qwen-qsa-eight-selector-results.md": {
+      "normalized_lf_sha256": "e1be1a37192d960fdf6e6d0bae923383d038c53da19fc2de568c09e340aa4cfe",
+      "normalized_utf8_bytes": 3611
+    },
+    "docs/reproducibility/qwen-eight-hip-ep/README.md": {
+      "normalized_lf_sha256": "eef08f7317c9ce1a4390cadb7dfc723a1578eff75a1cd89961c146f9903cf51f",
+      "normalized_utf8_bytes": 15078
+    },
+    "docs/experiments/qwen-qsa-native-gqa-results.md": {
+      "normalized_lf_sha256": "2f915530452bccaada5ba43ad599c6d1f2a8df90711d96d4d40e3d99e0e0300a",
+      "normalized_utf8_bytes": 18242
+    },
+    "docs/reproducibility/qwen-hip-ep/README.md": {
+      "normalized_lf_sha256": "1a71d5de30719a7fdb15c3d40cb2c6c0c0624bcdaac053e75a3d3ef9cb66ef86",
+      "normalized_utf8_bytes": 17358
+    },
+    "docs/reproducibility/qwen-hip-ep/AUDIT.md": {
+      "normalized_lf_sha256": "44e587085a837ee45ed392fee22d7254ab34bec9524558cf1c5e6b4d8a2ac25d",
+      "normalized_utf8_bytes": 11608
+    },
+    "docs/reproducibility/qwen-hip-ep/PR_DESCRIPTION.md": {
+      "normalized_lf_sha256": "75073a023fde6b65d2c39ebe4ff553e858363c61e367ce785252e174e174cc1d",
+      "normalized_utf8_bytes": 3844
+    },
+    "docs/design/qwen-qsa-native-gqa.md": {
+      "normalized_lf_sha256": "1074b5e9a0cabeef903efd1ea4bdd6aaa2806ded55d92dffa2ebf2bb7d3c886d",
+      "normalized_utf8_bytes": 9857
+    },
+    "docs/experiments/qwen-qsa-bfcl-v4-50.md": {
+      "normalized_lf_sha256": "b82496ba918b9795f79b347e6b791292d808e03f0ecae8334f7707e6a185fe56",
+      "normalized_utf8_bytes": 8001
+    },
+    "docs/experiments/qwen-qsa-memory.md": {
+      "normalized_lf_sha256": "d68abcae1ab2b7eb2edf6bddc46e03d6672b841181ad4fb154550c9f0a974c83",
+      "normalized_utf8_bytes": 3616
+    },
+    "README.md": {
+      "normalized_lf_sha256": "182a4fe9f8ac77449f76e726930e31802cf6a88b75dc6184e23e2f5e53e12430",
+      "normalized_utf8_bytes": 7517
+    }
+  }
+}

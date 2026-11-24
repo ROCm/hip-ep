@@ -4,6 +4,24 @@ Licensed under the MIT License.
 -->
 # Frozen Qwen QSA at the native GQA boundary
 
+<!-- QWEN_EIGHT_PERFORMANCE_BEGIN -->
+## Latest eight-selector performance
+
+The same native operator/math/cache contract now has four- and eight-selector exports. The eight-selector variant reuses the measured kernels and compiler.
+
+**Decode throughput improved over four selectors at every measured length.** Prefill is slower at 4K/16K and slightly faster at 32K. All eight weights, including the overlapping four positions, come from checkpoint 640; this is not a layer-count-only change.
+
+| Context | Eight vs four: prefill | Eight vs four: decode |
+|---|---:|---:|
+| 4K | -5.21% | +0.71% |
+| 16K | -6.31% | +1.94% |
+| 32K | +0.92% | +5.31% |
+
+Eight uses one warmup and three measured requests at batch one, with 64 common teacher-forced decode inputs. Default/four controls are reused across runs (two warmups, six requests, two resident sessions sharing cache buffers); Eight has one resident session. No paired confidence interval or isolated layer-count causal claim applies. Both prefill and decode use QSA at all eight selected layers.
+
+Eight-selector BFCL/GSM8K accuracy and application-memory comparisons have not been run on hip-ep. The source checkpoint still misses its fixed 32K PPL gate. Historical four-selector accuracy, memory and paired intervals do not transfer to Eight. See the [eight-selector report](../experiments/qwen-qsa-eight-selector-results.md) and [raw-data paper handoff](../reproducibility/qwen-eight-hip-ep/README.md).
+<!-- QWEN_EIGHT_PERFORMANCE_END -->
+
 This is the implementation contract for the integrated native port. Matched
 default/QSA quality and batch-one performance measurements are complete at the
 qualified contexts. Current support, numerical controls, source identities and
@@ -13,8 +31,11 @@ measurement limits are in the
 
 ## Scope and execution boundary
 
-Replace only full-attention layers **27/31/35/39**, zero-based, in the pinned
-Qwen/Qwen3.8-27B revision. Preserve all 48 Gated DeltaNet blocks, other full
+The historical four-selector export replaces full-attention layers
+**27/31/35/39**, zero-based, in the pinned Qwen/Qwen3.8-27B revision. The
+eight-selector export replaces **3/7/23/27/31/35/39/63**, using all eight updated
+checkpoint-640 weights, including the overlapping four positions. Preserve all
+48 Gated DeltaNet blocks, other full
 attention, QKV/O projections, native Q/K norms, native partial RoPE, output gate,
 embedding, output head and full KV storage. Both variants use the same fresh
 RTN W4A16/FP16 backbone bytes and FP32 recurrent state.
@@ -78,13 +99,14 @@ Use the EP compute stream and existing sequence-length readback where valid;
 avoid adding a new host synchronization at each selected layer. Scratch used
 only during the current operation can be shared within one serial session.
 Large FP16-to-BF16 hidden/projection buffers need not remain separately live for
-all four nodes. Retained pools and tails must remain distinct. This matters on
+all selected nodes. Retained pools and tails must remain distinct. This matters on
 the 64 GiB shared-memory target.
 
 The initial qualification uses unpadded sequential text, starting with batch one.
 Canonical text position IDs and uniform lengths must be explicit in validation;
 padding or custom multimodal positions must not silently use the text formula.
-Expand batches 4/8 and 64K contexts after actual correctness and memory probes.
+Whole-model measured performance is batch one at 4K/16K/32K. Other batches are
+not qualified by those timings; 64K remains excluded and no expansion is queued.
 Record an implementation restriction separately from a hardware limitation or
 the source AITER exclusion. A 65,536-token prefix plus 64 decode calls needs
 capacity **65,600**, so do not inherit OLMo's 65,536 total-window cap.
@@ -103,14 +125,15 @@ prefixes and a 4095+1 continuation against frozen dequantized HF weights. The
 native port needs additional QSA-specific controls and full-model default/Changed
 checks; those existing default diagnostics are not QSA validation.
 
-CPU fixtures now match the canonical frozen source features bit-for-bit for all
-four selector layers, using target FP16 hidden inputs cast to BF16 and actual
+Historical CPU fixtures match the canonical frozen source features bit-for-bit
+for the four-selector export, using target FP16 hidden inputs cast to BF16 and actual
 native FP32 RoPE tables. Stable ties, the first pruning query and causal support
 counts are checked. `prepare_selector_fixtures.py` writes their tensors and hash
 receipt under `_local/qwen-qsa/selector-fixtures-v1/`. They are CPU oracles for
 later native tests; no native QSA qualification is implied.
 
-Use the locked 64-window 4K test and 128-question zero-shot, thinking-disabled GSM
+The historical four-selector quality protocol uses the locked 64-window 4K test
+and 128-question zero-shot, thinking-disabled GSM
 protocol. Source gates are PPL increase at most 5% and GSM drop at most 2 points
 against the fresh default. OLMo's accepted nongating GSM decision is separate.
 Natural long-document quality is locked before tuning and reported separately;
@@ -118,15 +141,20 @@ short GSM does not reach the pruning threshold.
 
 ## Timing and evidence
 
-The frozen timing protocol has candidate prefixes 4K/16K/32K/64K, 64 common
-teacher-forced decode inputs, two warmup pairs and six alternating measured pairs.
+The historical four-selector timing protocol has candidate prefixes
+4K/16K/32K/64K, 64 common teacher-forced decode inputs, two warmup pairs and six
+alternating measured pairs. Only 4K/16K/32K completed; 64K was canceled. The
+eight-selector campaign uses the same three supported prefixes and decode
+inputs, with one warmup and three measured requests per shape, as requested.
 Time full-model prefill and decode independently with synchronization and the
 same output-head/session/cache work. Sampling stays outside primary decode
-timers. Preserve raw trials and report paired uncertainty and regressions.
+timers. Preserve raw trials and report regressions. Paired uncertainty belongs
+only to the historical paired campaign, not the eight-selector across-run comparison.
 
-Both models should be resident together where actual memory allows. If this is
-infeasible, retain the failure and explicitly document any serial-loading timing
-protocol; loading cannot enter one variant's measured phase. Do not infer a
+The historical Original/four campaign has two resident sessions sharing cache
+buffers. The eight-selector campaign has one resident full-model session per
+process; load/compile time stays outside measured phases. Keep those residency
+and repetition differences explicit. Do not infer a
 speedup or feasible batch from sparse KV arithmetic or MI355X source rates.
 
 Source trained job 303195 now times the same step-128 export as source accuracy.

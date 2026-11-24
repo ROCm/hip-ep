@@ -24,6 +24,20 @@ Each new shape retains all four rows (`trial=-1,0,1,2`),with only trials0–2 ag
 
 The charger rating is user-reported. AC state was checked about once per second and sampled host evidence every5seconds; every recorded AC state stayed connected. CPU/available-RAM telemetry is diagnostic host data,not GPU-residency measurement. Preflight observed only desktop/System GPU activity,with no competing model workload. The preflight scope proposal was superseded before launch; [protocol-amendment.json](raw/eight-140w/protocol-amendment.json) documents the final1/3 request.
 
+<!-- QWEN_EIGHT_PERFORMANCE_BEGIN -->
+## Four versus eight selectors
+
+**Decode throughput improved over four selectors at every measured length.** Prefill is slower at 4K/16K and slightly faster at 32K. All eight weights, including the overlapping four positions, come from checkpoint 640; this is not a layer-count-only change.
+
+| Context | Eight vs four: prefill | Eight vs four: decode |
+|---|---:|---:|
+| 4K | -5.21% | +0.71% |
+| 16K | -6.31% | +1.94% |
+| 32K | +0.92% | +5.31% |
+
+Eight uses one warmup and three measured requests at batch one, with 64 common teacher-forced decode inputs. Default/four controls are reused across runs (two warmups, six requests, two resident sessions sharing cache buffers); Eight has one resident session. No paired confidence interval or isolated layer-count causal claim applies. Both prefill and decode use QSA at all eight selected layers. See the [standalone performance report](../../experiments/qwen-qsa-eight-selector-results.md).
+<!-- QWEN_EIGHT_PERFORMANCE_END -->
+
 ## Estimated evaluation durations — no accuracy runs started
 
 These are planning estimates derived **after** measured performance. Each actual historical BFCL prompt and generated token is costed separately using the new prefill/decode curves,then calibrated to historical generation time and actual tool/queue overhead. Both previous trajectories are used:294/283 generation calls,2,217,075/2,117,348 processed prompt tokens,and14,333/13,899 output tokens. The50 fixed cases include26 single-turn and24 multi-turn cases,1–7 declared turns,cap1024,thinking disabled. GSM128 uses its historical11,167 prompt and43,494 output tokens,cap512,thinking disabled. This is not a single decode-TPS multiplier.
