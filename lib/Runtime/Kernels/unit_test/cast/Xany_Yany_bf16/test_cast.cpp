@@ -12,8 +12,8 @@
  *
  * Reference semantics (same as the kernel and PyTorch): f32 and f16 sides go
  * through fp32. fp32 -> bf16 and fp32 -> fp16 round to nearest even, so an
- * f64 or i64 source rounds twice (first to fp32). f64 -> f16 therefore rounds
- * twice too. float -> integer truncates toward zero. A NaN result matches any
+ * f64 -> bf16 or i64 source rounds twice (first to fp32). f64 -> f16 is the
+ * exception: one correct rounding. float -> integer truncates toward zero. A NaN result matches any
  * NaN (payloads may differ). f64 <-> integer is a direct static_cast of the
  * double (f64 -> integer, and integer -> f64), so a value wider than the fp32
  * mantissa is not rounded through fp32 first.
