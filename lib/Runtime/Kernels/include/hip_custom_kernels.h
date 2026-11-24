@@ -913,15 +913,6 @@ HIP_KERNEL_API int hip_swiglu_promoted(void *stream, const void *gate,
                                       const void *up, void *output,
                                       int64_t num_elements, int hip_dtype);
 
-// Clamped SwiGLU, computed in FP32 and rounded once:
-//   g = min(gate, limit), u = clamp(up, -limit, limit),
-//   output = g / (1 + exp(-alpha * g)) * (u + beta).
-// limit may be +inf. HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16, HIP_DTYPE_BFLOAT16.
-HIP_KERNEL_API int hip_swiglu_clamped(void *stream, const void *gate,
-                                      const void *up, void *output,
-                                      int64_t num_elements, int hip_dtype,
-                                      float alpha, float beta, float limit);
-
 /* =========================================================================
  * Softplus activation
  * =========================================================================
@@ -1233,19 +1224,6 @@ HIP_KERNEL_API int hip_softmax_row_2d_fp32(void* stream, const void* input, void
 HIP_KERNEL_API int hip_softmax_row_2d_inplace(void* stream, void* data, int rows, int cols);
 HIP_KERNEL_API int hip_softmax_row_2d_inplace_fp32(void* stream, void* data, int rows, int cols);
 
-/* Last-axis softmax over [outer, R, C] scores with the scale and an id mask
- * applied on the way in:
- *   out[o,r,c] = softmax_c(row_ids[r] == col_ids[c] ? x[o,r,c] * scale : fill)
- * The scaled value is rounded to the element type first. An id vector of
- * length 1 broadcasts; any other length must be R (row_ids) or C (col_ids).
- * elem_size_bytes: 2 for fp16, 4 for fp32. `input` may equal `output`.
- * Returns -1 on invalid arguments. */
-HIP_KERNEL_API int hip_softmax_row_scaled_masked(
-    void* stream, const void* input, void* output, const int64_t* row_ids,
-    int64_t row_ids_len, const int64_t* col_ids, int64_t col_ids_len,
-    int64_t outer, int64_t R, int64_t C, float scale, float fill,
-    int elem_size_bytes);
-
 /* Column-wise softmax: fp32 input -> fp16 output.
  * Reads fp32 Score matrix (no fp16 overflow/inf), writes fp16 probabilities.
  * input_batch_stride is in float elements, output_batch_stride in half elements. */
@@ -1523,8 +1501,11 @@ HIP_KERNEL_API int hip_gqa_flash_decode_fused_copy(
  *   FLOAT32 <-> FLOAT16; FLOAT32 -> INT64, INT32
  *   FLOAT16 -> INT64, INT32, UINT8; INT64/INT32/UINT8 -> FLOAT16, FLOAT32
  *   BFLOAT16 <-> FLOAT32, FLOAT16, FLOAT64, INT64, INT32, INT16, INT8, UINT8
- *   (FLOAT64 is kernel-only for now: wrap_cast does not map
- *   HIPDNN_EP_DATATYPE_DOUBLE yet, so model graphs cannot reach it.)
+ *   FLOAT64 <-> FLOAT32; FLOAT64 <-> FLOAT16 is correctly rounded once
+ *   (test_cast checks it on gfx1151); FLOAT64 <-> BFLOAT16 rounds twice,
+ *   through fp32
+ *   FLOAT64 <-> INT64, INT32, INT16, INT8, UINT8 (direct static_cast; f64 to
+ *   integer truncates toward zero)
  * bf16 conversions go through fp32: fp32 -> bf16 rounds to nearest even
  * (same as PyTorch and ONNX), bf16 -> fp32 is exact, float -> integer
  * truncates toward zero.
@@ -1859,10 +1840,7 @@ HIP_KERNEL_API int hip_pool(
  * HIP_DTYPE_UINT8 for every mode. Integer linear interpolates the stored
  * codes in float and truncates toward zero on the store. Nearest copies
  * one sample.
- * Linear rounds each product and sum to f32 (no FMA contraction).
- * Returns: 0 on success, non-zero on failure, including a window extent
- * above 2^24 (a float coordinate cannot address every index beyond it) or
- * an output row count (N * C * all output axes but the last) above INT32_MAX.
+ * Returns: 0 on success, non-zero on failure.
  */
 HIP_KERNEL_API int hip_resize(
     void* stream,
@@ -2364,21 +2342,7 @@ HIP_KERNEL_API int hip_batch_norm(
  * Mean/var over each (N, group). channels_last 0 is NCHW, 1 is NHWC.
  * activation 1 applies SiLU after the affine transform.
  * `hip_dtype`: FLOAT16, BFLOAT16, FLOAT32, or FLOAT64.
- *
- * Large groups use a split reduction whose partials live in `workspace`
- * (device memory, 256-byte aligned). Query the size with
- * hip_group_norm_workspace_bytes for the current device. A null or smaller
- * workspace is valid: the kernel shrinks the split or uses a slower
- * one-block-per-group path.
  */
-HIP_KERNEL_API size_t hip_group_norm_workspace_bytes(
-    int64_t n,
-    int64_t c,
-    int64_t spatial,
-    int64_t groups,
-    int channels_last,
-    int hip_dtype);
-
 HIP_KERNEL_API int hip_group_norm(
     void* stream,
     const void* input,
@@ -2392,8 +2356,6 @@ HIP_KERNEL_API int hip_group_norm(
     int channels_last,
     int activation,
     float epsilon,
-    void* workspace,
-    size_t workspace_bytes,
     int hip_dtype);
 
 /* =========================================================================
