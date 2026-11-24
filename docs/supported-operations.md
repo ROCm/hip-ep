@@ -73,7 +73,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | ReduceMean | Custom HIP kernel |
 | CumSum | Custom HIP kernel |
 | Pad | Custom HIP kernel. The opset<11 form, with `pads` and the fill `value` as attributes, is rewritten to the operand form first |
-| Tile | Custom HIP kernel |
+| Tile | Static shapes with constant repeats become a broadcast: a unit dim is inserted before each repeated extent above one, `hip.expand` broadcasts the repeats, and a `tensor.collapse_shape` merges each repeat with its extent. The rocMLIR fusion folds these views into a neighbouring kernel; otherwise the expand kernel runs. A zero repeat, a dynamic shape, or a broadcast rank above 8 uses the custom HIP Tile kernel |
 | Expand | Custom HIP kernel |
 | GatherND | Custom HIP kernel |
 | ScatterND | Custom HIP kernel (reductions: none / add / mul / min / max) |

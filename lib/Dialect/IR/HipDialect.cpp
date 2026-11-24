@@ -307,12 +307,18 @@ LogicalResult ConstantOp::verify() {
   int64_t size = getSizeAttr().getInt();
   if (size <= 0)
     return emitOpError("external source `size` must be positive");
-  // A 4-bit initializer with no MLIR element type is carried as an 8-bit result
-  // of the logical element count while its buffer holds only ceil(n/2) packed
-  // bytes (two values per byte); accept that half-size external source.
-  int64_t packedBytes = (numElements + 1) / 2;
-  bool isPacked4Bit = elementBits == 8 && size == packedBytes;
-  if (size != expectedBytes && !isPacked4Bit)
+  // A sub-byte initializer has no MLIR element type of its own, so it is
+  // carried as an 8-bit result of the logical element count while its buffer
+  // holds only the packed bytes: ceil(n / 2) for a 4-bit payload, ceil(n / 4)
+  // for a 2-bit one. The width is not recorded here - it travels on the
+  // consuming op, which is where reading the buffer needs it - so each
+  // admissible packing is accepted rather than one being singled out.
+  bool isPackedSubByte = false;
+  if (elementBits == 8)
+    for (int64_t valuesPerByte : {2, 4})
+      isPackedSubByte |=
+          size == (numElements + valuesPerByte - 1) / valuesPerByte;
+  if (size != expectedBytes && !isPackedSubByte)
     return emitOpError("external source byte size ")
            << size << " does not match result byte size " << expectedBytes;
 
@@ -2788,6 +2794,56 @@ LogicalResult SwigluOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// ScaledMaskedSoftmaxOp: ins(input, row_ids, col_ids), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ScaledMaskedSoftmaxOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ScaledMaskedSoftmaxOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult ScaledMaskedSoftmaxOp::verify() {
+  if (failed(verifyDpsComputeOp(
+          *this, {getInput(), getRowIds(), getColIds(), getOutput()},
+          /*numInits=*/1)))
+    return failure();
+  auto inputType = dyn_cast<ShapedType>(getInput().getType());
+  auto outputType = dyn_cast<ShapedType>(getOutput().getType());
+  if (!inputType || !outputType || !inputType.hasRank() ||
+      inputType.getRank() < 2)
+    return emitOpError("input must be ranked with rank >= 2");
+  Type elemType = inputType.getElementType();
+  if (!elemType.isF16() && !elemType.isF32())
+    return emitOpError("input must be f16 or f32");
+  if (!outputType.hasRank() || outputType.getElementType() != elemType ||
+      failed(
+          verifyCompatibleShape(inputType.getShape(), outputType.getShape())))
+    return emitOpError("output must match the input shape and element type");
+  int64_t rank = inputType.getRank();
+  for (auto [ids, axis] :
+       {std::pair(getRowIds(), rank - 2), std::pair(getColIds(), rank - 1)}) {
+    auto idsType = dyn_cast<ShapedType>(ids.getType());
+    if (!idsType || !idsType.hasRank() || idsType.getRank() != 1 ||
+        !idsType.getElementType().isInteger(64))
+      return emitOpError("row_ids and col_ids must be rank-1 i64");
+    // Where's broadcast rule: an id vector spans its scores axis or is 1 long.
+    int64_t len = idsType.getDimSize(0);
+    int64_t extent = inputType.getDimSize(axis);
+    if (!ShapedType::isDynamic(len) && !ShapedType::isDynamic(extent) &&
+        len != 1 && len != extent)
+      return emitOpError("id vector of length ")
+             << len << " neither broadcasts nor matches scores axis " << axis
+             << " of size " << extent;
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // PoolOp: ins(input), outs([output] or [output, indices])
 //===----------------------------------------------------------------------===//
 
@@ -4686,9 +4742,34 @@ void SizeOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+// A packed payload is defined against byte storage: 8 / packed_bits values per
+// byte of an i8 / ui8 buffer. Any other storage width would leave the byte
+// count, and with it every reader's view of the buffer, undefined, so the
+// quantized operand and its zero point must both be 8-bit integers.
+static LogicalResult verifyPackedQdqStorage(Operation *op, int64_t packedBits,
+                                            Value quantized, Value zeroPoint) {
+  if (packedBits == 0)
+    return success();
+  for (Value value : {quantized, zeroPoint}) {
+    if (!value)
+      continue;
+    Type elemType = getElementTypeOrSelf(value.getType());
+    if (!elemType.isInteger(8))
+      return op->emitOpError("packed_bits = ")
+             << packedBits << " expects 8-bit integer storage, got "
+             << elemType;
+  }
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // QuantizeLinearOp: ins(x, scale, zero_point), outs(y)
 //===----------------------------------------------------------------------===//
+
+LogicalResult QuantizeLinearOp::verify() {
+  return verifyPackedQdqStorage(*this, getPackedBits(), getOutput(),
+                                getZeroPoint());
+}
 
 MutableOperandRange QuantizeLinearOp::getDpsInitsMutable() {
   return getOutputMutable();
@@ -4703,6 +4784,11 @@ void QuantizeLinearOp::getEffects(
 //===----------------------------------------------------------------------===//
 // DequantizeLinearOp: ins(x, scale, zero_point), outs(y)
 //===----------------------------------------------------------------------===//
+
+LogicalResult DequantizeLinearOp::verify() {
+  return verifyPackedQdqStorage(*this, getPackedBits(), getInput(),
+                                getZeroPoint());
+}
 
 MutableOperandRange DequantizeLinearOp::getDpsInitsMutable() {
   return getOutputMutable();

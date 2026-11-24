@@ -3084,6 +3084,53 @@ def Hip_SwigluOp : Hip_DpsOp_AutoReify<"swiglu"> {
   }];
 }
 
+def Hip_ScaledMaskedSoftmaxOp : Hip_DpsOp_AutoReify<"scaled_masked_softmax"> {
+  let summary = "Softmax over the last axis of scaled, id-masked scores";
+  let description = [{
+    With the scores viewed as [outer, R, C] (R and C the last two axes):
+
+      output[o, r, c] = softmax_c(row_ids[r] == col_ids[c]
+                                      ? round(input[o, r, c] * scale)
+                                      : fill)
+
+    where round() is to the element type, as a separate multiply would store
+    it. An id vector of length 1 broadcasts across its axis; any other length
+    must equal the axis it indexes, which the runtime checks.
+
+    Produced by hip-fusion-transform from mul(scores, scale) ->
+    where(equal(row_ids[R,1], col_ids[1,C]), ., fill) -> miopen.softmax, the
+    per-frame attention mask of Qwen-VL style vision encoders. It never
+    materializes the mask or either intermediate score tensor.
+
+    Example:
+    ```mlir
+    hip.scaled_masked_softmax(%ctx) ins(%scores, %ids, %ids :
+        memref<16x?x?xf16>, memref<?xi64>, memref<?xi64>)
+        outs(%out : memref<16x?x?xf16>) {fill = -6.5504e+04 : f32,
+        scale = 0.1178 : f32}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$row_ids,
+    Hip_TensorOrMemRef:$col_ids,
+    Hip_TensorOrMemRef:$output,
+    F32Attr:$scale,
+    F32Attr:$fill
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $row_ids `,` $col_ids `:` type($input)
+    `,` type($row_ids) `,` type($col_ids) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+}
+
 def Hip_ReciprocalOp : Hip_DpsOp_AutoReifyInfer<"reciprocal", "Y"> {
   let summary = "Element-wise reciprocal: y = 1/x";
   let description = [{
@@ -6159,6 +6206,12 @@ def Hip_ReadbackScalarOp : Hip_Op<"readback_scalar",
   }];
 }
 
+// Sub-byte width of a quantized payload: 0 for unpacked storage at the element
+// type's own width, 4 for INT4 / UINT4, 2 for a 2-bit payload. These are the
+// only packings anything produces or reads, so any other value is rejected.
+def Hip_PackedBitsAttr
+    : DefaultValuedAttr<ConfinedAttr<I64Attr, [IntIsOneOf<[0, 2, 4]>]>, "0">;
+
 def Hip_QuantizeLinearOp : Hip_DpsOp_AutoReifyInfer<"quantize_linear"> {
   let summary = "ONNX QuantizeLinear";
   let description = [{
@@ -6168,15 +6221,23 @@ def Hip_QuantizeLinearOp : Hip_DpsOp_AutoReifyInfer<"quantize_linear"> {
     the quantization granularity. The quantization formula is
     y = saturate((x / y_scale) + y_zero_point).
 
-    `packed_int4` marks an ONNX INT4 / UINT4 target. `$output` and
-    `$zero_point` keep their i8 / ui8 element type and logical shape, but only
-    the first ceil(numel/2) bytes of `$output` are written: two values per
-    byte, low nibble first, over the flattened row-major sequence. The buffer
-    is still allocated at the logical element count, so its upper half is left
-    untouched, and only a `packed_int4` consumer reads the result correctly.
-    Nothing sets this today -- unlike a packed constant, a 4-bit target leaves
-    no trace in the IR to detect -- and whatever does must first establish that
-    every consumer can be marked as well.
+    `packed_bits` names a sub-byte target: 4 for ONNX INT4 / UINT4, 2 for a
+    2-bit one, and 0 - the default - for an unpacked target stored at its
+    element type's own width, one value per element. For a nonzero
+    `packed_bits` = b, `$output` and `$zero_point` keep an 8-bit integer
+    element type (verified) and their logical shape, but only the first ceil(numel * b / 8) bytes of
+    `$output` are written: 8 / b values per byte, least significant field
+    first, over the flattened row-major sequence. The buffer is still
+    allocated at the logical element count, so its tail is left untouched, and
+    only a consumer reading the same width recovers the values.
+
+    The width has to be stated rather than derived: every sub-byte payload
+    carries an i8 / ui8 element type at its logical extent, so a 2-bit and a
+    4-bit tensor of the same length are indistinguishable by type, differing
+    only in a byte count the type does not record.
+
+    Producers therefore state the width explicitly, and consumers preserve it
+    until an operation that understands the packed representation reads it.
   }];
 
   let arguments = (ins
@@ -6189,8 +6250,10 @@ def Hip_QuantizeLinearOp : Hip_DpsOp_AutoReifyInfer<"quantize_linear"> {
     I64Attr:$block_size,
     I64Attr:$precision,
     I64Attr:$saturate,
-    UnitAttr:$packed_int4
+    Hip_PackedBitsAttr:$packed_bits
   );
+
+  let hasVerifier = 1;
 
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $input `,` $scale `:`
@@ -6213,14 +6276,26 @@ def Hip_DequantizeLinearOp : Hip_DpsOp_AutoReifyInfer<"dequantize_linear"> {
     or have a rank identical to the input for blocked quantization.
     See QuantizeLinear for details on quantization granularity.
 
-    `packed_int4` marks an ONNX INT4 / UINT4 source. Those import as i8 / ui8
-    at the LOGICAL element count while `$input` and `$zero_point` only hold
-    ceil(numel/2) bytes, two values per byte, low nibble first, over the
-    flattened row-major sequence. The element type keeps the signedness but
-    cannot express the width, so without this flag a consumer reads twice the
-    buffer. `$output` and every shape stay logical, so nothing else changes.
-    Set by convert-onnx-to-hip from the marker that constant lowering stamps
-    on the ONNX op once it sees the halved backing size.
+    `packed_bits` names a sub-byte source: 4 for ONNX INT4 / UINT4, 2 for a
+    2-bit one, and 0 - the default - for an unpacked source stored at its
+    element type's own width, one value per element. Sources with a nonzero
+    `packed_bits` = b import as i8 / ui8 (verified: 8-bit integer storage is
+    required) at the LOGICAL element count while
+    `$input` and `$zero_point` only hold ceil(numel * b / 8) bytes, 8 / b
+    values per byte, least significant field first, over the flattened
+    row-major sequence.
+
+    The element type keeps the signedness but cannot express the width, and
+    neither can the extent, which stays logical: a 2-bit and a 4-bit tensor of
+    the same length have the same type and differ only in a byte count no
+    operand records. Stating the width is therefore the only way a consumer
+    can read the buffer at all, and the only way one that folds this op into a
+    wider one - `hip.matmul_nbits`, whose own `bits` attribute this feeds -
+    can know what it is folding.
+
+    `$output` and every shape stay logical, so nothing else changes. Set by
+    convert-onnx-to-hip from the marker that constant lowering stamps on the
+    ONNX op once it sees the reduced backing size.
   }];
 
   let arguments = (ins
@@ -6231,8 +6306,10 @@ def Hip_DequantizeLinearOp : Hip_DpsOp_AutoReifyInfer<"dequantize_linear"> {
     Hip_TensorOrMemRef:$output,
     I64Attr:$axis,
     I64Attr:$block_size,
-    UnitAttr:$packed_int4
+    Hip_PackedBitsAttr:$packed_bits
   );
+
+  let hasVerifier = 1;
 
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $input `,` $scale `:`
