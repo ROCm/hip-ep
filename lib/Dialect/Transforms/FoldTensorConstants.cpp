@@ -126,6 +126,10 @@ public:
 
     if (isa<NotOp, AndOp, OrOp>(op))
       return evaluateBoolElementwise(op, type, depth);
+    if (auto less = dyn_cast<LessOp>(op))
+      return evaluateLess(less, type, depth);
+    if (auto range = dyn_cast<RangeOp>(op))
+      return evaluateRange(range, type, depth);
     return nullptr;
   }
 
@@ -206,6 +210,105 @@ private:
         [](const APInt &lhs, const APInt &rhs) { return lhs | rhs; });
   }
 
+  /// Signed i64 comparison producing i1. Supported shapes: both operands of
+  /// exactly the result shape, or one true rank-0 scalar with the other of
+  /// exactly the result shape. A splat of a shaped tensor is not a scalar:
+  /// it still contributes its dims to broadcasting, so shaped mismatches
+  /// bail rather than guess.
+  DenseElementsAttr evaluateLess(LessOp op, RankedTensorType type, int depth) {
+    if (!type.getElementType().isInteger(1))
+      return nullptr;
+    auto lhsType = dyn_cast<RankedTensorType>(op.getLhs().getType());
+    auto rhsType = dyn_cast<RankedTensorType>(op.getRhs().getType());
+    if (!lhsType || !rhsType || !lhsType.getElementType().isInteger(64) ||
+        !rhsType.getElementType().isInteger(64))
+      return nullptr;
+    auto matchesResult = [&](RankedTensorType t) {
+      return t.hasStaticShape() && t.getShape() == type.getShape();
+    };
+    bool lhsScalar = lhsType.getRank() == 0 && matchesResult(rhsType);
+    bool rhsScalar = rhsType.getRank() == 0 && matchesResult(lhsType);
+    bool sameShape = matchesResult(lhsType) && matchesResult(rhsType);
+    if (!lhsScalar && !rhsScalar && !sameShape)
+      return nullptr;
+    DenseElementsAttr lhs = resolveImpl(op.getLhs(), depth + 1);
+    DenseElementsAttr rhs = resolveImpl(op.getRhs(), depth + 1);
+    if (!lhs || !rhs)
+      return nullptr;
+
+    auto slt = [](const APInt &a, const APInt &b) {
+      return APInt(1, a.slt(b) ? 1 : 0);
+    };
+    if (lhs.isSplat() && rhs.isSplat())
+      return DenseElementsAttr::get(
+          type, slt(lhs.getSplatValue<APInt>(), rhs.getSplatValue<APInt>()));
+    SmallVector<APInt> folded;
+    folded.reserve(type.getNumElements());
+    if (sameShape && !lhsScalar && !rhsScalar && !lhs.isSplat() &&
+        !rhs.isSplat()) {
+      for (auto [a, b] :
+           llvm::zip_equal(lhs.getValues<APInt>(), rhs.getValues<APInt>()))
+        folded.push_back(slt(a, b));
+    } else if (rhsScalar || rhs.isSplat()) {
+      const APInt b = rhs.getSplatValue<APInt>();
+      for (const APInt &a : lhs.getValues<APInt>())
+        folded.push_back(slt(a, b));
+    } else {
+      const APInt a = lhs.getSplatValue<APInt>();
+      for (const APInt &b : rhs.getValues<APInt>())
+        folded.push_back(slt(a, b));
+    }
+    return DenseElementsAttr::get(type, folded);
+  }
+
+  /// ONNX Range over rank-0 i64 scalars: output[i] = start + i * delta,
+  /// count = max(ceil((limit - start) / delta), 0). All arithmetic runs in
+  /// 128-bit APInt so span, count and values cannot wrap; the computed count
+  /// must equal the static result dim and every value must fit signed i64.
+  DenseElementsAttr evaluateRange(RangeOp op, RankedTensorType type,
+                                  int depth) {
+    if (!type.getElementType().isInteger(64) || type.getRank() != 1)
+      return nullptr;
+    auto scalar = [&](Value v) -> std::optional<APInt> {
+      auto t = dyn_cast<RankedTensorType>(v.getType());
+      if (!t || t.getRank() != 0 || !t.getElementType().isInteger(64))
+        return std::nullopt;
+      DenseElementsAttr payload = resolveImpl(v, depth + 1);
+      if (!payload)
+        return std::nullopt;
+      return payload.getSplatValue<APInt>().sext(128);
+    };
+    std::optional<APInt> start = scalar(op.getStart());
+    std::optional<APInt> limit = scalar(op.getLimit());
+    std::optional<APInt> delta = scalar(op.getDelta());
+    if (!start || !limit || !delta || delta->isZero())
+      return nullptr;
+
+    APInt count(128, 0);
+    if ((delta->isNegative() && limit->slt(*start)) ||
+        (!delta->isNegative() && start->slt(*limit))) {
+      APInt span = delta->isNegative() ? *start - *limit : *limit - *start;
+      APInt step = delta->isNegative() ? -*delta : *delta;
+      APInt remainder;
+      APInt::sdivrem(span, step, count, remainder);
+      if (!remainder.isZero())
+        count = count + 1;
+    }
+    if (count != APInt(128, type.getDimSize(0)))
+      return nullptr;
+
+    SmallVector<APInt> values;
+    values.reserve(type.getDimSize(0));
+    APInt current = *start;
+    for (int64_t i = 0; i < type.getDimSize(0); ++i) {
+      if (!current.isSignedIntN(64))
+        return nullptr;
+      values.push_back(current.trunc(64));
+      current = current + *delta;
+    }
+    return DenseElementsAttr::get(type, values);
+  }
+
   static constexpr int kMaxDepth = 128;
   int64_t maxElements;
   int64_t evalBudget;
@@ -214,7 +317,9 @@ private:
 };
 
 /// Kinds the sweep may replace with a carrier. Grows with the evaluators.
-bool isReplaceableKind(Operation *op) { return isa<NotOp, AndOp, OrOp>(op); }
+bool isReplaceableKind(Operation *op) {
+  return isa<NotOp, AndOp, OrOp, LessOp, RangeOp>(op);
+}
 
 struct FoldTensorConstantsPass final
     : public impl::FoldTensorConstantsPassBase<FoldTensorConstantsPass> {

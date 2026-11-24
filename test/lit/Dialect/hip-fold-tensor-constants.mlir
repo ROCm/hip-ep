@@ -177,6 +177,80 @@ func.func @fold_through_expand_shape(%ctx: !hip.context, %x: tensor<1x4xf32>,
   return %result : tensor<1x4xf32>
 }
 
+// An i64 iota chain folds: range(0,4,1) then less(iota, 2) with a rank-0
+// scalar rhs. The range folds first (its only use is a DPS input), then the
+// less reads the folded carrier.
+// CHECK-LABEL: func.func @fold_range_less
+// CHECK-NOT: hip.range
+// CHECK-NOT: hip.less
+// CHECK: %[[COND:.*]] = hip.constant {value = dense<[true, true, false, false]> : tensor<4xi1>} : tensor<4xi1>
+// CHECK: hip.where({{.*}}) ins(%[[COND]],
+func.func @fold_range_less(%ctx: !hip.context, %x: tensor<4xf32>,
+                           %y: tensor<4xf32>) -> tensor<4xf32> {
+  %start = hip.constant {value = dense<0> : tensor<i64>} : tensor<i64>
+  %limit = hip.constant {value = dense<4> : tensor<i64>} : tensor<i64>
+  %delta = hip.constant {value = dense<1> : tensor<i64>} : tensor<i64>
+  %iota_init = tensor.empty() : tensor<4xi64>
+  %iota = hip.range(%ctx) ins(%start, %limit, %delta : tensor<i64>, tensor<i64>, tensor<i64>)
+      outs(%iota_init : tensor<4xi64>) : tensor<4xi64>
+  %two = hip.constant {value = dense<2> : tensor<i64>} : tensor<i64>
+  %less_init = tensor.empty() : tensor<4xi1>
+  %condition = hip.less(%ctx) ins(%iota, %two : tensor<4xi64>, tensor<i64>)
+      outs(%less_init : tensor<4xi1>) : tensor<4xi1>
+  %where_init = tensor.empty() : tensor<4xf32>
+  %result = hip.where(%ctx) ins(%condition, %x, %y :
+      tensor<4xi1>, tensor<4xf32>, tensor<4xf32>)
+      outs(%where_init : tensor<4xf32>) : tensor<4xf32>
+  return %result : tensor<4xf32>
+}
+
+// Negative delta: range(5,0,-2) = [5,3,1]; less(iota, 4) = [F,T,T].
+// CHECK-LABEL: func.func @fold_range_negative_delta
+// CHECK-NOT: hip.range
+// CHECK: hip.constant {value = dense<[false, true, true]> : tensor<3xi1>} : tensor<3xi1>
+func.func @fold_range_negative_delta(%ctx: !hip.context, %x: tensor<3xf32>,
+                                     %y: tensor<3xf32>) -> tensor<3xf32> {
+  %start = hip.constant {value = dense<5> : tensor<i64>} : tensor<i64>
+  %limit = hip.constant {value = dense<0> : tensor<i64>} : tensor<i64>
+  %delta = hip.constant {value = dense<-2> : tensor<i64>} : tensor<i64>
+  %iota_init = tensor.empty() : tensor<3xi64>
+  %iota = hip.range(%ctx) ins(%start, %limit, %delta : tensor<i64>, tensor<i64>, tensor<i64>)
+      outs(%iota_init : tensor<3xi64>) : tensor<3xi64>
+  %four = hip.constant {value = dense<4> : tensor<i64>} : tensor<i64>
+  %less_init = tensor.empty() : tensor<3xi1>
+  %condition = hip.less(%ctx) ins(%iota, %four : tensor<3xi64>, tensor<i64>)
+      outs(%less_init : tensor<3xi1>) : tensor<3xi1>
+  %where_init = tensor.empty() : tensor<3xf32>
+  %result = hip.where(%ctx) ins(%condition, %x, %y :
+      tensor<3xi1>, tensor<3xf32>, tensor<3xf32>)
+      outs(%where_init : tensor<3xf32>) : tensor<3xf32>
+  return %result : tensor<3xf32>
+}
+
+// delta = 0 is undefined Range input: the evaluator bails and the whole
+// chain stays.
+// CHECK-LABEL: func.func @keep_range_zero_delta
+// CHECK: hip.range
+// CHECK: hip.less
+func.func @keep_range_zero_delta(%ctx: !hip.context, %x: tensor<4xf32>,
+                                 %y: tensor<4xf32>) -> tensor<4xf32> {
+  %start = hip.constant {value = dense<0> : tensor<i64>} : tensor<i64>
+  %limit = hip.constant {value = dense<4> : tensor<i64>} : tensor<i64>
+  %delta = hip.constant {value = dense<0> : tensor<i64>} : tensor<i64>
+  %iota_init = tensor.empty() : tensor<4xi64>
+  %iota = hip.range(%ctx) ins(%start, %limit, %delta : tensor<i64>, tensor<i64>, tensor<i64>)
+      outs(%iota_init : tensor<4xi64>) : tensor<4xi64>
+  %two = hip.constant {value = dense<2> : tensor<i64>} : tensor<i64>
+  %less_init = tensor.empty() : tensor<4xi1>
+  %condition = hip.less(%ctx) ins(%iota, %two : tensor<4xi64>, tensor<i64>)
+      outs(%less_init : tensor<4xi1>) : tensor<4xi1>
+  %where_init = tensor.empty() : tensor<4xf32>
+  %result = hip.where(%ctx) ins(%condition, %x, %y :
+      tensor<4xi1>, tensor<4xf32>, tensor<4xf32>)
+      outs(%where_init : tensor<4xf32>) : tensor<4xf32>
+  return %result : tensor<4xf32>
+}
+
 // A broadcast form is refused: the exact-type gate requires every input to
 // match the result type, and dense<true> over tensor<1xi1> does not.
 // CHECK-LABEL: func.func @keep_broadcast_and
