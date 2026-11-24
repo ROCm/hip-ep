@@ -174,7 +174,7 @@ func.func @not_a_kernel(%x: tensor<4x6xf32>) -> tensor<2x6xf32> {
 }
 
 //===----------------------------------------------------------------------===//
-// The shape hip-fuse-rocmlir actually produces. Unit tests that hand-write a
+// The shape the rocMLIR fusion actually produces. Unit tests that hand-write a
 // kernel taking its DPS buffers as block arguments miss what an outlined
 // kernel really holds: a ub.poison standing in for the !hip.context, a
 // tensor.empty per outs buffer, and the fusion anchor the kernel was built

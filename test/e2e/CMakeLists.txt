@@ -16,7 +16,7 @@ message(STATUS "Configuring E2E integration tests")
 # bitcode path instead.
 if(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS)
   set(_e2e_mode NATIVE)
-  set(_e2e_ext ".dll")
+  set(_e2e_ext "${CMAKE_SHARED_LIBRARY_SUFFIX}")
 else()
   set(_e2e_mode LLVM_IR)
   set(_e2e_ext ".bc")
@@ -35,8 +35,8 @@ foreach(test_file ${MLIR_E2E_TESTS})
     set(test_dir "${CMAKE_CURRENT_BINARY_DIR}/${test_name}")
     file(MAKE_DIRECTORY "${test_dir}")
 
-    # Output artifact path (inside per-test dir). .dll when native artifacts
-    # are enabled, .bc otherwise.
+    # Output artifact path (inside per-test dir): the platform's shared library
+    # (.dll / .so) when native artifacts are enabled, .bc otherwise.
     set(artifact_output "${test_dir}/${test_name}${_e2e_ext}")
 
     # Test 1: Compile .mlir → artifact.
@@ -122,7 +122,7 @@ endforeach()
 # regressed back to UseInitArray=false (bug 1 above).
 if(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS AND NOT WIN32)
     set(_init_fini_check_dll
-        "${CMAKE_CURRENT_BINARY_DIR}/test_add_model/test_add_model.dll")
+        "${CMAKE_CURRENT_BINARY_DIR}/test_add_model/test_add_model${CMAKE_SHARED_LIBRARY_SUFFIX}")
     add_test(NAME E2E_DLL_HasInitFiniArrays
         COMMAND ${CMAKE_COMMAND} -E env bash -c
             "readelf -d '${_init_fini_check_dll}' | grep -q '(INIT_ARRAY)' && \

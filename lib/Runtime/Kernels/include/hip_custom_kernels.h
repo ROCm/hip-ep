@@ -47,6 +47,34 @@
 extern "C" {
 #endif
 
+// tq4_mse_qr_v1: B1/Hq24/G4/D256, BSHD FP16 inputs, packed BNSD cache.
+// Each row is 33 u32 words: FP32 norm then 32 words of centroid indices.
+HIP_KERNEL_API size_t hip_tq4_decode_workspace(int valid_length);
+HIP_KERNEL_API int hip_tq4_encode_append(
+    void *stream, const void *key, const void *value, void *present_key,
+    void *present_value, int count, int past, int capacity, const float *rotation,
+    const float *key_centroids, const float *value_centroids);
+HIP_KERNEL_API int hip_tq4_decode(
+    void *stream, const void *query, const void *key, const void *value,
+    void *output, int valid_length, int capacity, float scale,
+    const float *rotation, const float *key_centroids,
+    const float *value_centroids, void *workspace, size_t workspace_bytes);
+
+// Append prefill: packed past plus causal FP16 BSHD new K/V; no cache writes.
+HIP_KERNEL_API size_t hip_tq4_prefill_workspace(int count);
+HIP_KERNEL_API int hip_tq4_prefill(
+    void *stream, const void *query, const void *key, const void *value,
+    const void *past_key, const void *past_value, void *output, int count,
+    int past, int capacity, const float *rotation, const float *key_centroids,
+    const float *value_centroids, void *workspace, size_t workspace_bytes);
+// Internal Ring statistics helper for a bounded query chunk.
+HIP_KERNEL_API int hip_gqa_ring_tq4_prefill(
+    void *stream, const void *rotated_query, const void *query,
+    const void *past_key, const void *past_value, const void *key,
+    const void *value, float *prefix, float *suffix, float *prefix_lse,
+    float *suffix_lse, int count, int start, int past, int capacity,
+    const float *key_centroids, const float *value_centroids);
+
 /* Experimental attention-only Ring entries. Q/output: [1,Q,24,256];
  * K/V: [1,4,capacity,256] FP16, already appended by the runtime. */
 // Validated attention-core bounds; full-model capacity depends on available memory.
@@ -433,7 +461,9 @@ HIP_KERNEL_API int hip_qlinear_matmul(
  * (lib/Runtime/Kernels/hip/elementwise_unary_kernel.hip).
  *
  * Supported hip_dtype (per op, may differ):
- *   Neg/Sign  : FLOAT16, INT32, INT64 (+ FLOAT32 for free)
+ *   Neg       : FLOAT16, BFLOAT16, INT32, INT64 (+ FLOAT32 for free);
+ *               bf16 flips the sign bit (exact, NaN payload kept)
+ *   Sign      : FLOAT16, INT32, INT64 (+ FLOAT32 for free)
  *   Cos/Sin   : FLOAT16, FLOAT32
  *   Not       : bool (i.e. 1-byte; pass element_size_bytes is unused -- the
  *               kernel reads/writes 1 byte unconditionally and ignores
@@ -548,8 +578,8 @@ HIP_KERNEL_API int hip_isnan(
  *
  * Mul / Add / Min / Max are reached from wrap_elementwise: the
  * int16/int32/int64 path lands in this file's flat kernels (after
- * hip_expand materialises any broadcast), while the float16/float32 path
- * uses the native broadcasting kernel below instead.
+ * hip_expand materialises any broadcast), while the float16/bfloat16/float32
+ * path uses the native broadcasting kernel below instead.
  *
  * Div / Mod / Equal / Less were added for the Qwen3.5 vision path. Equal and
  * Less write bool (1 byte); their hip_dtype refers to the input element type.
@@ -621,7 +651,9 @@ HIP_KERNEL_API int hip_elementwise_mod(
  *
  *   op: 0 = add, 1 = mul, 2 = min, 3 = max
  *
- * Supported hip_dtype: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16.
+ * Supported hip_dtype: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
+ * HIP_DTYPE_BFLOAT16. f16/bf16 are computed in float and rounded to nearest
+ * even on store.
  * Returns: 0 on success, -1 on unsupported dtype / launch error, -2 when the
  * output volume exceeds the 32-bit index range (caller should fall back).
  */
@@ -880,6 +912,15 @@ HIP_KERNEL_API int hip_swiglu(void *stream, const void *gate, const void *up,
 HIP_KERNEL_API int hip_swiglu_promoted(void *stream, const void *gate,
                                       const void *up, void *output,
                                       int64_t num_elements, int hip_dtype);
+
+// Clamped SwiGLU, computed in FP32 and rounded once:
+//   g = min(gate, limit), u = clamp(up, -limit, limit),
+//   output = g / (1 + exp(-alpha * g)) * (u + beta).
+// limit may be +inf. HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16, HIP_DTYPE_BFLOAT16.
+HIP_KERNEL_API int hip_swiglu_clamped(void *stream, const void *gate,
+                                      const void *up, void *output,
+                                      int64_t num_elements, int hip_dtype,
+                                      float alpha, float beta, float limit);
 
 /* =========================================================================
  * Softplus activation
@@ -1360,6 +1401,8 @@ HIP_KERNEL_API int hip_mha_flash_prefill(
  * process-wide map (matmul_nbits-style), and reuses it on later calls.
  * Env overrides skip autotune: HIPDNN_GQA_DECODE_SCALAR / _WMMA (impl),
  * HIPDNN_GQA_DECODE_SPLITS=N (count), HIPDNN_GQA_DECODE_NOAUTOTUNE=1 (fixed).
+ * Each override is read once, on first use in the process, and then stays
+ * fixed; changing it mid-process has no effect.
  *
  * seqlens_k: optional device pointer [B] int32. When non-null, total_seq
  * = seqlens_k[b]+1 is read on-device (no host sync).
@@ -1803,7 +1846,10 @@ HIP_KERNEL_API int hip_pool(
  * HIP_DTYPE_UINT8 for every mode. Integer linear interpolates the stored
  * codes in float and truncates toward zero on the store. Nearest copies
  * one sample.
- * Returns: 0 on success, non-zero on failure.
+ * Linear rounds each product and sum to f32 (no FMA contraction).
+ * Returns: 0 on success, non-zero on failure, including a window extent
+ * above 2^24 (a float coordinate cannot address every index beyond it) or
+ * an output row count (N * C * all output axes but the last) above INT32_MAX.
  */
 HIP_KERNEL_API int hip_resize(
     void* stream,
@@ -2000,6 +2046,10 @@ HIP_KERNEL_API int hip_reduce_prod(
  *
  * Both kernels are bounded to kTileMaxRank = 8 input/output dimensions
  * (matches ORT's TArray<int64, 8> default).
+ *
+ * hip_expand dtypes: FLOAT16, BFLOAT16, FLOAT32, INT8, UINT8, INT16, UINT16,
+ * INT32, INT64. Pure copy, so UINT8 and UINT16 reuse the INT8 and INT16
+ * instantiations.
  */
 HIP_KERNEL_API int hip_tile(
     void* stream,

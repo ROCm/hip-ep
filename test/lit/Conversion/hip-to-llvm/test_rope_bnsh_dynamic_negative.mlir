@@ -28,9 +28,10 @@ module {
       %sin_cache: memref<131072x64xf16, 1>,
       %output: memref<?x?x?x128xf16, 1>) {
     hip.rope(%ctx)
-        ins(%input, %position_ids, %cos_cache, %sin_cache :
-            memref<?x?x?x128xf16, 1>, memref<?x?xi64, 1>,
+        ins(%input, %cos_cache, %sin_cache :
+            memref<?x?x?x128xf16, 1>,
             memref<131072x64xf16, 1>, memref<131072x64xf16, 1>)
+        position_ids(%position_ids : memref<?x?xi64, 1>)
         outs(%output : memref<?x?x?x128xf16, 1>)
         {interleaved = 0 : i64, num_heads = 0 : i64,
          rotary_embedding_dim = 128 : i64}
