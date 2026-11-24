@@ -2059,9 +2059,10 @@ def Hip_RopeOp : Hip_DpsOp_WithInfer<"rope"> {
     Example:
     ```mlir
     hip.rope(%ctx)
-        ins(%input, %position_ids, %cos_cache, %sin_cache :
-            memref<1x128x4096xf16, 1>, memref<1x128xi64, 1>,
+        ins(%input, %cos_cache, %sin_cache :
+            memref<1x128x4096xf16, 1>,
             memref<131072x64xf16, 1>, memref<131072x64xf16, 1>)
+        position_ids(%position_ids : memref<1x128xi64, 1>)
         outs(%output : memref<1x128x4096xf16, 1>)
         {interleaved = 0 : i64, num_heads = 32 : i64, rotary_embedding_dim = 128 : i64}
     ```
@@ -2080,17 +2081,16 @@ def Hip_RopeOp : Hip_DpsOp_WithInfer<"rope"> {
   );
 
   // position_ids is the only optional operand; MLIR resolves its presence from
-  // the operand count (no AttrSizedOperandSegments needed). Each optional group
-  // must LEAD with the `,` literal: a group's first parsable element has to be a
-  // literal / variable / custom directive, so a bare `type(...)` directive
-  // cannot open the type-list group. Anchoring on $position_ids omits it from
-  // both the value and type lists when absent; the present-form IR prints
-  // identically to before.
+  // the operand count (no AttrSizedOperandSegments needed). It has a keyword
+  // clause of its own: as a `,`-led group between $input and $cos_cache, an
+  // op without it printed three operands that the parser, committing to the
+  // group at the first `,`, read as input, position_ids and cos_cache.
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(`
-        $input (`,` $position_ids^)? `,` $cos_cache `,` $sin_cache `:`
-        type($input) (`,` type($position_ids)^)? `,` type($cos_cache) `,` type($sin_cache)
+        $input `,` $cos_cache `,` $sin_cache `:`
+        type($input) `,` type($cos_cache) `,` type($sin_cache)
     `)`
+    (`position_ids` `(` $position_ids^ `:` type($position_ids) `)`)?
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
@@ -2398,6 +2398,7 @@ def Hip_TransposeOp : Hip_DpsOp_WithInfer<"transpose", "Output",
     attr-dict (`:` type($result_tensors)^)?
   }];
   let hasVerifier = 1;
+  let hasCanonicalizer = 1;
 }
 
 def Hip_GatherOp : Hip_DpsOp_WithInfer<"gather"> {
@@ -3145,6 +3146,53 @@ def Hip_SwigluOp : Hip_DpsOp_AutoReify<"swiglu"> {
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+}
+
+def Hip_ScaledMaskedSoftmaxOp : Hip_DpsOp_AutoReify<"scaled_masked_softmax"> {
+  let summary = "Softmax over the last axis of scaled, id-masked scores";
+  let description = [{
+    With the scores viewed as [outer, R, C] (R and C the last two axes):
+
+      output[o, r, c] = softmax_c(row_ids[r] == col_ids[c]
+                                      ? round(input[o, r, c] * scale)
+                                      : fill)
+
+    where round() is to the element type, as a separate multiply would store
+    it. An id vector of length 1 broadcasts across its axis; any other length
+    must equal the axis it indexes, which the runtime checks.
+
+    Produced by hip-fusion-transform from mul(scores, scale) ->
+    where(equal(row_ids[R,1], col_ids[1,C]), ., fill) -> miopen.softmax, the
+    per-frame attention mask of Qwen-VL style vision encoders. It never
+    materializes the mask or either intermediate score tensor.
+
+    Example:
+    ```mlir
+    hip.scaled_masked_softmax(%ctx) ins(%scores, %ids, %ids :
+        memref<16x?x?xf16>, memref<?xi64>, memref<?xi64>)
+        outs(%out : memref<16x?x?xf16>) {fill = -6.5504e+04 : f32,
+        scale = 0.1178 : f32}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$row_ids,
+    Hip_TensorOrMemRef:$col_ids,
+    Hip_TensorOrMemRef:$output,
+    F32Attr:$scale,
+    F32Attr:$fill
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $row_ids `,` $col_ids `:` type($input)
+    `,` type($row_ids) `,` type($col_ids) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
 }
 
 def Hip_ReciprocalOp : Hip_DpsOp_AutoReifyInfer<"reciprocal", "Y"> {
@@ -4138,9 +4186,9 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp_AutoReify<"causal_conv_with_state", [A
     Example (1D):
     ```mlir
     hip.causal_conv_with_state(%ctx)
-        ins(%input, %weight, %bias, %past_state :
-            tensor<1x64x128xf16>, tensor<64x1x4xf16>,
-            tensor<64xf16>, tensor<1x64x3xf16>)
+        ins(%input, %weight : tensor<1x64x128xf16>, tensor<64x1x4xf16>)
+        bias(%bias : tensor<64xf16>)
+        past_state(%past_state : tensor<1x64x3xf16>)
         outs(%output, %present_state :
              tensor<1x64x128xf16>, tensor<1x64x3xf16>)
         {activation = "silu", ndim = 1 : i64}
@@ -4172,14 +4220,10 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp_AutoReify<"causal_conv_with_state", [A
 
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(`
-        $input `,` $weight
-        (`,` $bias^)?
-        (`,` $past_state^)?
-        `:`
-        type($input) `,` type($weight)
-        (`,` type($bias)^)?
-        (`,` type($past_state)^)?
+        $input `,` $weight `:` type($input) `,` type($weight)
     `)`
+    (`bias` `(` $bias^ `:` type($bias) `)`)?
+    (`past_state` `(` $past_state^ `:` type($past_state) `)`)?
     `outs` `(`
         $output `,` $present_state
         `:`

@@ -1241,6 +1241,19 @@ HIP_KERNEL_API int hip_softmax_row_2d_fp32(void* stream, const void* input, void
 HIP_KERNEL_API int hip_softmax_row_2d_inplace(void* stream, void* data, int rows, int cols);
 HIP_KERNEL_API int hip_softmax_row_2d_inplace_fp32(void* stream, void* data, int rows, int cols);
 
+/* Last-axis softmax over [outer, R, C] scores with the scale and an id mask
+ * applied on the way in:
+ *   out[o,r,c] = softmax_c(row_ids[r] == col_ids[c] ? x[o,r,c] * scale : fill)
+ * The scaled value is rounded to the element type first. An id vector of
+ * length 1 broadcasts; any other length must be R (row_ids) or C (col_ids).
+ * elem_size_bytes: 2 for fp16, 4 for fp32. `input` may equal `output`.
+ * Returns -1 on invalid arguments. */
+HIP_KERNEL_API int hip_softmax_row_scaled_masked(
+    void* stream, const void* input, void* output, const int64_t* row_ids,
+    int64_t row_ids_len, const int64_t* col_ids, int64_t col_ids_len,
+    int64_t outer, int64_t R, int64_t C, float scale, float fill,
+    int elem_size_bytes);
+
 /* Column-wise softmax: fp32 input -> fp16 output.
  * Reads fp32 Score matrix (no fp16 overflow/inf), writes fp16 probabilities.
  * input_batch_stride is in float elements, output_batch_stride in half elements. */
@@ -2359,7 +2372,21 @@ HIP_KERNEL_API int hip_batch_norm(
  * Mean/var over each (N, group). channels_last 0 is NCHW, 1 is NHWC.
  * activation 1 applies SiLU after the affine transform.
  * `hip_dtype`: FLOAT16, BFLOAT16, FLOAT32, or FLOAT64.
+ *
+ * Large groups use a split reduction whose partials live in `workspace`
+ * (device memory, 256-byte aligned). Query the size with
+ * hip_group_norm_workspace_bytes for the current device. A null or smaller
+ * workspace is valid: the kernel shrinks the split or uses a slower
+ * one-block-per-group path.
  */
+HIP_KERNEL_API size_t hip_group_norm_workspace_bytes(
+    int64_t n,
+    int64_t c,
+    int64_t spatial,
+    int64_t groups,
+    int channels_last,
+    int hip_dtype);
+
 HIP_KERNEL_API int hip_group_norm(
     void* stream,
     const void* input,
@@ -2373,6 +2400,8 @@ HIP_KERNEL_API int hip_group_norm(
     int channels_last,
     int activation,
     float epsilon,
+    void* workspace,
+    size_t workspace_bytes,
     int hip_dtype);
 
 /* =========================================================================

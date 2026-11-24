@@ -18,8 +18,9 @@ The runtime kernel writes the widest store of 16, 8, 4 or 2 bytes that tiles
 the output row, and one element otherwise.
 TestResizeRowKernel covers each width for f32, f16 and 8-bit types, ranks 1 to
 3, downsampling, and a scale of 3, where a reciprocal multiply would floor to
-the wrong source index. The ONNX importer reads bf16 tensors as f32, so a bf16
-Resize cannot reach the bf16 kernel from a model.
+the wrong source index. TestResizeLinearDownsample covers the launch layout
+that linear resampling uses when an axis shrinks. The ONNX importer reads bf16
+tensors as f32, so a bf16 Resize cannot reach the bf16 kernel from a model.
 """
 
 from __future__ import annotations
@@ -379,6 +380,102 @@ class TestResizeRowKernel:
         actual, reference = model_runner.run_sample(model, [x])
         atol = 0 if mode == "nearest" else 1
         compare_outputs(actual, reference, atol=atol, rtol=0)
+
+
+# When an axis shrinks, linear resampling pads each row to a power of two of
+# lane slots (a multiple of 256 past 256 lanes) and spreads a thread's rows
+# across the tensor. The cases cover rows above 256 lanes, several rows per
+# thread, an axis that grows beside one that shrinks, and an output extent of
+# 1.
+class TestResizeLinearDownsample:
+    @pytest.mark.parametrize(
+        "coord", ["half_pixel", "pytorch_half_pixel", "asymmetric", "align_corners"]
+    )
+    @pytest.mark.parametrize(
+        "shape,scales",
+        [
+            ([1, 3, 64, 64], [1.0, 1.0, 0.5, 0.5]),
+            ([1, 2, 45, 60], [1.0, 1.0, 1.0 / 3, 1.0 / 3]),
+        ],
+    )
+    def test_coords_f32(self, model_runner, shape, scales, coord):
+        model = _make_resize_scales_model(shape, scales, np.float32, "linear", coord)
+        rng = np.random.default_rng(406)
+        x = rng.uniform(-2.0, 2.0, shape).astype(np.float32)
+        actual, reference = model_runner.run_sample(model, [x])
+        compare_outputs(actual, reference, atol=1e-5, rtol=1e-5)
+
+    @pytest.mark.parametrize(
+        "shape,scales,coord",
+        [
+            ([1, 2, 30, 40], [1.0, 1.0, 0.25, 0.25], "half_pixel"),
+            ([1, 2, 40, 48], [1.0, 1.0, 0.75, 0.75], "asymmetric"),
+            ([1, 2, 31, 77], [1.0, 1.0, 0.6, 0.4], "half_pixel"),
+            ([1, 2, 16, 30], [1.0, 1.0, 2.0, 0.5], "align_corners"),
+            ([1, 2, 30, 16], [1.0, 1.0, 0.5, 2.0], "pytorch_half_pixel"),
+            ([1, 4, 51], [1.0, 1.0, 0.4], "asymmetric"),
+            ([1, 2, 8, 10, 12], [1.0, 1.0, 0.5, 0.5, 0.5], "half_pixel"),
+            ([1, 2, 6, 8, 16], [1.0, 1.0, 1.5, 0.5, 0.5], "align_corners"),
+            ([2, 16, 72, 84], [1.0, 1.0, 0.5, 0.5], "pytorch_half_pixel"),
+            # 2400 outputs per row: 600 lanes of 4, padded to 768 slots.
+            ([1, 1, 8, 4800], [1.0, 1.0, 0.5, 0.5], "half_pixel"),
+        ],
+    )
+    def test_linear_f32(self, model_runner, shape, scales, coord):
+        model = _make_resize_scales_model(shape, scales, np.float32, "linear", coord)
+        rng = np.random.default_rng(407)
+        x = rng.uniform(-2.0, 2.0, shape).astype(np.float32)
+        actual, reference = model_runner.run_sample(model, [x])
+        compare_outputs(actual, reference, atol=1e-5, rtol=1e-5)
+
+    @pytest.mark.parametrize(
+        "shape,scales,coord",
+        [
+            ([1, 3, 576, 672], [1.0, 1.0, 0.5, 0.5], "half_pixel"),
+            ([1, 2, 45, 60], [1.0, 1.0, 1.0 / 3, 1.0 / 3], "align_corners"),
+            # 4800 outputs per row: 600 lanes of 8, padded to 768 slots.
+            ([1, 1, 16, 9600], [1.0, 1.0, 0.5, 0.5], "half_pixel"),
+            # 4608 rows over 2048 row groups: a thread takes two or three rows,
+            # and the last pass is partial.
+            ([1, 16, 576, 672], [1.0, 1.0, 0.5, 0.5], "half_pixel"),
+        ],
+    )
+    def test_linear_f16(self, model_runner, shape, scales, coord):
+        model = _make_resize_scales_model(shape, scales, np.float16, "linear", coord)
+        rng = np.random.default_rng(408)
+        x = rng.uniform(-2.0, 2.0, shape).astype(np.float16)
+        actual, reference = model_runner.run_sample(model, [x])
+        compare_outputs(actual, reference, atol=1e-2, rtol=1e-2)
+
+    @pytest.mark.parametrize("width", [20, 50])
+    @pytest.mark.parametrize("dtype", [np.int8, np.uint8])
+    def test_linear_8bit(self, model_runner, width, dtype):
+        shape = [1, 4, 12, width]
+        model = _make_resize_scales_model(
+            shape, [1.0, 1.0, 0.5, 0.5], dtype, "linear", "half_pixel"
+        )
+        rng = np.random.default_rng(409)
+        info = np.iinfo(dtype)
+        x = rng.integers(info.min, info.max + 1, shape).astype(dtype)
+        actual, reference = model_runner.run_sample(model, [x])
+        compare_outputs(actual, reference, atol=1, rtol=0)
+
+    @pytest.mark.parametrize(
+        "shape,sizes,coord",
+        [
+            ([1, 2, 37, 53], [1, 2, 18, 26], "half_pixel"),
+            ([1, 2, 37, 53], [1, 2, 18, 26], "align_corners"),
+            ([1, 2, 100, 100], [1, 2, 33, 67], "asymmetric"),
+            ([1, 1, 9, 9], [1, 1, 1, 1], "pytorch_half_pixel"),
+            ([1, 1, 9, 9], [1, 1, 1, 1], "align_corners"),
+        ],
+    )
+    def test_sizes_f32(self, model_runner, shape, sizes, coord):
+        model = _make_resize_sizes_model(shape, sizes, np.float32, "linear", coord)
+        rng = np.random.default_rng(410)
+        x = rng.uniform(-2.0, 2.0, shape).astype(np.float32)
+        actual, reference = model_runner.run_sample(model, [x])
+        compare_outputs(actual, reference, atol=1e-5, rtol=1e-5)
 
 
 # The innermost axis keeps its extent and scale 1, so the kernel copies or
