@@ -1,0 +1,98 @@
+{
+  "state": "paused_by_user_request",
+  "paused_unix": 1795551153.428498,
+  "reason": "Wait for llm-forecast completion evidence, inspect competing CPU/GPU work, then clean Original/Eight B1 4K pilot only. Full16K/32K must not resume before pilot review.",
+  "stopped_processes": [
+    {
+      "pid": 34692,
+      "ppid": 34576,
+      "name": "python.exe",
+      "command": [
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qsa\\venv\\Scripts\\python.exe",
+        "-u",
+        "scripts/qwen_qsa/run_eight_performance.py"
+      ]
+    },
+    {
+      "pid": 36584,
+      "ppid": 34692,
+      "name": "python.exe",
+      "command": [
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qsa\\venv\\Scripts\\python.exe",
+        "-u",
+        "scripts/qwen_qsa/run_eight_performance.py"
+      ]
+    },
+    {
+      "pid": 27412,
+      "ppid": 36584,
+      "name": "python.exe",
+      "command": [
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qsa\\venv\\Scripts\\python.exe",
+        "-u",
+        "scripts/qwen_qsa/measure_eight.py",
+        "benchmark",
+        "--context",
+        "32768"
+      ]
+    },
+    {
+      "pid": 40628,
+      "ppid": 27412,
+      "name": "python.exe",
+      "command": [
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qsa\\venv\\Scripts\\python.exe",
+        "-u",
+        "scripts/qwen_qsa/measure_eight.py",
+        "benchmark",
+        "--context",
+        "32768"
+      ]
+    },
+    {
+      "pid": 41824,
+      "ppid": 10084,
+      "name": "python.exe",
+      "command": [
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qsa\\venv\\Scripts\\python.exe",
+        "-u",
+        "scripts/qwen_qsa/run_eight_controls.py"
+      ]
+    },
+    {
+      "pid": 42700,
+      "ppid": 41824,
+      "name": "python.exe",
+      "command": [
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qsa\\venv\\Scripts\\python.exe",
+        "-u",
+        "scripts/qwen_qsa/run_eight_controls.py"
+      ]
+    }
+  ],
+  "former_gpu_lock_owner": "36584",
+  "interruption": "Frozen worker has no in-band request-boundary stop; stopped current in-flight request. Only previously completed rows are retained.",
+  "existing_results": "Potentially contention-affected; not accepted as a clean comparison",
+  "accuracy_evaluations_started": false,
+  "unrelated_processes_terminated": false,
+  "completed_rows": [
+    {
+      "context": 16384,
+      "warmup_rows": 2,
+      "measured_rows": 6,
+      "raw_path": "_local\\qwen-qsa\\eight-qsa-v1\\performance\\16384\\rows.jsonl"
+    },
+    {
+      "context": 32768,
+      "warmup_rows": 2,
+      "measured_rows": 0,
+      "raw_path": "_local\\qwen-qsa\\eight-qsa-v1\\performance\\32768\\rows.jsonl"
+    },
+    {
+      "context": 4096,
+      "warmup_rows": 2,
+      "measured_rows": 6,
+      "raw_path": "_local\\qwen-qsa\\eight-qsa-v1\\performance\\4096\\rows.jsonl"
+    }
+  ]
+}

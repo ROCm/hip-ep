@@ -1,0 +1,64 @@
+{
+  "checked_unix": 1795551639.2581391,
+  "chat_completed_unix": 1795551121,
+  "no_competing_gpu_work_observed": true,
+  "windows_and_wsl_inspected": true,
+  "windows_cpu_percent": 1.8,
+  "processes": [
+    {
+      "pid": 6732,
+      "name": "python.exe",
+      "cpu_percent_one_core": 0.0,
+      "command": [
+        "C:\\Users\\rajeevp\\AppData\\Local\\miniforge3\\python.exe",
+        "C:\\Users\\rajeevp\\AppData\\Local\\miniforge3\\Scripts\\conda-script.py",
+        "run",
+        "--no-capture-output",
+        "-n",
+        "llmfc",
+        "python",
+        "-B",
+        "-m",
+        "llmfc_mcp"
+      ]
+    },
+    {
+      "pid": 17320,
+      "name": "python.exe",
+      "cpu_percent_one_core": 0.0,
+      "command": [
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qsa\\venv\\Scripts\\python.exe",
+        "-"
+      ]
+    },
+    {
+      "pid": 29720,
+      "name": "python.exe",
+      "cpu_percent_one_core": 0.0,
+      "command": [
+        "python",
+        "-B",
+        "-m",
+        "llmfc_mcp"
+      ]
+    },
+    {
+      "pid": 37472,
+      "name": "python.exe",
+      "cpu_percent_one_core": 0.0,
+      "command": [
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qsa\\venv\\Scripts\\python.exe",
+        "-"
+      ]
+    }
+  ],
+  "gpu_active": [],
+  "available_ram_bytes": 43983777792,
+  "notes": [
+    "Four GPU samples; no competing model workload observed",
+    "llmfc_mcp is an idle service, not terminated",
+    "WSL was not initially running; inspection started transient systemd services. No Python/model job was present; no repeated WSL boot is requested",
+    "Coordinating documentation audit finished before controls; user changed scope to Original-only short4K/16K/32K"
+  ],
+  "scope": "Original only B1 4K/16K/32K,2warmups,2measured requests"
+}

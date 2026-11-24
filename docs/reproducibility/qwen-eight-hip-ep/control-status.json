@@ -1,0 +1,7 @@
+{
+  "state": "canceled_by_user_request",
+  "stages": [],
+  "started_unix": 1795550262.962695,
+  "reason": "Queued fresh-default control canceled before starting",
+  "paused_unix": 1795551153.428498
+}

@@ -1,0 +1,2 @@
+{"trial": -2, "warmup": true, "variant": "Eight", "context": 32768, "batch": 1, "prefill_seconds": 146.9164270000001, "decode_seconds": 8.408572100000129, "prefill_tokens_s": 223.038367248068, "decode_tokens_s": 7.611280398011813, "finite": true, "replay_exact": true}
+{"trial": -1, "warmup": true, "variant": "Eight", "context": 32768, "batch": 1, "prefill_seconds": 152.96238299999914, "decode_seconds": 7.054864499999894, "prefill_tokens_s": 214.2226039980051, "decode_tokens_s": 9.071754673672466, "finite": true, "replay_exact": true}
