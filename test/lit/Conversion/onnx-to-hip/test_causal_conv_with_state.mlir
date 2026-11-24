@@ -332,7 +332,7 @@ module {
   // CHECK-SAME: (%[[CTX12:.*]]: !hip.context, %[[IN12:.*]]: tensor<?x64x?xf16>, %[[W12:.*]]: tensor<64x1x4xf16>, %[[PS12:.*]]: tensor<?x64x3xf16>)
   // CHECK: tensor.dim %[[PS12]]
   // CHECK: tensor.empty({{.*}}) : tensor<?x64x3xf16>
-  // CHECK: %[[R12:.*]]:2 = hip.causal_conv_with_state(%[[CTX12]]) ins(%[[IN12]], %[[W12]], %[[PS12]] : tensor<?x64x?xf16>, tensor<64x1x4xf16>, tensor<?x64x3xf16>) outs({{.*}}, {{.*}} : tensor<?x64x?xf16>, tensor<?x64x3xf16>)
+  // CHECK: %[[R12:.*]]:2 = hip.causal_conv_with_state(%[[CTX12]]) ins(%[[IN12]], %[[W12]] : tensor<?x64x?xf16>, tensor<64x1x4xf16>) past_state(%[[PS12]] : tensor<?x64x3xf16>) outs({{.*}}, {{.*}} : tensor<?x64x?xf16>, tensor<?x64x3xf16>)
   // CHECK-NOT: onnx.Custom
   // CHECK: return %[[R12]]#0 : tensor<?x64x?xf16>
 
