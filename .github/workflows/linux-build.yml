@@ -39,6 +39,8 @@ env:
   # pull/<n>.diff and applied on top of OGA_REF. Part of the OGA cache key.
   # Empty: the fork branch already carries everything the build needs.
   OGA_PR_PATCHES: ""
+  # Local ABI repair for the pinned fork; the hash also binds its cache key.
+  OGA_COMPAT_PATCH_SHA256: "7e0cddb2ab069ad46d49d03955fc4646b743baa0e664e0f9a7adeef69fcccc89"
   # The GPU arch the artifact targets. CI runners have no GPU, so it is passed
   # explicitly (build.py auto-detects from /sys on a real GPU host).
   HIP_ARCHITECTURES: gfx11-generic
@@ -350,7 +352,7 @@ jobs:
         uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/oga-artifacts
-          key: linux-oga-${{ env.OGA_REF }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
+          key: linux-oga-${{ env.OGA_REF }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}-local${{ env.OGA_COMPAT_PATCH_SHA256 }}
 
       # Checkout + build are skipped on an OGA cache hit (step-level gate); the
       # install-copy below always runs so the
@@ -405,6 +407,17 @@ jobs:
               --exclude='.github/*' --exclude='*.md' "/tmp/oga-pr-${pr}.diff" \
               || { echo "PR #${pr} failed to apply"; exit 1; }
           done
+
+      - name: Apply pinned OGA word-piece ABI repair
+        if: steps.cache-oga.outputs.cache-hit != 'true'
+        shell: bash
+        working-directory: onnxruntime-genai
+        run: |
+          set -euo pipefail
+          PATCH_FILE="../cmake/oga-wordpiece-types.patch"
+          printf '%s  %s\n' "$OGA_COMPAT_PATCH_SHA256" "$PATCH_FILE" | sha256sum --check --status
+          git -c core.autocrlf=input apply --check "$PATCH_FILE"
+          git -c core.autocrlf=input apply "$PATCH_FILE"
 
       - name: Build OGA
         if: steps.cache-oga.outputs.cache-hit != 'true'
