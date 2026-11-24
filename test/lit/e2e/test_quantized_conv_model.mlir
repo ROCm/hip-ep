@@ -4,15 +4,16 @@
 // RUN: hip-mlir-opt %s --hipdnn-pipeline | FileCheck %s
 
 // DynamicQuantizeLinear followed by ConvInteger, the head of a quantized
-// conv graph. Both ops decompose to HIP ops that bufferize; hip.conv and
-// hip.quantize_linear then lower to their runtime wrappers.
+// conv graph. Both ops decompose to HIP ops that bufferize and lower to their
+// runtime wrappers. The ConvInteger's f32 hip.conv is 1x1 with stride 1, so
+// hip-fusion-transform turns it into a hipBLASLt matmul.
 
 // CHECK: module attributes {
 // CHECK-SAME: hipdnn.input_count = 3
 // CHECK-SAME: hipdnn.output_count = 1
 // CHECK-NOT: onnx.DynamicQuantizeLinear
 // CHECK-NOT: onnx.ConvInteger
-// CHECK-DAG: llvm.func @wrap_conv
+// CHECK-DAG: llvm.func @wrap_hipblasLtMatmul
 // CHECK-DAG: llvm.func @wrap_quantize_linear
 // CHECK-DAG: llvm.func @wrap_reduce_min
 // CHECK-DAG: llvm.func @wrap_reduce_max

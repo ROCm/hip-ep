@@ -184,8 +184,8 @@ std::optional<PatchEmbedPlan> analyzePatchEmbedConv(
   // the permutations it needs -- gemma3-4b contracts over 14x14x3 = 588 per
   // output element, Qwen's rank-5 embed over 2x16x16x3 = 1536. Requiring more
   // than one element in the patch is the weakest condition that separates those
-  // from a 1x1, and it leaves the 1x1 case to the ordinary conv path, which
-  // handles it as a K = C contraction with no data movement at all.
+  // from a 1x1. The 1x1 case is left to pointwise_conv_to_matmul, which runs it
+  // in channels-first layout as a batched matmul with no data movement at all.
   //
   // The single-patch shapes are exempt: there both permutations are identities
   // on the linear layout and are never emitted, so the rewrite is a pure win

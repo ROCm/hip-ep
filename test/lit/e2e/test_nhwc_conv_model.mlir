@@ -4,13 +4,17 @@
 // RUN: hip-mlir-opt %s --hipdnn-pipeline | FileCheck %s
 
 // com.microsoft.NhwcConv through the full pipeline. Layout transposes reuse
-// wrap_transpose; the convolution itself is wrap_conv.
+// wrap_transpose. The convolution is 1x1 with stride 1 and no padding, so
+// hip-fusion-transform runs it as a hipBLASLt matmul plus a bias add
+// (wrap_elementwise) rather than wrap_conv.
 
 // CHECK: module attributes {
 // CHECK-SAME: hipdnn.input_count = 3
 // CHECK-SAME: hipdnn.output_count = 1
 // CHECK-DAG: llvm.func @wrap_transpose
-// CHECK-DAG: llvm.func @wrap_conv
+// CHECK-DAG: llvm.func @wrap_hipblasLtMatmul
+// CHECK-DAG: llvm.func @wrap_elementwise
+// CHECK-NOT: llvm.func @wrap_conv
 // CHECK: llvm.func @inference_compute
 // CHECK-NOT: NhwcConv
 module {

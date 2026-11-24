@@ -33,6 +33,7 @@
 #include "gelu_fusion.hpp"
 #include "linear_attention_group_fold.hpp"
 #include "patch_embed_conv_to_gemm.hpp"
+#include "pointwise_conv_to_matmul.hpp"
 #include "swiglu_fusion.hpp"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -856,6 +857,13 @@ inline void registerNativeHelpers(mlir::PDLPatternModule &pdlPatterns) {
 /// rather than at the `hip.quantize_linear` it replaces.
 constexpr unsigned kPatchEmbedConvToGemmBenefit = 5;
 
+/// The 1x1-conv-as-matmul rewrite, also rooted at `hip.conv`. Below the Q/DQ
+/// fusions for the same reason as patch-embed. The two native conv patterns
+/// match disjoint convs (patch-embed declines a unit kernel unless the input is
+/// a single pixel, and this pattern declines exactly that case), so their
+/// relative order is not what keeps them apart.
+constexpr unsigned kPointwiseConvToMatmulBenefit = 4;
+
 /// The SwiGLU and GELU fusions are rooted at `hip.mul` but match disjoint
 /// chains (a sigmoid gate, a tanh or erf activation), so their benefits are
 /// never ranked against each other. `HipQMul` also matches a `hip.mul`, but
@@ -879,6 +887,8 @@ inline mlir::LogicalResult run(mlir::ModuleOp module,
   // add c++ patterns here
   populatePatchEmbedConvToGemmPattern(
       patterns, mlir::PatternBenefit(kPatchEmbedConvToGemmBenefit));
+  populatePointwiseConvToMatmulPattern(
+      patterns, mlir::PatternBenefit(kPointwiseConvToMatmulBenefit));
   populateSwigluFusionPattern(patterns,
                               mlir::PatternBenefit(kSwigluFusionBenefit));
   populateGeluFusionPattern(patterns, mlir::PatternBenefit(kGeluFusionBenefit));

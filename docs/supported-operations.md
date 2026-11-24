@@ -12,7 +12,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 
 | Operation | Backend or lowering |
 |---|---|
-| Conv | Custom HIP kernel. Rank-3 (NCL) is rewritten to a unit-height 2D conv; rank-4 (NCHW) and rank-5 (NCDHW) lower directly. With `HIPDNN_EP_ROCMLIR=1`, a 2D conv of a per-tensor dequantized 8-bit input and dequantized i8 weights with a zero weight zero point runs as a rocMLIR i8 conv scaled by `x_scale * w_scale`, with the bias, activation, and quantize after it in the same kernel |
+| Conv | Custom HIP kernel. Rank-3 (NCL) is rewritten to a unit-height 2D conv; rank-4 (NCHW) and rank-5 (NCDHW) lower directly. A float (f16, bf16, f32) 1x1 conv with stride 1, no padding, dilation 1 and one group runs on hipBLASLt instead: `hip-fusion-transform` rewrites it to `hip.matmul` of the `[Cout, Cin]` filter against the `[N, Cin, pixels]` input, plus a broadcast `hip.add` for the bias. Batch and spatial extents may be dynamic; channels must be static. A rank-4 or rank-5 one over a single pixel becomes a 2-D `hip.gemm` with the bias in its epilogue. With `HIPDNN_EP_ROCMLIR=1`, a 2D conv of a per-tensor dequantized 8-bit input and dequantized i8 weights with a zero weight zero point runs as a rocMLIR i8 conv scaled by `x_scale * w_scale`, with the bias, activation, and quantize after it in the same kernel |
 | NhwcConv (`com.microsoft`) | Rank-4 NHWC activations and `[M, kH, kW, C/group]` weights are transposed into `hip.conv` and the result is transposed back. Static weights are permuted while lowering |
 | ConvTranspose | Custom HIP kernel |
 | MatMul | hipBLASLt |
