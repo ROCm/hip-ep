@@ -1,5 +1,5 @@
 {
-  "state": "original4k_complete_eight_paused",
+  "state": "original4k_charger_repeat_complete_eight_paused",
   "files": {
     ".gitattributes": {
       "sha256": "9270f5d00be8254ec79574e9d8a4ab1def8796f6c0b005713d119d5bd75aee54",
@@ -16,6 +16,18 @@
     "eight-identity.json": {
       "sha256": "13c47547e81ec914958ac1727455ba14f029a80ac8da83ec6e5fb5ccb2f1a1b4",
       "bytes": 5171
+    },
+    "original-140w-4k-comparison.json": {
+      "sha256": "1c820395dc6414207cf68a71968c15cf3f1dbe36006e3b5ce57aace7ae4e8e67",
+      "bytes": 2122
+    },
+    "original-140w-archive.json": {
+      "sha256": "bc748f2451359f3b5ab30a90d2678d74a3998ce74a4e02eaa4f5011c30d1f3c2",
+      "bytes": 232
+    },
+    "original-140w-status.json": {
+      "sha256": "042e3650a7aad5efc451d8faba24a7f93c04da6e3a7fd7d6183cf8c797dce8c2",
+      "bytes": 1766
     },
     "original-4k-comparison.json": {
       "sha256": "9a5b04261fc20bf696a72102f80d2a460ccc1a4cefba6b414fcc405e1bbca907",
@@ -36,6 +48,26 @@
     "raw/eight-export-receipt.json": {
       "sha256": "370a4d1b543c1481ffc0fa6706f90a9b9732c62ee944dd028b731bceb6156e51",
       "bytes": 220234
+    },
+    "raw/original-140w/4096/protocol.json": {
+      "sha256": "ffd0df08d10daecefdcaaa71f423722dc0daad2d5d2e1f6889b5f8a96377da50",
+      "bytes": 2016
+    },
+    "raw/original-140w/4096/rows.jsonl": {
+      "sha256": "8b61d9b0d990d62022407a2b7ee06aff5b31079f4da2473dcef83a6307ab15fa",
+      "bytes": 1097
+    },
+    "raw/original-140w/4096/summary.json": {
+      "sha256": "a577c185c8ae0882cd63a5ef256a0715c24cbe8c4446474ccd3f5e0cb9fa0361",
+      "bytes": 888
+    },
+    "raw/original-140w/preflight/gpu.json": {
+      "sha256": "4b6e07f56d8100045d30f49d26617d77cb837074c8a722446fd323ef1c9a4b48",
+      "bytes": 2092
+    },
+    "raw/original-140w/preflight/receipt.json": {
+      "sha256": "2ff1eebc9ec23d6d7805221bcfe8499fe03124668ae3d01eb810fbb8cb82cf75",
+      "bytes": 2449
     },
     "raw/original-control/4096/protocol.json": {
       "sha256": "868f786d5902c904e65ec6862999a53ecf7e7382debdec8b89200befcb34b99b",
@@ -90,8 +122,8 @@
       "bytes": 864
     },
     "README.md": {
-      "sha256": "5b02565863f0f55cd7524c36d80c20877359e424496f367ba695f71b0ff759b2",
-      "bytes": 6811
+      "sha256": "566b4fe48722007926b051fe445f800fd62cae6a8a44c78168e36b387a7e6120",
+      "bytes": 8603
     },
     "status.json": {
       "sha256": "fb50e1a7454a198d5d3507131906243c2afcad4bbe92603aedfffd069eabb78d",

@@ -4,9 +4,22 @@ Licensed under the MIT License.
 -->
 # Qwen hip-ep: Original 4K control and paused eight-selector transfer
 
-**Current state:** the fresh Original-only B1/4K diagnostic is complete. Eight/QSA timing and BFCL/GSM8K remain paused. The 16K Original stage had just launched when the user narrowed scope to4K; it was canceled, and32K was not started. No longer-context control result is accepted.
+**Current state:** the same Original-only B1/4K diagnostic was repeated after the user connected a140W charger. It recovered close to the archived Original baseline. Eight/QSA timing, longer shapes and BFCL/GSM8K remain paused; this repeat ran only4K.
 
-## Fresh Original 4K diagnostic
+## Repeat after the140W charger change
+
+Same Original model, native binaries, input stream and independent synchronized phase timers; two warmups and two measured requests, with64 forced decode inputs each. AC power was detected. The140W rating is user-reported; wattage and actual device power limits were not independently measured. Preflight CPU load was2.8%, with only desktop/System GPU activity and no competing model workload observed.
+
+| Phase | Earlier quiet control tok/s |140W repeat tok/s | Archived Original tok/s | Repeat vs archive |
+|---|---:|---:|---:|---:|
+| prefill | 306.25 | 431.71 | 438.06 | -1.45% |
+| decode | 10.17 | 10.79 | 10.68 | +1.01% |
+
+The recovered performance is consistent with power delivery/power limits contributing to the earlier drop. This before/after observation does not prove an exclusive cause. Both current controls contain two measured requests; the archive contains six, so no paired interval is claimed. All aggregates use token count divided by the mean elapsed phase seconds across **both** measured requests. Finite outputs, exact replay, stable sessions/cache addresses and raw hashes pass.
+
+[Comparison JSON](original-140w-4k-comparison.json), [raw rows](raw/original-140w/4096/rows.jsonl), [saved aggregate](raw/original-140w/4096/summary.json), [protocol](raw/original-140w/4096/protocol.json), [power/load receipt](raw/original-140w/preflight/receipt.json) and [incremental local ZIP receipt](original-140w-archive.json) retain this repeat. Its protocol correctly labels native default attention, with no QSA nodes. The previous raw protocol and correction receipt remain unchanged. No kernel, model or compiler modification and no accuracy evaluation occurred. The worker has exited and the GPU-stage lock is released.
+
+## Earlier Original4K control before the charger change
 
 Two exact-shape warmups and **two measured requests**, each with4096 prefill tokens and64 common teacher-forced decode inputs. Prefill and decode have separate HIP-synchronized CPU-wall timers. Same preserved Original W4A16 group128 graph/backbone and native binaries; FP16 activation/KV and FP32 recurrent state. No export, kernel change or QSA model session was used by this control. One resident Original session.
 
@@ -15,7 +28,7 @@ Two exact-shape warmups and **two measured requests**, each with4096 prefill tok
 | prefill | 306.25 | 438.06 | -30.09% |
 | decode | 10.17 | 10.68 | -4.77% |
 
-The prior Original baseline was **not recovered** under the sampled quiet conditions. A baseline shift is present in Original itself. These data do not establish llm-forecast contention as the cause or isolate a QSA effect. Cause remains unresolved. The comparison is across runs, two fresh versus six archived measured requests; the historical paired run had two resident sessions sharing KV/state buffers. No paired confidence interval or acceptance of long-context accuracy is inferred.
+That earlier control did **not** recover the prior Original baseline under the sampled quiet conditions. The later charger repeat above recovers close to that baseline. The earlier data alone did not establish contention as the cause or isolate a QSA effect. The comparison is across runs, two fresh versus six archived measured requests; the historical paired run had two resident sessions sharing KV/state buffers. No paired confidence interval or acceptance of long-context accuracy is inferred.
 
 Use [original-4k-comparison.json](original-4k-comparison.json), [all four raw requests](raw/original-control/4096/rows.jsonl), [saved aggregate](raw/original-control/4096/summary.json) and [protocol](raw/original-control/4096/protocol.json). TPS equals phase token count divided by **mean elapsed seconds over all measured requests** (`trial >= 0`), not the mean of per-request TPS. Exact aggregation is in `scripts/qwen_qsa/measure_eight_control.py`; the2-request option changes only the repeat count. The full finalization independently recomputed the displayed aggregate from both measured rows.
 
@@ -43,7 +56,7 @@ The worker then had no in-band boundary stop, so its in-flight request was termi
 
 ## Handoff and remaining scope
 
-The immediate user-requested Original4K check is complete. Await review before further timing. The previously proposed fresh Original/Eight4K pilot, the full eight-selector matrix and the evaluation-duration estimates have not been completed or accepted. BFCL50 and GSM8K128 must not start under the current request. No unmeasured estimate or benchmark accuracy is reported.
+The Original4K check and its charger repeat are complete. Await review before further timing. The previously proposed fresh Original/Eight4K pilot, the full eight-selector matrix and the evaluation-duration estimates have not been completed or accepted. BFCL50 and GSM8K128 must not start under the current request. No unmeasured estimate or benchmark accuracy is reported.
 
 [validation.json](validation.json) preserves eight-node dispatch/cache/finite/replay controls; [transfer-provenance.json](transfer-provenance.json) distinguishes the handoff commit from the sibling repository’s later observed HEAD. [original-control-status.json](original-control-status.json) captures the narrowed scope. Current local branch: `codex/qwen-eight-qsa-perf`. The [historical four-selector packet](../qwen-hip-ep/README.md), old results and measured installation are unchanged. New source snapshots/logs remain in `_local/qwen-qsa/eight-qsa-v1/` and `_local/qwen-qsa/original-short-control-v1/`. Nothing is pushed.
 

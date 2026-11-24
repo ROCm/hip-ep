@@ -1,0 +1,35 @@
+{
+  "state": "complete",
+  "started_unix": 1795552221.2679842,
+  "pid": 39632,
+  "command": [
+    "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qsa\\venv\\Scripts\\python.exe",
+    "-u",
+    "scripts/qwen_qsa/measure_eight_control.py",
+    "--context",
+    "4096",
+    "--output-root",
+    "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qwen-qsa\\original-140w-4k-v1",
+    "--measured-requests",
+    "2",
+    "--stop-file",
+    "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qwen-qsa\\original-140w-4k-v1\\stop.json"
+  ],
+  "source_sha256": {
+    "scripts\\qwen_qsa\\measure_eight_control.py": "b84fba7157456a50196934474310ec75981de583dea92025139dcb454c25fd43",
+    "scripts\\qwen_qsa\\measure_eight.py": "9734acff8928d067ca9c5603f6bfce343cbe64fd70fd8c545bf8efa52cdc4cc2",
+    "scripts\\qwen_qsa\\native_inference.py": "41dddd8e41a55591dd9271210ac7e9ba85dbdd7b37b16c52642ab5c3ea87081f",
+    "scripts\\qwen_qsa\\benchmark_native.py": "5d4516e372a2452f0264319739a26cf84d91d6fb432a1453f1370768a4d15bc2",
+    "scripts\\qwen_qsa\\export_eight.py": "01a5ef5931933f34d7979ef68407a02cec3d2763ff6eca798659cf9f38b5efa0",
+    "scripts\\qwen_qsa\\verify_handoff.py": "7dc4919f44796dc4e0dad6ba738100b85e91ddc58967e09b84657180d68745db",
+    "scripts\\qsa\\runtime.py": "b839b0816065d57458e749ec666c105cf019015f037e449b87632089e31586de",
+    "_local\\qwen-qsa\\original-140w-4k-v1\\run.py": "882ca91a6e61f2c431a9051abdd6dd6149ba8895120661060d59930cbb3b6b89"
+  },
+  "charger_watts_user_reported": 140,
+  "scope": "Original only B1 4096;2warmups,2measured requests,64forced decode inputs",
+  "qsa_runs": false,
+  "accuracy_evaluations": false,
+  "worker_pid": 23388,
+  "exit_code": 0,
+  "elapsed_seconds": 78.09438157081604
+}
