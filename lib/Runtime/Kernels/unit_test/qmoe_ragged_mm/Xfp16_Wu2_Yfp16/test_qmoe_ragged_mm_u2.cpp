@@ -59,6 +59,14 @@ bool runCase(bool gather, bool withZeroPoints) {
     scales[i] = __float2half(0.02f + 0.001f * static_cast<float>(i % 7));
   for (size_t i = 0; i < zeroPoints.size(); ++i)
     zeroPoints[i] = static_cast<uint8_t>(i & 3);
+  // The kernel takes 2-bit zero points in the ONNX packing: four per byte,
+  // low bits first, each (expert, n) row padded to a whole byte.
+  constexpr int zpRowBytes = (kBlocks * kBits + 7) / 8;
+  std::vector<uint8_t> packedZeroPoints(kExperts * kN * zpRowBytes, 0);
+  for (int row = 0; row < kExperts * kN; ++row)
+    for (int g = 0; g < kBlocks; ++g)
+      packedZeroPoints[row * zpRowBytes + g / 4] |= static_cast<uint8_t>(
+          zeroPoints[row * kBlocks + g] << ((g % 4) * kBits));
   for (size_t i = 0; i < bias.size(); ++i)
     bias[i] =
         __float2half(static_cast<float>(static_cast<int>(i % 5) - 2) / 32.0f);
@@ -87,7 +95,8 @@ bool runCase(bool gather, bool withZeroPoints) {
   int32_t *dRowIds = nullptr, *dGroups = nullptr, *dGroupCount = nullptr;
   uint32_t *dQueue = nullptr;
   bool ok = upload(&dInput, input) && upload(&dWeights, weights) &&
-            upload(&dScales, scales) && upload(&dZeroPoints, zeroPoints) &&
+            upload(&dScales, scales) &&
+            upload(&dZeroPoints, packedZeroPoints) &&
             upload(&dBias, bias) && upload(&dRowIds, rowIds) &&
             upload(&dGroups, groups) && upload(&dGroupCount, groupCount) &&
             hipMalloc(&dQueue, sizeof(uint32_t)) == hipSuccess &&
