@@ -17,7 +17,8 @@
 #ifndef HIPDNN_EP_RUNTIME_STATE_INTERNAL_H
 #define HIPDNN_EP_RUNTIME_STATE_INTERNAL_H
 
-#include "runtime_types.h"
+// The configured include paths select the real or mock runtime types.
+#include <runtime_types.h>
 // For hipdnn_output_allocator_t (the output_allocator field below). Acyclic:
 // hipdnn_ep_runtime.h only forward-declares RuntimeState; it does not include
 // this internal header.
