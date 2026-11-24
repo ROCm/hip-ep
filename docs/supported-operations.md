@@ -71,6 +71,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | ReduceMin | Custom HIP kernel |
 | ReduceProd | Custom HIP kernel |
 | ReduceMean | Custom HIP kernel |
+| ReduceSumSquare | Decomposed to Mul + ReduceSum, its ONNX function body. Same axes, `keepdims` and `noop_with_empty_axes` handling as ReduceSum |
 | CumSum | Custom HIP kernel |
 | Pad | Custom HIP kernel. The opset<11 form, with `pads` and the fill `value` as attributes, is rewritten to the operand form first |
 | Tile | Static shapes with constant repeats become a broadcast: a unit dim is inserted before each repeated extent above one, `hip.expand` broadcasts the repeats, and a `tensor.collapse_shape` merges each repeat with its extent. The rocMLIR fusion folds these views into a neighbouring kernel; otherwise the expand kernel runs. A zero repeat, a dynamic shape, or a broadcast rank above 8 uses the custom HIP Tile kernel |
