@@ -5088,17 +5088,22 @@ extern "C" int hip_matmul_nbits_wmma_smallm_grouped(
 // a whole (expert, row0, rows) slot x BN columns with the LDS-staged core, so
 // an expert's weights are read once per BM rows instead of once per 16-64.
 // Column-fastest order, as in the direct-B kernel, keeps the running
-// workgroups on one expert's weights. The tile is the 4x4-warp-tile,
-// two-deep-prefetch entry of the dense table (128 threads); C, and A or
-// a_row_ids, are offset to the slot's first row, so the core sees a single
-// row tile.
+// workgroups on one expert's weights. The tile is one of the dense table's
+// extended entries, chosen per device family below; C, and A or a_row_ids,
+// are offset to the slot's first row, so the core sees a single row tile.
 static constexpr int kTiledGroupedBm = HIP_MATMUL_NBITS_TILED_GROUPED_ROWS;
-static constexpr int kTiledGroupedBn = 128;
 
+// VARIANT packs the GemmFp16U4ImplX pipeline options as WmmaConfig::variant
+// does (bits 0-6). Bit 1, the uniform-base addressing, cannot gather A rows.
+#define TILED_GROUPED_VARIANT_ARGS(V) \
+    ((V) & 1) ? 2 : 1, ((V) >> 1) & 1, ((V) >> 2) & 1, ((V) >> 3) & 3, \
+    ((V) >> 5) & 1, ((V) >> 6) & 1
+
+template <int BN_T, int WT_M, int WT_N, int BK_T, int VARIANT>
 __global__
 __attribute__((amdgpu_flat_work_group_size(
-    GEMM_WG_SZ(kTiledGroupedBm, kTiledGroupedBn, 4, 4),
-    GEMM_WG_SZ(kTiledGroupedBm, kTiledGroupedBn, 4, 4))))
+    GEMM_WG_SZ(kTiledGroupedBm, BN_T, WT_M, WT_N),
+    GEMM_WG_SZ(kTiledGroupedBm, BN_T, WT_M, WT_N))))
 __attribute__((amdgpu_waves_per_eu(1)))
 void MatMulNBitsWMMA_Tiled_Grouped(
     int N, int K,
@@ -5113,6 +5118,7 @@ void MatMulNBitsWMMA_Tiled_Grouped(
     int group_size, int num_groups_k,
     _Float16* __restrict__ C)
 {
+    static_assert((VARIANT & 2) == 0, "gathered A rows need per-thread addresses");
     const int slot = static_cast<int>(blockIdx.y);
     if (slot >= *num_row_tiles) return;
     const int expert = row_tiles[3 * slot];
@@ -5120,14 +5126,36 @@ void MatMulNBitsWMMA_Tiled_Grouped(
     const size_t row0 = static_cast<size_t>(expert_row_offsets[expert]) +
                         static_cast<size_t>(row_tiles[3 * slot + 1]);
     const size_t e_cols = static_cast<size_t>(expert) * N;
-    GemmFp16U4ImplX<kTiledGroupedBm, kTiledGroupedBn, 4, 4, /*USE_ZEROS=*/false,
-                    /*BOUNDS_CHECK=*/true, /*BK_IN=*/32, /*PGR_P=*/2,
-                    /*ADDR_P=*/0, /*PIPE_P=*/0, /*SCHED_P=*/0, /*EPI_P=*/0,
-                    /*XOR_P=*/0, /*GROUPED_P=*/true>(
+    GemmFp16U4ImplX<kTiledGroupedBm, BN_T, WT_M, WT_N, /*USE_ZEROS=*/false,
+                    /*BOUNDS_CHECK=*/true, BK_T,
+                    TILED_GROUPED_VARIANT_ARGS(VARIANT), /*GROUPED_P=*/true>(
         rows, N, K, a_row_ids ? A : A + row0 * K, K, B + e_cols * b_row_bytes,
         scales + e_cols * num_groups_k, nullptr, group_size, num_groups_k,
         C + row0 * N, N, /*swizzle_n=*/1, b_row_bytes, /*fixed_row_tile=*/0,
         bias ? bias + e_cols : nullptr, a_row_ids ? a_row_ids + row0 : nullptr);
+}
+#undef TILED_GROUPED_VARIANT_ARGS
+
+// The tile is chosen per device family. gfx115x runs a K-step of 64 over a 2x4
+// warp tile with the two-deep prefetch, the LDS-staged epilogue and the XOR
+// swizzle: 5-8% over the shipped tile on the gpt-oss expert shapes (fc1
+// N=5760 / fc2 N=2880, K=2880, 2k and 8k token chunks) on gfx1151. Other
+// devices, and a K that is not a multiple of 64, keep the shipped 4x4 / K=32
+// tile.
+static bool tiled_grouped_gfx115_device() {
+    constexpr int kMaxCachedDevices = 16;
+    // 0 == not probed yet, 1 == no, 2 == yes.
+    static int cached[kMaxCachedDevices] = {};
+    auto probe = [](int d) {
+        hipDeviceProp_t p;
+        return hipGetDeviceProperties(&p, d) == hipSuccess &&
+               std::strncmp(p.gcnArchName, "gfx115", 6) == 0;
+    };
+    int dev = 0;
+    if (hipGetDevice(&dev) != hipSuccess || dev < 0) return false;
+    if (dev >= kMaxCachedDevices) return probe(dev);
+    if (cached[dev] == 0) cached[dev] = probe(dev) ? 2 : 1;
+    return cached[dev] == 2;
 }
 
 extern "C" int hip_matmul_nbits_wmma_tiled_grouped_supported(
@@ -5153,21 +5181,30 @@ extern "C" int hip_matmul_nbits_wmma_tiled_grouped(
 
   const int ngk = static_cast<int>((K + block_size - 1) / block_size);
   const int b_row_bytes = static_cast<int>((K + 1) / 2);
-  const dim3 grid(static_cast<unsigned>((N + kTiledGroupedBn - 1) / kTiledGroupedBn),
-                  static_cast<unsigned>(max_row_tiles));
   (void)hipGetLastError();
-  hipLaunchKernelGGL(
-      MatMulNBitsWMMA_Tiled_Grouped, grid,
-      dim3(GEMM_WG_SZ(kTiledGroupedBm, kTiledGroupedBn, 4, 4)), 0,
-      static_cast<hipStream_t>(stream), static_cast<int>(N),
-      static_cast<int>(K), static_cast<const _Float16*>(A),
-      static_cast<const int32_t*>(a_row_ids),
-      static_cast<const unsigned char*>(B), b_row_bytes,
-      static_cast<const _Float16*>(scales), static_cast<const _Float16*>(bias),
-      static_cast<const int32_t*>(expert_row_offsets),
-      static_cast<const int32_t*>(row_tiles),
-      static_cast<const int32_t*>(num_row_tiles), static_cast<int>(block_size),
-      ngk, static_cast<_Float16*>(output));
+#define TILED_GROUPED_LAUNCH(BN, WM, WN, BK, V)                                \
+    hipLaunchKernelGGL(                                                       \
+        HIP_KERNEL_NAME(MatMulNBitsWMMA_Tiled_Grouped<BN, WM, WN, BK, V>),    \
+        dim3(static_cast<unsigned>((N + BN - 1) / BN),                        \
+             static_cast<unsigned>(max_row_tiles)),                           \
+        dim3(GEMM_WG_SZ(kTiledGroupedBm, BN, WM, WN)), 0,                     \
+        static_cast<hipStream_t>(stream), static_cast<int>(N),                \
+        static_cast<int>(K), static_cast<const _Float16*>(A),                 \
+        static_cast<const int32_t*>(a_row_ids),                               \
+        static_cast<const unsigned char*>(B), b_row_bytes,                    \
+        static_cast<const _Float16*>(scales),                                 \
+        static_cast<const _Float16*>(bias),                                   \
+        static_cast<const int32_t*>(expert_row_offsets),                      \
+        static_cast<const int32_t*>(row_tiles),                               \
+        static_cast<const int32_t*>(num_row_tiles),                           \
+        static_cast<int>(block_size), ngk, static_cast<_Float16*>(output))
+  // The core runs whole K-steps, so the 64-wide step needs K % 64 == 0.
+  if (tiled_grouped_gfx115_device() && (K % 64) == 0) {
+    TILED_GROUPED_LAUNCH(128, 2, 4, 64, 97);
+  } else {
+    TILED_GROUPED_LAUNCH(128, 4, 4, 32, 1);
+  }
+#undef TILED_GROUPED_LAUNCH
 
   hipError_t err = hipGetLastError();
   if (err != hipSuccess)
