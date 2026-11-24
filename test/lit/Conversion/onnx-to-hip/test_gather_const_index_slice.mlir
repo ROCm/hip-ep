@@ -4,8 +4,8 @@
 // A Gather of one constant in-range index on static floating-point data, with
 // a result of at least 4096 elements, becomes a size-1 tensor.extract_slice of
 // the gathered axis, plus a tensor.collapse_shape that drops the axis for a
-// scalar index. Small results, integer data, runtime indices, several indices
-// and out-of-range indices keep hip.gather.
+// scalar index. Small results, integer data, runtime or dynamically shaped
+// indices, several indices and out-of-range indices keep hip.gather.
 
 // RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
 
@@ -78,6 +78,15 @@ module {
     return %y : tensor<8192xf32>
   }
   // CHECK-LABEL: func.func @runtime_index
+  // CHECK-NOT: tensor.extract_slice
+  // CHECK: hip.gather
+
+  // Dynamically shaped indices keep hip.gather even with a static result.
+  func.func @dynamic_indices(%x: tensor<16x4096xf32>, %i: tensor<?xi64>) -> tensor<1x4096xf32> {
+    %y = "onnx.Gather"(%x, %i) {axis = 0 : si64} : (tensor<16x4096xf32>, tensor<?xi64>) -> tensor<1x4096xf32>
+    return %y : tensor<1x4096xf32>
+  }
+  // CHECK-LABEL: func.func @dynamic_indices
   // CHECK-NOT: tensor.extract_slice
   // CHECK: hip.gather
 

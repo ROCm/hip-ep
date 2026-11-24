@@ -52,7 +52,7 @@ gatherAsSlice(mlir::PatternRewriter &rewriter, mlir::Location loc,
   auto dataType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
   auto indicesType = mlir::dyn_cast<mlir::RankedTensorType>(indices.getType());
   if (!dataType || !indicesType || !dataType.hasStaticShape() ||
-      !resultType.hasStaticShape() ||
+      !indicesType.hasStaticShape() || !resultType.hasStaticShape() ||
       resultType.getNumElements() < kMinSliceElements ||
       !mlir::isa<mlir::FloatType>(dataType.getElementType()) ||
       resultType.getElementType() != dataType.getElementType())
