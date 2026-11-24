@@ -140,6 +140,10 @@ mlir::LogicalResult convertOnnxReduction(mlir::Operation *op,
     list.erase(std::unique(list.begin(), list.end()), list.end());
     reduced = rewriter.getDenseI64ArrayAttr(list);
   }
+  if (!reduced && op->getNumOperands() < 2)
+    return rewriter.notifyMatchFailure(
+        op, name + ": unranked input without an axes operand; cannot "
+                   "normalize static axes");
   if (reduced && inputType) {
     mlir::RankedTensorType expected =
         reducedType(inputType, reduced.asArrayRef(), keepdims);
