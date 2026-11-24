@@ -65,6 +65,10 @@ struct GatherOpLowering : public ConvertOpToLLVMPattern<GatherOp> {
     // element_size_bytes
     unsigned elementSizeBytes =
         dataType.getElementType().getIntOrFloatBitWidth() / 8;
+
+    if (elementSizeBytes == 0)
+      return rewriter.notifyMatchFailure(
+          op, "sub-byte (i1) element type is unsupported for gather");
     Value elemSizeVal = LLVM::ConstantOp::create(
         rewriter, loc, i64Type, rewriter.getI64IntegerAttr(elementSizeBytes));
 
@@ -94,6 +98,10 @@ struct GatherOpLowering : public ConvertOpToLLVMPattern<GatherOp> {
     // otherwise fuses adjacent indices into out-of-range values).
     unsigned indicesElemBytes =
         indicesType.getElementType().getIntOrFloatBitWidth() / 8;
+
+    if (indicesElemBytes == 0)
+      return rewriter.notifyMatchFailure(
+          op, "sub-byte (i1) element type is unsupported for gather");
     Value indicesElemSizeVal = LLVM::ConstantOp::create(
         rewriter, loc, i64Type, rewriter.getI64IntegerAttr(indicesElemBytes));
 

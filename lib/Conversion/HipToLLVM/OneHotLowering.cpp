@@ -100,6 +100,9 @@ struct OneHotOpLowering : public ConvertOpToLLVMPattern<OneHotOp> {
         indicesType.getElementType().getIntOrFloatBitWidth() / 8;
     unsigned depthElemBytes =
         depthType.getElementType().getIntOrFloatBitWidth() / 8;
+    if (elementSizeBytes == 0 || indicesElemBytes == 0 || depthElemBytes == 0)
+      return rewriter.notifyMatchFailure(
+          op, "sub-byte (i1) element type is unsupported for one_hot");
     Value elemSizeVal = createI64Const(elementSizeBytes);
     Value indicesElemSizeVal = createI64Const(indicesElemBytes);
     Value depthElemSizeVal = createI64Const(depthElemBytes);

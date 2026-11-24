@@ -92,6 +92,10 @@ struct CompressOpLowering : public ConvertOpToLLVMPattern<CompressOp> {
 
     unsigned elementSizeBytes =
         inputType.getElementType().getIntOrFloatBitWidth() / 8;
+
+    if (elementSizeBytes == 0)
+      return rewriter.notifyMatchFailure(
+          op, "sub-byte (i1) element type is unsupported for compress");
     Value elemSizeVal = createI64Const(elementSizeBytes);
 
     SmallVector<Type, 12> paramTypes = {
