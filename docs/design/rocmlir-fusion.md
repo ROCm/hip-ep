@@ -448,3 +448,8 @@ and `int4-weights` are the fusion switches.
 - `HIPDNN_EP_ROCMLIR_FUSION_REPORT=<file>` (pipeline option `report`)
   appends one JSON line for each kernel and each host function. Two runs make
   the same kernels when their records are equal as multisets.
+- `HIPDNN_EP_ROCMLIR_VERBOSE=1` prints the autotune progress to stderr: one line
+  per candidate and kernel, the nearest-tune and compile summaries, and at the
+  end the perfConfig compile and benchmark wall times, as
+  `hip-rocmlir-compiler --verbose` does. The HIP-to-LLVM time is not printed,
+  since the provider lowers the module later in the tail.
