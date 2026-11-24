@@ -32,10 +32,6 @@ struct GatherNDOpLowering : public ConvertOpToLLVMPattern<GatherNDOp> {
     auto outputType = cast<MemRefType>(op.getOutput().getType());
 
     int64_t hipDtype = getHipdnnDataType(dataType.getElementType());
-    // i1 shares the UINT8 dtype slot, which the gather_nd kernel rejects.
-    if (dataType.getElementType().isInteger(1))
-      return rewriter.notifyMatchFailure(
-          op, "i1 data is unsupported for gather_nd");
     if (hipDtype < 0)
       return rewriter.notifyMatchFailure(op, "unsupported data element type");
 
