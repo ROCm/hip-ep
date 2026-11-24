@@ -2334,6 +2334,7 @@ def Hip_TransposeOp : Hip_DpsOp_WithInfer<"transpose", "Output",
     attr-dict (`:` type($result_tensors)^)?
   }];
   let hasVerifier = 1;
+  let hasCanonicalizer = 1;
 }
 
 def Hip_GatherOp : Hip_DpsOp_WithInfer<"gather"> {
@@ -3081,6 +3082,53 @@ def Hip_SwigluOp : Hip_DpsOp_AutoReify<"swiglu"> {
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+}
+
+def Hip_ScaledMaskedSoftmaxOp : Hip_DpsOp_AutoReify<"scaled_masked_softmax"> {
+  let summary = "Softmax over the last axis of scaled, id-masked scores";
+  let description = [{
+    With the scores viewed as [outer, R, C] (R and C the last two axes):
+
+      output[o, r, c] = softmax_c(row_ids[r] == col_ids[c]
+                                      ? round(input[o, r, c] * scale)
+                                      : fill)
+
+    where round() is to the element type, as a separate multiply would store
+    it. An id vector of length 1 broadcasts across its axis; any other length
+    must equal the axis it indexes, which the runtime checks.
+
+    Produced by hip-fusion-transform from mul(scores, scale) ->
+    where(equal(row_ids[R,1], col_ids[1,C]), ., fill) -> miopen.softmax, the
+    per-frame attention mask of Qwen-VL style vision encoders. It never
+    materializes the mask or either intermediate score tensor.
+
+    Example:
+    ```mlir
+    hip.scaled_masked_softmax(%ctx) ins(%scores, %ids, %ids :
+        memref<16x?x?xf16>, memref<?xi64>, memref<?xi64>)
+        outs(%out : memref<16x?x?xf16>) {fill = -6.5504e+04 : f32,
+        scale = 0.1178 : f32}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$row_ids,
+    Hip_TensorOrMemRef:$col_ids,
+    Hip_TensorOrMemRef:$output,
+    F32Attr:$scale,
+    F32Attr:$fill
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $row_ids `,` $col_ids `:` type($input)
+    `,` type($row_ids) `,` type($col_ids) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
 }
 
 def Hip_ReciprocalOp : Hip_DpsOp_AutoReifyInfer<"reciprocal", "Y"> {

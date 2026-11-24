@@ -3,10 +3,9 @@
  * Licensed under the MIT License.
  */
 
-#include "OnnxToHipUtils.h"
+#include "ReduceConversionUtils.h"
 
 #include "llvm/ADT/APInt.h"
-#include "llvm/ADT/SmallSet.h"
 
 namespace mlir {
 namespace hip {
@@ -59,71 +58,6 @@ extractIntVector(mlir::Value v, llvm::SmallVectorImpl<int64_t> &out) {
   return mlir::success();
 }
 
-/// Build the destination `tensor.empty` for ReduceL2.
-///
-/// Output shape semantics match other ONNX reduce ops:
-///   * keepdims=1: out_rank == in_rank; reduced axes become size 1.
-///   * keepdims=0: out_rank == in_rank - #axes; reduced axes are dropped.
-///
-/// For dynamic output dims we map back to the source `data` dim using the
-/// known axes set (compile-time constant). When axes are not known, fall
-/// back to positional alignment (correct for keepdims=1 and all-reduce).
-static mlir::Value buildReduceL2Init(mlir::PatternRewriter &rewriter,
-                                     mlir::Location loc,
-                                     mlir::RankedTensorType resultType,
-                                     mlir::Value data,
-                                     llvm::ArrayRef<int64_t> axesVec,
-                                     bool axesKnown, int64_t keepdims) {
-  auto dataType = mlir::cast<mlir::RankedTensorType>(data.getType());
-  int64_t inRank = dataType.getRank();
-
-  llvm::SmallSet<int64_t, 8> reducedAxes;
-  for (int64_t a : axesVec) {
-    if (a < 0)
-      a += inRank;
-    reducedAxes.insert(a);
-  }
-
-  llvm::SmallVector<int64_t> outToIn(resultType.getRank(), -1);
-  if (axesKnown) {
-    if (keepdims) {
-      for (int64_t i = 0; i < resultType.getRank(); ++i)
-        outToIn[i] = reducedAxes.contains(i) ? -1 : i;
-    } else {
-      int64_t outIdx = 0;
-      for (int64_t i = 0; i < inRank; ++i) {
-        if (reducedAxes.contains(i))
-          continue;
-        if (outIdx < resultType.getRank())
-          outToIn[outIdx] = i;
-        ++outIdx;
-      }
-    }
-  } else {
-    for (int64_t i = 0; i < resultType.getRank(); ++i)
-      outToIn[i] = i < inRank ? i : -1;
-  }
-
-  llvm::SmallVector<mlir::Value> dynSizes;
-  for (int64_t i = 0; i < resultType.getRank(); ++i) {
-    if (!resultType.isDynamicDim(i))
-      continue;
-    int64_t inIdx = outToIn[i];
-    if (inIdx < 0) {
-      dynSizes.push_back(
-          mlir::arith::ConstantIndexOp::create(rewriter, loc, 1));
-    } else if (dataType.isDynamicDim(inIdx)) {
-      dynSizes.push_back(
-          mlir::tensor::DimOp::create(rewriter, loc, data, inIdx));
-    } else {
-      dynSizes.push_back(mlir::arith::ConstantIndexOp::create(
-          rewriter, loc, dataType.getDimSize(inIdx)));
-    }
-  }
-  return mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
-                                       resultType.getElementType(), dynSizes);
-}
-
 /// onnx.ReduceL2 -> hip.reduce_l2
 ///
 /// Direct, dim-tolerant conversion: sqrt(sum(x^2)) along the reduced axes
@@ -142,6 +76,8 @@ struct ReduceL2ToHip : public mlir::RewritePattern {
 mlir::LogicalResult
 ReduceL2ToHip::matchAndRewrite(mlir::Operation *op,
                                mlir::PatternRewriter &rewriter) const {
+  if (mlir::failed(checkReductionAttributes(op, rewriter, "ReduceL2")))
+    return mlir::failure();
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))
     return mlir::failure();
@@ -183,12 +119,6 @@ ReduceL2ToHip::matchAndRewrite(mlir::Operation *op,
     } else {
       axesKnown = true; // empty axes, noop
     }
-    auto axesType = mlir::RankedTensorType::get(
-        {static_cast<int64_t>(axesVec.size())}, rewriter.getI64Type());
-    auto axesAttr =
-        mlir::DenseIntElementsAttr::get(axesType, llvm::ArrayRef(axesVec));
-    axesOperand =
-        mlir::arith::ConstantOp::create(rewriter, loc, axesType, axesAttr);
   }
 
   auto resultTypeOr =
@@ -199,8 +129,27 @@ ReduceL2ToHip::matchAndRewrite(mlir::Operation *op,
             "static axes)");
   mlir::RankedTensorType resultType = *resultTypeOr;
 
-  mlir::Value init = buildReduceL2Init(rewriter, loc, resultType, data, axesVec,
-                                       axesKnown, keepdims);
+  mlir::Value init;
+  if (axesKnown) {
+    mlir::FailureOr<mlir::Value> empty = createReductionEmptyTensor(
+        rewriter, loc, resultType, data, axesVec, keepdims, noopWithEmptyAxes);
+    if (mlir::failed(empty))
+      return rewriter.notifyMatchFailure(
+          op, "ReduceL2: destination shape conflicts with the result type");
+    init = *empty;
+  } else {
+    // Runtime axes: the destination can only follow the data positionally.
+    init = createEmptyTensor(rewriter, loc, resultType, data);
+  }
+
+  if (!axesOperand) {
+    auto axesType = mlir::RankedTensorType::get(
+        {static_cast<int64_t>(axesVec.size())}, rewriter.getI64Type());
+    auto axesAttr =
+        mlir::DenseIntElementsAttr::get(axesType, llvm::ArrayRef(axesVec));
+    axesOperand =
+        mlir::arith::ConstantOp::create(rewriter, loc, axesType, axesAttr);
+  }
 
   auto keepdimsAttr = rewriter.getI64IntegerAttr(keepdims);
   auto noopWithEmptyAxesAttr = rewriter.getI64IntegerAttr(noopWithEmptyAxes);
