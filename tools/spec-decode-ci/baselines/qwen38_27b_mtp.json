@@ -1,0 +1,98 @@
+{
+  "name": "qwen38_27b_mtp",
+  "model_repo": "amd/Qwen3.8-27B-MTP-Quark-hip-ep",
+  "model_revision": "ad3f4d12f2f98df15fcf15f92f0e6077ef7f5bfd",
+  "hip_ep_ref": "perf/dspark-dflash-enablement-optimziation (dfcca586)",
+  "harness": {
+    "script": "scripts/qwen38_spec_bench.py",
+    "format": "qwen38_spec_bench",
+    "args": [
+      "--ep",
+      "hipgpu",
+      "--iobinding",
+      "--ep-dll",
+      "{ep_dir}/hipgpu.dll",
+      "--target-dir",
+      "{model}/target",
+      "--target",
+      "text_hipep_all.onnx",
+      "--embed",
+      "{model}/target/embed_tokens_fp16.npy",
+      "--tokenizer-dir",
+      "{model}/target",
+      "--mtp",
+      "{model}/mtp.onnx",
+      "--per-task",
+      "1",
+      "--max-context",
+      "1792"
+    ],
+    "path_prepend": [
+      "{therock_bin}"
+    ]
+  },
+  "prompts": "../prompts/spec_bench_qwen38_ci5.jsonl",
+  "prompts_sha256": "abf2d2dc3ac8418cfa392a37e5c27c00e5b7b48d60c0172b8d93e6f2f1269671",
+  "question_ids": [
+    110,
+    183,
+    279,
+    343,
+    406
+  ],
+  "max_new": 128,
+  "env": {
+    "HIPDNN_EP_STRICT": "1",
+    "HIPDNN_EP_MATMUL_DP4A_MAX_M": "8"
+  },
+  "baseline_arm": "none",
+  "arms": [
+    "none",
+    "mtp:2:cap8"
+  ],
+  "tolerance": {
+    "tok_s": 0.08,
+    "speedup": 0.06,
+    "tokens_per_verify": 0.02
+  },
+  "reference": {
+    "calibrated": false,
+    "source": "team reference numbers for Qwen3.8-27B on Strix Halo (plain 13.36 tok/s; MTP ~19.4 1.45x; DSpark ~23.1 1.73x; DFlash2 27.24 2.04x; EAGLE-4 33.19 2.31x); tokens per verify from the board measurement, which is hardware-independent",
+    "arms": {
+      "none": {
+        "tok_s": 13.36
+      },
+      "mtp:2:cap8": {
+        "tok_s": 19.4,
+        "speedup": 1.45,
+        "tokens_per_verify": 2.372
+      }
+    }
+  },
+  "board_measurement": {
+    "source": "median of 6 runs on Strix Halo (Radeon 8060S, Windows power plan Balanced), hip-ep dfcca586, 2026-11-01; tokens per verify identical on every run",
+    "arms": {
+      "none": {
+        "tok_s": 11.307
+      },
+      "mtp:2:cap8": {
+        "tok_s": 19.81,
+        "speedup": 1.752,
+        "tokens_per_verify": 2.372
+      }
+    }
+  },
+  "model_card_reference": {
+    "source": "results/spec_bench.json of the model repo (240 Spec-Bench prompts, measuring hip-ep build not recorded), restricted to question_ids 110, 183, 279, 343, 406",
+    "arms": {
+      "none": {
+        "tok_s": 13.33
+      },
+      "mtp:2:cap8": {
+        "tok_s": 18.63,
+        "speedup": 1.398,
+        "tokens_per_verify": 2.322
+      }
+    }
+  }
+}
