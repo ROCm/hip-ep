@@ -35,11 +35,15 @@ env:
   # ORT is still built from source either way). Part of the ort-install cache
   # key. Remove a PR once its fix lands in the pinned ONNX Runtime release.
   ONNXRUNTIME_PR_PATCHES: ""
-  OGA_VERSION: "0.19.0"
+  # onnxruntime-genai source: a fork branch that carries the AMDGPU paged
+  # Engine path and engine_benchmark support. Pinned by commit so the OGA
+  # cache key tracks the exact source.
+  OGA_REPOSITORY: "AMDmoore/onnxruntime-genai"
+  OGA_REF: "580ee41dd317ea52d326d94e1aaacf320b389e4e"
   # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
-  # pull/<n>.diff and applied on top of v<OGA_VERSION>. Part of the OGA cache
-  # key. Remove a PR once it lands in the pinned OGA release.
-  OGA_PR_PATCHES: "2875"
+  # pull/<n>.diff and applied on top of OGA_REF. Part of the OGA cache key.
+  # Empty: the fork branch already carries everything the build needs.
+  OGA_PR_PATCHES: ""
   # The GPU arch the artifact targets. CI runners have no GPU, so it is passed
   # explicitly (build.py auto-detects from /sys on a real GPU host).
   HIP_ARCHITECTURES: gfx11-generic
@@ -422,7 +426,7 @@ jobs:
         uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/oga-artifacts
-          key: linux-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
+          key: linux-oga-${{ env.OGA_REF }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
 
       # Checkout + build are skipped on an OGA cache hit (step-level gate); the
       # install-copy below always runs so the
@@ -431,8 +435,8 @@ jobs:
         if: steps.cache-oga.outputs.cache-hit != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: microsoft/onnxruntime-genai
-          ref: v${{ env.OGA_VERSION }}
+          repository: ${{ env.OGA_REPOSITORY }}
+          ref: ${{ env.OGA_REF }}
           submodules: recursive
           path: onnxruntime-genai
           # Full history: `git apply --3way` below resolves each hunk against the
@@ -497,10 +501,12 @@ jobs:
           # ENABLE_TESTS=OFF is not redundant with --skip_tests: build.py only
           # turns the option off for mobile targets, so on desktop --skip_tests
           # skips *running* the tests while still building them. This job needs
-          # only the shared library, model_benchmark and the wheel.
+          # only the shared library, model_benchmark, engine_benchmark and the
+          # wheel.
           python3 onnxruntime-genai/build.py \
             --config Release \
             --cmake_generator Ninja \
+            --build_engine_benchmark \
             --no_telemetry \
             --ort_home "$ORT_HOME" \
             --skip_tests --skip_examples \
@@ -513,6 +519,16 @@ jobs:
           mkdir -p "$ART"
           cp "${{ runner.workspace }}/build-oga/Release/benchmark/c/model_benchmark" "$ART/"
           cp -a "${{ runner.workspace }}/build-oga/Release"/libonnxruntime-genai.so* "$ART/"
+          ENGINE_BENCH=$(find "${{ runner.workspace }}/build-oga/Release" \
+            -name engine_benchmark -type f | head -1)
+          if [ -z "$ENGINE_BENCH" ]; then
+            echo "ERROR: engine_benchmark not found in build tree"
+            exit 1
+          fi
+          cp "$ENGINE_BENCH" "$ART/"
+          # engine_benchmark refuses to start without versions.json beside it.
+          printf '{"ort_version": "%s", "cuda_plugin_ep_version": "n/a"}\n' \
+            "${{ env.ONNXRUNTIME_VERSION }}" > "$ART/versions.json"
           # Cache the OGA python wheel alongside the other OGA artifacts.
           OGA_WHEEL=$(find "${{ runner.workspace }}/build-oga" \
             -name "onnxruntime_genai-*.whl" -type f | head -1)
@@ -528,6 +544,7 @@ jobs:
           set -euo pipefail
           ART="${{ runner.workspace }}/oga-artifacts"
           cp "$ART/model_benchmark" "${{ runner.workspace }}/install/bin/"
+          cp "$ART/engine_benchmark" "$ART/versions.json" "${{ runner.workspace }}/install/bin/"
           cp -a "$ART"/libonnxruntime-genai.so* "${{ runner.workspace }}/install/lib/"
 
       # -----------------------------------------------------------------------
@@ -574,7 +591,8 @@ jobs:
             "$INSTALL"/bin/hip-compiler \
             "$INSTALL"/bin/hip-onnx-runner \
             "$INSTALL"/bin/hip-test \
-            "$INSTALL"/bin/model_benchmark
+            "$INSTALL"/bin/model_benchmark \
+            "$INSTALL"/bin/engine_benchmark
           prev=0
           for _ in 1 2 3 4; do
             mapfile -t libs < <(find "$INSTALL/lib" -maxdepth 1 -name 'lib*.so*' -type f)
