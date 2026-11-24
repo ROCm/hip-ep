@@ -10,7 +10,7 @@
 // A convolution followed by a batch normalization without learned parameters,
 // written as elementwise ops. hip-fusion-transform turns the chain into
 // hip.batch_norm with a scale of ones and a bias of zeros, and
-// hip-fold-batchnorm folds that into the convolution.
+// hip-fold-into-conv folds that into the convolution.
 //
 // mean = [1, 0], var = [3, 0], epsilon = 1, so s = 1 / sqrt(var + epsilon) =
 // [0.5, 1] and t = -mean * s = [-0.5, 0], which becomes the convolution's bias.

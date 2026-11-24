@@ -10,7 +10,7 @@
 //   y = (x - mean) * (1 / sqrt(variance + epsilon)) * scale + bias
 //
 // The scale and the bias are optional. Recovering hip.batch_norm lets
-// hip-fold-batchnorm fold the normalization into a producing convolution. The
+// hip-fold-into-conv fold the normalization into a producing convolution. The
 // pattern declines unless the per-channel parameters broadcast along dimension
 // 1 of x, epsilon is known at compile time, and the full-size intermediates
 // have a single value use.

@@ -5,7 +5,7 @@
 
 """Tests for BatchNormalization folded into the producing Conv weights.
 
-hip-fold-batchnorm rewrites an inference BatchNormalization with constant
+hip-fold-into-conv rewrites an inference BatchNormalization with constant
 parameters into the filter and bias of the Conv(s) feeding it, directly or
 through an Add of two Convs. A wrong per-channel scale, a shift added twice,
 or a shift dropped all give outputs that stay correlated with the reference,
@@ -17,6 +17,14 @@ inline threshold. Run with
 `--ep-option XLNX_model_clone_external_data_threshold=1073741824` (or the
 `XLNX_ABI_2_0_CLONE_EXTERNAL_DATA_THRESHOLD` environment variable) to exercise
 the fold; without it the same graphs check the unfolded path.
+
+TestConvChannelAffine runs a Conv followed by a Mul by a per-channel constant
+(a layer scale), an Add of one, both in a row, or a BatchNormalization, with a
+dynamic batch. It checks the result against the reference. ONNX Runtime
+applies its own Conv + Mul / Add / BatchNormalization fusions before the EP
+sees the graph, so these cases do not show that hip-fold-into-conv ran: the
+LIT tests of the pass (test/lit/Transforms/test_fold_into_conv.mlir) cover the
+fold itself, including the cases that must not fold.
 
 test_decomposed_bn_graph_inputs covers a BatchNormalization exported as
 elementwise ops (Sub, Mul, Mul, Add over Unsqueeze'd per-channel vectors and
@@ -243,3 +251,57 @@ class TestConvBatchNorm:
         actual, expected = model_runner.run_sample(model, [x] + vectors)
         compare_outputs(actual, expected, **_TOLERANCE[dtype])
         _assert_batch_norm_fused(ir_dump)
+
+
+# Each case is the chain after the Conv: (op, constant shape) pairs.
+_AFFINE_CHAINS = {
+    "bn": None,
+    "mul_chw": [("Mul", [CHANNELS, 1, 1])],
+    "mul_1chw": [("Mul", [1, CHANNELS, 1, 1])],
+    "mul_scalar": [("Mul", [])],
+    "add_1chw": [("Add", [1, CHANNELS, 1, 1])],
+    "mul_add": [("Mul", [CHANNELS, 1, 1]), ("Add", [1, CHANNELS, 1, 1])],
+}
+
+
+class TestConvChannelAffine:
+    @pytest.mark.parametrize("dtype", [np.float32, np.float16])
+    @pytest.mark.parametrize("batch", [1, 3])
+    @pytest.mark.parametrize("chain", list(_AFFINE_CHAINS))
+    def test_conv_then_affine_dynamic_batch(self, model_runner, dtype, batch, chain):
+        """Conv -> per-channel affine map, with a dynamic batch."""
+        in_c = 16
+        tp = np_to_onnx_type(dtype)
+        rng = np.random.default_rng(21)
+        inits = [
+            _weight(rng, dtype, "w", in_c),
+            numpy_helper.from_array(
+                rng.uniform(-0.5, 0.5, [CHANNELS]).astype(dtype), "cb"
+            ),
+        ]
+        nodes = [_conv_node("x", "w", "c0", bias="cb")]
+        if _AFFINE_CHAINS[chain] is None:
+            inits += _bn_initializers(rng, dtype)
+            nodes.append(_bn_node("c0", "y"))
+        else:
+            last = "c0"
+            for i, (op, shape) in enumerate(_AFFINE_CHAINS[chain]):
+                const = rng.uniform(0.5, 1.5 if op == "Mul" else 1.0, shape)
+                inits.append(numpy_helper.from_array(const.astype(dtype), f"k{i}"))
+                out = "y" if i == len(_AFFINE_CHAINS[chain]) - 1 else f"c{i + 1}"
+                nodes.append(helper.make_node(op, [last, f"k{i}"], [out]))
+                last = out
+        model = make_model_from_nodes(
+            nodes,
+            [helper.make_tensor_value_info("x", tp, ["batch", in_c, SPATIAL, SPATIAL])],
+            [
+                helper.make_tensor_value_info(
+                    "y", tp, ["batch", CHANNELS, SPATIAL, SPATIAL]
+                )
+            ],
+            initializers=inits,
+        )
+        x = rng.uniform(-1.0, 1.0, [batch, in_c, SPATIAL, SPATIAL]).astype(dtype)
+        actual, expected = model_runner.run_sample(model, [x])
+        assert actual[0].shape == (batch, CHANNELS, SPATIAL, SPATIAL)
+        compare_outputs(actual, expected, **_TOLERANCE[dtype])

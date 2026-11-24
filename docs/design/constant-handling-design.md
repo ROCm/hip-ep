@@ -218,7 +218,7 @@ potentially multi-gigabyte weights throughout shape inference.
 Passes that fold weight values at compile time read a carrier's payload through
 `readConstantData` (`include/hip/Dialect/IR/HipConstantData.h`), which handles
 inline values and file-backed ranges and declines memory-address carriers.
-`hip-fold-batchnorm`, `hip-decompose-conv-transpose`, and the NhwcConv
+`hip-fold-into-conv`, `hip-decompose-conv-transpose`, and the NhwcConv
 conversion all use it, so they fold only weights at or below the importer's
 inline threshold (raise `XLNX_ABI_2_0_CLONE_EXTERNAL_DATA_THRESHOLD` to bring
 all initializers inline). A fold emits its result as a new inline carrier, so

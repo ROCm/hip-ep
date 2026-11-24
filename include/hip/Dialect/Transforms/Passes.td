@@ -349,23 +349,46 @@ def DecomposeConvTransposePass
   ];
 }
 
-def FoldBatchNormPass
-    : Pass<"hip-fold-batchnorm", "mlir::func::FuncOp"> {
-  let summary = "Fold constant-parameter hip.batch_norm into hip.conv weights";
+def FoldIntoConvPass : Pass<"hip-fold-into-conv", "mlir::func::FuncOp"> {
+  let summary = "Fold neighbouring constant ops into a hip.conv's parameters";
   let description = [{
-    Inference BatchNorm with constant parameters is the per-channel affine map
-    `y = s * x + t`, `s = scale / sqrt(var + eps)`, `t = B - mean * s`. When
-    its input is a `hip.conv`, or a `hip.add` of two `hip.conv`s, the scale is
-    multiplied into each filter per output channel and the shift is added to
-    one conv's bias (any existing biases are scaled by `s`). The batch norm
-    disappears, so a following pointwise op fuses straight into the conv.
+    Folds ops next to a `hip.conv` into the conv's own parameters, so the op
+    and its kernel launch disappear. Every rewrite here builds the replacement
+    conv before touching the IR and skips the fold when a required fact is not
+    established, leaving the IR unchanged.
 
-    Every intermediate result must have the batch norm as its only consumer,
-    and the filters, biases, and batch-norm parameters must be readable at
-    compile time. The rewritten filters are emitted as new inline
-    `hip.constant`s; the originals are left for their other users, if any.
-    Inline and file-backed carriers are read; memory-address carriers are
-    not, so a batch norm over memory-backed weights is left in place.
+    **Output side: a per-channel affine map.** A conv is linear in its weights
+    per output channel, so a per-channel affine map `y = s * x + t` applied to
+    its output moves into the conv: `s` multiplies the filter and any existing
+    bias per output channel, and `t` is added to the bias. The map's input
+    must be a `hip.conv`, or a `hip.add` of two `hip.conv`s (both filters are
+    scaled and `t` goes into one bias). Three ops are sources of such a map:
+
+    - an inference `hip.batch_norm` with constant parameters:
+      `s = scale / sqrt(var + eps)`, `t = B - mean * s`;
+    - a `hip.mul` by a constant that broadcasts along the channel axis only
+      (`[C, 1, 1]`, `[1, C, 1, 1]`, or a scalar), e.g. a layer scale: `t = 0`;
+    - a `hip.add` of such a constant: `s = 1`.
+
+    A mul followed by an add folds in two steps. The map folds only when:
+
+    - every intermediate result has the next op on the path to the map as its
+      only consumer; `tensor.dim` users are allowed and move to the rewritten
+      conv, since the fold preserves every shape;
+    - the input is rank >= 3 with a static channel dim (dim 1); batch and
+      spatial dims may be dynamic, and the rewritten convs keep their result
+      types and inits;
+    - the map's parameters, the biases, and (when `s` is not all ones) the
+      filters are constants readable at compile time; a mul / add constant
+      must have the conv's element type. Inline and file-backed carriers are
+      read; memory-address carriers are not, so a fold that needs
+      memory-backed weights is skipped;
+    - every rounded filter and bias value is finite.
+
+    The rewritten filters and biases are emitted as new inline `hip.constant`s,
+    rounded to the element type; the originals are left for their other users,
+    if any. A batch norm that is not fed by a conv, or that the fold does not
+    apply to, stays a `hip.batch_norm`, which lowers to one kernel.
   }];
 }
 
