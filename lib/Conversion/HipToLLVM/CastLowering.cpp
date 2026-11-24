@@ -66,12 +66,11 @@ struct CastOpLowering : public ConvertOpToLLVMPattern<CastOp> {
       return rewriter.notifyMatchFailure(
           op, "unsupported element type for hip.cast");
 
-    // The kernels convert by value, so f32 2.5 or i64 5 would land in the mask
-    // as 2 or 5 and later Where/And/Not would misread it. Only a source that is
-    // already a 0/1 byte may target i1 until a `x != 0` kernel exists.
+    // The kernels convert by value, so f32 2.5, i64 5 or a ui8 5 would land in
+    // the mask unchanged and later Where/And/Not would misread it. Only an i1
+    // source is already a 0/1 byte; anything else needs a `x != 0` kernel.
     if (outputType.getElementType().isInteger(1) &&
-        !(inputType.getElementType().isInteger(1) ||
-          inputType.getElementType().isUnsignedInteger(8)))
+        !inputType.getElementType().isInteger(1))
       return rewriter.notifyMatchFailure(
           op, "hip.cast to i1 needs a != 0 normalisation kernel");
 
