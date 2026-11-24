@@ -58,6 +58,14 @@ public:
   /// before compile().
   void setHipdnnHandle(void *handle) { hipdnnHandle_ = handle; }
 
+  /// Output tensor-form HIP IR: compile() lowers the ONNX source to the HIP
+  /// dialect, writes the module at its output path, and returns before
+  /// bufferization (buildOnnxToHipPipelineTail). The written module names
+  /// "hip" as its source pipeline, and compile() takes such a module as input
+  /// and continues from that point, so it compiles to the same artifact the
+  /// source does. Must be called before compile().
+  void setHipIrOutput() { hipIrOutput_ = true; }
+
   /// Retrieve compiled hipDNN graphs after compile() returns.
   /// The returned map contains graphs compiled by the ConvertOnnxToHipDNN
   /// pass. Caller should store them in a registry for runtime execution.
@@ -132,6 +140,7 @@ private:
 
   morphizen::FileSystem *fileSystem_ = nullptr;
   void *hipdnnHandle_ = nullptr;
+  bool hipIrOutput_ = false;
   mlir::hip::CompiledGraphMap compiledGraphs_;
 };
 
