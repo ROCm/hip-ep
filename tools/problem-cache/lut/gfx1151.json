@@ -1942,6 +1942,24 @@
     },
     {
       "perf_config": "gemm:mPerBlock=80,nPerBlock=64,kPerBlock=32,kpack=1,numCTAs=1,numWaves=4,matrixInstrNonkdim=0,splitKFactor=1,numStages=3,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=1,nPerBlock=1,kPerBlock=1,kpack=1,numCTAs=1,numWaves=4,matrixInstrNonkdim=0,splitKFactor=1,numStages=1,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=1,nPerBlock=32,kPerBlock=1,kpack=1,numCTAs=1,numWaves=2,matrixInstrNonkdim=0,splitKFactor=1,numStages=3,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=1,nPerBlock=16,kPerBlock=1,kpack=1,numCTAs=1,numWaves=2,matrixInstrNonkdim=0,splitKFactor=1,numStages=1,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=128,nPerBlock=128,kPerBlock=96,kpack=1,numCTAs=1,numWaves=4,matrixInstrNonkdim=0,splitKFactor=1,numStages=1,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "attn:mPerBlockG0=16,nPerBlockG0=32,nPerBlockG1=0,kPerBlock=64,kpack=1,numCTAs=1,numWaves=1,matrixInstrNonkdim=0,splitKFactor=1,numStages=2,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "attn:mPerBlockG0=32,nPerBlockG0=256,nPerBlockG1=0,kPerBlock=32,kpack=1,numCTAs=1,numWaves=8,matrixInstrNonkdim=0,splitKFactor=1,numStages=1,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
     }
   ],
   "points": [
@@ -27766,6 +27784,174 @@
       "config": 170,
       "m": 77,
       "n": 77,
+      "k": 64
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB false -transO false -g 1 -m 1 -n 2048 -k 512 -outputFusions=addf,mulf,erf,addf,mulf,mulf -supportsSplitK false",
+      "config": 175,
+      "m": 1,
+      "n": 2048,
+      "k": 512
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB false -transO false -g 1 -m 1 -n 512 -k 2048 -outputFusions=addf,addf -supportsSplitK true",
+      "config": 175,
+      "m": 1,
+      "n": 512,
+      "k": 2048
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB false -transO false -g 1 -m 1 -n 512 -k 512 -outputFusions=addf -supportsSplitK true",
+      "config": 175,
+      "m": 1,
+      "n": 512,
+      "k": 512
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB false -transO false -g 1 -m 1 -n 512 -k 512 -outputFusions=addf,addf -supportsSplitK true",
+      "config": 175,
+      "m": 1,
+      "n": 512,
+      "k": 512
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB false -transO false -g 1 -m 1 -n 512 -k 512 -outputFusions=addf,mulf -supportsSplitK true",
+      "config": 175,
+      "m": 1,
+      "n": 512,
+      "k": 512
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB false -transO false -g 1 -m 1 -n 512 -k 512 -supportsSplitK true",
+      "config": 175,
+      "m": 1,
+      "n": 512,
+      "k": 512
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB false -transO false -g 1 -m 1 -n 51865 -k 512 -supportsSplitK true",
+      "config": 488,
+      "m": 1,
+      "n": 51865,
+      "k": 512
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB false -transO false -g 1 -m 1500 -n 512 -k 512 -outputFusions=addf -supportsSplitK true",
+      "config": 503,
+      "m": 1500,
+      "n": 512,
+      "k": 512
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB false -transO false -g 1 -m 1500 -n 512 -k 512 -supportsSplitK true",
+      "config": 286,
+      "m": 1500,
+      "n": 512,
+      "k": 512
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB false -transO false -g 8 -m 1 -n 1 -k 64 -supportsSplitK true",
+      "config": 645,
+      "m": 1,
+      "n": 1,
+      "k": 64
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB false -transO false -g 8 -m 1 -n 64 -k 1 -supportsSplitK true",
+      "config": 646,
+      "m": 1,
+      "n": 64,
+      "k": 1
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB false -transO false -g 8 -m 1 -n 64 -k 1500 -supportsSplitK true",
+      "config": 647,
+      "m": 1,
+      "n": 64,
+      "k": 1500
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB true -transO false -g 8 -m 1 -n 1500 -k 64 -supportsSplitK true",
+      "config": 227,
+      "m": 1,
+      "n": 1500,
+      "k": 64
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB false -transO false -g 1 -m 1 -n 3072 -k 768 -outputFusions=addf,mulf,erf,addf,mulf,mulf -supportsSplitK false",
+      "config": 1,
+      "m": 1,
+      "n": 3072,
+      "k": 768
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB false -transO false -g 1 -m 1 -n 51865 -k 768 -outputFusions=extf -supportsSplitK true",
+      "config": 630,
+      "m": 1,
+      "n": 51865,
+      "k": 768
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB false -transO false -g 1 -m 1 -n 768 -k 3072 -outputFusions=addf,addf -supportsSplitK true",
+      "config": 324,
+      "m": 1,
+      "n": 768,
+      "k": 3072
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB false -transO false -g 1 -m 1 -n 768 -k 768 -outputFusions=addf,addf -supportsSplitK true",
+      "config": 324,
+      "m": 1,
+      "n": 768,
+      "k": 768
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB false -transO false -g 1 -m 1 -n 768 -k 768 -outputFusions=addf,extf -supportsSplitK true",
+      "config": 251,
+      "m": 1,
+      "n": 768,
+      "k": 768
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB false -transO false -g 1 -m 1 -n 768 -k 768 -outputFusions=addf,mulf -supportsSplitK true",
+      "config": 0,
+      "m": 1,
+      "n": 768,
+      "k": 768
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB false -transO false -g 1 -m 1 -n 768 -k 768 -outputFusions=extf -supportsSplitK true",
+      "config": 324,
+      "m": 1,
+      "n": 768,
+      "k": 768
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB false -transO false -g 1 -m 1500 -n 768 -k 768 -outputFusions=addf,extf -supportsSplitK true",
+      "config": 3,
+      "m": 1500,
+      "n": 768,
+      "k": 768
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB false -transO false -g 1 -m 1500 -n 768 -k 768 -outputFusions=extf -supportsSplitK true",
+      "config": 648,
+      "m": 1500,
+      "n": 768,
+      "k": 768
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -transQ false -transK false -transV false -transO false -causal false -return_lse false -split_kv 1 -num_heads_q 1 -num_heads_kv 1 -g 12 -seq_len_q 1 -seq_len_k 1 -head_dim_qk 64 -head_dim_v 64 -with-attn-scale false -with-attn-bias true -transBias false -supportsSplitK false",
+      "config": 649,
+      "m": 1,
+      "n": 1,
+      "k": 64
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -transQ false -transK false -transV false -transO false -causal false -return_lse false -split_kv 1 -num_heads_q 1 -num_heads_kv 1 -g 12 -seq_len_q 1 -seq_len_k 1500 -head_dim_qk 64 -head_dim_v 64 -with-attn-scale false -with-attn-bias false -transBias false -supportsSplitK false",
+      "config": 650,
+      "m": 1,
+      "n": 1500,
       "k": 64
     }
   ],
