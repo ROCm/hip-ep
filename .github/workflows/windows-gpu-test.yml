@@ -525,9 +525,9 @@ jobs:
       # -----------------------------------------------------------------------
       # GenAI accuracy: hipdnn-accuracy-test PPL_VLM on Qwen3.8-Flash-Next
       # through the AMDGPU (HIP) EP, gated against the latest main run. The
-      # framework, venv, HF cache and the 124 GB model persist under
-      # runner.workspace/genai-accuracy; only the first run downloads the
-      # model. See test/genai_accuracy/README.md.
+      # framework, venv and HF cache persist under runner.workspace/genai-accuracy.
+      # The 124 GB model lives in C:\models (downloaded there only when missing)
+      # and is linked into that directory. See test/genai_accuracy/README.md.
       # -----------------------------------------------------------------------
       - name: Checkout GenAI accuracy script
         if: ${{ !inputs.docs_only && always() }}
@@ -543,7 +543,8 @@ jobs:
         run: |
           python hip-ep-src\test\genai_accuracy\run_genai_accuracy.py prepare `
             --package-dir gpu-test-package `
-            --cache-root "${{ runner.workspace }}\genai-accuracy"
+            --cache-root "${{ runner.workspace }}\genai-accuracy" `
+            --models-root "C:\models"
           exit $LASTEXITCODE
 
       - name: Run GenAI accuracy (Qwen3.8-Flash-Next PPL_VLM)

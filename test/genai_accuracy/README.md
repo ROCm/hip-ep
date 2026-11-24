@@ -50,12 +50,24 @@ artifact contains `result.json`, the framework logs, and the generated
 hipdnn-accuracy-test/   framework checkout at the pinned commit
 genai-accuracy-venv/    venv, rebuilt when the Python or pinned packages change
 hf-home/                Hugging Face cache (flickr30k)
-genai-models/<repo>/    model download (~124 GB, downloaded once)
+genai-models/<model>    link to the model in the model store
 ```
+
+The model (~124 GB) lives in the machine-wide model store `--models-root`
+(default `$GENAI_MODELS_ROOT`, or `C:\models` on Windows) as
+`<models-root>/<model>`, so every runner workspace shares one copy. `prepare`:
+
+1. Treats the model as present when `<models-root>/<model>/genai_config.json`
+   exists and no `.download_incomplete` marker is left by an interrupted
+   download. A model placed there by hand is used as is; its revision is not
+   verified against the pin.
+2. Otherwise downloads the pinned revision into `<models-root>/<model>`.
+3. Links `<cache-root>/genai-models/<model>` to it: a symlink, or a directory
+   junction when the account cannot create symlinks.
 
 Each run hard-links the model into `--work-dir`, because `run_accuracy.py`
 overwrites `genai_config.json` in the model directory. The work dir must be on
-the same volume as the cache root.
+the same volume as the model store.
 
 ## Running locally
 
@@ -64,7 +76,8 @@ On a Windows Strix Halo machine with Python 3.14 and an extracted
 
 ```bash
 python test/genai_accuracy/run_genai_accuracy.py prepare \
-  --package-dir gpu-test-package --cache-root D:/genai-accuracy
+  --package-dir gpu-test-package --cache-root D:/genai-accuracy \
+  --models-root D:/models
 python test/genai_accuracy/run_genai_accuracy.py run \
   --package-dir gpu-test-package --cache-root D:/genai-accuracy \
   --work-dir D:/genai-accuracy-work --results-dir genai-accuracy-results

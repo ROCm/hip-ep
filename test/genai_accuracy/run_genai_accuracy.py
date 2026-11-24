@@ -107,14 +107,25 @@ def _venv_python(venv_dir: Path) -> Path:
     return venv_dir / "bin" / "python"
 
 
+def _default_models_root() -> str:
+    env = os.environ.get("GENAI_MODELS_ROOT")
+    if env:
+        return env
+    return r"C:\models" if os.name == "nt" else str(Path.home() / "models")
+
+
 def _paths(args) -> dict:
     cache_root = Path(args.cache_root).resolve()
-    spec = _model_spec(args.model)
+    models_root = Path(args.models_root).resolve()
     return {
         "framework": cache_root / "hipdnn-accuracy-test",
         "venv": cache_root / "genai-accuracy-venv",
         "hf_home": cache_root / "hf-home",
-        "model": cache_root / "genai-models" / spec["hf_repo"].replace("/", "--"),
+        # The model lives in the machine-wide store (models_root) so it is
+        # shared across runner workspaces; "model" is the link to it under the
+        # cache root that the rest of the flow reads.
+        "model_store": models_root / args.model,
+        "model": cache_root / "genai-models" / args.model,
     }
 
 
@@ -230,10 +241,23 @@ def _install_package_wheels(venv_python: Path, package_dir: Path) -> None:
     )
 
 
+# Present while a download into the model store is in progress, so an
+# interrupted download is not mistaken for a complete model.
+DOWNLOAD_MARKER = ".download_incomplete"
+
+
+def _model_present(model_dir: Path) -> bool:
+    return (model_dir / "genai_config.json").is_file() and not (
+        model_dir / DOWNLOAD_MARKER
+    ).exists()
+
+
 def _download_model(
     venv_python: Path, spec: dict, model_dir: Path, hf_home: Path
 ) -> None:
     model_dir.mkdir(parents=True, exist_ok=True)
+    marker = model_dir / DOWNLOAD_MARKER
+    marker.write_text(f"{spec['hf_repo']}@{spec['revision']}\n", encoding="utf-8")
     # snapshot_download into local_dir is incremental: complete files are
     # verified from local metadata and skipped.
     script = (
@@ -246,6 +270,53 @@ def _download_model(
         [venv_python, "-c", script, spec["hf_repo"], spec["revision"], model_dir],
         env=env,
     )
+    marker.unlink()
+
+
+def _is_link(path: Path) -> bool:
+    return os.path.islink(path) or (
+        hasattr(os.path, "isjunction") and os.path.isjunction(path)
+    )
+
+
+def _link_model(store_dir: Path, link: Path) -> None:
+    """Make `link` point at the model in the shared store."""
+    link.parent.mkdir(parents=True, exist_ok=True)
+    if os.path.lexists(link):
+        if not _is_link(link):
+            raise SystemExit(
+                f"{link} exists and is not a link; remove it so it can be "
+                f"linked to {store_dir}"
+            )
+        if os.path.realpath(link) == os.path.realpath(store_dir):
+            _log(f"Model link up to date: {link} -> {store_dir}")
+            return
+        # rmdir removes a directory symlink or junction without touching the
+        # target; a POSIX symlink needs unlink.
+        if os.name == "nt":
+            os.rmdir(link)
+        else:
+            os.unlink(link)
+    try:
+        os.symlink(store_dir, link, target_is_directory=True)
+        _log(f"Linked model: {link} -> {store_dir}")
+    except OSError as exc:
+        if os.name != "nt":
+            raise
+        # Creating a symlink needs admin or Developer Mode on Windows; a
+        # directory junction needs neither and works for a same-machine target.
+        _log(f"[INFO] symlink failed ({exc}); using a directory junction")
+        _run(["cmd", "/c", "mklink", "/J", link, store_dir])
+
+
+def _ensure_model(venv_python: Path, spec: dict, paths: dict) -> None:
+    store = paths["model_store"]
+    if _model_present(store):
+        _log(f"Model already in store, skipping download: {store}")
+    else:
+        _log(f"Model not found in store, downloading to: {store}")
+        _download_model(venv_python, spec, store, paths["hf_home"])
+    _link_model(store, paths["model"])
 
 
 def cmd_prepare(args) -> int:
@@ -255,7 +326,7 @@ def cmd_prepare(args) -> int:
     _sync_framework(paths["framework"])
     venv_python = _ensure_venv(paths["venv"])
     _install_package_wheels(venv_python, package_dir)
-    _download_model(venv_python, spec, paths["model"], paths["hf_home"])
+    _ensure_model(venv_python, spec, paths)
     return 0
 
 
@@ -286,7 +357,7 @@ def _mirror_model(source: Path, target: Path) -> None:
         except OSError as exc:
             raise SystemExit(
                 f"Cannot hard-link {entry} into {target} ({exc}); keep the work "
-                "dir on the same volume as the model cache"
+                "dir on the same volume as the model store"
             ) from None
 
 
@@ -623,7 +694,13 @@ def main() -> int:
         p.add_argument(
             "--cache-root",
             required=True,
-            help="Persistent dir for the framework, venv, HF cache and models",
+            help="Persistent dir for the framework, venv, HF cache and model link",
+        )
+        p.add_argument(
+            "--models-root",
+            default=_default_models_root(),
+            help="Machine-wide model store; the model is downloaded here when "
+            "missing (default: $GENAI_MODELS_ROOT, C:\\models on Windows)",
         )
 
     p_prepare = sub.add_parser("prepare", help="Sync framework, venv and model")
