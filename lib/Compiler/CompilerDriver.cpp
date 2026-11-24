@@ -43,6 +43,7 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Format.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
@@ -628,6 +629,9 @@ bool CompilerDriver::runMLIRPasses(
       mlir::hip::rocMlirAutotuneBenchmarkFromEnv(autotuneOpts.benchmark);
       autotuneOpts.log = embedOpts.log;
       autotuneOpts.logPrefix = "[CompilerDriver/rocmlir-autotune]";
+      // HIPDNN_EP_ROCMLIR_VERBOSE also turns on the per-candidate lines, one
+      // per config per kernel, which hip-rocmlir-compiler --verbose prints.
+      autotuneOpts.verbose = embedOpts.log != nullptr;
       // problemCachePath stays empty here. The shipped LUT is skipped only
       // when HIPDNN_EP_ROCMLIR_AUTOTUNE is set explicitly.
       autotuneOpts.tuningTypeProvided =
@@ -649,8 +653,22 @@ bool CompilerDriver::runMLIRPasses(
       autotuner->installInto(embedOpts);
     }
 
-    if (mlir::failed(
-            mlir::hip::compileAndEmbedRocMlirKernels(module, embedOpts))) {
+    const bool embedOk =
+        mlir::hip::compileAndEmbedRocMlirKernels(module, embedOpts).succeeded();
+    // HIPDNN_EP_ROCMLIR_VERBOSE: where the autotune time went, as
+    // hip-rocmlir-compiler prints it at exit. Printed whether or not the embed
+    // succeeded, since a slow failed compile is the one most worth reading.
+    // Only the two times the autotuner measures are printed; the HIP-to-LLVM
+    // lowering runs later in the tail and is not timed here.
+    if (autotuner && embedOpts.log) {
+      const mlir::hip::AutotunePhaseTimes &times = autotuner->phaseTimes();
+      *embedOpts.log << "[CompilerDriver/rocmlir-autotune] perfConfig compile "
+                        "wall: "
+                     << llvm::format("%.1f", times.perfConfigCompileMs)
+                     << " ms, benchmark: "
+                     << llvm::format("%.1f", times.benchmarkMs) << " ms\n";
+    }
+    if (!embedOk) {
       error_message = "rocMLIR kernel compilation failed";
       return false;
     }
