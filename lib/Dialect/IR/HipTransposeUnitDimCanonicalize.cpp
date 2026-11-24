@@ -27,6 +27,7 @@
 // bufferization.
 //===----------------------------------------------------------------------===//
 
+#include "HipTransposeUtilsInternal.h"
 #include "hip/Dialect/IR/HipDialect.h"
 
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -43,25 +44,6 @@ using namespace mlir::hip;
 
 namespace {
 
-/// Whether the declared result type is the input type permuted by `perm`. The
-/// verifier does not relate the two, and a reshape built from a result type
-/// that disagrees with the permutation would change the program. A dimension
-/// that is dynamic on either side cannot be compared and is accepted.
-bool resultMatchesPermutedInput(RankedTensorType inputType,
-                                RankedTensorType resultType,
-                                ArrayRef<int64_t> perm) {
-  if (inputType.getElementType() != resultType.getElementType() ||
-      inputType.getRank() != resultType.getRank())
-    return false;
-  return llvm::all_of(llvm::seq<int64_t>(0, resultType.getRank()),
-                      [&](int64_t i) {
-                        int64_t from = inputType.getDimSize(perm[i]);
-                        int64_t to = resultType.getDimSize(i);
-                        return ShapedType::isDynamic(from) ||
-                               ShapedType::isDynamic(to) || from == to;
-                      });
-}
-
 struct UnitDimTransposeToReshape : public OpRewritePattern<TransposeOp> {
   using OpRewritePattern::OpRewritePattern;
 
@@ -76,10 +58,14 @@ struct UnitDimTransposeToReshape : public OpRewritePattern<TransposeOp> {
     if (!inputType || !resultType)
       return rewriter.notifyMatchFailure(transpose, "unranked tensors");
 
-    // The verifier has checked `perm` is a permutation of the input's dims.
-    SmallVector<int64_t> perm =
-        extractFromIntegerArrayAttr<int64_t>(transpose.getPerm());
-    if (!resultMatchesPermutedInput(inputType, resultType, perm))
+    SmallVector<int64_t> perm;
+    if (!hip::detail::getPermutation(transpose, perm))
+      return rewriter.notifyMatchFailure(transpose, "unreadable permutation");
+    // The verifier does not relate the result type to the permutation, and a
+    // reshape built from a result type that disagrees with it would change the
+    // program.
+    if (!hip::detail::permutesIntoResultType(transpose.getInput(),
+                                             transpose->getResult(0), perm))
       return rewriter.notifyMatchFailure(
           transpose, "result type disagrees with the permutation");
 
@@ -135,7 +121,7 @@ struct UnitDimTransposeToReshape : public OpRewritePattern<TransposeOp> {
 
 } // namespace
 
-void TransposeOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
-                                              MLIRContext *context) {
-  patterns.add<UnitDimTransposeToReshape>(context);
+void hip::detail::populateUnitDimTransposePatterns(
+    RewritePatternSet &patterns) {
+  patterns.add<UnitDimTransposeToReshape>(patterns.getContext());
 }

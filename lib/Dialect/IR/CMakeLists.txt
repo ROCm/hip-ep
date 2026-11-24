@@ -19,8 +19,9 @@ add_library(HipDialectIR STATIC
   HipShapeUtilsMatmulGemm.cpp
   HipShapeUtilsReduction.cpp
   HipShapeUtilsShapeOps.cpp
-  HipTransposeUnitDimCanonicalize.cpp
   HipTransposeCanonicalize.cpp
+  HipTransposeUnitDimCanonicalize.cpp
+  HipTransposeUtils.cpp
 )
 
 add_dependencies(HipDialectIR
