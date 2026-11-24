@@ -147,4 +147,7 @@ class TestMatMulF64:
             [x],
             reference="cpu",
         )
-        compare_outputs(actual, expected, atol=1e-6)
+        # The default rtol=1e-3 and an atol of 1e-6 are single-precision
+        # tolerances. These four-term f64 dots have rounding error near 1e-16,
+        # so 1e-12 still catches an fp32 computation.
+        compare_outputs(actual, expected, atol=1e-12, rtol=1e-12)

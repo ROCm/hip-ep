@@ -435,9 +435,9 @@ std::vector<uint8_t> make_f64(int64_t n, Rng& rng) {
       1e-40,   // f32 subnormal after the first step (no flush to zero)
       1.0 + 0x1p-8,           // exact in fp32, bf16 tie -> 1.0
       1.0 + 0x1p-8 + 0x1p-40, // rounds to the tie in fp32 first -> 1.0
-      // Just off an f16 tie. A two-step f64 -> f32 -> f16 path lands both on
-      // the tie and would give 0x3c00 and 0x3c02; the correctly rounded
-      // result is 0x3c01 for both, which is what the kernel produces.
+      // Just off an f16 tie. The correctly rounded result is 0x3c01 for both.
+      // Rounding through fp32 first would land them on the ties (0x3c00 and
+      // 0x3c02 after round-to-even), so this input checks the single rounding.
       1.0 + 0x1p-11 + 0x1p-30,
       1.0 + 0x1p-10 + 0x1p-11 - 0x1p-30,
   };

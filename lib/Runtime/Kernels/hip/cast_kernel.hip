@@ -183,6 +183,66 @@ __global__ void cast_f16_to_i32_kernel(
   }
 }
 
+// double -> binary16 with one rounding (round to nearest even). Going through
+// float first rounds twice and can land on the wrong side of an f16 tie. HIP
+// has no double -> half intrinsic, so the IEEE bits are rounded directly.
+// NaN returns the canonical quiet NaN 0x7e00.
+__device__ static inline uint16_t f64_to_f16_bits_rn(double value) {
+  const uint64_t bits = __builtin_bit_cast(uint64_t, value);
+  const uint16_t sign = static_cast<uint16_t>((bits >> 48) & 0x8000u);
+  const int exp_field = static_cast<int>((bits >> 52) & 0x7ffu);
+  const uint64_t frac = bits & ((1ull << 52) - 1);
+  if (exp_field == 0x7ff) {
+    return frac != 0 ? static_cast<uint16_t>(0x7e00)
+                     : static_cast<uint16_t>(sign | 0x7c00);
+  }
+  // Zero, and double subnormals (far below the smallest half subnormal).
+  if (exp_field == 0) {
+    return sign;
+  }
+  const int e = exp_field - 1023;  // value = m * 2^(e - 52), m in [2^52, 2^53)
+  if (e > 15) {                    // at least 2^16: overflows to infinity
+    return static_cast<uint16_t>(sign | 0x7c00);
+  }
+  const uint64_t m = frac | (1ull << 52);
+  // Bits dropped from m: 42 for a normal half (10 fraction bits). A subnormal
+  // half has quantum 2^-24, which drops more bits.
+  const int shift = 42 + (e < -14 ? -14 - e : 0);
+  if (shift >= 54) {  // m < 2^53 is below half of the quantum: rounds to zero
+    return sign;
+  }
+  uint64_t q = m >> shift;
+  const uint64_t rem = m & ((1ull << shift) - 1);
+  const uint64_t half = 1ull << (shift - 1);
+  if (rem > half || (rem == half && (q & 1))) {
+    ++q;
+  }
+  if (e >= -14) {
+    // q is in [1024, 2048]; 2048 carries into the next binade.
+    int biased = e + 15;
+    if (q == 2048) {
+      q = 1024;
+      ++biased;
+    }
+    if (biased >= 31) {
+      return static_cast<uint16_t>(sign | 0x7c00);
+    }
+    return static_cast<uint16_t>(sign | (biased << 10) | (q - 1024));
+  }
+  // Subnormal half: q is the bit pattern. q == 1024 is the smallest normal.
+  return static_cast<uint16_t>(sign | q);
+}
+
+__global__ void cast_f64_to_f16_kernel(
+    const double* __restrict__ input,
+    __half* __restrict__ output,
+    int64_t num_elements) {
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    output[idx] = __ushort_as_half(f64_to_f16_bits_rn(input[idx]));
+  }
+}
+
 // Generic static_cast. Integer pairs use it directly, and so does f64 <->
 // integer: routing those through fp32 would drop every integer wider than
 // 24 bits. Float -> integer truncates toward zero. The kernels above stay
@@ -316,9 +376,8 @@ static int launch_cast_bf16(hipStream_t stream, const void* input,
   return -1;
 }
 
-// f64 <-> f32 and f64 <-> f16 use the float conversion path. f64 -> f16 is
-// correctly rounded once on gfx1151 (test_cast checks it against a single
-// rounding), so it does not match a two-step f64 -> f32 -> f16. f64 <->
+// f64 <-> f32 uses the float conversion path. f64 -> f16 is rounded once
+// directly from the double (cast_f64_to_f16_kernel), not through fp32. f64 <->
 // integer is a direct static_cast: routing i64 through fp32 would drop every
 // integer wider than 24 bits. bf16 <-> f64 stays on launch_cast_bf16, which
 // rounds twice (through fp32).
@@ -334,6 +393,13 @@ static int launch_cast_f64(hipStream_t stream, const void* input,
            dtype == HIP_DTYPE_INT16 || dtype == HIP_DTYPE_INT8 ||
            dtype == HIP_DTYPE_UINT8;
   };
+  if (input_dtype == HIP_DTYPE_FLOAT64 && output_dtype == HIP_DTYPE_FLOAT16) {
+    hipLaunchKernelGGL(cast_f64_to_f16_kernel, dim3(grid_size),
+                       dim3(block_size), 0, stream,
+                       static_cast<const double*>(input),
+                       static_cast<__half*>(output), num_elements);
+    return 0;
+  }
   if (input_dtype == HIP_DTYPE_FLOAT64 && isF16OrF32(output_dtype)) {
     return dispatch_dtype(output_dtype, [&](auto dst) {
       using Dst = typename decltype(dst)::type;
