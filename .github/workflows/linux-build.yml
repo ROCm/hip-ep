@@ -414,8 +414,11 @@ jobs:
         working-directory: onnxruntime-genai
         run: |
           set -euo pipefail
-          PATCH_FILE="../cmake/oga-wordpiece-types.patch"
-          printf '%s  %s\n' "$OGA_COMPAT_PATCH_SHA256" "$PATCH_FILE" | sha256sum --check --status
+          # Hash canonical Git bytes; a Windows checkout may convert to CRLF.
+          PATCH_FILE="$(mktemp)"
+          trap 'rm -f "$PATCH_FILE"' EXIT
+          git -C .. show HEAD:cmake/oga-wordpiece-types.patch > "$PATCH_FILE"
+          printf '%s  %s\n' "$OGA_COMPAT_PATCH_SHA256" "$PATCH_FILE" | sha256sum --check --strict
           git -c core.autocrlf=input apply --check "$PATCH_FILE"
           git -c core.autocrlf=input apply "$PATCH_FILE"
 
