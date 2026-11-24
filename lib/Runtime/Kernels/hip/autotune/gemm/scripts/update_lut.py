@@ -538,8 +538,16 @@ def cmd_compile(args) -> int:
         print(f"[compile] no {lut_json}; run build first", file=sys.stderr)
         return 1
     with tempfile.TemporaryDirectory() as tmp:
+        # FlatBuffers structs have no defaults under --strict-json: a legacy
+        # config's JSON omits `family` (0, the former padding byte), so give
+        # flatc an explicit copy. The table on disk stays unchanged.
+        doc = json.loads(lut_json.read_text(encoding="utf-8"))
+        for c in doc.get("configs", []):
+            c.setdefault("family", 0)
+        source = Path(tmp) / lut_json.name
+        source.write_text(json.dumps(doc), encoding="utf-8")
         cmd = [args.flatc, "--binary", "--strict-json", "-o", tmp, str(FBS),
-               str(lut_json)]
+               str(source)]
         print("[compile] " + " ".join(cmd))
         proc = subprocess.run(cmd)
         if proc.returncode != 0:
@@ -578,6 +586,8 @@ def check_rank_table(doc):
                 raise ValueError("GEMM geometry field exceeds uint8: " + field)
         if not isinstance(c["threads"], int) or not 0 <= c["threads"] <= 65535:
             raise ValueError("GEMM threads exceeds uint16")
+        if not isinstance(c.get("family", 0), int) or not 0 <= c.get("family", 0) <= 255:
+            raise ValueError("GEMM config family exceeds uint8")
     for p in [*doc["points"], *doc.get("fallbacks", [])]:
         if not isinstance(p["config"], int) or not 0 <= p["config"] < len(doc["configs"]):
             raise ValueError("GEMM config index outside pool")

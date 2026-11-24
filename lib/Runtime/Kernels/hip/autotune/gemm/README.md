@@ -21,8 +21,10 @@ are in [draft PR #1618](https://github.com/ROCm/hip-ep/pull/1618), stacked on
 the dense branch.
 
 The required gfx1151 kernel comparison uses native `confirm` timing for each
-requested complete call: custom/hipBLASLt must be at most 1.05, with error
-against the FP32 CPU reference no greater than hipBLASLt's. Attention adapter
+requested complete call: custom/hipBLASLt must be at most 1.05. Error against
+the FP32 CPU reference must be within the dtype's unit-test tolerance and of the
+same order as hipBLASLt's (custom/hipBLASLt relative L2 at most 10; a larger
+ratio needs an explained FP64-reference or reduction-order account). Attention adapter
 qualification includes its casts and loops. Kernel timing and model results
 have separate scopes; the user's Jenkins genai CI owns model regression.
 
@@ -165,6 +167,44 @@ transposed-A requests use the host-only `Unconfigured` phase, query the loader
 as a miss (`reason=unconfigured-phase`) and continue to their custom default.
 They do not borrow a WMMA/GEMV point for a different operation. Degenerate
 M/N/K requests retain the existing zero/epilogue handling before tile lookup.
+
+## General dense family (exact LUT points)
+
+`gemm_general_impl.h` adds kernels selected only by an **exact** offline-LUT
+point whose config has `family >= 1` (`GemmTuneConfig.family`, the former
+padding byte; legacy configs keep 0 and their bytes are unchanged). A legacy
+request (`Request::family == 0`) never answers from these points and a general
+request never answers from legacy points, so every existing point and every
+nearest/fallback answer of the legacy families is unchanged. The family is
+consulted first in `hip_gemm_strided_batched` (all runtime dense entries), for
+uniform F16 or F32 inputs, `ta == 0`, `a_group == b_group == 1`, alpha any and
+beta 0 or a row-broadcast C with beta 1. Any other request, a miss or a non-exact
+answer continues to the existing route.
+
+| family | kernel | covers |
+|---|---|---|
+| 1 `gen_wmma` | F16 WMMA, four-wave (2x2), eight-wave (4x2) or one row of waves; single LDS buffer, next K tile in registers, two barriers per tile; NN B natural `[k][n]` with 16-bit fragment reads, NT B `[n][k]`; LDS-staged 16-byte epilogue; optional K split (F32 partials + fixed-order reduction) and K-start stagger | large/mid F16 NN/NT (+row bias), batched attention-shaped GEMMs, small-grid split-K |
+| 2 `gen_gemv` | F16 NN M=1, whole K per workgroup, A in LDS, 16-byte B rows, one launch | router decode |
+| 3 `gen_f32` tile | F32 register-blocked LDS tile, optional split/stagger | F32 batched/router |
+| 4-6 `gen_f32` dot/rows/lds | F32 per-lane K slices with shuffle reduction, B-in-LDS row streaming, whole-K LDS | small F32 batched GEMMs |
+
+The catalog (`gemm_gen::kCfg`) stores each entry's LUT geometry: `bm16/bn16`,
+`bk`, `wt_m/wt_n`, `threads`, `split_k`, `swizzle` = stagger workgroups,
+`tile_n` = stagger tiles (GEMV: columns per workgroup, `bk` = load unroll).
+F16 entries read 16-byte buffer chunks: unaligned A/B bases or batch strides
+keep the existing route. Split entries need workspace; `hip_gemm_workspace_size` reports the largest
+legal general entry for the shape independently of the LUT, so a later
+selection never exceeds a live allocation. `HIPDNN_EP_GEMM_GEN=0` disables the
+family; `HIPDNN_EP_GEMM_GEN_CFG=<catalog id>` forces a legal entry.
+`HIPDNN_EP_DEBUG=1` logs `[gemm] general final ...`.
+
+The rank adapter appends the legal general entries after the legacy family's
+descriptor IDs (`route=gen_*;...;family=N` geometry), so native UT ranking
+measures them beside the legacy candidates; `rank-build` writes a selected entry
+as a `family` config. Bias requests rank without bias (a LUT key has no bias)
+and the same entry serves both. Only gfx1151's table carries general points;
+the WMMA/GEMV bodies use gfx11 buffer resources and compile to a trap on the
+8-half fragment encoding, where no point can select them.
 
 ## Mode switch
 

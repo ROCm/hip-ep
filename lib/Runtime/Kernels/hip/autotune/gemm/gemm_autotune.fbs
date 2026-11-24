@@ -67,6 +67,9 @@ struct GemmTuneConfig {
   // Gemv payload. Zero on Wmma/TiledFma configs.
   threads: uint16;
   tile_n: ubyte;
+  // 0: the legacy kernel tables. >= 1: the general family (gemm_general_impl.h),
+  // used only for exact points; fills the former padding byte.
+  family: ubyte;
 
   // TiledFma reuses bm16/bn16 (tile BM/BN, /16) + bk (tile BK, exact -- always
   // <=64 so it fits the same ubyte) + wt_m/wt_n (per-thread TM/TN) + threads

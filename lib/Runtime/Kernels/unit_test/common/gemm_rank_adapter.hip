@@ -53,6 +53,21 @@ void rankRecordLaunch(dim3 grid, dim3 block, size_t shared, Args... args) {
 #include "../../hip/gemm_kernel.hip"
 #undef hipLaunchKernelGGL
 
+// The general family passes one argument struct. Found by argument-dependent
+// lookup at the recorder's instantiation: its runtime values (not pointers)
+// enter the final launch identity like any scalar kernel argument.
+namespace gemm_gen {
+inline void rankArgument(std::ostringstream& text, const Args& p) {
+  text << ";m=" << p.m << ";n=" << p.n << ";k=" << p.k << ";lda=" << p.lda
+       << ";ldb=" << p.ldb << ";ldy=" << p.ldy << ";sa=" << p.sa << ";sb=" << p.sb
+       << ";sc=" << p.sc << ";sy=" << p.sy << ";alpha=" << std::setprecision(17)
+       << p.alpha << ";bias=" << p.bias << ";group=" << p.group_m
+       << ";stagger=" << p.stagger_mod << ":" << p.stagger_tiles
+       << ";splits=" << p.splits << ";a=ptr;b=ptr;c=" << (p.c ? "ptr" : "null")
+       << ";ws=" << (p.ws ? "ptr" : "null");
+}
+}  // namespace gemm_gen
+
 namespace {
 const void* rankOperand() { return reinterpret_cast<const void*>(uintptr_t(0x10000)); }
 int rankFamily(const UtGemmShape& s) {
@@ -71,7 +86,26 @@ int rankFamily(const UtGemmShape& s) {
                       s.m, s.n, s.k, s.ta, s.tb)) return 4;
   return 5;
 }
+// General-family candidates follow the legacy family's descriptor IDs: ID
+// legacyCount + i selects the i-th catalog entry legal for this shape.
+int rankLegacyCount(const UtGemmShape& s);
+int rankGeneral(const UtGemmShape& s, int id) {
+  const int base = rankLegacyCount(s);
+  if (id < base) return -1;
+  const int output = s.output < 0 ? s.dtype : s.output;
+  if (s.batches < 1 || s.a_group != 1 || s.b_group != 1 || s.ta) return -1;
+  if (s.beta != 0 && !(s.beta == 1 && s.crows == 1 && s.ccols == s.n)) return -1;
+  int index = id - base;
+  for (int g = 0; g < gemm_gen::kNumCfg; ++g)
+    if (gemm_gen::legal(gemm_gen::kCfg[g], s.m, s.n, s.k, s.ta, s.tb, s.dtype, output, s.batches) &&
+        index-- == 0)
+      return g;
+  return -1;
+}
 void rankInstall(const UtGemmShape& shape, int id) {
+  const int general = id >= 0 ? rankGeneral(shape, id) : -1;
+  gemmGenRankConfig = general;
+  if (general >= 0) id = -1;
   const int family = rankFamily(shape);
   gemmBatchRankConfig = family >= 6 ? id : -2;
   std::lock_guard<std::mutex> lock(g_tune_mu);
@@ -107,6 +141,16 @@ std::string rankProbe(const UtGemmShape& s, int id) {
   return rankFinalLaunch;
 }
 std::string rankGeometry(const UtGemmShape& s, int id) {
+  const int general = rankGeneral(s, id);
+  if (general >= 0) {
+    const auto& c = gemm_gen::kCfg[general];
+    const char* route = c.family == gemm_gen::kWmma ? "gen_wmma" : c.family == gemm_gen::kGemv ? "gen_gemv" : "gen_f32";
+    char text[256];
+    std::snprintf(text, sizeof(text), "route=%s;bm=%d;bn=%d;swizzle=%d;wt_m=%d;wt_n=%d;bk=%d;split_k=%d;threads=%d;tile_n=%d;family=%d",
+                  route, c.bm, c.bn, c.smod, c.wt_m, c.wt_n, c.bk, c.splits, c.threads,
+                  c.family == gemm_gen::kGemv ? c.tile_n : c.stiles, c.family);
+    return text;
+  }
   const int family = rankFamily(s);
   int bm = 0, bn = 0, sw = 0, wtm = 0, wtn = 0, bk = 0, sk = 0, threads = 0, tn = 0;
   const char* route = "default";
@@ -139,11 +183,9 @@ std::string rankGeometry(const UtGemmShape& s, int id) {
                 route, bm, bn, sw, wtm, wtn, bk, sk, threads, tn);
   return text;
 }
-}
 
-extern "C" int hipdnn_ut_gemm_config_count(const UtGemmShape* shape) {
-  if (!shape) return 0;
-  switch (rankFamily(*shape)) {
+int rankLegacyCount(const UtGemmShape& s) {
+  switch (rankFamily(s)) {
     case 1: return kNumWmma;
     case 2: return kNumGemvNt;
     case 3: return kNumGemvNn;
@@ -154,6 +196,14 @@ extern "C" int hipdnn_ut_gemm_config_count(const UtGemmShape* shape) {
     case 8: return kNumBatchedFma;
     default: return 0;
   }
+}
+}
+
+extern "C" int hipdnn_ut_gemm_config_count(const UtGemmShape* shape) {
+  if (!shape) return 0;
+  int general = 0;
+  while (rankGeneral(*shape, rankLegacyCount(*shape) + general) >= 0) ++general;
+  return rankLegacyCount(*shape) + general;
 }
 extern "C" int hipdnn_ut_gemm_config(const UtGemmShape* shape, int id, UtGemmConfig* out) {
   if (!shape || !out || shape->m <= 0 || shape->n <= 0 || shape->k <= 0 ||

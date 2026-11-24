@@ -74,6 +74,9 @@ struct Request {
   int trans_b = 1;
   int m = 0, n = 0, k = 0;
   int batch_count = 1, a_group = 1, b_group = 1;
+  /* 0: answer only from legacy configs (family 0). Nonzero: only from the
+   * general family (config family >= 1). The two never answer each other. */
+  int family = 0;
 };
 
 /* WMMA tile geometry, matching the WmmaCfg fields the dispatch keys on. A
@@ -81,18 +84,21 @@ struct Request {
  * and the search moves on, so a stale table is never worse than no table. */
 struct WmmaAnswer {
   int bm = 0, bn = 0, wt_m = 0, wt_n = 0, swizzle_n = 0, split_k = 1, bk = 32;
+  int family = 0, threads = 0, tile_n = 0;
 };
 
 /* (threads, tile_n) for the GEMV NT / NN decode paths, matched against
  * kGemvNt / kGemvNn. */
 struct GemvAnswer {
   int threads = 0, tile_n = 0;
+  int family = 0, bk = 0;
 };
 
 /* (bm, bn, tm, tn, bk, threads) for the plain-FMA tiled path (fp32/fp64,
  * wave64 fp16/bf16), matched against kTiledFma. */
 struct TiledFmaAnswer {
   int bm = 0, bn = 0, tm = 0, tn = 0, bk = 0, threads = 0;
+  int family = 0, split_k = 1, swizzle = 0, tile_n = 0;
 };
 
 struct Result {

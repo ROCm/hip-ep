@@ -6,6 +6,7 @@
 #include <array>
 #include <climits>
 #include <cstddef>
+#include "gemm_general_impl.h"
 
 // Included by gemm_kernel.hip after the existing uniform implementation.
 // Batch and K ownership remain explicit in every launch and workspace offset.
@@ -726,6 +727,82 @@ static GemmBatchChoice gemmBatchChoice(int m,int n,int k,int ta,int tb,int in,in
   return choice;
 }
 
+// General family: only an exact offline-LUT point selects it. Legacy LUT
+// lookups never see these points (Request::family), so every other request
+// keeps its existing route. HIPDNN_EP_GEMM_GEN=0 disables the family;
+// HIPDNN_EP_GEMM_GEN_CFG=<catalog id> forces a legal entry.
+#ifdef HIPDNN_UT_RANK_GEMM_ADAPTER
+static thread_local int gemmGenRankConfig=-1;
+#endif
+struct GemmGenContext { int m,n,k,ta,tb,in,out,batches,id; };
+static int gemmGenLookup(int m,int n,int k,int ta,int tb,int in,int out,int batches) {
+  using namespace gemm_lut;
+  GemmGenContext ctx{m,n,k,ta,tb,in,out,batches,-1};
+  auto wv=[](void* o,const WmmaAnswer& g) {
+    auto& x=*static_cast<GemmGenContext*>(o);
+    for(int id=0;id<gemm_gen::kNumCfg;++id){const auto& c=gemm_gen::kCfg[id];
+      if(c.family==g.family&&c.bm==g.bm&&c.bn==g.bn&&c.bk==g.bk&&c.wt_m==g.wt_m&&c.wt_n==g.wt_n&&
+         c.threads==g.threads&&c.splits==g.split_k&&c.smod==g.swizzle_n&&c.stiles==g.tile_n&&
+         gemm_gen::legal(c,x.m,x.n,x.k,x.ta,x.tb,x.in,x.out,x.batches)){x.id=id;return true;}}
+    return false;
+  };
+  auto gv=[](void* o,const GemvAnswer& g) {
+    auto& x=*static_cast<GemmGenContext*>(o);
+    for(int id=0;id<gemm_gen::kNumCfg;++id){const auto& c=gemm_gen::kCfg[id];
+      if(c.family==g.family&&c.threads==g.threads&&c.tile_n==g.tile_n&&c.bk==g.bk&&
+         gemm_gen::legal(c,x.m,x.n,x.k,x.ta,x.tb,x.in,x.out,x.batches)){x.id=id;return true;}}
+    return false;
+  };
+  auto tv=[](void* o,const TiledFmaAnswer& g) {
+    auto& x=*static_cast<GemmGenContext*>(o);
+    for(int id=0;id<gemm_gen::kNumCfg;++id){const auto& c=gemm_gen::kCfg[id];
+      if(c.family==g.family&&c.bm==g.bm&&c.bn==g.bn&&c.bk==g.bk&&c.wt_m==g.tm&&c.wt_n==g.tn&&
+         c.threads==g.threads&&c.splits==g.split_k&&c.smod==g.swizzle&&c.stiles==g.tile_n&&
+         gemm_gen::legal(c,x.m,x.n,x.k,x.ta,x.tb,x.in,x.out,x.batches)){x.id=id;return true;}}
+    return false;
+  };
+  Request req;
+  req.act_dtype=req.wts_dtype=req.out_dtype=in==0?HipdnnDType::F16:HipdnnDType::F32;
+  req.m=m;req.n=n;req.k=k;req.trans_b=tb;req.batch_count=batches;req.a_group=req.b_group=1;
+  req.family=1;
+  const Kind kinds[2]={in==0?Kind::Wmma:Kind::TiledFma,Kind::GemvNn};
+  for(int i=0;i<(in==0&&!tb?2:1);++i) {
+    req.kind=kinds[i];ctx.id=-1;
+    auto hit=resolve(req,wv,gv,tv,&ctx);
+    if(hit.source==Source::Exact&&ctx.id>=0)return ctx.id;
+  }
+  return -1;
+}
+static int gemmGenSelect(int m,int n,int k,int ta,int tb,int in,int out,int batches,int ag,int bg,
+                         const void* c,int crows,int ccols,float beta) {
+  static const bool on=gemmEnvInt("HIPDNN_EP_GEMM_GEN",1)!=0;
+  static const int forced=gemmEnvInt("HIPDNN_EP_GEMM_GEN_CFG",-1);
+  if(!on||ta||in!=out||(in!=0&&in!=1)||ag!=1||bg!=1||batches<1||!m||!n||!k||
+     hipdnn_device_is_wave64())return -1;
+  if(beta!=0.f&&!(beta==1.f&&c&&crows==1&&ccols==n))return -1;
+#ifdef HIPDNN_UT_RANK_GEMM_ADAPTER
+  if(gemmGenRankConfig<0)return -1;
+  return gemmGenRankConfig<gemm_gen::kNumCfg&&
+         gemm_gen::legal(gemm_gen::kCfg[gemmGenRankConfig],m,n,k,ta,tb,in,out,batches)?gemmGenRankConfig:-1;
+#else
+  if(forced>=0)return forced<gemm_gen::kNumCfg&&
+         gemm_gen::legal(gemm_gen::kCfg[forced],m,n,k,ta,tb,in,out,batches)?forced:-1;
+  if(!gemmLutLookupEnabled()||gemmForcedRoute())return -1;
+  return gemmGenLookup(m,n,k,ta,tb,in,out,batches);
+#endif
+}
+// Largest legal general-family workspace for this request, independent of the
+// LUT choice, so a later selection never exceeds a live allocation.
+static size_t gemmGenWorkspace(int m,int n,int k,int ta,int tb,int in,int out,int batches,int ag,int bg) {
+  if(ag!=1||bg!=1)return 0;
+  size_t bytes=0;
+  for(int id=0;id<gemm_gen::kNumCfg;++id)
+    if(gemm_gen::legal(gemm_gen::kCfg[id],m,n,k,ta,tb,in,out,batches))
+      bytes=std::max(bytes,gemm_gen::workspaceBytes(gemm_gen::kCfg[id],m,n,batches));
+  return bytes;
+}
+static std::unordered_map<GemmBatchKey,int,GemmBatchKeyHash> g_gemm_gen_cache;
+
 extern "C" int hip_gemm_workspace_size(int m,int n,int k,int ta,int tb,int in,int out,
     int batches,int ag,int bg,size_t *bytes) {
   if(!bytes||m<0||n<0||k<0||m>INT_MAX-256||n>INT_MAX-256||k>INT_MAX-256||ta<0||ta>1||tb<0||tb>1||!gemmBatchTypes(in,out)||
@@ -753,11 +830,12 @@ extern "C" int hip_gemm_workspace_size(int m,int n,int k,int ta,int tb,int in,in
       if (gemmBatchedWmmaLegal(cfg,m,n,k,batches,ta,tb))
         splits=std::max(splits,cfg.splits);
   }
-  if(splits<=1)return 0;
+  const size_t general=gemmGenWorkspace(m,n,k,ta,tb,in,out,batches,ag,bg);
+  if(splits<=1){*bytes=general;return 0;}
   const uint64_t count=uint64_t(m)*n;
   if(count>uint64_t(PTRDIFF_MAX)/sizeof(float)/batches/splits ||
      count>uint64_t(INT_MAX)*256/batches)return -1;
-  *bytes=size_t(count)*batches*splits*sizeof(float);return 0;
+  *bytes=std::max(general,size_t(count)*batches*splits*sizeof(float));return 0;
 }
 
 template <typename T,typename Out,bool TA,bool TB>
@@ -819,6 +897,7 @@ static GemmBatchKey gemmBatchCacheKey(int m,int n,int k,int ta,int tb,int in,int
   return {device,m,n,k,ta,tb,in,out,batches,ag,bg,crows,ccols,sa,sb,sc,sy,
           alpha_bits,beta_bits,safe};
 }
+
 
 static void gemmBatchLog(const GemmBatchChoice& choice,int m,int n,int k,
                          int in,int out,int batches,int ag,int bg) {
@@ -913,6 +992,39 @@ extern "C" int hip_gemm_strided_batched(void*stream,const void*a,const void*b,co
       (c!=y||crows!=m||ccols!=n||sc!=sy)) ||
      (required&&(overlaps(workspace,required,a,abytes)||overlaps(workspace,required,b,bbytes)||
       overlaps(workspace,required,c,cbytes)||overlaps(workspace,required,y,ybytes))))return -1;
+  if(k&&in==out) {
+#ifndef HIPDNN_UT_RANK_GEMM_ADAPTER
+    const GemmBatchKey gkey=gemmBatchCacheKey(m,n,k,ta,tb,in,out,batches,ag,bg,crows,ccols,
+        sa,sb,sc,sy,alpha,beta,c!=nullptr);
+    int gid=-2;
+    {
+      std::lock_guard<std::mutex> lock(g_tune_mu);
+      auto it=g_gemm_gen_cache.find(gkey);
+      if(it!=g_gemm_gen_cache.end())gid=it->second;
+    }
+    if(gid==-2) {
+      gid=gemmGenSelect(m,n,k,ta,tb,in,out,batches,ag,bg,c,crows,ccols,beta);
+      std::lock_guard<std::mutex> lock(g_tune_mu);
+      g_gemm_gen_cache.emplace(gkey,gid);
+      if(gid>=0) {
+        const auto& g=gemm_gen::kCfg[gid];
+        CUSTOM_KERNELS_DEBUG_LOG("[gemm] general final M=%d N=%d K=%d in=%d B=%d tb=%d -> cfg=%d family=%d bm=%d bn=%d bk=%d tm=%d tn=%d th=%d splits=%d stagger=%d/%d tile_n=%d\n",
+            m,n,k,in,batches,tb,gid,g.family,g.bm,g.bn,g.bk,g.wt_m,g.wt_n,g.threads,g.splits,g.smod,g.stiles,g.tile_n);
+      }
+    }
+#else
+    const int gid=gemmGenSelect(m,n,k,ta,tb,in,out,batches,ag,bg,c,crows,ccols,beta);
+#endif
+    // F16 general kernels read 16-byte buffer chunks from A and B: their bases
+    // and batch strides must be 16-byte aligned; otherwise keep the existing route.
+    const bool aligned=in!=0||(((reinterpret_cast<uintptr_t>(a)|reinterpret_cast<uintptr_t>(b))&15)==0&&
+        (batches==1||((sa|sb)&7)==0));
+    if(gid>=0&&aligned) {
+      if(gemm_gen::workspaceBytes(gemm_gen::kCfg[gid],m,n,batches)>required)return -1;
+      return gemm_gen::launch(gid,static_cast<hipStream_t>(stream),a,b,c,y,m,n,k,tb,alpha,
+          beta!=0.f?1:0,batches,sa,sb,sc,sy,workspace);
+    }
+  }
   GemmBatchChoice choice;
   choice.family=gemmBatchFamily(m,n,k,ta,tb,in,out,batches,ag,bg);
 #ifndef HIPDNN_UT_RANK_GEMM_ADAPTER

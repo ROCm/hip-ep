@@ -143,6 +143,7 @@ bool typesConsistent(common_fbs::HipdnnDType act,
 
 struct Answer {
   fbs::GemmConfigKind kind;
+  int family = 0;
   WmmaAnswer wmma;
   GemvAnswer gemv;
   TiledFmaAnswer tiled_fma;
@@ -255,6 +256,7 @@ void loadBuffer(Table &t, const unsigned char *data, size_t size) {
   for (const fbs::GemmTuneConfig *c : *configs) {
     Answer a{};
     a.kind = c->kind();
+    a.family = c->family();
     if (a.kind == fbs::GemmConfigKind::Wmma) {
       a.wmma.bm = static_cast<int>(c->bm16()) * 16;
       a.wmma.bn = static_cast<int>(c->bn16()) * 16;
@@ -263,9 +265,14 @@ void loadBuffer(Table &t, const unsigned char *data, size_t size) {
       a.wmma.wt_n = c->wt_n();
       a.wmma.bk = c->bk();
       a.wmma.split_k = c->split_k() ? c->split_k() : 1;
+      a.wmma.family = a.family;
+      a.wmma.threads = c->threads();
+      a.wmma.tile_n = c->tile_n();
     } else if (a.kind == fbs::GemmConfigKind::Gemv) {
       a.gemv.threads = c->threads();
       a.gemv.tile_n = c->tile_n();
+      a.gemv.family = a.family;
+      a.gemv.bk = c->bk();
     } else if (a.kind == fbs::GemmConfigKind::TiledFma) {
       a.tiled_fma.bm = static_cast<int>(c->bm16()) * 16;
       a.tiled_fma.bn = static_cast<int>(c->bn16()) * 16;
@@ -273,6 +280,10 @@ void loadBuffer(Table &t, const unsigned char *data, size_t size) {
       a.tiled_fma.tn = c->wt_n();
       a.tiled_fma.bk = c->bk();
       a.tiled_fma.threads = c->threads();
+      a.tiled_fma.family = a.family;
+      a.tiled_fma.split_k = c->split_k() ? c->split_k() : 1;
+      a.tiled_fma.swizzle = c->swizzle();
+      a.tiled_fma.tile_n = c->tile_n();
     }
     t.pool.push_back(a);
   }
@@ -356,7 +367,10 @@ Table &table() {
 
 bool accept(const Answer &answer, WmmaValidator wmma_valid,
             GemvValidator gemv_valid, TiledFmaValidator tiled_fma_valid,
-            Result &out, void *ctx) {
+            Result &out, void *ctx, int family) {
+  // Legacy and general-family requests never answer each other.
+  if ((answer.family != 0) != (family != 0))
+    return false;
   if (answer.kind == fbs::GemmConfigKind::Wmma) {
     if (!wmma_valid || !wmma_valid(ctx, answer.wmma))
       return false;
@@ -383,7 +397,7 @@ bool accept(const Answer &answer, WmmaValidator wmma_valid,
 bool searchGroup(Table &t, const std::vector<Point> &pts, float qm, float qn,
                  float qk, WmmaValidator wv, GemvValidator gv,
                  TiledFmaValidator tv, void *ctx, Result &result,
-                 const Point *&chosen, float &chosen_d2) {
+                 const Point *&chosen, float &chosen_d2, int family) {
   auto dist2 = [&](const Point &p) {
     const float dm = t.wm * (qm - p.lm);
     const float dn = t.wn * (qn - p.ln);
@@ -401,7 +415,7 @@ bool searchGroup(Table &t, const std::vector<Point> &pts, float qm, float qn,
     }
   }
 
-  if (accept(t.pool[pts[best].config], wv, gv, tv, result, ctx)) {
+  if (accept(t.pool[pts[best].config], wv, gv, tv, result, ctx, family)) {
     chosen = &pts[best];
     chosen_d2 = best_d2;
     return true;
@@ -415,7 +429,7 @@ bool searchGroup(Table &t, const std::vector<Point> &pts, float qm, float qn,
       order.emplace_back(dist2(pts[i]), i);
   std::sort(order.begin(), order.end());
   for (const auto &cand : order) {
-    if (accept(t.pool[pts[cand.second].config], wv, gv, tv, result, ctx)) {
+    if (accept(t.pool[pts[cand.second].config], wv, gv, tv, result, ctx, family)) {
       chosen = &pts[cand.second];
       chosen_d2 = cand.first;
       return true;
@@ -483,9 +497,10 @@ Result resolve(const Request &request, WmmaValidator wmma_valid,
   const auto git = t.groups.find(key);
   if (git != t.groups.end() && !git->second.empty() &&
       searchGroup(t, git->second, qm, qn, qk, wmma_valid, gemv_valid,
-                 tiled_fma_valid, ctx, result, chosen, chosen_d2)) {
+                 tiled_fma_valid, ctx, result, chosen, chosen_d2,
+                 request.family)) {
     // exact/nearest below.
-  } else if (request.act_dtype == HipdnnDType::BF16 &&
+  } else if (request.family == 0 && request.act_dtype == HipdnnDType::BF16 &&
             request.wts_dtype == HipdnnDType::BF16 && t.bf16_aliases_f16) {
     /* Stage C aliasing: only fires for an equal-dtype bf16 request (act==wts,
      * the only shape this round measured), and only when the table says the
@@ -500,7 +515,7 @@ Result resolve(const Request &request, WmmaValidator wmma_valid,
                                request.b_group));
     if (ait != t.groups.end() && !ait->second.empty() &&
         searchGroup(t, ait->second, qm, qn, qk, wmma_valid, gemv_valid,
-                   tiled_fma_valid, ctx, result, chosen, chosen_d2)) {
+                   tiled_fma_valid, ctx, result, chosen, chosen_d2, 0)) {
       via_alias = true;
     }
   }
@@ -523,9 +538,9 @@ Result resolve(const Request &request, WmmaValidator wmma_valid,
   }
 
   const auto fit = t.fallbacks.find(key);
-  if (fit != t.fallbacks.end() &&
+  if (request.family == 0 && fit != t.fallbacks.end() &&
       accept(t.pool[fit->second], wmma_valid, gemv_valid, tiled_fma_valid,
-            result, ctx)) {
+            result, ctx, 0)) {
     result.source = Source::Fallback;
     if (logOn()) {
       logHeader("fallback");

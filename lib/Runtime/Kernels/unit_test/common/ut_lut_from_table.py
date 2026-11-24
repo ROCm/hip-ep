@@ -13,6 +13,11 @@ NBITS_KEY = ('phase', 'bits', 'group_size', 'zero_point', 'row_stride', 'm', 'n'
 GQA_KEY = ('phase', 'head_dim', 'kv_dtype', 'num_heads', 'kv_num_heads', 'batch', 'seq_q', 'seq_kv')
 GEMM_KEY = ('phase', 'act_dtype', 'wts_dtype', 'out_dtype', 'trans_b',
             'batch_count', 'a_group', 'b_group', 'm', 'n', 'k')
+# Legacy kernel-table routes and the general family (config family >= 1,
+# selected by exact points only) per table phase.
+GEMM_ROUTE = {'Wmma': 'wmma', 'GemvNt': 'gemv_nt', 'GemvNn': 'gemv_nn', 'TiledFma': 'tiled_fma'}
+GEMM_GENERAL_ROUTE = {'Wmma': 'gen_wmma', 'GemvNn': 'gen_gemv', 'TiledFma': 'gen_f32'}
+GEMM_PHASE = {**{v: k for k, v in GEMM_ROUTE.items()}, **{v: k for k, v in GEMM_GENERAL_ROUTE.items()}}
 
 
 def key_fields(op):
@@ -36,10 +41,14 @@ def config_values(text):
 def native_config(op, doc, point):
     c = doc['configs'][point['config']]
     if op == 'gemm':
-        route = {'Wmma': 'wmma', 'GemvNt': 'gemv_nt', 'GemvNn': 'gemv_nn', 'TiledFma': 'tiled_fma'}[point['phase']]
-        return config_text(dict(route=route, bm=c['bm16'] * 16, bn=c['bn16'] * 16,
-                                swizzle=c['swizzle'], wt_m=c['wt_m'], wt_n=c['wt_n'], bk=c['bk'],
-                                split_k=c['split_k'], threads=c['threads'], tile_n=c['tile_n']))
+        family = c.get('family', 0)
+        route = (GEMM_GENERAL_ROUTE if family else GEMM_ROUTE)[point['phase']]
+        values = dict(route=route, bm=c['bm16'] * 16, bn=c['bn16'] * 16,
+                      swizzle=c['swizzle'], wt_m=c['wt_m'], wt_n=c['wt_n'], bk=c['bk'],
+                      split_k=c['split_k'], threads=c['threads'], tile_n=c['tile_n'])
+        if family:
+            values['family'] = family
+        return config_text(values)
     if op == 'gqa':
         return config_text(dict(wmma=c['use_wmma'], splits=point['splits'],
                                 **{k: c[k] for k in ('bkv', 'hb', 'qw', 'mt', 'nd')}))
@@ -75,7 +84,13 @@ def point_input(op, doc, point, activation='fp16', prefill_kv='fp16'):
             raise ValueError('unsupported GEMM phase/transpose category')
         if not 0 <= point['config'] < len(doc['configs']) or doc['configs'][point['config']]['kind'] != kind:
             raise ValueError('GEMM phase/config kind mismatch')
-        if (phase == 'GemvNt' and (not legacy or m != 1 or tb != 1)) or \
+        general = doc['configs'][point['config']].get('family', 0)
+        if general:
+            # Exact general-family points: the phase only names the config kind.
+            if (phase == 'GemvNt') or (phase == 'Wmma' and dtype == 'fp32') or \
+                    (phase == 'TiledFma' and dtype != 'fp32') or (phase == 'GemvNn' and tb != 0) or ag != 1 or bg != 1:
+                raise ValueError('GEMM general-family point outside its kernel classes')
+        elif (phase == 'GemvNt' and (not legacy or m != 1 or tb != 1)) or \
                 (phase == 'GemvNn' and (tb != 0 or not (parallel_nn or (legacy and m == 1)))) or \
                 (phase == 'Wmma' and (parallel_nn or (m < 16 and legacy) or dtype == 'fp32')) or \
                 (phase == 'TiledFma' and ((m < 16 and legacy) or dtype != 'fp32')):
@@ -246,7 +261,7 @@ def record_point(op, record):
             raise ValueError('explicit-stride diagnostics do not add a tight-layout LUT point')
         selected = record['winner'] if record['insert_nondefault'] else 0
         route = config_values(record['candidates'][selected]['config'])['route']
-        phase = {'wmma': 'Wmma', 'gemv_nt': 'GemvNt', 'gemv_nn': 'GemvNn', 'tiled_fma': 'TiledFma'}.get(route)
+        phase = GEMM_PHASE.get(route)
         if phase is None:
             raise ValueError('GEMM selected default has no table geometry')
         return dict(phase=phase, act_dtype=enum, wts_dtype=enum, out_dtype=out_enum,
@@ -291,16 +306,21 @@ def update_points(op, doc, records):
             continue
         c = config_values(text)
         if op == 'gemm':
-            expected = {'Wmma': 'wmma', 'GemvNt': 'gemv_nt', 'GemvNn': 'gemv_nn', 'TiledFma': 'tiled_fma'}[p['phase']]
+            family = c.get('family', 0)
+            expected = (GEMM_GENERAL_ROUTE if family else GEMM_ROUTE).get(p['phase'])
             if c['route'] != expected:
                 skipped.append(dict(leaf=record['leaf'], shape=record['shape'], reason='GEMM selected default has no table geometry'))
                 continue
             if c['bm'] % 16 or c['bn'] % 16:
                 raise ValueError('GEMM tile geometry is not representable in bm16/bn16')
-            config = dict(kind='Wmma' if c['route'] == 'wmma' else 'TiledFma' if c['route'] == 'tiled_fma' else 'Gemv',
+            kind = {'Wmma': 'Wmma', 'TiledFma': 'TiledFma'}.get(p['phase'], 'Gemv')
+            config = dict(kind=kind,
                           bm16=c['bm'] // 16, bn16=c['bn'] // 16, swizzle=c['swizzle'],
                           wt_m=c['wt_m'], wt_n=c['wt_n'], bk=c['bk'], split_k=c['split_k'],
                           threads=c['threads'], tile_n=c['tile_n'])
+            if family:
+                # Legacy configs keep their exact dict (no key); see GemmTuneConfig.family.
+                config['family'] = family
             pool = doc['configs']
         elif op == 'gqa':
             config = dict(kind='Decode' if p['phase'] == 'Decode' else 'Prefill', use_wmma=c['wmma'],

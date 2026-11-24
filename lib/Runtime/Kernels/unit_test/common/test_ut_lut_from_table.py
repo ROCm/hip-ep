@@ -325,7 +325,9 @@ int main() {
         source = AUTOTUNE / 'gemm/lut/gfx1151.json'
         doc = table.read_table(source)
         rows, skipped = table.inventory('gemm', doc)
-        self.assertEqual((len(rows), len(skipped)), (1254, 0))
+        self.assertEqual((len(rows), len(skipped)), (len(doc['points']), 0))
+        # The 1254 refreshed-table points stay first; ranked exact keys append.
+        self.assertGreaterEqual(len(doc['points']), 1254)
         for change, reason in ((dict(wts_dtype='F32'), 'mixed'), (dict(act_dtype='F64'), 'dtype'),
                                (dict(phase='Any'), 'phase'), (dict(m=2), 'phase')):
             modified = copy.deepcopy(doc)
@@ -343,6 +345,37 @@ int main() {
         self.assertEqual(doc, table.read_table(source))
         self.cli('gemm', 'rank-seed', '--from-lut', source.with_suffix('.fb'), '--out', output, success=False)
         self.cli('gemm', 'rank-seed', '--from-lut', source, '--out', source, success=False)
+
+    def test_gemm_general_family_new_key_roundtrip(self):
+        source = AUTOTUNE / 'gemm/lut/gfx1151.json'
+        doc = table.read_table(source)
+        point = dict(phase='Wmma', act_dtype='F16', wts_dtype='F16', out_dtype='F16', trans_b='NN',
+                     batch_count=1, a_group=1, b_group=1, m=777, n=4096, k=1152)
+        self.assertNotIn(table.table_key('gemm', point), {table.table_key('gemm', p) for p in doc['points']})
+        general = 'route=gen_wmma;bm=128;bn=96;swizzle=0;wt_m=4;wt_n=3;bk=64;split_k=1;threads=128;tile_n=0;family=1'
+        legacy = 'route=wmma;bm=128;bn=128;swizzle=8;wt_m=4;wt_n=2;bk=64;split_k=1;threads=0;tile_n=0'
+        record = synthetic(dict(old_config=legacy, leaf='gemm/Xfp16_Wfp16_Yfp16', shape='M777_N4096_K1152_ta0_tb0'))
+        record['candidates'][1]['config'] = general
+        log = self.root / 'general.log'
+        log.write_text('UT_RANK ' + json.dumps(record) + '\n')
+        output = self.root / 'general.json'
+        self.cli('gemm', 'rank-build', '--base', source, '--rank-log', log, '--out', output)
+        built = table.read_table(output)
+        # Legacy points and configs are untouched; the new exact point uses a family-1 config.
+        self.assertEqual(built['points'][:len(doc['points'])], doc['points'])
+        self.assertEqual(built['configs'][:len(doc['configs'])], doc['configs'])
+        added = built['points'][-1]
+        self.assertEqual(table.table_key('gemm', added), table.table_key('gemm', point))
+        config = built['configs'][added['config']]
+        self.assertEqual((config['kind'], config['family']), ('Wmma', 1))
+        self.assertEqual(table.native_config('gemm', built, added), general)
+        rows, skipped = table.inventory('gemm', built)
+        self.assertFalse(skipped)
+        self.assertIn(('gemm/Xfp16_Wfp16_Yfp16', 'M777_N4096_K1152_ta0_tb0'), {(r['leaf'], r['shape']) for r in rows})
+        # Rebuilding with the same evidence keeps the exact table.
+        again = self.root / 'general-again.json'
+        self.cli('gemm', 'rank-build', '--base', output, '--rank-log', log, '--out', again)
+        self.assertEqual(table.read_table(again), built)
 
     def test_gemm_output_batch_group_partitions_roundtrip(self):
         doc = table.read_table(AUTOTUNE / 'gemm/lut/gfx1151.json')
