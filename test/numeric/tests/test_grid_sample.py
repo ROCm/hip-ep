@@ -97,6 +97,34 @@ class TestGridSample:
         actual, expected = model_runner.run_sample(model, [x, grid])
         compare_outputs(actual, expected, atol=1e-5, rtol=1e-5)
 
+    @pytest.mark.parametrize(
+        "input_shape,grid_shape",
+        [
+            ([1, 4096, 4, 4], [1, 1, 1, 2]),
+            ([2, 601, 5, 6], [2, 7, 9, 2]),
+        ],
+    )
+    @pytest.mark.parametrize("mode", ["bilinear", "nearest"])
+    @pytest.mark.parametrize("padding_mode", ["zeros", "reflection"])
+    def test_grid_sample_few_pixels_many_channels(
+        self, model_runner, input_shape, grid_shape, mode, padding_mode
+    ):
+        """A small output with many channels, so channels split across groups,
+        the last of which is shorter than the rest."""
+        model = _make_grid_sample_model(
+            input_shape,
+            grid_shape,
+            np.float32,
+            mode=mode,
+            padding_mode=padding_mode,
+            align_corners=0,
+        )
+        rng = np.random.default_rng(23)
+        x = rng.uniform(-2, 2, input_shape).astype(np.float32)
+        grid = rng.uniform(-1.3, 1.3, grid_shape).astype(np.float32)
+        actual, expected = model_runner.run_sample(model, [x, grid])
+        compare_outputs(actual, expected, atol=1e-5, rtol=1e-5)
+
     def test_grid_sample_f16_warp_border_align_corners(self, model_runner):
         """fp16 bilinear warp with border padding and align_corners=1."""
         input_shape = [1, 3, 24, 32]

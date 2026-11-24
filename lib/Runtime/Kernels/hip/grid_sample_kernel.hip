@@ -5,6 +5,7 @@
  * ONNX GridSample (4-D NCHW). One thread per output pixel: the grid read,
  * the source coordinates and the padded corner offsets do not depend on the
  * channel, so each thread computes them once and then samples every channel.
+ * Small outputs split the channels across thread groups instead.
  *
  * Grid last dim is (x, y) in [-1, 1]. Coordinate unnormalization:
  *   align_corners=1: ((g + 1) * (size - 1)) / 2
@@ -109,17 +110,29 @@ __device__ inline float load_or_zero(const T *__restrict__ img, int64_t off) {
   return off < 0 ? 0.0f : to_float<T>(img[off]);
 }
 
-// One thread per output pixel (n, oh, ow); loops over the C channels.
+// A launch with fewer output pixels than this splits the channels into groups,
+// so a small output with many channels still fills the GPU.
+constexpr int64_t kMinGridSampleThreads = 32768;
+
+// One thread per (channel group, output pixel (n, oh, ow)), pixels fastest;
+// loops over the group's channels [group * c_per_group, +c_per_group).
 template <typename T, int MODE, int PAD>
-__global__ void grid_sample_kernel(const T *__restrict__ input,
-                                   const T *__restrict__ grid,
-                                   T *__restrict__ output, int64_t C,
-                                   int64_t inH, int64_t inW, int64_t outH,
-                                   int64_t outW, int align_corners,
-                                   int64_t pixels) {
-  int64_t tid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (tid >= pixels)
+__global__ void
+grid_sample_kernel(const T *__restrict__ input, const T *__restrict__ grid,
+                   T *__restrict__ output, int64_t C, int64_t inH, int64_t inW,
+                   int64_t outH, int64_t outW, int align_corners,
+                   int64_t pixels, int64_t c_per_group, int64_t threads) {
+  int64_t flat = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (flat >= threads)
     return;
+  // Several groups only occur below kMinGridSampleThreads pixels, so `flat`
+  // then fits in 32 bits and avoids a costly 64-bit divide.
+  int64_t group = c_per_group >= C ? 0
+                                   : static_cast<uint32_t>(flat) /
+                                         static_cast<uint32_t>(pixels);
+  int64_t tid = flat - group * pixels;
+  int64_t c_begin = group * c_per_group;
+  int64_t c_end = c_begin + c_per_group < C ? c_begin + c_per_group : C;
 
   int64_t out_plane = outH * outW;
   int64_t n = tid / out_plane;
@@ -139,14 +152,14 @@ __global__ void grid_sample_kernel(const T *__restrict__ input,
   }
 
   int64_t in_plane = inH * inW;
-  const T *img = input + n * C * in_plane;
-  T *out = output + n * C * out_plane + pix;
+  const T *img = input + (n * C + c_begin) * in_plane;
+  T *out = output + (n * C + c_begin) * out_plane + pix;
   if (MODE == 0) {
     // Round half to even, as the ONNX reference does.
     int iy = static_cast<int>(rintf(y));
     int ix = static_cast<int>(rintf(x));
     int64_t off = padded_offset<PAD>(iy, ix, H, W, lo);
-    for (int64_t c = 0; c < C; ++c, img += in_plane, out += out_plane)
+    for (int64_t c = c_begin; c < c_end; ++c, img += in_plane, out += out_plane)
       *out = from_float<T>(load_or_zero(img, off));
     return;
   }
@@ -160,7 +173,7 @@ __global__ void grid_sample_kernel(const T *__restrict__ input,
   int64_t o01 = padded_offset<PAD>(y0, x1, H, W, lo);
   int64_t o10 = padded_offset<PAD>(y1, x0, H, W, lo);
   int64_t o11 = padded_offset<PAD>(y1, x1, H, W, lo);
-  for (int64_t c = 0; c < C; ++c, img += in_plane, out += out_plane) {
+  for (int64_t c = c_begin; c < c_end; ++c, img += in_plane, out += out_plane) {
     float v00 = load_or_zero(img, o00);
     float v01 = load_or_zero(img, o01);
     float v10 = load_or_zero(img, o10);
@@ -172,44 +185,47 @@ __global__ void grid_sample_kernel(const T *__restrict__ input,
 }
 
 template <typename T, int MODE>
-static void launch_grid_sample_pad(int padding_mode, dim3 grid_dim, dim3 block,
-                                   hipStream_t stream, const void *input,
-                                   const void *grid, void *output, int64_t c,
-                                   int64_t in_h, int64_t in_w, int64_t out_h,
-                                   int64_t out_w, int align_corners,
-                                   int64_t pixels) {
+static void
+launch_grid_sample_pad(int padding_mode, dim3 grid_dim, dim3 block,
+                       hipStream_t stream, const void *input, const void *grid,
+                       void *output, int64_t c, int64_t in_h, int64_t in_w,
+                       int64_t out_h, int64_t out_w, int align_corners,
+                       int64_t pixels, int64_t c_per_group, int64_t threads) {
   auto in = static_cast<const T *>(input);
   auto g = static_cast<const T *>(grid);
   auto out = static_cast<T *>(output);
   if (padding_mode == 0)
     hipLaunchKernelGGL(HIP_KERNEL_NAME(grid_sample_kernel<T, MODE, 0>),
                        grid_dim, block, 0, stream, in, g, out, c, in_h, in_w,
-                       out_h, out_w, align_corners, pixels);
+                       out_h, out_w, align_corners, pixels, c_per_group,
+                       threads);
   else if (padding_mode == 1)
     hipLaunchKernelGGL(HIP_KERNEL_NAME(grid_sample_kernel<T, MODE, 1>),
                        grid_dim, block, 0, stream, in, g, out, c, in_h, in_w,
-                       out_h, out_w, align_corners, pixels);
+                       out_h, out_w, align_corners, pixels, c_per_group,
+                       threads);
   else
     hipLaunchKernelGGL(HIP_KERNEL_NAME(grid_sample_kernel<T, MODE, 2>),
                        grid_dim, block, 0, stream, in, g, out, c, in_h, in_w,
-                       out_h, out_w, align_corners, pixels);
+                       out_h, out_w, align_corners, pixels, c_per_group,
+                       threads);
 }
 
 template <typename T>
-static void launch_grid_sample(int mode, int padding_mode, dim3 grid_dim,
-                               dim3 block, hipStream_t stream,
-                               const void *input, const void *grid,
-                               void *output, int64_t c, int64_t in_h,
-                               int64_t in_w, int64_t out_h, int64_t out_w,
-                               int align_corners, int64_t pixels) {
+static void
+launch_grid_sample(int mode, int padding_mode, dim3 grid_dim, dim3 block,
+                   hipStream_t stream, const void *input, const void *grid,
+                   void *output, int64_t c, int64_t in_h, int64_t in_w,
+                   int64_t out_h, int64_t out_w, int align_corners,
+                   int64_t pixels, int64_t c_per_group, int64_t threads) {
   if (mode == 0)
     launch_grid_sample_pad<T, 0>(padding_mode, grid_dim, block, stream, input,
                                  grid, output, c, in_h, in_w, out_h, out_w,
-                                 align_corners, pixels);
+                                 align_corners, pixels, c_per_group, threads);
   else
     launch_grid_sample_pad<T, 1>(padding_mode, grid_dim, block, stream, input,
                                  grid, output, c, in_h, in_w, out_h, out_w,
-                                 align_corners, pixels);
+                                 align_corners, pixels, c_per_group, threads);
 }
 
 } // namespace
@@ -228,8 +244,14 @@ extern "C" int hip_grid_sample(void *stream, const void *input, const void *grid
 
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
   int64_t pixels = n * out_h * out_w;
+  int64_t groups = (kMinGridSampleThreads + pixels - 1) / pixels;
+  if (groups > c)
+    groups = c;
+  int64_t c_per_group = (c + groups - 1) / groups;
+  groups = (c + c_per_group - 1) / c_per_group;
+  int64_t threads = pixels * groups;
   dim3 block(256);
-  dim3 grid_dim(static_cast<unsigned int>((pixels + 255) / 256));
+  dim3 grid_dim(static_cast<unsigned int>((threads + 255) / 256));
 
   (void)hipGetLastError();
   CUSTOM_KERNELS_DEBUG_LOG(
@@ -240,21 +262,20 @@ extern "C" int hip_grid_sample(void *stream, const void *input, const void *grid
 
   if (hip_dtype == HIP_DTYPE_FLOAT16) {
     launch_grid_sample<__half>(mode, padding_mode, grid_dim, block, hip_stream,
-                               input, grid, output, c, in_h, in_w, out_h,
-                               out_w, align_corners, pixels);
+                               input, grid, output, c, in_h, in_w, out_h, out_w,
+                               align_corners, pixels, c_per_group, threads);
   } else if (hip_dtype == HIP_DTYPE_BFLOAT16) {
-    launch_grid_sample<__hip_bfloat16>(mode, padding_mode, grid_dim, block,
-                                       hip_stream, input, grid, output, c, in_h,
-                                       in_w, out_h, out_w, align_corners,
-                                       pixels);
+    launch_grid_sample<__hip_bfloat16>(
+        mode, padding_mode, grid_dim, block, hip_stream, input, grid, output, c,
+        in_h, in_w, out_h, out_w, align_corners, pixels, c_per_group, threads);
   } else if (hip_dtype == HIP_DTYPE_FLOAT32) {
     launch_grid_sample<float>(mode, padding_mode, grid_dim, block, hip_stream,
                               input, grid, output, c, in_h, in_w, out_h, out_w,
-                              align_corners, pixels);
+                              align_corners, pixels, c_per_group, threads);
   } else if (hip_dtype == HIP_DTYPE_FLOAT64) {
     launch_grid_sample<double>(mode, padding_mode, grid_dim, block, hip_stream,
-                               input, grid, output, c, in_h, in_w, out_h,
-                               out_w, align_corners, pixels);
+                               input, grid, output, c, in_h, in_w, out_h, out_w,
+                               align_corners, pixels, c_per_group, threads);
   } else {
     fprintf(stderr, "[custom_kernels] hip_grid_sample: unsupported dtype=%d\n",
             hip_dtype);
