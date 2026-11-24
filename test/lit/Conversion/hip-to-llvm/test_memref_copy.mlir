@@ -254,3 +254,24 @@ func.func @copy_singleton_dynamic_outer_stride_with_padding(
         to memref<1x4x64xf32, strided<[?, 80, 1]>>
   return
 }
+
+// -----
+
+// Test 12: a copy whose sides differ only in which dimensions are static --
+// the SSD postprocessor loop copies a `?x100x91` view into a `1x100x91`
+// per-iteration buffer. memref.copy guarantees equal runtime extents, so the
+// static side fixes the shape and this is one flat device transfer. Rejecting
+// the mismatch dropped it into the default lowering's host memcpy, which
+// faulted inside ucrtbase on the device pointers.
+//
+// CHECK-LABEL: llvm.func @copy_dynamic_to_static_extent
+// CHECK:         llvm.call @wrap_hipMemcpyAsync({{.*}}) :
+// CHECK-NOT:     llvm.intr.memcpy
+// CHECK-NOT:     llvm.call @memrefCopy
+func.func @copy_dynamic_to_static_extent(
+    %ctx: !hip.context,
+    %src: memref<?x100x91xf32>,
+    %dst: memref<1x100x91xf32>) {
+  memref.copy %src, %dst : memref<?x100x91xf32> to memref<1x100x91xf32>
+  return
+}

@@ -41,6 +41,8 @@ target_link_libraries(test_static_plugins PRIVATE
   MLIRSupport
   MLIRConvertToLLVMInterface
 )
+# After LibHipCompiler so the GNU ld rescan group is the last link item.
+hip_link_rocmlir_closure(test_static_plugins)
 
 # Tell the test whether the sample plugin is linked into this build.
 if("sample" IN_LIST HIPDNN_EP_COMPILER_PLUGINS)

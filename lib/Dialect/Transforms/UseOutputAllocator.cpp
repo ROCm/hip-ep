@@ -95,6 +95,11 @@ namespace {
 // Expand (internal rank < return rank, e.g. DETR logits): abi_groups[i] = #
 // external dims expanded from internal dim i (sum = external rank, len =
 // internal rank).
+//
+// Static (any chain of collapse_shape / expand_shape between two fully static
+// shapes, e.g. a [1, H, K, V] state returned as [1, 1, 1, H*K*V], which no
+// single reassociation spans): abi_shape is the returned shape and abi_groups
+// is empty; every external dim is a constant.
 static void stampAbiReshapeAttrs(AllocOutputOp allocOutput, Value retVal,
                                  OpBuilder &builder) {
   Value root = allocOutput.getResult();
@@ -104,22 +109,21 @@ static void stampAbiReshapeAttrs(AllocOutputOp allocOutput, Value retVal,
 
   memref::CollapseShapeOp collapse;
   memref::ExpandShapeOp expand;
+  int64_t reshapes = 0;
   Value cur = retVal;
   while (cur != root) {
     Operation *def = cur.getDefiningOp();
     if (!def)
       return;
     if (auto c = dyn_cast<memref::CollapseShapeOp>(def)) {
-      if (collapse || expand)
-        return;
       collapse = c;
+      ++reshapes;
       cur = c.getSrc();
       continue;
     }
     if (auto e = dyn_cast<memref::ExpandShapeOp>(def)) {
-      if (collapse || expand)
-        return;
       expand = e;
+      ++reshapes;
       cur = e.getSrc();
       continue;
     }
@@ -129,10 +133,19 @@ static void stampAbiReshapeAttrs(AllocOutputOp allocOutput, Value retVal,
     }
     return;
   }
-  if (!collapse && !expand)
+  if (reshapes == 0)
     return;
 
   auto extType = cast<MemRefType>(retVal.getType());
+  if (reshapes > 1) {
+    if (!rootType.hasStaticShape() || !extType.hasStaticShape() ||
+        rootType.getShape() == extType.getShape())
+      return;
+    allocOutput->setAttr(kAbiShapeAttrName,
+                         builder.getDenseI64ArrayAttr(extType.getShape()));
+    allocOutput->setAttr(kAbiGroupsAttrName, builder.getDenseI64ArrayAttr({}));
+    return;
+  }
   if (extType.getRank() == rootType.getRank())
     return;
 
@@ -201,6 +214,28 @@ static memref::ExpandShapeOp findSingleExpandShape(Value root, Value retVal) {
     return {};
   }
   return expand;
+}
+
+/// The output-allocator callback can rebuild a rank-increasing expand when
+/// every reassociation group holds at most one dynamic extent. A
+/// memref.reshape that splits one runtime extent into several, such as
+/// [?x4] viewed as [?x?x4], is not that case: its result sizes are only
+/// known at the reshape, so the compute buffer must stay internal and the
+/// returned view is copied into a graph-rank output.
+static bool expandAbiCoversReturn(memref::AllocOp allocOp, Value retVal) {
+  memref::ExpandShapeOp expand =
+      findSingleExpandShape(allocOp.getResult(), retVal);
+  if (!expand)
+    return false;
+  auto externalType = expand.getResultType();
+  if (externalType.getRank() <= allocOp.getType().getRank())
+    return false;
+  return llvm::none_of(expand.getReassociationIndices(),
+                       [&](ArrayRef<int64_t> group) {
+                         return llvm::count_if(group, [&](int64_t dim) {
+                                  return externalType.isDynamicDim(dim);
+                                }) > 1;
+                       });
 }
 
 /// A rank-increasing expand can split one internal dynamic dimension into
@@ -361,6 +396,12 @@ struct UseOutputAllocatorPass
     // values print in order in phase 2.
     SmallVector<std::pair<memref::AllocOp, int64_t>> outputs;
     funcOp.walk([&](memref::AllocOp allocOp) {
+      // An alloc inside a loop or branch region runs once per iteration (or
+      // only on one path) and reaches the return through region results, so
+      // it cannot be the graph output buffer itself. Phase 3 copies the
+      // region result into a single hip.alloc_output after the region.
+      if (allocOp->getParentRegion() != &funcOp.getBody())
+        return;
       int64_t outIdx = -1;
       for (Value aliased : aliasAnalysis.resolve(allocOp.getResult()))
         for (OpOperand &use : aliased.getUses())
@@ -401,6 +442,11 @@ struct UseOutputAllocatorPass
 
       AllocOutputOp allocOutput;
       if (!replacement) {
+        auto retType =
+            retVal ? dyn_cast<MemRefType>(retVal.getType()) : MemRefType();
+        if (retType && retType.getRank() > allocOp.getType().getRank() &&
+            !expandAbiCoversReturn(allocOp, retVal))
+          continue;
         builder.setInsertionPoint(allocOp);
         allocOutput = AllocOutputOp::create(
             builder, allocOp.getLoc(), allocOp.getType(), ctx,

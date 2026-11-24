@@ -224,7 +224,8 @@ struct UpsampleToResize : public mlir::RewritePattern {
         mlir::tensor::EmptyOp::create(rewriter, loc, outputType.getShape(),
                                       outputType.getElementType(), dynSizes);
     auto hipOp = mlir::hip::ResizeOp::create(
-        rewriter, loc, outputType, *ctxOrFailure, input, init,
+        rewriter, loc, outputType, *ctxOrFailure, input,
+        /*runtime_scales=*/mlir::ValueRange{}, init,
         rewriter.getI64IntegerAttr(modeId),
         rewriter.getI64IntegerAttr(kResizeCoordAsymmetric),
         rewriter.getI64IntegerAttr(kResizeNearestFloor), scalesAttr);

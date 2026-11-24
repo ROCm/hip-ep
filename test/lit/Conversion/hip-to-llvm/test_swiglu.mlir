@@ -73,4 +73,34 @@ module {
         outs(%output : memref<8x128xf16, 1>) {promote_activation = true}
     return
   }
+
+  // The clamped form calls wrap_swiglu_clamped with alpha, beta and the
+  // limit as f32; limit 0 (no clamp) is passed as +inf.
+  func.func @swiglu_clamped_f32(%ctx: !hip.context,
+      %gate: memref<?x2880xf32, 1>, %up: memref<?x2880xf32, 1>,
+      %output: memref<?x2880xf32, 1>) {
+    // CHECK-LABEL: llvm.func @swiglu_clamped_f32
+    // CHECK-DAG: llvm.mlir.constant(1.702000e+00 : f32) : f32
+    // CHECK-DAG: llvm.mlir.constant(1.000000e+00 : f32) : f32
+    // CHECK-DAG: llvm.mlir.constant(7.000000e+00 : f32) : f32
+    // CHECK: llvm.call @wrap_swiglu_clamped({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f32, f32, f32) -> i32
+    hip.swiglu(%ctx)
+        ins(%gate, %up : memref<?x2880xf32, 1>, memref<?x2880xf32, 1>)
+        outs(%output : memref<?x2880xf32, 1>)
+        {activation_alpha = 1.702 : f32, activation_beta = 1.0 : f32,
+         swiglu_limit = 7.0 : f32}
+    return
+  }
+
+  func.func @swiglu_clamped_no_limit_f16(%ctx: !hip.context,
+      %gate: memref<64xf16, 1>, %up: memref<64xf16, 1>,
+      %output: memref<64xf16, 1>) {
+    // CHECK-LABEL: llvm.func @swiglu_clamped_no_limit_f16
+    // CHECK-DAG: llvm.mlir.constant(0x7F800000 : f32) : f32
+    // CHECK: llvm.call @wrap_swiglu_clamped
+    hip.swiglu(%ctx) ins(%gate, %up : memref<64xf16, 1>, memref<64xf16, 1>)
+                     outs(%output : memref<64xf16, 1>)
+                     {activation_beta = 1.0 : f32}
+    return
+  }
 }

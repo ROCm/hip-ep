@@ -65,6 +65,7 @@ inline constexpr const char *kWrapConvTranspose = "wrap_conv_transpose";
 inline constexpr const char *kWrapHipblasltMatmul = "wrap_hipblasLtMatmul";
 inline constexpr const char *kWrapMatmulI32 = "wrap_matmul_i32";
 inline constexpr const char *kWrapRocMlir = "wrap_rocmlir";
+inline constexpr const char *kWrapRocMlirPrefill = "wrap_rocmlir_prefill";
 inline constexpr const char *kWrapRmsNorm = "wrap_rms_norm";
 inline constexpr const char *kWrapSkipSimplifiedLayerNorm =
     "wrap_skip_simplified_layer_norm";
@@ -88,6 +89,7 @@ inline constexpr const char *kWrapHyperConnectionPostMixNorm =
 inline constexpr const char *kMiopenAdd = "hip_miopen_add";
 inline constexpr const char *kMiopenMul = "hip_miopen_mul";
 inline constexpr const char *kMiopenSoftmax = "hip_miopen_softmax";
+inline constexpr const char *kScaledMaskedSoftmax = "hip_scaled_masked_softmax";
 inline constexpr const char *kWrapTranspose = "wrap_transpose";
 inline constexpr const char *kWrapGather = "wrap_gather";
 inline constexpr const char *kWrapGatherFromFile = "wrap_gather_from_file";
@@ -111,6 +113,7 @@ inline constexpr const char *kWrapSwish = "wrap_swish";   // hip.swish
 inline constexpr const char *kWrapPow = "wrap_pow";       // hip.pow
 inline constexpr const char *kWrapSwiglu = "wrap_swiglu"; // hip.swiglu
 inline constexpr const char *kWrapSwigluPromoted = "wrap_swiglu_promoted";
+inline constexpr const char *kWrapSwigluClamped = "wrap_swiglu_clamped";
 inline constexpr const char *kWrapSoftplus = "wrap_softplus"; // hip.softplus
 inline constexpr const char *kWrapElementwiseSub = "wrap_elementwise_sub";
 inline constexpr const char *kWrapRotaryEmbedding = "wrap_rotary_embedding";
@@ -175,6 +178,7 @@ inline constexpr const char *kWrapLog = "wrap_log";
 inline constexpr const char *kWrapDiv = "wrap_div";
 inline constexpr const char *kWrapCumSum = "wrap_cumsum";
 inline constexpr const char *kWrapPad = "wrap_pad";
+inline constexpr const char *kWrapPadStatic = "wrap_pad_static";
 inline constexpr const char *kWrapTile = "wrap_tile";
 inline constexpr const char *kWrapExpand = "wrap_expand";
 inline constexpr const char *kWrapReduceProd = "wrap_reduce_prod";
@@ -182,14 +186,18 @@ inline constexpr const char *kWrapPool = "wrap_pool";
 inline constexpr const char *kWrapResize = "wrap_resize";
 inline constexpr const char *kWrapResizeScaled = "wrap_resize_scaled";
 inline constexpr const char *kWrapGridSample = "wrap_grid_sample";
+inline constexpr const char *kWrapRoiAlign = "wrap_roi_align";
 inline constexpr const char *kWrapGlobalPool = "wrap_global_pool";
 inline constexpr const char *kWrapLess = "wrap_less";
 inline constexpr const char *kWrapGatherND = "wrap_gather_nd";
 inline constexpr const char *kWrapSign = "wrap_sign";
 inline constexpr const char *kWrapMod = "wrap_mod";
-inline constexpr const char *kWrapSlice = "wrap_slice";
+inline constexpr const char *kWrapSlice = "wrap_slice_typed";
+inline constexpr const char *kWrapSliceStatic = "wrap_slice_static";
 inline constexpr const char *kWrapScatterND = "wrap_scatter_nd";
 inline constexpr const char *kWrapNonZero = "wrap_nonzero";
+inline constexpr const char *kWrapNonMaxSuppression =
+    "wrap_non_max_suppression";
 inline constexpr const char *kWrapSize = "wrap_size";
 inline constexpr const char *kWrapQElementwise = "wrap_qelementwise";
 inline constexpr const char *kWrapQMatMul = "wrap_qmatmul";
@@ -224,6 +232,11 @@ inline constexpr int64_t kQMoEAmdRoutingSigmoid = 0;
 // hip.qmoe / wrap_qmoe relu2 activation. Must match
 // HIPDNN_EP_QMOE_ACTIVATION_RELU2 in lib/Runtime/hipdnn_ep_runtime.h.
 inline constexpr int64_t kQMoEActivationRelu2 = 5;
+
+// hip.qmoe / wrap_qmoe routing_type. Must match HIPDNN_EP_QMOE_ROUTING_* in
+// lib/Runtime/hipdnn_ep_runtime.h.
+inline constexpr int64_t kQMoERoutingSoftmax = 0;
+inline constexpr int64_t kQMoERoutingSigmoidBias = 1;
 
 // Window-pool reduction mode constants (hip.pool / wrap_pool).
 // Values must match HIPDNN_EP_POOL_* in lib/Runtime/hipdnn_ep_runtime.h
@@ -584,6 +597,8 @@ void populateScatterNDLoweringPatterns(const LLVMTypeConverter &converter,
                                        RewritePatternSet &patterns);
 void populateNonZeroLoweringPatterns(const LLVMTypeConverter &converter,
                                      RewritePatternSet &patterns);
+void populateNonMaxSuppressionLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 // Generic data-dependent-shape readback primitive (hip.readback_dim). Not tied
 // to any single operator; any op that computes a runtime extent into a device
 // i32 scalar can be sliced/sized via this.
@@ -599,6 +614,8 @@ void populateSizeLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateLoopLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
+void populateScanLoweringPatterns(const LLVMTypeConverter &converter,
+                                  RewritePatternSet &patterns);
 void populateIfLoweringPatterns(const LLVMTypeConverter &converter,
                                 RewritePatternSet &patterns);
 void populatePoolLoweringPatterns(const LLVMTypeConverter &converter,
@@ -607,6 +624,8 @@ void populateResizeLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns);
 void populateGridSampleLoweringPatterns(const LLVMTypeConverter &converter,
                                         RewritePatternSet &patterns);
+void populateRoiAlignLoweringPatterns(const LLVMTypeConverter &converter,
+                                      RewritePatternSet &patterns);
 void populateGlobalPoolLoweringPatterns(const LLVMTypeConverter &converter,
                                         RewritePatternSet &patterns);
 void populateQElementwiseLoweringPatterns(const LLVMTypeConverter &converter,

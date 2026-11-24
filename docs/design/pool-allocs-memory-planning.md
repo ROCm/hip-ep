@@ -343,6 +343,9 @@ is rejected if placement relied on its mapped-input support.
 This analysis can replace scalar and dimension readbacks, or supply a GQA host
 length for batch one. GPU inputs and the final inference wait stay unchanged.
 GQA and its opt-in Ring path accept an explicit host-length presence flag.
+When `hip.gqa` carries `uniform_seqlens_k`, its `seqlens_k` is a device
+broadcast of one length, so the analysis proves the host-written
+`total_seq_len` instead and the lowering passes `total_seq_len - 1`.
 Without a proven value, the runtime retains its existing readback path.
 `--convert-hip-to-llvm='report-host-scalars=true'` reports the forwarded count
 or the reason the analysis was rejected, including in Release builds.

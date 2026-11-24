@@ -64,14 +64,17 @@ add_library(HipToLLVM STATIC
   SliceLowering.cpp
   ScatterNDLowering.cpp
   NonZeroLowering.cpp
+  NonMaxSuppressionLowering.cpp
   ReadbackDimLowering.cpp
   ReadbackScalarLowering.cpp
   SizeLowering.cpp
   LoopLowering.cpp
+  ScanLowering.cpp
   IfLowering.cpp
   PoolLowering.cpp
   ResizeLowering.cpp
   GridSampleLowering.cpp
+  RoiAlignLowering.cpp
   GlobalPoolLowering.cpp
   QElementwiseLowering.cpp
   QMatMulLowering.cpp

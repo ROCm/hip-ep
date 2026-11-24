@@ -483,6 +483,20 @@ int wrap_matmul_i32(RuntimeState *state, const void *A, const void *B,
   return 0;
 }
 
+// Pre-fill for a hip.rocmlir argument. The mock has no device buffer to fill.
+int wrap_rocmlir_prefill(RuntimeState *state, void *buffer, int64_t count,
+                         int64_t element_bytes, uint64_t pattern) {
+  (void)buffer;
+  (void)pattern;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_rocmlir_prefill\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_rocmlir_prefill(count=%lld, element_bytes=%lld)\n",
+             (long long)count, (long long)element_bytes);
+  return 0;
+}
+
 // RocMLIR dispatch (hip.rocmlir). Empty for now: the generated IR builds the
 // kernargs buffer and passes the embedded GPU binary + launch geometry, but
 // this wrapper does not yet load the module or launch the kernel.
@@ -532,8 +546,9 @@ int wrap_group_query_attention_host_length(
     // it).
     int64_t kv_bnsd,
     // key/value sequence length (mock stub ignores it).
-    int64_t seq_len_new_kv, int32_t has_host_length,
-    int32_t host_length_value) {
+    int64_t seq_len_new_kv, int32_t has_host_length, int32_t host_length_value,
+    // Per-key bias row [key_bias_batch, key_bias_len] (mock stub logs it).
+    void *key_bias, int64_t key_bias_batch, int64_t key_bias_len) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_group_query_attention\n");
     return -1;
@@ -573,6 +588,8 @@ int wrap_group_query_attention_host_length(
              "attn_bias_num_heads=%lld,\n",
              attention_bias, (long long)attn_bias_batch,
              (long long)attn_bias_num_heads);
+  MOCK_PRINT("[MOCK]   key_bias=%p, key_bias_batch=%lld, key_bias_len=%lld,\n",
+             key_bias, (long long)key_bias_batch, (long long)key_bias_len);
   MOCK_PRINT("[MOCK]   batch=%lld, seq_q=%lld, seq_kv=%lld, "
              "past_buf_seq=%lld, head_dim=%lld, elem_size=%lld)\n",
              (long long)batch_size, (long long)seq_len_q, (long long)seq_len_kv,
@@ -602,8 +619,8 @@ int wrap_group_query_attention_ring_f16(
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
     int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
-    int64_t seq_len_new_kv, int32_t has_host_length,
-    int32_t host_length_value) {
+    int64_t seq_len_new_kv, int32_t has_host_length, int32_t host_length_value,
+    void *key_bias, int64_t key_bias_batch, int64_t key_bias_len) {
   return wrap_group_query_attention_host_length(
       state, op_state_slot, query, key, value, past_key, past_value, seqlens_k,
       total_seq_len, cos_cache, sin_cache, position_ids, attention_bias,
@@ -613,7 +630,49 @@ int wrap_group_query_attention_ring_f16(
       v_quant_type, kv_cache_bit_width, no_causal, batch_size, seq_len_q,
       seq_len_kv, past_buf_seq, head_dim, element_size_bytes, attn_bias_batch,
       attn_bias_num_heads, kv_bnsd, seq_len_new_kv, has_host_length,
-      host_length_value);
+      host_length_value, key_bias, key_bias_batch, key_bias_len);
+}
+
+int wrap_group_query_attention_v5(
+    RuntimeState *state, int op_state_slot,
+    // Inputs 1-7 (core GQA)
+    void *query, void *key, void *value, void *past_key, void *past_value,
+    void *seqlens_k, void *total_seq_len,
+    // Inputs 8-10 (RoPE)
+    void *cos_cache, void *sin_cache, void *position_ids,
+    // Inputs 11-14 (advanced features)
+    void *attention_bias, void *head_sink, void *k_scale, void *v_scale,
+    // Outputs
+    void *output, void *present_key, void *present_value, void *output_qk,
+    // Attributes (13)
+    int64_t num_heads, int64_t kv_num_heads, float scale, int64_t do_rotary,
+    int64_t rotary_interleaved, float softcap, int64_t local_window_size,
+    int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
+    int64_t v_quant_type, int64_t kv_cache_bit_width, int32_t no_causal,
+    // Shape values (6)
+    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
+    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
+    int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
+    int64_t seq_len_new_kv, int32_t has_host_length, int32_t host_length_value,
+    void *key_bias, int64_t key_bias_batch, int64_t key_bias_len,
+    int64_t past_key_width, int64_t past_value_width, int64_t present_key_width,
+    int64_t present_value_width, int32_t fp16_tensors) {
+  (void)fp16_tensors;
+  (void)past_key_width;
+  (void)past_value_width;
+  (void)present_key_width;
+  (void)present_value_width;
+  // The mock records dispatch only; codec execution requires the real runtime.
+  return wrap_group_query_attention_host_length(
+      state, op_state_slot, query, key, value, past_key, past_value, seqlens_k,
+      total_seq_len, cos_cache, sin_cache, position_ids, attention_bias,
+      head_sink, k_scale, v_scale, output, present_key, present_value,
+      output_qk, num_heads, kv_num_heads, scale, do_rotary, rotary_interleaved,
+      softcap, local_window_size, smooth_softmax, qk_output, k_quant_type,
+      v_quant_type, kv_cache_bit_width, no_causal, batch_size, seq_len_q,
+      seq_len_kv, past_buf_seq, head_dim, element_size_bytes, attn_bias_batch,
+      attn_bias_num_heads, kv_bnsd, seq_len_new_kv, has_host_length,
+      host_length_value, key_bias, key_bias_batch, key_bias_len);
 }
 
 int wrap_multi_head_attention(
@@ -744,9 +803,11 @@ int wrap_gated_delta_net(RuntimeState *state, const void *qkv,
 int wrap_dynamic_sparse_attention(
     RuntimeState *state, const void *query, const void *key, const void *value,
     const void *past_key, const void *past_value, const void *selected_indices,
-    const void *selected_counts, const void *seqlens_k, void *output,
-    void *present_key, void *present_value, int64_t batch, int64_t seq_len,
-    int64_t num_heads, int64_t kv_num_heads, int64_t head_size,
+    const void *selected_counts, const void *seqlens_k, const void *gate,
+    const void *q_norm_weight, const void *k_norm_weight,
+    const void *position_ids, const void *cos_cache, const void *sin_cache,
+    void *output, void *present_key, void *present_value, int64_t batch,
+    int64_t seq_len, int64_t num_heads, int64_t kv_num_heads, int64_t head_size,
     int64_t capacity, int64_t max_selected, int64_t past_key_batch,
     int64_t past_key_heads, int64_t past_key_head_size,
     int64_t past_value_batch, int64_t past_value_heads,
@@ -756,14 +817,42 @@ int wrap_dynamic_sparse_attention(
     int64_t indices_rows, int64_t counts_rows, int64_t seqlens_len,
     int64_t key_batch, int64_t key_seq_len, int64_t key_width,
     int64_t value_batch, int64_t value_seq_len, int64_t value_width,
-    float scale) {
-  if (!state || !query || !key || !value || !past_key || !past_value ||
-      !selected_counts || !seqlens_k || !output || !present_key ||
-      !present_value) {
+    int64_t gate_batch, int64_t gate_seq_len, int64_t gate_width,
+    int64_t q_norm_len, int64_t k_norm_len, int64_t position_sections,
+    int64_t position_batch, int64_t position_seq_len, int64_t cos_rows,
+    int64_t cos_width, int64_t sin_rows, int64_t sin_width, int64_t section_t,
+    int64_t section_h, int64_t section_w, int64_t mrope_layout, float scale,
+    float norm_epsilon, const void *past_sequence_length) {
+  const bool packed = !key && !value;
+  const int prologue_parts = (q_norm_weight != nullptr) +
+                             (k_norm_weight != nullptr) +
+                             (position_ids != nullptr) +
+                             (cos_cache != nullptr) + (sin_cache != nullptr);
+  if (!state || !query || (!packed && (!key || !value)) || !past_key ||
+      !past_value || !selected_counts || !seqlens_k || !output ||
+      !present_key || !present_value ||
+      (prologue_parts != 0 && prologue_parts != 5)) {
     fprintf(stderr,
             "Invalid required argument in wrap_dynamic_sparse_attention\n");
     return -1;
   }
+  (void)gate_batch;
+  (void)gate_seq_len;
+  (void)gate_width;
+  (void)q_norm_len;
+  (void)k_norm_len;
+  (void)position_sections;
+  (void)position_batch;
+  (void)position_seq_len;
+  (void)cos_rows;
+  (void)cos_width;
+  (void)sin_rows;
+  (void)sin_width;
+  (void)section_t;
+  (void)section_h;
+  (void)section_w;
+  (void)mrope_layout;
+  (void)norm_epsilon;
   (void)key_batch;
   (void)key_seq_len;
   (void)key_width;
@@ -787,11 +876,13 @@ int wrap_dynamic_sparse_attention(
   (void)seqlens_len;
   MOCK_PRINT("[MOCK] wrap_dynamic_sparse_attention(B=%lld, S=%lld, N=%lld, "
              "kvN=%lld, D=%lld, cap=%lld, max_selected=%lld, scale=%f, "
-             "shared_cache=%d)\n",
+             "shared_cache=%d, packed=%d, prologue=%d, gate=%d, paired=%d)\n",
              (long long)batch, (long long)seq_len, (long long)num_heads,
              (long long)kv_num_heads, (long long)head_size, (long long)capacity,
              (long long)max_selected, (double)scale,
-             past_key == present_key ? 1 : 0);
+             past_key == present_key ? 1 : 0, packed ? 1 : 0,
+             prologue_parts != 0 ? 1 : 0, gate ? 1 : 0,
+             past_sequence_length ? 1 : 0);
   return 0;
 }
 
@@ -805,10 +896,14 @@ int wrap_sparse_attention_indexer(
     int64_t rotary_batched, int64_t compress_ratio, int64_t token_budget,
     int64_t element_size_bytes, int64_t past_batch, int64_t mask_batch,
     int64_t mask_len, int64_t cos_batch, int64_t sin_batch, int64_t sin_rows,
-    float epsilon, float scale) {
+    float epsilon, float scale, const void *rotary_position_ids,
+    const void *rotary_sections, int64_t id_sections, int64_t id_batch,
+    int64_t id_rows, void *selected_counts, int64_t pair_format) {
   if (!state || !query || !query_norm_weight || !key_norm_weight ||
       !cos_cache || !sin_cache || (past_rows > 0 && !past_key) ||
-      !selected_indices || !present_key) {
+      !selected_indices || !present_key ||
+      (rotary_position_ids && !rotary_sections) ||
+      (pair_format && (mask || !past_sequence_length || !selected_counts))) {
     fprintf(stderr,
             "Invalid required argument in wrap_sparse_attention_indexer\n");
     return -1;
@@ -821,15 +916,20 @@ int wrap_sparse_attention_indexer(
   (void)cos_batch;
   (void)sin_batch;
   (void)sin_rows;
+  (void)id_sections;
+  (void)id_batch;
   MOCK_PRINT("[MOCK] wrap_sparse_attention_indexer(B=%lld, S=%lld, "
              "past_rows=%lld, N=%lld, D=%lld, R=%lld, X=%lld, batched=%lld, "
-             "r=%lld, budget=%lld, elem=%lld, eps=%g, scale=%f, mask=%d)\n",
+             "r=%lld, budget=%lld, elem=%lld, eps=%g, scale=%f, mask=%d, "
+             "id_rows=%lld, counts=%d, pair=%d)\n",
              (long long)batch, (long long)seq_len, (long long)past_rows,
              (long long)num_heads, (long long)head_size,
              (long long)rotary_width, (long long)rotary_rows,
              (long long)rotary_batched, (long long)compress_ratio,
              (long long)token_budget, (long long)element_size_bytes,
-             (double)epsilon, (double)scale, mask ? 1 : 0);
+             (double)epsilon, (double)scale, mask ? 1 : 0,
+             (long long)(rotary_position_ids ? id_rows : 0),
+             selected_counts ? 1 : 0, pair_format ? 1 : 0);
   return 0;
 }
 
@@ -1116,7 +1216,7 @@ int wrap_arg_max(RuntimeState *state, void *data, void *indices, int64_t axis,
 int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
                void *indices, int64_t axis, int64_t largest, int64_t sorted,
                int64_t rank, const int64_t *x_shape, int64_t num_elements,
-               int64_t element_size_bytes) {
+               int64_t data_type) {
   (void)x;
   (void)k;
   (void)values;
@@ -1127,10 +1227,9 @@ int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
     return -1;
   }
   MOCK_PRINT("[MOCK] wrap_top_k(axis=%lld, largest=%lld, sorted=%lld, "
-             "rank=%lld, num_elements=%lld, element_size=%lld)\n",
+             "rank=%lld, num_elements=%lld, data_type=%lld)\n",
              (long long)axis, (long long)largest, (long long)sorted,
-             (long long)rank, (long long)num_elements,
-             (long long)element_size_bytes);
+             (long long)rank, (long long)num_elements, (long long)data_type);
   return 0;
 }
 
@@ -1373,6 +1472,31 @@ int wrap_grid_sample(RuntimeState *state, void *input, void *grid, void *output,
   return 0;
 }
 
+int wrap_roi_align(RuntimeState *state, void *input, void *rois,
+                   void *batch_indices, void *output, int64_t data_type,
+                   int64_t n, int64_t c, int64_t in_h, int64_t in_w,
+                   int64_t num_rois, int64_t out_h, int64_t out_w,
+                   int64_t sampling_ratio, float spatial_scale,
+                   int64_t half_pixel, int64_t mode) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_roi_align\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_roi_align(dtype=%s(%lld), N=%lld, C=%lld, "
+             "in=%lldx%lld, rois=%lld, out=%lldx%lld, sampling_ratio=%lld, "
+             "spatial_scale=%f, half_pixel=%lld, mode=%lld)\n",
+             hipdnn_ep_datatype_name(data_type), (long long)data_type,
+             (long long)n, (long long)c, (long long)in_h, (long long)in_w,
+             (long long)num_rois, (long long)out_h, (long long)out_w,
+             (long long)sampling_ratio, (double)spatial_scale,
+             (long long)half_pixel, (long long)mode);
+  (void)input;
+  (void)rois;
+  (void)batch_indices;
+  (void)output;
+  return 0;
+}
+
 int wrap_global_pool(RuntimeState *state, void *input, void *output,
                      int64_t outer, int64_t reduce_size, int64_t data_type,
                      int64_t mode, int64_t p) {
@@ -1577,6 +1701,29 @@ extern "C" int hip_miopen_softmax(RuntimeState *state, const void *input,
              "data_type=%s(%lld))\n",
              (long long)rows, (long long)cols,
              hipdnn_ep_datatype_name(data_type), (long long)data_type);
+  return 0;
+}
+
+// Signature must match lib/Runtime/real/activation.cpp.
+extern "C" int hip_scaled_masked_softmax(
+    RuntimeState *state, const void *input, const void *row_ids,
+    const void *col_ids, void *output, int64_t outer, int64_t rows,
+    int64_t cols, int64_t row_ids_len, int64_t col_ids_len,
+    int64_t elem_size_bytes, float scale, float fill) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in hip_scaled_masked_softmax\n");
+    return -1;
+  }
+  (void)input;
+  (void)row_ids;
+  (void)col_ids;
+  (void)output;
+  MOCK_PRINT("[MOCK] hip_scaled_masked_softmax(outer=%lld, rows=%lld, "
+             "cols=%lld, row_ids=%lld, col_ids=%lld, elem_size=%lld, "
+             "scale=%g, fill=%g)\n",
+             (long long)outer, (long long)rows, (long long)cols,
+             (long long)row_ids_len, (long long)col_ids_len,
+             (long long)elem_size_bytes, (double)scale, (double)fill);
   return 0;
 }
 
@@ -1996,7 +2143,9 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
               int64_t k, int64_t expert_weight_bits, int64_t block_size,
               int64_t swiglu_fusion, int64_t activation_type,
               float activation_alpha, float activation_beta, float swiglu_limit,
-              int64_t normalize_routing_weights, int64_t elem_size) {
+              int64_t normalize_routing_weights, int64_t elem_size,
+              const void *correction_bias, int64_t routing_type,
+              float routed_scaling_factor) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_qmoe\n");
     return -1;
@@ -2023,6 +2172,10 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
              fc1_bias ? "yes" : "null", fc2_bias ? "yes" : "null",
              fc3_weights ? "yes" : "null", fc1_zero_points ? "yes" : "null",
              fc2_zero_points ? "yes" : "null", router_weights ? "yes" : "null");
+  MOCK_PRINT("[MOCK]   routing_type=%lld, correction_bias=%s, "
+             "routed_scaling_factor=%f\n",
+             (long long)routing_type, correction_bias ? "yes" : "null",
+             (double)routed_scaling_factor);
 
   return 0;
 }
@@ -2603,6 +2756,34 @@ int wrap_nonzero(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
+int wrap_non_max_suppression(
+    RuntimeState *state, const float *boxes, const float *scores,
+    const int64_t *max_output_boxes_per_class, const float *iou_threshold,
+    const float *score_threshold, int64_t *selected, int32_t *count_ptr,
+    int64_t num_batches, int64_t num_classes, int64_t num_boxes,
+    int64_t capacity, int64_t center_point_box, int64_t has_score_threshold) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_non_max_suppression\n");
+    return -1;
+  }
+  (void)boxes;
+  (void)scores;
+  (void)max_output_boxes_per_class;
+  (void)iou_threshold;
+  (void)score_threshold;
+  (void)selected;
+  // The mock selects nothing; downstream shapes see N = 0.
+  if (count_ptr)
+    *count_ptr = 0;
+  MOCK_PRINT("[MOCK] wrap_non_max_suppression(B=%lld, C=%lld, S=%lld, "
+             "capacity=%lld, center_point_box=%lld, "
+             "has_score_threshold=%lld)\n",
+             (long long)num_batches, (long long)num_classes,
+             (long long)num_boxes, (long long)capacity,
+             (long long)center_point_box, (long long)has_score_threshold);
+  return 0;
+}
+
 int32_t hipdnn_ep_readback_i32(RuntimeState *state, const void *device_scalar) {
   (void)state;
   // Mock "device" memory is host memory: read the scalar directly.
@@ -2807,6 +2988,22 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
   return 0;
 }
 
+int wrap_pad_static(RuntimeState *state, void *data, void *output,
+                    const int64_t *data_shape, const int64_t *output_shape,
+                    const int64_t *lower_pads, int64_t rank, int64_t data_type,
+                    int64_t mode_id, const void *constant_value) {
+  (void)constant_value;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_pad_static\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_pad_static(rank=%lld, data_type=%s(%lld), "
+             "mode=%lld)\n",
+             (long long)rank, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type, (long long)mode_id);
+  return 0;
+}
+
 int wrap_tile(RuntimeState *state, void *input, void *repeats, void *output,
               const int64_t *input_shape, int64_t input_rank,
               const int64_t *output_shape, int64_t output_rank,
@@ -2892,12 +3089,14 @@ int wrap_gather_nd(RuntimeState *state, void *data, void *indices, void *output,
   return 0;
 }
 
-int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
-               void *axes, void *steps, void *output, const int64_t *data_shape,
-               int64_t data_rank, const int64_t *output_shape,
-               int64_t output_rank, int64_t starts_num_elements,
-               int64_t axes_num_elements, int64_t steps_num_elements,
-               int64_t data_type) {
+int wrap_slice_typed(RuntimeState *state, void *data, void *starts, void *ends,
+                     void *axes, void *steps, void *output,
+                     const int64_t *data_shape, int64_t data_rank,
+                     const int64_t *output_shape, int64_t output_rank,
+                     int64_t starts_num_elements, int64_t axes_num_elements,
+                     int64_t steps_num_elements, int64_t data_type,
+                     int64_t index_type) {
+  (void)index_type;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_slice\n");
     return -1;
@@ -2917,6 +3116,38 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
              steps ? "yes" : "null", hipdnn_ep_datatype_name(data_type),
              (long long)data_type);
   return 0;
+}
+
+int wrap_slice_static(RuntimeState *state, void *data, void *output,
+                      const int64_t *data_shape, const int64_t *output_shape,
+                      const int64_t *starts, const int64_t *steps, int64_t rank,
+                      int64_t data_type) {
+  (void)data;
+  (void)output;
+  (void)data_shape;
+  (void)output_shape;
+  (void)starts;
+  (void)steps;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_slice_static\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_slice_static(rank=%lld, data_type=%s(%lld))\n",
+             (long long)rank, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type);
+  return 0;
+}
+
+int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
+               void *axes, void *steps, void *output, const int64_t *data_shape,
+               int64_t data_rank, const int64_t *output_shape,
+               int64_t output_rank, int64_t starts_num_elements,
+               int64_t axes_num_elements, int64_t steps_num_elements,
+               int64_t data_type) {
+  return wrap_slice_typed(
+      state, data, starts, ends, axes, steps, output, data_shape, data_rank,
+      output_shape, output_rank, starts_num_elements, axes_num_elements,
+      steps_num_elements, data_type, HIPDNN_EP_DATATYPE_INT64);
 }
 
 int wrap_scatter_nd(RuntimeState *state, void *data, void *indices,
@@ -3086,5 +3317,16 @@ int wrap_swiglu_promoted(RuntimeState *state, void *gate, void *up,
     return -1;
   MOCK_PRINT("[MOCK] wrap_swiglu_promoted(num_elements=%lld)\n",
              (long long)num_elements);
+  return 0;
+}
+
+int wrap_swiglu_clamped(RuntimeState *state, void *gate, void *up, void *output,
+                        int64_t num_elements, int64_t data_type, float alpha,
+                        float beta, float limit) {
+  if (!state || !gate || !up || !output)
+    return -1;
+  MOCK_PRINT("[MOCK] wrap_swiglu_clamped(num_elements=%lld, data_type=%lld, "
+             "alpha=%g, beta=%g, limit=%g)\n",
+             (long long)num_elements, (long long)data_type, alpha, beta, limit);
   return 0;
 }

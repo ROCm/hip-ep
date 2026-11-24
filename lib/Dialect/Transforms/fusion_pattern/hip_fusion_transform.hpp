@@ -30,7 +30,10 @@
 
 #include "hip/Dialect/IR/HipDialect.h"
 
+#include "gelu_fusion.hpp"
+#include "linear_attention_group_fold.hpp"
 #include "patch_embed_conv_to_gemm.hpp"
+#include "scaled_masked_softmax_fusion.hpp"
 #include "swiglu_fusion.hpp"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -876,11 +879,18 @@ inline void registerNativeHelpers(mlir::PDLPatternModule &pdlPatterns) {
 /// rather than at the `hip.quantize_linear` it replaces.
 constexpr unsigned kPatchEmbedConvToGemmBenefit = 5;
 
-/// The SwiGLU fusion is the only pattern in this set rooted at `hip.mul`, so
-/// this benefit is never ranked against another pattern. `HipQMul` also
-/// matches a `hip.mul`, but it roots at the `hip.quantize_linear` that
-/// consumes it.
+/// The SwiGLU and GELU fusions are rooted at `hip.mul` but match disjoint
+/// chains (a sigmoid gate, a tanh or erf activation), so their benefits are
+/// never ranked against each other. `HipQMul` also matches a `hip.mul`, but
+/// it roots at the `hip.quantize_linear` that consumes it.
 constexpr unsigned kSwigluFusionBenefit = 2;
+constexpr unsigned kGeluFusionBenefit = 2;
+
+/// The only pattern rooted at `hip.linear_attention`.
+constexpr unsigned kLinearAttentionGroupFoldBenefit = 1;
+
+/// The only pattern rooted at `hip.miopen.softmax`.
+constexpr unsigned kScaledMaskedSoftmaxFusionBenefit = 1;
 
 /// apply this directory's patterns to every function body in module, failure
 /// means the embedded PDLL patterns will not parse or the driver failed
@@ -897,6 +907,11 @@ inline mlir::LogicalResult run(mlir::ModuleOp module,
       patterns, mlir::PatternBenefit(kPatchEmbedConvToGemmBenefit));
   populateSwigluFusionPattern(patterns,
                               mlir::PatternBenefit(kSwigluFusionBenefit));
+  populateGeluFusionPattern(patterns, mlir::PatternBenefit(kGeluFusionBenefit));
+  populateLinearAttentionGroupFoldPattern(
+      patterns, mlir::PatternBenefit(kLinearAttentionGroupFoldBenefit));
+  populateScaledMaskedSoftmaxFusionPattern(
+      patterns, mlir::PatternBenefit(kScaledMaskedSoftmaxFusionBenefit));
 
   // pdl patterns here
   if (pdlBuffer.getBufferSize() != 0) {

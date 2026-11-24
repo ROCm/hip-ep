@@ -61,7 +61,7 @@ func.func @where_rank_extend(%ctx: !hip.context, %cond: tensor<2x8xi1>,
   return %r : tensor<2x8xf16>
 }
 
-// The shape hip-fuse-rocmlir actually produces.
+// The shape the rocMLIR fusion actually produces.
 // CHECK-LABEL: func.func @where_outlined_kernel
 // CHECK: tosa.select
 // CHECK-NOT: hip.where
@@ -73,6 +73,26 @@ func.func @where_outlined_kernel(%cond: tensor<2x8xi1>, %x: tensor<2x8xf16>,
                            tensor<2x8xi1>, tensor<2x8xf16>, tensor<2x8xf16>)
                        outs(%init : tensor<2x8xf16>) : tensor<2x8xf16>
   return %r : tensor<2x8xf16>
+}
+
+// The rocMLIR fusion normalizes MorphiZen's ui8 Where condition to signless i8
+// in the private kernel ABI. Compare it with zero and invert the i1 result so
+// tosa.select gets a predicate. No unsigned cast is involved.
+// CHECK-LABEL: func.func @where_i8_predicate
+// CHECK: tosa.equal
+// CHECK: tosa.bitwise_xor
+// CHECK: tosa.select
+// CHECK-NOT: tosa.custom
+// CHECK-NOT: hip.where
+func.func @where_i8_predicate(%ctx: !hip.context,
+                          %cond: tensor<1x1x60x60xi8>, %x: tensor<f32>,
+                          %y: tensor<1x2x60x60xf32>,
+                          %init: tensor<1x2x60x60xf32>)
+    -> tensor<1x2x60x60xf32> attributes {rock.kernel} {
+  %r = hip.where(%ctx) ins(%cond, %x, %y :
+      tensor<1x1x60x60xi8>, tensor<f32>, tensor<1x2x60x60xf32>)
+      outs(%init : tensor<1x2x60x60xf32>) : tensor<1x2x60x60xf32>
+  return %r : tensor<1x2x60x60xf32>
 }
 
 // -----
