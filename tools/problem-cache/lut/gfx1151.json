@@ -1807,6 +1807,141 @@
     },
     {
       "perf_config": "gemm:mPerBlock=128,nPerBlock=32,kPerBlock=32,kpack=1,numCTAs=1,numWaves=8,matrixInstrNonkdim=0,splitKFactor=1,numStages=2,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=9,nPerBlock=256,kPerBlock=8,kpack=1,numCTAs=1,numWaves=2,matrixInstrNonkdim=0,splitKFactor=1,numStages=1,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=1,nPerBlock=3,kPerBlock=1,kpack=1,numCTAs=1,numWaves=4,matrixInstrNonkdim=0,splitKFactor=1,numStages=1,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=1,nPerBlock=128,kPerBlock=32,kpack=1,numCTAs=1,numWaves=2,matrixInstrNonkdim=0,splitKFactor=1,numStages=2,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=1,nPerBlock=128,kPerBlock=32,kpack=1,numCTAs=1,numWaves=2,matrixInstrNonkdim=0,splitKFactor=1,numStages=1,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=16,nPerBlock=256,kPerBlock=4,kpack=1,numCTAs=1,numWaves=2,matrixInstrNonkdim=0,splitKFactor=1,numStages=2,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=32,nPerBlock=64,kPerBlock=8,kpack=1,numCTAs=1,numWaves=2,matrixInstrNonkdim=0,splitKFactor=1,numStages=3,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=16,nPerBlock=64,kPerBlock=8,kpack=1,numCTAs=1,numWaves=2,matrixInstrNonkdim=0,splitKFactor=1,numStages=2,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=32,nPerBlock=64,kPerBlock=24,kpack=1,numCTAs=1,numWaves=4,matrixInstrNonkdim=0,splitKFactor=1,numStages=2,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=24,nPerBlock=32,kPerBlock=18,kpack=1,numCTAs=1,numWaves=2,matrixInstrNonkdim=0,splitKFactor=1,numStages=2,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=16,nPerBlock=128,kPerBlock=9,kpack=1,numCTAs=1,numWaves=2,matrixInstrNonkdim=0,splitKFactor=1,numStages=1,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=16,nPerBlock=4,kPerBlock=128,kpack=1,numCTAs=1,numWaves=2,matrixInstrNonkdim=0,splitKFactor=1,numStages=3,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=16,nPerBlock=4,kPerBlock=16,kpack=1,numCTAs=1,numWaves=2,matrixInstrNonkdim=0,splitKFactor=1,numStages=3,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=8,nPerBlock=4,kPerBlock=16,kpack=1,numCTAs=1,numWaves=2,matrixInstrNonkdim=0,splitKFactor=1,numStages=1,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=16,nPerBlock=4,kPerBlock=3,kpack=1,numCTAs=1,numWaves=4,matrixInstrNonkdim=0,splitKFactor=1,numStages=1,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=16,nPerBlock=4,kPerBlock=16,kpack=1,numCTAs=1,numWaves=8,matrixInstrNonkdim=0,splitKFactor=1,numStages=3,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=16,nPerBlock=4,kPerBlock=8,kpack=1,numCTAs=1,numWaves=2,matrixInstrNonkdim=0,splitKFactor=1,numStages=2,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=16,nPerBlock=256,kPerBlock=12,kpack=1,numCTAs=1,numWaves=2,matrixInstrNonkdim=0,splitKFactor=1,numStages=2,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=16,nPerBlock=128,kPerBlock=12,kpack=1,numCTAs=1,numWaves=2,matrixInstrNonkdim=0,splitKFactor=1,numStages=3,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=3,nPerBlock=256,kPerBlock=8,kpack=1,numCTAs=1,numWaves=2,matrixInstrNonkdim=0,splitKFactor=1,numStages=2,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=128,nPerBlock=128,kPerBlock=8,kpack=1,numCTAs=1,numWaves=8,matrixInstrNonkdim=0,splitKFactor=1,numStages=2,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=16,nPerBlock=64,kPerBlock=36,kpack=1,numCTAs=1,numWaves=2,matrixInstrNonkdim=0,splitKFactor=1,numStages=2,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=32,nPerBlock=256,kPerBlock=16,kpack=1,numCTAs=1,numWaves=2,matrixInstrNonkdim=0,splitKFactor=1,numStages=2,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=64,nPerBlock=128,kPerBlock=16,kpack=1,numCTAs=1,numWaves=2,matrixInstrNonkdim=0,splitKFactor=1,numStages=3,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=256,nPerBlock=32,kPerBlock=16,kpack=1,numCTAs=1,numWaves=2,matrixInstrNonkdim=0,splitKFactor=1,numStages=2,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=4,nPerBlock=256,kPerBlock=4,kpack=1,numCTAs=1,numWaves=2,matrixInstrNonkdim=0,splitKFactor=1,numStages=3,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=128,nPerBlock=128,kPerBlock=16,kpack=1,numCTAs=1,numWaves=8,matrixInstrNonkdim=0,splitKFactor=1,numStages=2,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=64,nPerBlock=64,kPerBlock=18,kpack=1,numCTAs=1,numWaves=2,matrixInstrNonkdim=0,splitKFactor=1,numStages=3,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "attn:mPerBlockG0=16,nPerBlockG0=128,nPerBlockG1=0,kPerBlock=32,kpack=1,numCTAs=1,numWaves=2,matrixInstrNonkdim=0,splitKFactor=1,numStages=2,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=32,nPerBlock=16,kPerBlock=16,kpack=1,numCTAs=1,numWaves=2,matrixInstrNonkdim=0,splitKFactor=1,numStages=3,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=16,nPerBlock=64,kPerBlock=64,kpack=1,numCTAs=1,numWaves=4,matrixInstrNonkdim=0,splitKFactor=1,numStages=1,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=1,nPerBlock=32,kPerBlock=256,kpack=1,numCTAs=1,numWaves=4,matrixInstrNonkdim=0,splitKFactor=1,numStages=3,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "attn:mPerBlockG0=128,nPerBlockG0=128,nPerBlockG1=0,kPerBlock=64,kpack=1,numCTAs=1,numWaves=8,matrixInstrNonkdim=0,splitKFactor=1,numStages=1,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=32,nPerBlock=64,kPerBlock=16,kpack=1,numCTAs=1,numWaves=4,matrixInstrNonkdim=0,splitKFactor=1,numStages=2,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=128,nPerBlock=32,kPerBlock=16,kpack=1,numCTAs=1,numWaves=4,matrixInstrNonkdim=0,splitKFactor=1,numStages=2,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=32,nPerBlock=256,kPerBlock=4,kpack=1,numCTAs=1,numWaves=4,matrixInstrNonkdim=0,splitKFactor=1,numStages=1,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=128,nPerBlock=128,kPerBlock=8,kpack=1,numCTAs=1,numWaves=4,matrixInstrNonkdim=0,splitKFactor=1,numStages=3,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=128,nPerBlock=128,kPerBlock=36,kpack=1,numCTAs=1,numWaves=8,matrixInstrNonkdim=0,splitKFactor=1,numStages=2,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=1,nPerBlock=1,kPerBlock=256,kpack=1,numCTAs=1,numWaves=4,matrixInstrNonkdim=0,splitKFactor=1,numStages=3,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=16,nPerBlock=2,kPerBlock=16,kpack=1,numCTAs=1,numWaves=2,matrixInstrNonkdim=0,splitKFactor=1,numStages=3,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=4,nPerBlock=64,kPerBlock=4,kpack=1,numCTAs=1,numWaves=4,matrixInstrNonkdim=0,splitKFactor=1,numStages=3,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=256,nPerBlock=64,kPerBlock=48,kpack=1,numCTAs=1,numWaves=4,matrixInstrNonkdim=0,splitKFactor=1,numStages=2,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=48,nPerBlock=128,kPerBlock=128,kpack=1,numCTAs=1,numWaves=4,matrixInstrNonkdim=0,splitKFactor=1,numStages=2,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=80,nPerBlock=64,kPerBlock=128,kpack=1,numCTAs=1,numWaves=4,matrixInstrNonkdim=0,splitKFactor=1,numStages=2,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=80,nPerBlock=128,kPerBlock=128,kpack=1,numCTAs=1,numWaves=8,matrixInstrNonkdim=0,splitKFactor=1,numStages=2,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
+    },
+    {
+      "perf_config": "gemm:mPerBlock=80,nPerBlock=64,kPerBlock=32,kpack=1,numCTAs=1,numWaves=4,matrixInstrNonkdim=0,splitKFactor=1,numStages=3,wavesPerEU=0,gridGroupSize=0,useAsyncCopy=-1,useBlockPingpong=-1,useInThreadTranspose=-1,useBufferOps=-1,useBufferAtomics=-1,useReductionLayout=-1,useOptimizeEpilogue=-1,useBf16x3ForF32=-1"
     }
   ],
   "points": [
@@ -25763,6 +25898,1875 @@
       "m": 3,
       "n": 24192,
       "k": 864
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 64 -H 576 -W 672 -k 3 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,addf,addf,maximumf,minimumf,extf -supportsSplitK false",
+      "config": 259,
+      "m": 3,
+      "n": 387072,
+      "k": 64
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 64 -H 576 -W 672 -k 64 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,addf,addf,maximumf -supportsSplitK false",
+      "config": 265,
+      "m": 64,
+      "n": 387072,
+      "k": 64
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 32 -H 143 -W 167 -k 32 -y 3 -x 3 -p 1 -q 1 -u 2 -v 2 -l 1 -j 1 -g 1 -outputFusions=addf,maximumf -supportsSplitK false",
+      "config": 195,
+      "m": 32,
+      "n": 6048,
+      "k": 288
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 32 -H 286 -W 334 -k 32 -y 3 -x 3 -p 1 -q 1 -u 2 -v 2 -l 1 -j 1 -g 1 -outputFusions=addf,maximumf -supportsSplitK false",
+      "config": 345,
+      "m": 32,
+      "n": 23881,
+      "k": 288
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f NC0G1 -I 01NGC -O NGC01 -n 1 -c 3 -H 576 -W 672 -k 32 -y 7 -x 7 -p 1 -q 1 -u 2 -v 2 -l 1 -j 1 -g 1 -inputFusions=truncf -outputFusions=addf,maximumf -supportsSplitK false",
+      "config": 355,
+      "m": 32,
+      "n": 95524,
+      "k": 147
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f NG01C -I 01NGC -O NGC01 -n 1 -c 3 -H 576 -W 672 -k 64 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -inputFusions=truncf -outputFusions=addf,mulf,addf,addf,maximumf -supportsSplitK false",
+      "config": 283,
+      "m": 64,
+      "n": 387072,
+      "k": 3
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 32 -H 224 -W 224 -k 9 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 600,
+      "m": 9,
+      "n": 50176,
+      "k": 288
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 64 -H 224 -W 224 -k 32 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,maximumf -supportsSplitK false",
+      "config": 466,
+      "m": 32,
+      "n": 50176,
+      "k": 576
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 64 -H 224 -W 224 -k 64 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,maximumf -supportsSplitK false",
+      "config": 389,
+      "m": 64,
+      "n": 50176,
+      "k": 576
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f N0G1C -I 0N1GC -O NGC01 -n 1 -c 1 -H 224 -W 224 -k 64 -y 5 -x 5 -p 2 -q 2 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,maximumf -supportsSplitK false",
+      "config": 503,
+      "m": 64,
+      "n": 50176,
+      "k": 25
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB false -transO false -g 1 -m 1 -n 1 -k 576 -outputFusions=addf -supportsSplitK true",
+      "config": 325,
+      "m": 1,
+      "n": 1,
+      "k": 576
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB true -transO false -g 1 -m 1 -n 3 -k 576 -outputFusions=addf -supportsSplitK true",
+      "config": 601,
+      "m": 1,
+      "n": 3,
+      "k": 576
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f G0N1C -I NG0C1 -O NGC01 -n 4 -c 120 -H 8 -W 14 -k 120 -y 5 -x 5 -p 2 -q 2 -u 1 -v 1 -l 1 -j 1 -g 120 -outputFusions=addf,mulf,addf,maximumf,minimumf,mulf -supportsSplitK false",
+      "config": 602,
+      "m": 1,
+      "n": 448,
+      "k": 25
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f G0N1C -I NG0C1 -O NGC01 -n 4 -c 144 -H 8 -W 14 -k 144 -y 5 -x 5 -p 2 -q 2 -u 1 -v 1 -l 1 -j 1 -g 144 -outputFusions=addf,mulf,addf,maximumf,minimumf,mulf -supportsSplitK false",
+      "config": 335,
+      "m": 1,
+      "n": 448,
+      "k": 25
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f G0N1C -I NG0C1 -O NGC01 -n 4 -c 16 -H 63 -W 112 -k 16 -y 3 -x 3 -p 1 -q 1 -u 2 -v 2 -l 1 -j 1 -g 16 -outputFusions=addf,maximumf -supportsSplitK false",
+      "config": 333,
+      "m": 1,
+      "n": 7168,
+      "k": 9
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f G0N1C -I NG0C1 -O NGC01 -n 4 -c 240 -H 8 -W 14 -k 240 -y 5 -x 5 -p 2 -q 2 -u 1 -v 1 -l 1 -j 1 -g 240 -outputFusions=addf,mulf,addf,maximumf,minimumf,mulf -supportsSplitK false",
+      "config": 335,
+      "m": 1,
+      "n": 448,
+      "k": 25
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f G0N1C -I NG0C1 -O NGC01 -n 4 -c 288 -H 8 -W 14 -k 288 -y 5 -x 5 -p 2 -q 2 -u 2 -v 2 -l 1 -j 1 -g 288 -outputFusions=addf,mulf,addf,maximumf,minimumf,mulf -supportsSplitK false",
+      "config": 334,
+      "m": 1,
+      "n": 112,
+      "k": 25
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f G0N1C -I NG0C1 -O NGC01 -n 4 -c 576 -H 4 -W 7 -k 576 -y 5 -x 5 -p 2 -q 2 -u 1 -v 1 -l 1 -j 1 -g 576 -outputFusions=addf,mulf,addf,maximumf,minimumf,mulf -supportsSplitK false",
+      "config": 603,
+      "m": 1,
+      "n": 112,
+      "k": 25
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f G0N1C -I NG0C1 -O NGC01 -n 4 -c 72 -H 32 -W 56 -k 72 -y 3 -x 3 -p 1 -q 1 -u 2 -v 2 -l 1 -j 1 -g 72 -outputFusions=addf,maximumf -supportsSplitK false",
+      "config": 334,
+      "m": 1,
+      "n": 1792,
+      "k": 9
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f G0N1C -I NG0C1 -O NGC01 -n 4 -c 88 -H 16 -W 28 -k 88 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 88 -outputFusions=addf,maximumf -supportsSplitK false",
+      "config": 563,
+      "m": 1,
+      "n": 1792,
+      "k": 9
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f G0N1C -I NG0C1 -O NGC01 -n 4 -c 96 -H 16 -W 28 -k 96 -y 5 -x 5 -p 2 -q 2 -u 2 -v 2 -l 1 -j 1 -g 96 -outputFusions=addf,mulf,addf,maximumf,minimumf,mulf -supportsSplitK false",
+      "config": 603,
+      "m": 1,
+      "n": 448,
+      "k": 25
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 4 -c 16 -H 32 -W 56 -k 72 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,maximumf -supportsSplitK false",
+      "config": 604,
+      "m": 72,
+      "n": 7168,
+      "k": 16
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 4 -c 24 -H 16 -W 28 -k 88 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,maximumf -supportsSplitK false",
+      "config": 605,
+      "m": 88,
+      "n": 1792,
+      "k": 24
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 4 -c 24 -H 16 -W 28 -k 96 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,addf,maximumf,minimumf,mulf -supportsSplitK false",
+      "config": 606,
+      "m": 96,
+      "n": 1792,
+      "k": 24
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 4 -c 40 -H 8 -W 14 -k 120 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,addf,maximumf,minimumf,mulf -supportsSplitK false",
+      "config": 338,
+      "m": 120,
+      "n": 448,
+      "k": 40
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 4 -c 40 -H 8 -W 14 -k 240 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,addf,maximumf,minimumf,mulf -supportsSplitK false",
+      "config": 338,
+      "m": 240,
+      "n": 448,
+      "k": 40
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 4 -c 48 -H 8 -W 14 -k 144 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,addf,maximumf,minimumf,mulf -supportsSplitK false",
+      "config": 607,
+      "m": 144,
+      "n": 448,
+      "k": 48
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 4 -c 48 -H 8 -W 14 -k 288 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,addf,maximumf,minimumf,mulf -supportsSplitK false",
+      "config": 315,
+      "m": 288,
+      "n": 448,
+      "k": 48
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 4 -c 72 -H 16 -W 28 -k 24 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 608,
+      "m": 24,
+      "n": 1792,
+      "k": 72
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 4 -c 88 -H 16 -W 28 -k 24 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,addf -supportsSplitK true",
+      "config": 344,
+      "m": 24,
+      "n": 1792,
+      "k": 88
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 4 -c 96 -H 4 -W 7 -k 576 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,addf,maximumf,minimumf,mulf -supportsSplitK false",
+      "config": 359,
+      "m": 576,
+      "n": 112,
+      "k": 96
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f NC0G1 -I NGC01 -O NGC01 -n 4 -c 3 -H 126 -W 224 -k 16 -y 3 -x 3 -p 1 -q 1 -u 2 -v 2 -l 1 -j 1 -g 1 -inputFusions=divf,subf,mulf -outputFusions=addf,mulf,addf,maximumf,minimumf,mulf -supportsSplitK false",
+      "config": 609,
+      "m": 16,
+      "n": 28224,
+      "k": 27
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f NG01C -I N01GC -O N01GC -n 4 -c 120 -H 1 -W 1 -k 32 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,maximumf -supportsSplitK false",
+      "config": 610,
+      "m": 32,
+      "n": 4,
+      "k": 120
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f NG01C -I N01GC -O N01GC -n 4 -c 144 -H 1 -W 1 -k 40 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,maximumf -supportsSplitK false",
+      "config": 296,
+      "m": 40,
+      "n": 4,
+      "k": 144
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f NG01C -I N01GC -O N01GC -n 4 -c 144 -H 1 -W 1 -k 576 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,addf,maximumf,minimumf -supportsSplitK false",
+      "config": 611,
+      "m": 576,
+      "n": 4,
+      "k": 144
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f NG01C -I N01GC -O N01GC -n 4 -c 16 -H 1 -W 1 -k 8 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,maximumf -supportsSplitK false",
+      "config": 612,
+      "m": 8,
+      "n": 4,
+      "k": 16
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f NG01C -I N01GC -O N01GC -n 4 -c 24 -H 1 -W 1 -k 96 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,addf,maximumf,minimumf -supportsSplitK false",
+      "config": 613,
+      "m": 96,
+      "n": 4,
+      "k": 24
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f NG01C -I N01GC -O N01GC -n 4 -c 240 -H 1 -W 1 -k 64 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,maximumf -supportsSplitK false",
+      "config": 296,
+      "m": 64,
+      "n": 4,
+      "k": 240
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f NG01C -I N01GC -O N01GC -n 4 -c 288 -H 1 -W 1 -k 72 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,maximumf -supportsSplitK false",
+      "config": 297,
+      "m": 72,
+      "n": 4,
+      "k": 288
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f NG01C -I N01GC -O N01GC -n 4 -c 32 -H 1 -W 1 -k 120 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,addf,maximumf,minimumf -supportsSplitK false",
+      "config": 614,
+      "m": 120,
+      "n": 4,
+      "k": 32
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f NG01C -I N01GC -O N01GC -n 4 -c 40 -H 1 -W 1 -k 144 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,addf,maximumf,minimumf -supportsSplitK false",
+      "config": 611,
+      "m": 144,
+      "n": 4,
+      "k": 40
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f NG01C -I N01GC -O N01GC -n 4 -c 576 -H 1 -W 1 -k 144 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,maximumf -supportsSplitK false",
+      "config": 296,
+      "m": 144,
+      "n": 4,
+      "k": 576
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f NG01C -I N01GC -O N01GC -n 4 -c 64 -H 1 -W 1 -k 240 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,addf,maximumf,minimumf -supportsSplitK false",
+      "config": 611,
+      "m": 240,
+      "n": 4,
+      "k": 64
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f NG01C -I N01GC -O N01GC -n 4 -c 72 -H 1 -W 1 -k 288 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,addf,maximumf,minimumf -supportsSplitK false",
+      "config": 611,
+      "m": 288,
+      "n": 4,
+      "k": 72
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f NG01C -I N01GC -O N01GC -n 4 -c 8 -H 1 -W 1 -k 16 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,addf,maximumf,minimumf -supportsSplitK false",
+      "config": 615,
+      "m": 16,
+      "n": 4,
+      "k": 8
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f NG01C -I N01GC -O N01GC -n 4 -c 96 -H 1 -W 1 -k 24 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,maximumf -supportsSplitK false",
+      "config": 611,
+      "m": 24,
+      "n": 4,
+      "k": 96
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f NG01C -I NGC01 -O NGC01 -n 4 -c 120 -H 8 -W 14 -k 48 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -inputFusions=mulf -outputFusions=addf -supportsSplitK true",
+      "config": 311,
+      "m": 48,
+      "n": 448,
+      "k": 120
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f NG01C -I NGC01 -O NGC01 -n 4 -c 144 -H 8 -W 14 -k 48 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -inputFusions=mulf -outputFusions=addf,addf -supportsSplitK true",
+      "config": 311,
+      "m": 48,
+      "n": 448,
+      "k": 144
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f NG01C -I NGC01 -O NGC01 -n 4 -c 16 -H 32 -W 56 -k 16 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -inputFusions=mulf -outputFusions=addf -supportsSplitK true",
+      "config": 379,
+      "m": 16,
+      "n": 7168,
+      "k": 16
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f NG01C -I NGC01 -O NGC01 -n 4 -c 240 -H 8 -W 14 -k 40 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -inputFusions=mulf -outputFusions=addf,addf -supportsSplitK true",
+      "config": 311,
+      "m": 40,
+      "n": 448,
+      "k": 240
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f NG01C -I NGC01 -O NGC01 -n 4 -c 288 -H 4 -W 7 -k 96 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -inputFusions=mulf -outputFusions=addf -supportsSplitK true",
+      "config": 339,
+      "m": 96,
+      "n": 112,
+      "k": 288
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f NG01C -I NGC01 -O NGC01 -n 4 -c 576 -H 4 -W 7 -k 96 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -inputFusions=mulf -outputFusions=addf,addf -supportsSplitK true",
+      "config": 339,
+      "m": 96,
+      "n": 112,
+      "k": 576
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f NG01C -I NGC01 -O NGC01 -n 4 -c 96 -H 8 -W 14 -k 40 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -inputFusions=mulf -outputFusions=addf -supportsSplitK true",
+      "config": 311,
+      "m": 40,
+      "n": 448,
+      "k": 96
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 176 -H 27 -W 33 -k 6 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,maxnumf -supportsSplitK false",
+      "config": 297,
+      "m": 6,
+      "n": 891,
+      "k": 176
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I N01GC -O NGC01 -n 1 -c 24 -H 571 -W 667 -k 32 -y 3 -x 3 -p 0 -q 0 -u 2 -v 2 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,maxnumf -supportsSplitK false",
+      "config": 432,
+      "m": 32,
+      "n": 94905,
+      "k": 216
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 104 -H 67 -W 79 -k 176 -y 3 -x 3 -p 0 -q 0 -u 2 -v 2 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,maxnumf -supportsSplitK false",
+      "config": 376,
+      "m": 176,
+      "n": 1287,
+      "k": 936
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 104 -H 69 -W 81 -k 104 -y 3 -x 3 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,maxnumf -supportsSplitK false",
+      "config": 616,
+      "m": 104,
+      "n": 5293,
+      "k": 936
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 176 -H 29 -W 35 -k 176 -y 3 -x 3 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,maxnumf -supportsSplitK false",
+      "config": 317,
+      "m": 176,
+      "n": 891,
+      "k": 1584
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 176 -H 31 -W 37 -k 176 -y 3 -x 3 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,maxnumf -supportsSplitK false",
+      "config": 317,
+      "m": 176,
+      "n": 1015,
+      "k": 1584
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 176 -H 33 -W 39 -k 176 -y 3 -x 3 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,maxnumf -supportsSplitK false",
+      "config": 617,
+      "m": 176,
+      "n": 1147,
+      "k": 1584
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 24 -H 574 -W 670 -k 24 -y 3 -x 3 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,maxnumf -supportsSplitK false",
+      "config": 466,
+      "m": 24,
+      "n": 382096,
+      "k": 216
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 32 -H 283 -W 331 -k 64 -y 3 -x 3 -p 0 -q 0 -u 2 -v 2 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,maxnumf -supportsSplitK false",
+      "config": 389,
+      "m": 64,
+      "n": 23265,
+      "k": 288
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 32 -H 285 -W 333 -k 32 -y 3 -x 3 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,maxnumf -supportsSplitK false",
+      "config": 434,
+      "m": 32,
+      "n": 93673,
+      "k": 288
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 64 -H 139 -W 163 -k 104 -y 3 -x 3 -p 0 -q 0 -u 2 -v 2 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,maxnumf -supportsSplitK false",
+      "config": 392,
+      "m": 104,
+      "n": 5589,
+      "k": 576
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 64 -H 141 -W 165 -k 64 -y 3 -x 3 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,maxnumf -supportsSplitK false",
+      "config": 389,
+      "m": 64,
+      "n": 22657,
+      "k": 576
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f NC0G1 -I 01NGC -O NGC01 -n 1 -c 6 -H 576 -W 672 -k 24 -y 3 -x 3 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,maxnumf -supportsSplitK false",
+      "config": 466,
+      "m": 24,
+      "n": 384580,
+      "k": 54
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 176 -H 27 -W 33 -k 6 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 297,
+      "m": 6,
+      "n": 891,
+      "k": 176
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I N01GC -O NGC01 -n 1 -c 32 -H 513 -W 513 -k 64 -y 3 -x 3 -p 0 -q 0 -u 2 -v 2 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 550,
+      "m": 64,
+      "n": 65536,
+      "k": 288
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I N01GC -O NGC01 -n 1 -c 64 -H 257 -W 257 -k 128 -y 3 -x 3 -p 0 -q 0 -u 2 -v 2 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 432,
+      "m": 128,
+      "n": 16384,
+      "k": 576
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 128 -H 128 -W 128 -k 256 -y 2 -x 2 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 526,
+      "m": 256,
+      "n": 16641,
+      "k": 512
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 128 -H 130 -W 130 -k 128 -y 3 -x 3 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 47,
+      "m": 128,
+      "n": 16384,
+      "k": 1152
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 3 -H 520 -W 520 -k 32 -y 9 -x 9 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 502,
+      "m": 32,
+      "n": 262144,
+      "k": 243
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 32 -H 520 -W 520 -k 3 -y 9 -x 9 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 618,
+      "m": 3,
+      "n": 262144,
+      "k": 2592
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 64 -H 256 -W 256 -k 128 -y 2 -x 2 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -inputFusions=maximumf -outputFusions=addf -supportsSplitK true",
+      "config": 619,
+      "m": 128,
+      "n": 66049,
+      "k": 256
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 1024 -H 13 -W 13 -k 125 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 311,
+      "m": 125,
+      "n": 169,
+      "k": 1024
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 1024 -H 13 -W 13 -k 1024 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,maxnumf -supportsSplitK false",
+      "config": 620,
+      "m": 1024,
+      "n": 169,
+      "k": 9216
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 128 -H 26 -W 26 -k 256 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,maxnumf -supportsSplitK false",
+      "config": 317,
+      "m": 256,
+      "n": 676,
+      "k": 1152
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 16 -H 208 -W 208 -k 32 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,maxnumf -supportsSplitK false",
+      "config": 466,
+      "m": 32,
+      "n": 43264,
+      "k": 144
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 256 -H 13 -W 13 -k 512 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,maxnumf -supportsSplitK false",
+      "config": 452,
+      "m": 512,
+      "n": 169,
+      "k": 2304
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 3 -H 416 -W 416 -k 16 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -inputFusions=mulf -outputFusions=addf,mulf,maxnumf -supportsSplitK false",
+      "config": 292,
+      "m": 16,
+      "n": 173056,
+      "k": 27
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 32 -H 104 -W 104 -k 64 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,maxnumf -supportsSplitK false",
+      "config": 370,
+      "m": 64,
+      "n": 10816,
+      "k": 288
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 64 -H 52 -W 52 -k 128 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,maxnumf -supportsSplitK false",
+      "config": 547,
+      "m": 128,
+      "n": 2704,
+      "k": 576
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB false -transO false -g 1 -m 16384 -n 512 -k 16384 -supportsSplitK true",
+      "config": 286,
+      "m": 16384,
+      "n": 512,
+      "k": 16384
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB false -transO false -g 1 -m 16384 -n 512 -k 512 -outputFusions=addf -supportsSplitK true",
+      "config": 621,
+      "m": 16384,
+      "n": 512,
+      "k": 512
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB false -transO false -g 1 -m 16384 -n 512 -k 512 -outputFusions=addf,addf -supportsSplitK true",
+      "config": 622,
+      "m": 16384,
+      "n": 512,
+      "k": 512
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB true -transO false -g 1 -m 16384 -n 16384 -k 512 -outputFusions=mulf,addf -supportsSplitK true",
+      "config": 623,
+      "m": 16384,
+      "n": 16384,
+      "k": 512
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 256 -H 1024 -W 1024 -k 128 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 506,
+      "m": 128,
+      "n": 1048576,
+      "k": 256
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 4 -H 128 -W 128 -k 4 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 624,
+      "m": 4,
+      "n": 16384,
+      "k": 4
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 512 -H 512 -W 512 -k 256 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 625,
+      "m": 256,
+      "n": 262144,
+      "k": 512
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 128 -H 1024 -W 1024 -k 128 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 389,
+      "m": 128,
+      "n": 1048576,
+      "k": 1152
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 128 -H 1024 -W 1024 -k 128 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,addf -supportsSplitK true",
+      "config": 526,
+      "m": 128,
+      "n": 1048576,
+      "k": 1152
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 128 -H 1024 -W 1024 -k 3 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 442,
+      "m": 3,
+      "n": 1048576,
+      "k": 1152
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 256 -H 1024 -W 1024 -k 128 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 389,
+      "m": 128,
+      "n": 1048576,
+      "k": 2304
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 256 -H 1024 -W 1024 -k 256 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 536,
+      "m": 256,
+      "n": 1048576,
+      "k": 2304
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 256 -H 512 -W 512 -k 256 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 536,
+      "m": 256,
+      "n": 262144,
+      "k": 2304
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 256 -H 512 -W 512 -k 256 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,addf -supportsSplitK true",
+      "config": 389,
+      "m": 256,
+      "n": 262144,
+      "k": 2304
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 4 -H 128 -W 128 -k 512 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 626,
+      "m": 512,
+      "n": 16384,
+      "k": 36
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 512 -H 128 -W 128 -k 512 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 536,
+      "m": 512,
+      "n": 16384,
+      "k": 4608
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 512 -H 256 -W 256 -k 512 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 536,
+      "m": 512,
+      "n": 65536,
+      "k": 4608
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 512 -H 256 -W 256 -k 512 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,addf -supportsSplitK true",
+      "config": 389,
+      "m": 512,
+      "n": 65536,
+      "k": 4608
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 512 -H 512 -W 512 -k 256 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 536,
+      "m": 256,
+      "n": 262144,
+      "k": 4608
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 512 -H 512 -W 512 -k 512 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 536,
+      "m": 512,
+      "n": 262144,
+      "k": 4608
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB false -transO false -g 1 -m 77 -n 3072 -k 768 -outputFusions=addf -supportsSplitK true",
+      "config": 9,
+      "m": 77,
+      "n": 3072,
+      "k": 768
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB false -transO false -g 1 -m 77 -n 768 -k 3072 -outputFusions=addf,addf -supportsSplitK true",
+      "config": 67,
+      "m": 77,
+      "n": 768,
+      "k": 3072
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB false -transO false -g 1 -m 77 -n 768 -k 768 -outputFusions=addf -supportsSplitK true",
+      "config": 187,
+      "m": 77,
+      "n": 768,
+      "k": 768
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB false -transO false -g 1 -m 77 -n 768 -k 768 -outputFusions=addf,addf -supportsSplitK true",
+      "config": 187,
+      "m": 77,
+      "n": 768,
+      "k": 768
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB false -transO false -g 1 -m 77 -n 768 -k 768 -outputFusions=addf,mulf -supportsSplitK true",
+      "config": 187,
+      "m": 77,
+      "n": 768,
+      "k": 768
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -transQ false -transK false -transV false -transO false -causal false -return_lse false -split_kv 1 -num_heads_q 1 -num_heads_kv 1 -g 12 -seq_len_q 77 -seq_len_k 77 -head_dim_qk 64 -head_dim_v 64 -with-attn-scale false -with-attn-bias true -transBias false -supportsSplitK false",
+      "config": 627,
+      "m": 77,
+      "n": 77,
+      "k": 64
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 1024 -H 13 -W 13 -k 1024 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,exp,addf,log,tanh,mulf -supportsSplitK false",
+      "config": 315,
+      "m": 1024,
+      "n": 169,
+      "k": 1024
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 1024 -H 13 -W 13 -k 255 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 628,
+      "m": 255,
+      "n": 169,
+      "k": 1024
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 1024 -H 13 -W 13 -k 512 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,exp,addf,log,tanh,mulf -supportsSplitK false",
+      "config": 458,
+      "m": 512,
+      "n": 169,
+      "k": 1024
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 128 -H 104 -W 104 -k 128 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,exp,addf,log,tanh,mulf -supportsSplitK false",
+      "config": 438,
+      "m": 128,
+      "n": 10816,
+      "k": 128
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 128 -H 104 -W 104 -k 64 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,exp,addf,log,tanh,mulf -supportsSplitK false",
+      "config": 533,
+      "m": 64,
+      "n": 10816,
+      "k": 128
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 128 -H 208 -W 208 -k 64 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,exp,addf,log,tanh,mulf -supportsSplitK false",
+      "config": 503,
+      "m": 64,
+      "n": 43264,
+      "k": 128
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 128 -H 52 -W 52 -k 128 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,exp,addf,log,tanh,mulf -supportsSplitK false",
+      "config": 43,
+      "m": 128,
+      "n": 2704,
+      "k": 128
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 2048 -H 13 -W 13 -k 512 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,maxnumf -supportsSplitK false",
+      "config": 452,
+      "m": 512,
+      "n": 169,
+      "k": 2048
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 256 -H 26 -W 26 -k 256 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,exp,addf,log,tanh,mulf -supportsSplitK false",
+      "config": 315,
+      "m": 256,
+      "n": 676,
+      "k": 256
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 256 -H 52 -W 52 -k 128 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,exp,addf,log,tanh,mulf -supportsSplitK false",
+      "config": 43,
+      "m": 128,
+      "n": 2704,
+      "k": 256
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 256 -H 52 -W 52 -k 255 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 370,
+      "m": 255,
+      "n": 2704,
+      "k": 256
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 256 -H 52 -W 52 -k 256 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,exp,addf,log,tanh,mulf -supportsSplitK false",
+      "config": 286,
+      "m": 256,
+      "n": 2704,
+      "k": 256
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 512 -H 13 -W 13 -k 512 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,exp,addf,log,tanh,mulf -supportsSplitK false",
+      "config": 458,
+      "m": 512,
+      "n": 169,
+      "k": 512
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 512 -H 26 -W 26 -k 255 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 343,
+      "m": 255,
+      "n": 676,
+      "k": 512
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 512 -H 26 -W 26 -k 256 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,exp,addf,log,tanh,mulf -supportsSplitK false",
+      "config": 315,
+      "m": 256,
+      "n": 676,
+      "k": 512
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 512 -H 26 -W 26 -k 512 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,exp,addf,log,tanh,mulf -supportsSplitK false",
+      "config": 43,
+      "m": 512,
+      "n": 676,
+      "k": 512
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 64 -H 104 -W 104 -k 64 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,exp,addf,log,tanh,mulf -supportsSplitK false",
+      "config": 533,
+      "m": 64,
+      "n": 10816,
+      "k": 64
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 64 -H 208 -W 208 -k 32 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,exp,addf,log,tanh,mulf -supportsSplitK false",
+      "config": 438,
+      "m": 32,
+      "n": 43264,
+      "k": 64
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 64 -H 208 -W 208 -k 64 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,exp,addf,log,tanh,mulf -supportsSplitK false",
+      "config": 434,
+      "m": 64,
+      "n": 43264,
+      "k": 64
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 128 -H 104 -W 104 -k 256 -y 3 -x 3 -p 1 -q 1 -u 2 -v 2 -l 1 -j 1 -g 1 -outputFusions=addf,exp,addf,log,tanh,mulf -supportsSplitK false",
+      "config": 392,
+      "m": 256,
+      "n": 2704,
+      "k": 1152
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 128 -H 52 -W 52 -k 128 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,exp,addf,log,tanh,mulf,addf -supportsSplitK false",
+      "config": 522,
+      "m": 128,
+      "n": 2704,
+      "k": 1152
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 128 -H 52 -W 52 -k 256 -y 3 -x 3 -p 1 -q 1 -u 2 -v 2 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,maxnumf -supportsSplitK false",
+      "config": 451,
+      "m": 256,
+      "n": 676,
+      "k": 1152
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 256 -H 26 -W 26 -k 256 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,exp,addf,log,tanh,mulf,addf -supportsSplitK false",
+      "config": 317,
+      "m": 256,
+      "n": 676,
+      "k": 2304
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 256 -H 26 -W 26 -k 512 -y 3 -x 3 -p 1 -q 1 -u 2 -v 2 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,maxnumf -supportsSplitK false",
+      "config": 452,
+      "m": 512,
+      "n": 169,
+      "k": 2304
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 256 -H 52 -W 52 -k 512 -y 3 -x 3 -p 1 -q 1 -u 2 -v 2 -l 1 -j 1 -g 1 -outputFusions=addf,exp,addf,log,tanh,mulf -supportsSplitK false",
+      "config": 444,
+      "m": 512,
+      "n": 676,
+      "k": 2304
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 32 -H 208 -W 208 -k 64 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,exp,addf,log,tanh,mulf,addf -supportsSplitK false",
+      "config": 286,
+      "m": 64,
+      "n": 43264,
+      "k": 288
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 32 -H 416 -W 416 -k 64 -y 3 -x 3 -p 1 -q 1 -u 2 -v 2 -l 1 -j 1 -g 1 -outputFusions=addf,exp,addf,log,tanh,mulf -supportsSplitK false",
+      "config": 389,
+      "m": 64,
+      "n": 43264,
+      "k": 288
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 512 -H 13 -W 13 -k 512 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,exp,addf,log,tanh,mulf,addf -supportsSplitK false",
+      "config": 452,
+      "m": 512,
+      "n": 169,
+      "k": 4608
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 512 -H 26 -W 26 -k 1024 -y 3 -x 3 -p 1 -q 1 -u 2 -v 2 -l 1 -j 1 -g 1 -outputFusions=addf,exp,addf,log,tanh,mulf -supportsSplitK false",
+      "config": 451,
+      "m": 1024,
+      "n": 169,
+      "k": 4608
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 64 -H 104 -W 104 -k 64 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,exp,addf,log,tanh,mulf,addf -supportsSplitK false",
+      "config": 291,
+      "m": 64,
+      "n": 10816,
+      "k": 576
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 64 -H 208 -W 208 -k 128 -y 3 -x 3 -p 1 -q 1 -u 2 -v 2 -l 1 -j 1 -g 1 -outputFusions=addf,exp,addf,log,tanh,mulf -supportsSplitK false",
+      "config": 389,
+      "m": 128,
+      "n": 10816,
+      "k": 576
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f NC0G1 -I 01NGC -O NGC01 -n 1 -c 3 -H 416 -W 416 -k 32 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,exp,addf,log,tanh,mulf -supportsSplitK false",
+      "config": 286,
+      "m": 32,
+      "n": 173056,
+      "k": 27
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB false -transO false -g 1 -m 128 -n 3072 -k 768 -outputFusions=addf,mulf,erf,addf,mulf,mulf -supportsSplitK false",
+      "config": 321,
+      "m": 128,
+      "n": 3072,
+      "k": 768
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB false -transO false -g 1 -m 128 -n 768 -k 3072 -outputFusions=addf,addf -supportsSplitK true",
+      "config": 629,
+      "m": 128,
+      "n": 768,
+      "k": 3072
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB false -transO false -g 1 -m 128 -n 768 -k 768 -outputFusions=addf -supportsSplitK true",
+      "config": 629,
+      "m": 128,
+      "n": 768,
+      "k": 768
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB false -transO false -g 1 -m 128 -n 768 -k 768 -outputFusions=addf,addf -supportsSplitK true",
+      "config": 629,
+      "m": 128,
+      "n": 768,
+      "k": 768
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB true -transO false -g 1 -m 1 -n 5 -k 768 -outputFusions=addf,extf -supportsSplitK true",
+      "config": 630,
+      "m": 1,
+      "n": 5,
+      "k": 768
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB true -transO false -g 1 -m 1 -n 768 -k 768 -outputFusions=addf,tanh -supportsSplitK false",
+      "config": 0,
+      "m": 1,
+      "n": 768,
+      "k": 768
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -transQ false -transK false -transV false -transO false -causal false -return_lse false -split_kv 1 -num_heads_q 1 -num_heads_kv 1 -g 12 -seq_len_q 128 -seq_len_k 128 -head_dim_qk 64 -head_dim_v 64 -with-attn-scale true -with-attn-bias true -transBias false -supportsSplitK false",
+      "config": 631,
+      "m": 128,
+      "n": 128,
+      "k": 64
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 896 -H 72 -W 84 -k 384 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 241,
+      "m": 384,
+      "n": 6048,
+      "k": 896
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 384 -H 36 -W 42 -k 24 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,extf -supportsSplitK true",
+      "config": 104,
+      "m": 24,
+      "n": 1512,
+      "k": 3456
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 384 -H 72 -W 84 -k 128 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,maxnumf -supportsSplitK false",
+      "config": 263,
+      "m": 128,
+      "n": 6048,
+      "k": 3456
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 384 -H 72 -W 84 -k 24 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,truncf,addf,extf -supportsSplitK true",
+      "config": 104,
+      "m": 24,
+      "n": 6048,
+      "k": 3456
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 384 -H 72 -W 84 -k 384 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 264,
+      "m": 384,
+      "n": 6048,
+      "k": 3456
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 384 -H 72 -W 84 -k 384 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,addf,extf -supportsSplitK true",
+      "config": 518,
+      "m": 384,
+      "n": 6048,
+      "k": 3456
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 384 -H 72 -W 84 -k 384 -y 3 -x 3 -p 1 -q 1 -u 2 -v 2 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,maxnumf -supportsSplitK false",
+      "config": 267,
+      "m": 384,
+      "n": 1512,
+      "k": 3456
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 384 -H 72 -W 84 -k 96 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 518,
+      "m": 96,
+      "n": 6048,
+      "k": 3456
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 384 -H 72 -W 84 -k 96 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,addf,extf -supportsSplitK true",
+      "config": 518,
+      "m": 96,
+      "n": 6048,
+      "k": 3456
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 384 -H 72 -W 84 -k 960 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,maxnumf -supportsSplitK false",
+      "config": 397,
+      "m": 960,
+      "n": 6048,
+      "k": 3456
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 512 -H 72 -W 84 -k 128 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,maxnumf -supportsSplitK false",
+      "config": 263,
+      "m": 128,
+      "n": 6048,
+      "k": 4608
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 640 -H 72 -W 84 -k 128 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,maxnumf -supportsSplitK false",
+      "config": 263,
+      "m": 128,
+      "n": 6048,
+      "k": 5760
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 768 -H 72 -W 84 -k 128 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,maxnumf -supportsSplitK false",
+      "config": 263,
+      "m": 128,
+      "n": 6048,
+      "k": 6912
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 864 -H 72 -W 84 -k 384 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 107,
+      "m": 384,
+      "n": 6048,
+      "k": 7776
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 960 -H 72 -W 84 -k 1536 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 16,
+      "m": 1536,
+      "n": 6048,
+      "k": 8640
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 960 -H 72 -W 84 -k 1536 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,addf -supportsSplitK true",
+      "config": 264,
+      "m": 1536,
+      "n": 6048,
+      "k": 8640
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB false -transO false -g 1 -m 256 -n 1024 -k 512 -outputFusions=addf,mulf,erf,addf,mulf,mulf -supportsSplitK false",
+      "config": 43,
+      "m": 256,
+      "n": 1024,
+      "k": 512
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB false -transO false -g 1 -m 256 -n 1024 -k 512 -supportsSplitK true",
+      "config": 43,
+      "m": 256,
+      "n": 1024,
+      "k": 512
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB false -transO false -g 1 -m 256 -n 256 -k 1024 -supportsSplitK true",
+      "config": 452,
+      "m": 256,
+      "n": 256,
+      "k": 1024
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB false -transO false -g 1 -m 256 -n 512 -k 1024 -outputFusions=addf,addf -supportsSplitK true",
+      "config": 315,
+      "m": 256,
+      "n": 512,
+      "k": 1024
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB false -transO false -g 1 -m 256 -n 512 -k 256 -outputFusions=addf -supportsSplitK true",
+      "config": 315,
+      "m": 256,
+      "n": 512,
+      "k": 256
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB false -transO false -g 1 -m 256 -n 512 -k 512 -outputFusions=addf -supportsSplitK true",
+      "config": 564,
+      "m": 256,
+      "n": 512,
+      "k": 512
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB false -transO false -g 1 -m 256 -n 512 -k 512 -outputFusions=addf,mulf -supportsSplitK true",
+      "config": 315,
+      "m": 256,
+      "n": 512,
+      "k": 512
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB false -transO false -g 8 -m 256 -n 256 -k 64 -supportsSplitK true",
+      "config": 370,
+      "m": 256,
+      "n": 256,
+      "k": 64
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB false -transO false -g 8 -m 256 -n 64 -k 256 -supportsSplitK true",
+      "config": 632,
+      "m": 256,
+      "n": 64,
+      "k": 256
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB true -transO false -g 1 -m 256 -n 512 -k 512 -outputFusions=addf,addf -supportsSplitK true",
+      "config": 633,
+      "m": 256,
+      "n": 512,
+      "k": 512
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB true -transO false -g 1 -m 512 -n 256 -k 256 -supportsSplitK true",
+      "config": 315,
+      "m": 512,
+      "n": 256,
+      "k": 256
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA true -transB false -transO false -g 1 -m 256 -n 256 -k 512 -outputFusions=mulf -supportsSplitK true",
+      "config": 512,
+      "m": 256,
+      "n": 256,
+      "k": 512
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 128 -H 512 -W 512 -k 64 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 634,
+      "m": 64,
+      "n": 262144,
+      "k": 128
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 128 -H 64 -W 64 -k 256 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 176,
+      "m": 256,
+      "n": 4096,
+      "k": 128
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 256 -H 128 -W 128 -k 128 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 541,
+      "m": 128,
+      "n": 16384,
+      "k": 256
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 256 -H 16 -W 16 -k 512 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 315,
+      "m": 512,
+      "n": 256,
+      "k": 256
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 256 -H 256 -W 256 -k 128 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 527,
+      "m": 128,
+      "n": 65536,
+      "k": 256
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 512 -H 16 -W 16 -k 512 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 315,
+      "m": 512,
+      "n": 256,
+      "k": 512
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 512 -H 16 -W 16 -k 512 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,addf -supportsSplitK true",
+      "config": 315,
+      "m": 512,
+      "n": 256,
+      "k": 512
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 512 -H 32 -W 32 -k 256 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 43,
+      "m": 256,
+      "n": 1024,
+      "k": 512
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 512 -H 64 -W 64 -k 256 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 176,
+      "m": 256,
+      "n": 4096,
+      "k": 512
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GN01C -I NGC01 -O NGC01 -n 1 -c 64 -H 256 -W 256 -k 128 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 534,
+      "m": 128,
+      "n": 65536,
+      "k": 64
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O N01GC -n 1 -c 64 -H 512 -W 512 -k 3 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 442,
+      "m": 3,
+      "n": 262144,
+      "k": 576
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 128 -H 128 -W 128 -k 128 -y 3 -x 3 -p 0 -q 0 -u 2 -v 2 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 536,
+      "m": 128,
+      "n": 3969,
+      "k": 1152
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 128 -H 128 -W 128 -k 128 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 635,
+      "m": 128,
+      "n": 16384,
+      "k": 1152
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 128 -H 128 -W 128 -k 128 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,addf -supportsSplitK true",
+      "config": 286,
+      "m": 128,
+      "n": 16384,
+      "k": 1152
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 128 -H 128 -W 128 -k 128 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,addf,mulf,addf -supportsSplitK true",
+      "config": 389,
+      "m": 128,
+      "n": 16384,
+      "k": 1152
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 128 -H 128 -W 128 -k 128 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,maxnumf -supportsSplitK false",
+      "config": 528,
+      "m": 128,
+      "n": 16384,
+      "k": 1152
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 128 -H 256 -W 256 -k 128 -y 3 -x 3 -p 0 -q 0 -u 2 -v 2 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 432,
+      "m": 128,
+      "n": 16129,
+      "k": 1152
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 128 -H 256 -W 256 -k 128 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 536,
+      "m": 128,
+      "n": 65536,
+      "k": 1152
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 128 -H 256 -W 256 -k 128 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,addf -supportsSplitK true",
+      "config": 526,
+      "m": 128,
+      "n": 65536,
+      "k": 1152
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 128 -H 256 -W 256 -k 128 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,addf,mulf,addf -supportsSplitK true",
+      "config": 552,
+      "m": 128,
+      "n": 65536,
+      "k": 1152
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 128 -H 256 -W 256 -k 128 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,maxnumf -supportsSplitK false",
+      "config": 61,
+      "m": 128,
+      "n": 65536,
+      "k": 1152
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 128 -H 512 -W 512 -k 128 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 536,
+      "m": 128,
+      "n": 262144,
+      "k": 1152
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 128 -H 512 -W 512 -k 64 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 389,
+      "m": 64,
+      "n": 262144,
+      "k": 1152
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 128 -H 64 -W 64 -k 256 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 536,
+      "m": 256,
+      "n": 4096,
+      "k": 1152
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 256 -H 128 -W 128 -k 128 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 536,
+      "m": 128,
+      "n": 16384,
+      "k": 2304
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 256 -H 128 -W 128 -k 256 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 389,
+      "m": 256,
+      "n": 16384,
+      "k": 2304
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 256 -H 16 -W 16 -k 512 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 435,
+      "m": 512,
+      "n": 256,
+      "k": 2304
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 256 -H 256 -W 256 -k 128 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 536,
+      "m": 128,
+      "n": 65536,
+      "k": 2304
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 256 -H 32 -W 32 -k 256 -y 3 -x 3 -p 0 -q 0 -u 2 -v 2 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 206,
+      "m": 256,
+      "n": 225,
+      "k": 2304
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 256 -H 32 -W 32 -k 256 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 636,
+      "m": 256,
+      "n": 1024,
+      "k": 2304
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 256 -H 32 -W 32 -k 256 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,addf -supportsSplitK true",
+      "config": 636,
+      "m": 256,
+      "n": 1024,
+      "k": 2304
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 256 -H 32 -W 32 -k 256 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,addf,mulf,addf -supportsSplitK true",
+      "config": 636,
+      "m": 256,
+      "n": 1024,
+      "k": 2304
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 256 -H 32 -W 32 -k 256 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,maxnumf -supportsSplitK false",
+      "config": 505,
+      "m": 256,
+      "n": 1024,
+      "k": 2304
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 256 -H 64 -W 64 -k 256 -y 3 -x 3 -p 0 -q 0 -u 2 -v 2 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 636,
+      "m": 256,
+      "n": 961,
+      "k": 2304
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 256 -H 64 -W 64 -k 256 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 536,
+      "m": 256,
+      "n": 4096,
+      "k": 2304
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 256 -H 64 -W 64 -k 256 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,addf -supportsSplitK true",
+      "config": 389,
+      "m": 256,
+      "n": 4096,
+      "k": 2304
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 256 -H 64 -W 64 -k 256 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,addf,mulf,addf -supportsSplitK true",
+      "config": 552,
+      "m": 256,
+      "n": 4096,
+      "k": 2304
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 256 -H 64 -W 64 -k 256 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,mulf,maxnumf -supportsSplitK false",
+      "config": 91,
+      "m": 256,
+      "n": 4096,
+      "k": 2304
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 512 -H 16 -W 16 -k 256 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 209,
+      "m": 256,
+      "n": 256,
+      "k": 4608
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 512 -H 16 -W 16 -k 512 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 435,
+      "m": 512,
+      "n": 256,
+      "k": 4608
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 512 -H 16 -W 16 -k 512 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,addf -supportsSplitK true",
+      "config": 501,
+      "m": 512,
+      "n": 256,
+      "k": 4608
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 512 -H 32 -W 32 -k 256 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 433,
+      "m": 256,
+      "n": 1024,
+      "k": 4608
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 512 -H 32 -W 32 -k 512 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 536,
+      "m": 512,
+      "n": 1024,
+      "k": 4608
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 512 -H 64 -W 64 -k 256 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 536,
+      "m": 256,
+      "n": 4096,
+      "k": 4608
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 64 -H 256 -W 256 -k 128 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 536,
+      "m": 128,
+      "n": 65536,
+      "k": 576
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 64 -H 512 -W 512 -k 64 -y 3 -x 3 -p 0 -q 0 -u 2 -v 2 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 389,
+      "m": 64,
+      "n": 65025,
+      "k": 576
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 64 -H 512 -W 512 -k 64 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 552,
+      "m": 64,
+      "n": 262144,
+      "k": 576
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f GNC01 -I NGC01 -O NGC01 -n 1 -c 64 -H 512 -W 512 -k 64 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,addf -supportsSplitK true",
+      "config": 389,
+      "m": 64,
+      "n": 262144,
+      "k": 576
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconv -F 1 -f NC0G1 -I 01NGC -O NGC01 -n 1 -c 3 -H 512 -W 512 -k 64 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 281,
+      "m": 64,
+      "n": 262144,
+      "k": 27
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB false -transO false -g 1 -m 1 -n 1 -k 768 -outputFusions=addf,extf -supportsSplitK true",
+      "config": 637,
+      "m": 1,
+      "n": 1,
+      "k": 768
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB false -transO false -g 1 -m 512 -n 3072 -k 768 -outputFusions=addf,mulf,erf,addf,mulf,mulf -supportsSplitK false",
+      "config": 241,
+      "m": 512,
+      "n": 3072,
+      "k": 768
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB false -transO false -g 1 -m 512 -n 768 -k 3072 -outputFusions=addf,addf -supportsSplitK true",
+      "config": 5,
+      "m": 512,
+      "n": 768,
+      "k": 3072
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB false -transO false -g 1 -m 512 -n 768 -k 768 -outputFusions=addf,addf -supportsSplitK true",
+      "config": 323,
+      "m": 512,
+      "n": 768,
+      "k": 768
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB false -transO false -g 1 -m 512 -n 768 -k 768 -supportsSplitK true",
+      "config": 321,
+      "m": 512,
+      "n": 768,
+      "k": 768
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB false -transO false -g 1 -m 384 -n 1024 -k 1024 -outputFusions=addf -supportsSplitK true",
+      "config": 503,
+      "m": 384,
+      "n": 1024,
+      "k": 1024
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB false -transO false -g 1 -m 384 -n 1024 -k 1024 -outputFusions=addf,addf -supportsSplitK true",
+      "config": 285,
+      "m": 384,
+      "n": 1024,
+      "k": 1024
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB false -transO false -g 1 -m 384 -n 1024 -k 4096 -outputFusions=addf,addf -supportsSplitK true",
+      "config": 43,
+      "m": 384,
+      "n": 1024,
+      "k": 4096
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB false -transO false -g 1 -m 384 -n 2 -k 1024 -inputFusions=addf,sqrt,divf,mulf,mulf,addf -outputFusions=addf -supportsSplitK true",
+      "config": 638,
+      "m": 384,
+      "n": 2,
+      "k": 1024
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB false -transO false -g 1 -m 384 -n 4096 -k 1024 -outputFusions=addf,mulf,erf,addf,mulf,mulf -supportsSplitK false",
+      "config": 176,
+      "m": 384,
+      "n": 4096,
+      "k": 1024
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB false -transO false -g 16 -m 384 -n 384 -k 64 -outputFusions=mulf,addf -supportsSplitK true",
+      "config": 527,
+      "m": 384,
+      "n": 384,
+      "k": 64
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f32 -out_datatype f32 -transA false -transB false -transO false -g 16 -m 384 -n 64 -k 384 -supportsSplitK true",
+      "config": 315,
+      "m": 384,
+      "n": 64,
+      "k": 384
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB false -transO false -g 1 -m 9216 -n 512 -k 512 -outputFusions=addf -supportsSplitK true",
+      "config": 17,
+      "m": 9216,
+      "n": 512,
+      "k": 512
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB false -transO false -g 1 -m 9216 -n 512 -k 512 -outputFusions=addf,addf -supportsSplitK true",
+      "config": 241,
+      "m": 9216,
+      "n": 512,
+      "k": 512
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB false -transO false -g 1 -m 9216 -n 512 -k 512 -outputFusions=addf,mulf -supportsSplitK true",
+      "config": 17,
+      "m": 9216,
+      "n": 512,
+      "k": 512
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB false -transO false -g 1 -m 9216 -n 512 -k 9216 -supportsSplitK true",
+      "config": 17,
+      "m": 9216,
+      "n": 512,
+      "k": 9216
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB false -transO false -g 1 -m 9216 -n 9216 -k 512 -supportsSplitK true",
+      "config": 3,
+      "m": 9216,
+      "n": 9216,
+      "k": 512
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f GN01C -I NGC01 -O N01GC -n 1 -c 4 -H 96 -W 96 -k 4 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -inputFusions=truncf -outputFusions=addf -supportsSplitK true",
+      "config": 639,
+      "m": 4,
+      "n": 9216,
+      "k": 4
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f GNC01 -I NGC01 -O N01GC -n 1 -c 256 -H 768 -W 768 -k 256 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 640,
+      "m": 256,
+      "n": 589824,
+      "k": 2304
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f GNC01 -I NGC01 -O N01GC -n 1 -c 512 -H 192 -W 192 -k 512 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 270,
+      "m": 512,
+      "n": 36864,
+      "k": 4608
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f GNC01 -I NGC01 -O N01GC -n 1 -c 512 -H 384 -W 384 -k 512 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 419,
+      "m": 512,
+      "n": 147456,
+      "k": 4608
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f NC0G1 -I 01NGC -O N01GC -n 1 -c 128 -H 768 -W 768 -k 128 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 144,
+      "m": 128,
+      "n": 589824,
+      "k": 1152
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f NC0G1 -I 01NGC -O N01GC -n 1 -c 128 -H 768 -W 768 -k 128 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,addf -supportsSplitK true",
+      "config": 259,
+      "m": 128,
+      "n": 589824,
+      "k": 1152
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f NC0G1 -I 01NGC -O N01GC -n 1 -c 256 -H 384 -W 384 -k 256 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 322,
+      "m": 256,
+      "n": 147456,
+      "k": 2304
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f NC0G1 -I 01NGC -O N01GC -n 1 -c 256 -H 384 -W 384 -k 256 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,addf -supportsSplitK true",
+      "config": 322,
+      "m": 256,
+      "n": 147456,
+      "k": 2304
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f NC0G1 -I 01NGC -O N01GC -n 1 -c 256 -H 768 -W 768 -k 128 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 322,
+      "m": 128,
+      "n": 589824,
+      "k": 2304
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f NC0G1 -I 01NGC -O N01GC -n 1 -c 4 -H 96 -W 96 -k 512 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 16,
+      "m": 512,
+      "n": 9216,
+      "k": 36
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f NC0G1 -I 01NGC -O N01GC -n 1 -c 512 -H 192 -W 192 -k 512 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 259,
+      "m": 512,
+      "n": 36864,
+      "k": 4608
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f NC0G1 -I 01NGC -O N01GC -n 1 -c 512 -H 192 -W 192 -k 512 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,addf -supportsSplitK true",
+      "config": 259,
+      "m": 512,
+      "n": 36864,
+      "k": 4608
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f NC0G1 -I 01NGC -O N01GC -n 1 -c 512 -H 384 -W 384 -k 256 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 259,
+      "m": 256,
+      "n": 147456,
+      "k": 4608
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f NC0G1 -I 01NGC -O N01GC -n 1 -c 512 -H 96 -W 96 -k 512 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf -supportsSplitK true",
+      "config": 259,
+      "m": 512,
+      "n": 9216,
+      "k": 4608
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f NC0G1 -I 01NGC -O N01GC -n 1 -c 512 -H 96 -W 96 -k 512 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,addf -supportsSplitK true",
+      "config": 258,
+      "m": 512,
+      "n": 9216,
+      "k": 4608
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f NC0G1 -I 01NGC -O NGC01 -n 1 -c 128 -H 768 -W 768 -k 3 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,extf -supportsSplitK true",
+      "config": 641,
+      "m": 3,
+      "n": 589824,
+      "k": 1152
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f NG01C -I 01NGC -O N01GC -n 1 -c 256 -H 768 -W 768 -k 128 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,addf -supportsSplitK true",
+      "config": 30,
+      "m": 128,
+      "n": 589824,
+      "k": 256
+    },
+    {
+      "problem": "gfx1151\t2\t1\tconvfp16 -F 1 -f NG01C -I 01NGC -O N01GC -n 1 -c 512 -H 384 -W 384 -k 256 -y 1 -x 1 -p 0 -q 0 -u 1 -v 1 -l 1 -j 1 -g 1 -outputFusions=addf,addf -supportsSplitK true",
+      "config": 268,
+      "m": 256,
+      "n": 147456,
+      "k": 512
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB false -transO false -g 1 -m 1 -n 1280 -k 1280 -inputFusions=uitofp,subf,mulf -outputFusions=extf -supportsSplitK true",
+      "config": 0,
+      "m": 1,
+      "n": 1280,
+      "k": 1280
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB false -transO false -g 1 -m 77 -n 1280 -k 1280 -inputFusions=uitofp,subf,mulf -outputFusions=addf -supportsSplitK true",
+      "config": 642,
+      "m": 77,
+      "n": 1280,
+      "k": 1280
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB false -transO false -g 1 -m 77 -n 1280 -k 1280 -inputFusions=uitofp,subf,mulf -outputFusions=addf,addf -supportsSplitK true",
+      "config": 642,
+      "m": 77,
+      "n": 1280,
+      "k": 1280
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB false -transO false -g 1 -m 77 -n 1280 -k 1280 -inputFusions=uitofp,subf,mulf -outputFusions=addf,mulf -supportsSplitK true",
+      "config": 642,
+      "m": 77,
+      "n": 1280,
+      "k": 1280
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB false -transO false -g 1 -m 77 -n 1280 -k 5120 -inputFusions=uitofp,subf,mulf -outputFusions=addf,addf,extf -supportsSplitK true",
+      "config": 642,
+      "m": 77,
+      "n": 1280,
+      "k": 5120
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB false -transO false -g 1 -m 77 -n 5120 -k 1280 -inputFusions=uitofp,subf,mulf -outputFusions=addf,mulf,erf,addf,mulf,mulf -supportsSplitK false",
+      "config": 643,
+      "m": 77,
+      "n": 5120,
+      "k": 1280
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB false -transO false -g 20 -m 77 -n 64 -k 77 -supportsSplitK true",
+      "config": 644,
+      "m": 77,
+      "n": 64,
+      "k": 77
+    },
+    {
+      "problem": "gfx1151\t2\t1\t-t f16 -out_datatype f16 -transA false -transB true -transO false -g 20 -m 77 -n 77 -k 64 -outputFusions=addf -supportsSplitK true",
+      "config": 170,
+      "m": 77,
+      "n": 77,
+      "k": 64
     }
   ],
   "fallbacks": []
