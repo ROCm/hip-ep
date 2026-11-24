@@ -103,6 +103,13 @@ QWEN_35B_INT8_HIDDEN = 2048
 QWEN_9B_INT8_HIDDEN = 4096
 QWEN_9B_INT8_INTERMEDIATE = 12288
 
+# --- Qwen3.8-Flash-Next (bits=4, block_size=32, symmetric) ---
+# Source: the Qwen3.8-Flash-Next text graph. Speculative verify runs its
+# matmuls at M = 1..8 rows.
+#   (2560, 1) x48 -- MoE shared_expert_gate (N = 1)
+FLASH_NEXT_HIDDEN = 2560
+FLASH_NEXT_VERIFY_ROWS = [1, 2, 3, 4, 5, 6, 7, 8]
+
 
 def _make_matmul_nbits_model(
     batch: int,
@@ -386,6 +393,33 @@ class TestMatMulNBits:
 
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=2e-2, rtol=1e-2, cos_threshold=0.999)
+
+    # ------------------------------------------------------------------
+    # Qwen3.8-Flash-Next verify-width shapes (bits=4, block_size=32)
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize("seq_len", FLASH_NEXT_VERIFY_ROWS)
+    def test_matmul_nbits_single_output_flash_next_shape(self, model_runner, seq_len):
+        """MoE shared_expert_gate: [1, S, 2560] -> [1, S, 1].
+
+        N = 1 is narrower than every tile of the M-blocked dp4a table, so
+        S = 5..8 runs on two row tiles of the tile_m = 4 default. The second
+        tile used to read the activations of rows 0..3: rows 4..7 came out as
+        other rows' values.
+        """
+        model = _make_matmul_nbits_model(
+            1,
+            seq_len,
+            FLASH_NEXT_HIDDEN,
+            1,
+            scale_range=(-0.05, 0.05),
+        )
+
+        rng = np.random.default_rng(99)
+        x = rng.uniform(-1, 1, [1, seq_len, FLASH_NEXT_HIDDEN]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=1e-1, rtol=2e-2, cos_threshold=0.999)
 
     # ------------------------------------------------------------------
     # Llama-3.1-8B AWQ-int4-g128 single-node shapes
