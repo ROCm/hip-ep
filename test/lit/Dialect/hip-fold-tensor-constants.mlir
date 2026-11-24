@@ -154,6 +154,29 @@ func.func @keep_non_constant_input(%ctx: !hip.context, %input: tensor<4xi1>,
   return %result : tensor<4xf32>
 }
 
+// A tensor.expand_shape between the carrier and the consumer is seen through:
+// the payload is reshaped, the not folds, and the now-dead expand_shape and
+// carrier are retired with it.
+// CHECK-LABEL: func.func @fold_through_expand_shape
+// CHECK-NOT: hip.not
+// CHECK-NOT: tensor.expand_shape
+// CHECK: %[[COND:.*]] = hip.constant {value = dense<true> : tensor<1x4xi1>} : tensor<1x4xi1>
+// CHECK: hip.where({{.*}}) ins(%[[COND]],
+// CHECK-NOT: hip.not
+func.func @fold_through_expand_shape(%ctx: !hip.context, %x: tensor<1x4xf32>,
+                                     %y: tensor<1x4xf32>) -> tensor<1x4xf32> {
+  %input = hip.constant {value = dense<false> : tensor<4xi1>} : tensor<4xi1>
+  %expanded = tensor.expand_shape %input [[0, 1]] output_shape [1, 4] : tensor<4xi1> into tensor<1x4xi1>
+  %not_init = tensor.empty() : tensor<1x4xi1>
+  %condition = hip.not(%ctx) ins(%expanded : tensor<1x4xi1>)
+      outs(%not_init : tensor<1x4xi1>) : tensor<1x4xi1>
+  %where_init = tensor.empty() : tensor<1x4xf32>
+  %result = hip.where(%ctx) ins(%condition, %x, %y :
+      tensor<1x4xi1>, tensor<1x4xf32>, tensor<1x4xf32>)
+      outs(%where_init : tensor<1x4xf32>) : tensor<1x4xf32>
+  return %result : tensor<1x4xf32>
+}
+
 // A broadcast form is refused: the exact-type gate requires every input to
 // match the result type, and dense<true> over tensor<1xi1> does not.
 // CHECK-LABEL: func.func @keep_broadcast_and
