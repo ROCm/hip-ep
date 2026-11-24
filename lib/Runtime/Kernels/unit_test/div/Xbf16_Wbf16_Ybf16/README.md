@@ -18,6 +18,12 @@ intrinsics. A NaN result matches any NaN.
 - Quotients that are fp32 subnormals are left out: whether the GPU keeps or
   flushes them depends on the device's denormal mode, not on this kernel.
   Random operands use exponents in [-60, 60] so their quotients stay normal.
+- Subnormal operands are out of scope for the same reason: whether the GPU
+  flushes subnormal inputs is a device denormal-mode property, so a bit-exact
+  expectation would not be portable (0x0001 / 0x0001 is 1 without flush and
+  NaN with it). Random operands are always normal. A negative NaN operand is
+  not listed either: a NaN result matches any NaN, so it would add no
+  coverage the positive NaN does not.
 - Every element is written and nothing outside the output: each case runs
   twice with two different fill bytes and 64 guard elements on each side.
 - An unsupported dtype (u8) returns -1 and leaves the output untouched. The

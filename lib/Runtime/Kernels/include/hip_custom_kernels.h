@@ -588,6 +588,10 @@ HIP_KERNEL_API int hip_isnan(
  *
  * Broadcasting is not performed in these kernels. lhs and rhs must already
  * match in shape; upstream Expand / broadcast materialization is required.
+ * For Div, wrap_div (lib/Runtime/real/div.cpp) materialises broadcasts with
+ * hip_expand before calling hip_elementwise_div. The Div dtype list above
+ * is repeated in elementwise_binary_kernel.hip, the wrap_div error message
+ * and docs/supported-operations.md; change all four together.
  *
  * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure.
  */

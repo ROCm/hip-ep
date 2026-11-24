@@ -359,7 +359,8 @@ struct AveragePoolToReshapeMean : public mlir::RewritePattern {
 //===----------------------------------------------------------------------===//
 // Broadcasting Div(x, y) -> Mul(x, Reciprocal(y))
 //
-// wrap_div broadcasts (rank <= 4): hip_expand expands rhs to lhs's shape.
+// wrap_div broadcasts (rank <= 4): hip_expand expands whichever operand
+// differs to the output shape.
 // This rewrite runs first for f16, bf16 and f32, so a different-shape Div
 // such as lhs[1,512,896] / rhs[1,512,1] lowers to hip.reciprocal + hip.mul,
 // both of which support bf16. It rounds twice (Reciprocal, then Mul), so
@@ -411,14 +412,8 @@ struct BroadcastDivToMulReciprocal : public mlir::RewritePattern {
     // ONNX Reciprocal is fp-only, so integer Div is not decomposed. It
     // lowers to hip.div, and wrap_div broadcasts it via hip_expand.
     mlir::Type elemType = lhsType.getElementType();
-    if (elemType.isIntOrIndex()) {
-      op->emitWarning()
-          << "onnx.Div with mismatched integer-type operands is not "
-             "decomposed; it lowers to hip.div, which broadcasts via "
-             "hip_expand.";
-      return rewriter.notifyMatchFailure(op,
-                                         "div.integer_broadcast_unsupported");
-    }
+    if (elemType.isIntOrIndex())
+      return rewriter.notifyMatchFailure(op, "div.integer_not_decomposed");
 
     // Only fp16/fp32/bf16 — Reciprocal supports the same set.
     if (!elemType.isF16() && !elemType.isF32() && !elemType.isBF16())

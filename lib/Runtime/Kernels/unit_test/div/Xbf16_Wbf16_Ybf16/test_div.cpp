@@ -233,7 +233,12 @@ bool reference_div(uint16_t a, uint16_t b, uint16_t* out) {
 // ---- inputs ----------------------------------------------------------------
 
 // bf16 bit patterns: +-0, +-inf, NaN, +-1, 2, 3, 7, 10, 0.1, the largest
-// finite value and the smallest normal value (both signs).
+// finite value and the smallest normal value (both signs). Subnormal
+// operands are out of scope: whether the GPU flushes subnormal inputs is a
+// device denormal-mode property, so a bit-exact expectation would not be
+// portable (0x0001/0x0001 is 1 without flush but NaN with it). A negative
+// NaN operand is not listed: a NaN result matches any NaN, so it would add
+// no coverage the positive NaN does not. See README.md.
 constexpr uint16_t kSpecials[] = {
     0x0000, 0x8000, 0x7f80, 0xff80, 0x7fc0, 0x3f80, 0xbf80, 0x4000,
     0x4040, 0x40e0, 0x4120, 0x3dcd, 0x7f7f, 0xff7f, 0x0080, 0x8080,
@@ -277,7 +282,7 @@ Operands make_operands(int64_t n, uint64_t seed) {
       }
     }
   }
-  uint64_t state = seed | 1u;
+  uint64_t state = seed * 0x9E3779B97F4A7C15ull + 1;
   while (static_cast<int64_t>(o.lhs.size()) < n) {
     const uint16_t a = random_bf16(&state);
     const uint16_t b = random_bf16(&state);
