@@ -181,7 +181,9 @@ def validate():
 
 
 @torch.inference_mode()
-def benchmark(context, output_root=None, stop_file=None):
+def benchmark(
+    context, output_root=None, stop_file=None, warmups=2, measured_requests=6
+):
     os.environ.pop("QSA_ORT_PROFILE_DIR", None)
     validation = json.loads((TASK / "validation.json").read_text())
     assert validation["status"] == "passed"
@@ -202,8 +204,8 @@ def benchmark(context, output_root=None, stop_file=None):
         context=context,
         batch=1,
         capacity=context + 64,
-        warmups=2,
-        measured_requests=6,
+        warmups=warmups,
+        measured_requests=measured_requests,
         decode_calls=64,
         timing_manifest_sha256=sha(data / "manifest.json"),
         stream_sha256=manifest["streams_sha256"],
@@ -228,7 +230,7 @@ def benchmark(context, output_root=None, stop_file=None):
     )
     rows = []
     warmup_reference = None
-    for trial in range(-2, 6):
+    for trial in range(-warmups, measured_requests):
         if stop_file and stop_file.exists():
             save(
                 folder / "stopped.json",
@@ -248,7 +250,7 @@ def benchmark(context, output_root=None, stop_file=None):
         decode = time.perf_counter() - begin
         output = torch.cat([call["logits"].clone() for call in plan], 1)
         assert output.isfinite().all()
-        if trial == -2:
+        if trial == -warmups:
             warmup_reference = output
         else:
             assert torch.equal(output, warmup_reference), (context, trial)
@@ -277,6 +279,8 @@ def benchmark(context, output_root=None, stop_file=None):
         status="complete",
         context=context,
         batch=1,
+        warmups=warmups,
+        measured_requests=measured_requests,
         load_compile_seconds=load_seconds,
         replay_exact=True,
         cache_pointers_unchanged=True,
@@ -304,13 +308,21 @@ def main():
     parser.add_argument("--context", type=int, choices=[4096, 16384, 32768])
     parser.add_argument("--output-root", type=Path)
     parser.add_argument("--stop-file", type=Path)
+    parser.add_argument("--warmups", type=int, choices=[1, 2], default=2)
+    parser.add_argument("--measured-requests", type=int, choices=range(2, 7), default=6)
     args = parser.parse_args()
     torch.set_num_threads(2)
     if args.mode == "validate":
         validate()
     else:
         assert args.context
-        benchmark(args.context, args.output_root, args.stop_file)
+        benchmark(
+            args.context,
+            args.output_root,
+            args.stop_file,
+            args.warmups,
+            args.measured_requests,
+        )
 
 
 if __name__ == "__main__":

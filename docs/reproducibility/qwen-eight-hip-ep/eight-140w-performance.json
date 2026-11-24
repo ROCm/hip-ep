@@ -1,0 +1,290 @@
+{
+  "state": "complete",
+  "scope": "Eight B1 4096/16384/32768 only;1warmup,3measured requests,64teacher-forced decode calls",
+  "contexts": [
+    {
+      "context": 4096,
+      "batch": 1,
+      "eight_warmups": 1,
+      "eight_measured_requests": 3,
+      "prefill": {
+        "eight_tokens_s": 398.0845575788776,
+        "original_historical_tokens_s": 438.0642856135859,
+        "four_historical_tokens_s": 419.9709660208917,
+        "eight_vs_original_percent": -9.126452291975761,
+        "eight_vs_four_percent": -5.211409886112306
+      },
+      "decode": {
+        "eight_tokens_s": 10.812791024933148,
+        "original_historical_tokens_s": 10.683621009325318,
+        "four_historical_tokens_s": 10.737049967819082,
+        "eight_vs_original_percent": 1.2090471526000846,
+        "eight_vs_four_percent": 0.7054177575877452
+      }
+    },
+    {
+      "context": 16384,
+      "batch": 1,
+      "eight_warmups": 1,
+      "eight_measured_requests": 3,
+      "prefill": {
+        "eight_tokens_s": 372.2624060886914,
+        "original_historical_tokens_s": 415.9429506214814,
+        "four_historical_tokens_s": 397.34322586154735,
+        "eight_vs_original_percent": -10.501571061013204,
+        "eight_vs_four_percent": -6.312129700581648
+      },
+      "decode": {
+        "eight_tokens_s": 10.44947576422324,
+        "original_historical_tokens_s": 10.125640770142908,
+        "four_historical_tokens_s": 10.250264341360507,
+        "eight_vs_original_percent": 3.198167912841754,
+        "eight_vs_four_percent": 1.943475955628804
+      }
+    },
+    {
+      "context": 32768,
+      "batch": 1,
+      "eight_warmups": 1,
+      "eight_measured_requests": 3,
+      "prefill": {
+        "eight_tokens_s": 354.09557408898286,
+        "original_historical_tokens_s": 384.8495172753791,
+        "four_historical_tokens_s": 350.8746932327165,
+        "eight_vs_original_percent": -7.991160650044504,
+        "eight_vs_four_percent": 0.9179575838289766
+      },
+      "decode": {
+        "eight_tokens_s": 10.010596007319775,
+        "original_historical_tokens_s": 9.356242675033192,
+        "four_historical_tokens_s": 9.506008414957988,
+        "eight_vs_original_percent": 6.993761865889825,
+        "eight_vs_four_percent": 5.308091160195105
+      }
+    }
+  ],
+  "measurements": [
+    {
+      "context": 4096,
+      "batch": 1,
+      "phase": "prefill",
+      "variant": "Original",
+      "mean_seconds": 9.350225833322233,
+      "tokens_s": 438.0642856135859,
+      "warmups": 2,
+      "measured_requests": 6,
+      "reused_historical": true
+    },
+    {
+      "context": 4096,
+      "batch": 1,
+      "phase": "prefill",
+      "variant": "Four",
+      "mean_seconds": 9.75305516666655,
+      "tokens_s": 419.9709660208917,
+      "warmups": 2,
+      "measured_requests": 6,
+      "reused_historical": true
+    },
+    {
+      "context": 4096,
+      "batch": 1,
+      "phase": "prefill",
+      "variant": "Eight",
+      "mean_seconds": 10.289271266666523,
+      "tokens_s": 398.0845575788776,
+      "warmups": 1,
+      "measured_requests": 3,
+      "reused_historical": false
+    },
+    {
+      "context": 4096,
+      "batch": 1,
+      "phase": "decode",
+      "variant": "Original",
+      "mean_seconds": 5.990478316680917,
+      "tokens_s": 10.683621009325318,
+      "warmups": 2,
+      "measured_requests": 6,
+      "reused_historical": true
+    },
+    {
+      "context": 4096,
+      "batch": 1,
+      "phase": "decode",
+      "variant": "Four",
+      "mean_seconds": 5.960668916678212,
+      "tokens_s": 10.737049967819082,
+      "warmups": 2,
+      "measured_requests": 6,
+      "reused_historical": true
+    },
+    {
+      "context": 4096,
+      "batch": 1,
+      "phase": "decode",
+      "variant": "Eight",
+      "mean_seconds": 5.918915833333206,
+      "tokens_s": 10.812791024933148,
+      "warmups": 1,
+      "measured_requests": 3,
+      "reused_historical": false
+    },
+    {
+      "context": 16384,
+      "batch": 1,
+      "phase": "prefill",
+      "variant": "Original",
+      "mean_seconds": 39.3900172500095,
+      "tokens_s": 415.9429506214814,
+      "warmups": 2,
+      "measured_requests": 6,
+      "reused_historical": true
+    },
+    {
+      "context": 16384,
+      "batch": 1,
+      "phase": "prefill",
+      "variant": "Four",
+      "mean_seconds": 41.23387271665464,
+      "tokens_s": 397.34322586154735,
+      "warmups": 2,
+      "measured_requests": 6,
+      "reused_historical": true
+    },
+    {
+      "context": 16384,
+      "batch": 1,
+      "phase": "prefill",
+      "variant": "Eight",
+      "mean_seconds": 44.011965033333276,
+      "tokens_s": 372.2624060886914,
+      "warmups": 1,
+      "measured_requests": 3,
+      "reused_historical": false
+    },
+    {
+      "context": 16384,
+      "batch": 1,
+      "phase": "decode",
+      "variant": "Original",
+      "mean_seconds": 6.3205876499899505,
+      "tokens_s": 10.125640770142908,
+      "warmups": 2,
+      "measured_requests": 6,
+      "reused_historical": true
+    },
+    {
+      "context": 16384,
+      "batch": 1,
+      "phase": "decode",
+      "variant": "Four",
+      "mean_seconds": 6.243741416673099,
+      "tokens_s": 10.250264341360507,
+      "warmups": 2,
+      "measured_requests": 6,
+      "reused_historical": true
+    },
+    {
+      "context": 16384,
+      "batch": 1,
+      "phase": "decode",
+      "variant": "Eight",
+      "mean_seconds": 6.1247091666667375,
+      "tokens_s": 10.44947576422324,
+      "warmups": 1,
+      "measured_requests": 3,
+      "reused_historical": false
+    },
+    {
+      "context": 32768,
+      "batch": 1,
+      "phase": "prefill",
+      "variant": "Original",
+      "mean_seconds": 85.14496843334443,
+      "tokens_s": 384.8495172753791,
+      "warmups": 2,
+      "measured_requests": 6,
+      "reused_historical": true
+    },
+    {
+      "context": 32768,
+      "batch": 1,
+      "phase": "prefill",
+      "variant": "Four",
+      "mean_seconds": 93.38946533333122,
+      "tokens_s": 350.8746932327165,
+      "warmups": 2,
+      "measured_requests": 6,
+      "reused_historical": true
+    },
+    {
+      "context": 32768,
+      "batch": 1,
+      "phase": "prefill",
+      "variant": "Eight",
+      "mean_seconds": 92.53998750000058,
+      "tokens_s": 354.09557408898286,
+      "warmups": 1,
+      "measured_requests": 3,
+      "reused_historical": false
+    },
+    {
+      "context": 32768,
+      "batch": 1,
+      "phase": "decode",
+      "variant": "Original",
+      "mean_seconds": 6.84035271667138,
+      "tokens_s": 9.356242675033192,
+      "warmups": 2,
+      "measured_requests": 6,
+      "reused_historical": true
+    },
+    {
+      "context": 32768,
+      "batch": 1,
+      "phase": "decode",
+      "variant": "Four",
+      "mean_seconds": 6.732583983335644,
+      "tokens_s": 9.506008414957988,
+      "warmups": 2,
+      "measured_requests": 6,
+      "reused_historical": true
+    },
+    {
+      "context": 32768,
+      "batch": 1,
+      "phase": "decode",
+      "variant": "Eight",
+      "mean_seconds": 6.393225733333263,
+      "tokens_s": 10.010596007319775,
+      "warmups": 1,
+      "measured_requests": 3,
+      "reused_historical": false
+    }
+  ],
+  "all_sampled_ac_connected": true,
+  "host_samples": 144,
+  "validation_sha256": "d3ad92c23de68f9c26b4aa0086cd5bcb37814a98a0f8737853ff17eafd6f07a7",
+  "graph_sha256": "2c385a8e9aa957d8da0ffb3f740f857514e7ef1ff322f49dde4d42d8bbecce93",
+  "selector_export_sha256": "8915ef00df9ad755808591862b473ee0e265cfd405ce1fc787bf948aea56eeeb",
+  "selector_layers": [
+    3,
+    7,
+    23,
+    27,
+    31,
+    35,
+    39,
+    63
+  ],
+  "native_binary_sha256": {
+    "hipgpu.dll": "399e7b10ac8c8da1142f36347bbdf4fa4ab58a0de6ecda190993cc3d12cc100e",
+    "custom_kernels_gfx1151.dll": "80183ff88257bb6c753365ced254beb36e88b11e5622e3351c74520df43e4fb7",
+    "hip-mlir-opt.exe": "8b32e457c69a1e8e2fc44360f55254c09e681b1b40fa0811c8a06ea017f45653",
+    "hip-compiler.exe": "e67e146993bb2ca080b51bf53054cb0414c1e521afb6d0c9e621b54e4017c574"
+  },
+  "comparison": "Across runs; historical Original/four2warmups6requests,2resident sessions versus new Eight1warmup3requests,1resident session. No paired intervals or isolated layer-count causality.",
+  "training_updates": 0,
+  "accuracy_evaluations_started": false
+}

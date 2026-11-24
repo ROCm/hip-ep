@@ -2,9 +2,40 @@
 Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 Licensed under the MIT License.
 -->
-# Qwen hip-ep: Original 4K control and paused eight-selector transfer
+# Qwen hip-ep: eight-selector performance and evaluation planning
 
-**Current state:** the same Original-only B1/4K diagnostic was repeated after the user connected a140W charger. It recovered close to the archived Original baseline. Eight/QSA timing, longer shapes and BFCL/GSM8K remain paused; this repeat ran only4K.
+**Current state:** the clean eight-selector performance campaign is complete at B1/4K,16K,32K after the140W charger change. It uses **one warmup and three measured requests per shape**, as requested. BFCL and GSM8K have not been started for this checkpoint. No64K or batched shapes were run.
+
+## Eight selectors: completed charged-power performance
+
+All eight updated BF16 selectors at zero-based layers3/7/23/27/31/35/39/63 come from the frozen checkpoint640 export; the original four positions also use its updated weights. The backbone remains native RTN W4A16 group128, with FP16 activations/KV and FP32 recurrent state. No training,learned calibration,kernel/compiler rebuild or model update occurred during this campaign. Both prefill and decode use sparse QSA. The earlier eight-node/cache/finite/dispatch validation is reused with exact graph,selector and binary identities.
+
+| Context | Original prefill tok/s (historical) | Four prefill tok/s (historical) | Eight prefill tok/s | Original decode tok/s (historical) | Four decode tok/s (historical) | Eight decode tok/s |
+|---:|---:|---:|---:|---:|---:|---:|
+| 4096 | 438.06 | 419.97 | 398.08 | 10.68 | 10.74 | 10.81 |
+| 16384 | 415.94 | 397.34 | 372.26 | 10.13 | 10.25 | 10.45 |
+| 32768 | 384.85 | 350.87 | 354.10 | 9.36 | 9.51 | 10.01 |
+
+These are **across-run** comparisons. Historical Original/four use2warmups and6requests in a paired two-resident-session run sharing cache buffers; Eight uses the user-requested1warmup and3requests with one resident full-model session. The common64 teacher-forced decode inputs,backbone,binaries,capacity and phase timers match. No paired confidence intervals or isolated layer-count causal claim is made. The locked prefixes concatenate known4K test windows; these timing streams are not a natural-long quality holdout. The separate charger Original4K check below recovered within1.45% prefill and1.01% decode of its archived baseline; Original16K/32K were not remeasured after the charger change.
+
+Each new shape retains all four rows (`trial=-1,0,1,2`),with only trials0–2 aggregated. TPS is token count divided by mean elapsed phase seconds across **all three** measured requests. Independent HIP-synchronized CPU-wall timers cover full-session prefill and64 full-session decode calls; allocation,binding,recurrent zeroing and cold load are outside phase timers. Output finite checks,exact replay,stable cache pointers and unchanged sessions pass at every shape.
+
+[Performance JSON](eight-140w-performance.json), [CSV](eight-140w-performance.csv), raw rows and saved aggregates: [4K rows](raw/eight-140w/4096/rows.jsonl) / [summary](raw/eight-140w/4096/summary.json), [16K rows](raw/eight-140w/16384/rows.jsonl) / [summary](raw/eight-140w/16384/summary.json), [32K rows](raw/eight-140w/32768/rows.jsonl) / [summary](raw/eight-140w/32768/summary.json). Protocols and reused historical rows/summaries are beside each. Source aggregation is `scripts/qwen_qsa/measure_eight.py`; exact as-run sources,commands and stop/RAM/time guards are in the local incremental ZIP below.
+
+The charger rating is user-reported. AC state was checked about once per second and sampled host evidence every5seconds; every recorded AC state stayed connected. CPU/available-RAM telemetry is diagnostic host data,not GPU-residency measurement. Preflight observed only desktop/System GPU activity,with no competing model workload. The preflight scope proposal was superseded before launch; [protocol-amendment.json](raw/eight-140w/protocol-amendment.json) documents the final1/3 request.
+
+## Estimated evaluation durations — no accuracy runs started
+
+These are planning estimates derived **after** measured performance. Each actual historical BFCL prompt and generated token is costed separately using the new prefill/decode curves,then calibrated to historical generation time and actual tool/queue overhead. Both previous trajectories are used:294/283 generation calls,2,217,075/2,117,348 processed prompt tokens,and14,333/13,899 output tokens. The50 fixed cases include26 single-turn and24 multi-turn cases,1–7 declared turns,cap1024,thinking disabled. GSM128 uses its historical11,167 prompt and43,494 output tokens,cap512,thinking disabled. This is not a single decode-TPS multiplier.
+
+| Evaluation | Eight only,reuse Original scores | Planning range | Fresh Original + Eight | Planning range |
+|---|---:|---:|---:|---:|
+| BFCL v4,50 cases | 123 min | 86–197 min | 238 min | 190–332 min |
+| GSM8K,128 cases | 71 min | 57–91 min | 143 min | 122–175 min |
+
+[Estimation JSON](evaluation-time-estimate.json) includes both trajectory scenarios,phase components,startup costs,formulas and limitations. `raw/eight-140w/bfcl-estimate-inputs.csv` and `gsm-estimate-inputs.csv` retain per-call/case workload lengths. Startup includes the maximum observed new Eight session load/compile plus15seconds for CPU/import/tokenizer setup; it may reuse OS/compiler caches. One resident session per variant is assumed; retaining four32-case GSM processes adds three startups per variant.
+
+Ranges are planning envelopes,not confidence intervals or guaranteed upper bounds. BFCL can change tool paths,call counts,turn stops and lengths with the new selectors. Sub-4K phase costs are calibrated extrapolations,and historical GSM token totals are workload assumptions,not output or accuracy predictions. Fresh Original estimates reuse its historical evaluation time; only its4K charged baseline was freshly checked. **Checkpoint640 still misses the source fixed32K PPL gate. No new accuracy score or accepted long-context accuracy is claimed.**
 
 ## Repeat after the140W charger change
 
@@ -56,8 +87,10 @@ The worker then had no in-band boundary stop, so its in-flight request was termi
 
 ## Handoff and remaining scope
 
-The Original4K check and its charger repeat are complete. Await review before further timing. The previously proposed fresh Original/Eight4K pilot, the full eight-selector matrix and the evaluation-duration estimates have not been completed or accepted. BFCL50 and GSM8K128 must not start under the current request. No unmeasured estimate or benchmark accuracy is reported.
+The charger Original4K check and the newly authorized Eight B1/4K,16K,32K campaign are complete. The original paired4K pilot was superseded by that request. Evaluation-duration estimates are now saved above; BFCL50 and GSM8K128 remain unstarted and require the user’s next instruction. No64K,batched or accuracy run is scheduled.
 
 [validation.json](validation.json) preserves eight-node dispatch/cache/finite/replay controls; [transfer-provenance.json](transfer-provenance.json) distinguishes the handoff commit from the sibling repository’s later observed HEAD. [original-control-status.json](original-control-status.json) captures the narrowed scope. Current local branch: `codex/qwen-eight-qsa-perf`. The [historical four-selector packet](../qwen-hip-ep/README.md), old results and measured installation are unchanged. New source snapshots/logs remain in `_local/qwen-qsa/eight-qsa-v1/` and `_local/qwen-qsa/original-short-control-v1/`. Nothing is pushed.
 
 The [immutable local ZIP receipt](archive.json) binds all raw source snapshots/logs, the transferred BF16 selector bytes, ONNX graph, paused-run rows and Original-control evidence. Every member checksum was verified; large backbone weights and compiled caches are excluded. The ZIP stays local. [eight-identity.json](eight-identity.json) records the corrected eight-selector identity; its raw export receipt retains inherited baseline metadata as an explicit erratum. [manifest.json](manifest.json) hashes the portable packet.
+
+[Eight charged-run incremental archive](eight-140w-archive.json) binds the exact as-run sources,commands,host samples,all timing rows,and CPU-only estimation/audit code. Every ZIP member checksum passed.

@@ -1,0 +1,76 @@
+{
+  "completed_utc": "2026-11-24T20:34:16.2255071Z",
+  "active": [
+    {
+      "timestamp": "2026-11-24T12:34:13.1413776-08:00",
+      "InstanceName": "pid_22492_luid_0x00000000_0x00034170_phys_0_eng_0_engtype_3d",
+      "CookedValue": 0.9891891098912707
+    },
+    {
+      "timestamp": "2026-11-24T12:34:13.1413776-08:00",
+      "InstanceName": "pid_22492_luid_0x00000000_0x00034170_phys_0_eng_1_engtype_copy",
+      "CookedValue": 0.14678976041733227
+    },
+    {
+      "timestamp": "2026-11-24T12:34:13.1413776-08:00",
+      "InstanceName": "pid_2968_luid_0x00000000_0x00034170_phys_0_eng_0_engtype_3d",
+      "CookedValue": 0.21429198037985356
+    },
+    {
+      "timestamp": "2026-11-24T12:34:14.1498078-08:00",
+      "InstanceName": "pid_22492_luid_0x00000000_0x00034170_phys_0_eng_0_engtype_3d",
+      "CookedValue": 1.1052425839686277
+    },
+    {
+      "timestamp": "2026-11-24T12:34:14.1498078-08:00",
+      "InstanceName": "pid_22492_luid_0x00000000_0x00034170_phys_0_eng_1_engtype_copy",
+      "CookedValue": 0.1741320321426312
+    },
+    {
+      "timestamp": "2026-11-24T12:34:14.1498078-08:00",
+      "InstanceName": "pid_2968_luid_0x00000000_0x00034170_phys_0_eng_0_engtype_3d",
+      "CookedValue": 0.2559721039691195
+    },
+    {
+      "timestamp": "2026-11-24T12:34:14.1498078-08:00",
+      "InstanceName": "pid_4_luid_0x00000000_0x00034170_phys_0_eng_1_engtype_copy",
+      "CookedValue": 0.15744272632850542
+    },
+    {
+      "timestamp": "2026-11-24T12:34:15.1627885-08:00",
+      "InstanceName": "pid_22492_luid_0x00000000_0x00034170_phys_0_eng_0_engtype_3d",
+      "CookedValue": 1.283262356331172
+    },
+    {
+      "timestamp": "2026-11-24T12:34:15.1627885-08:00",
+      "InstanceName": "pid_22492_luid_0x00000000_0x00034170_phys_0_eng_1_engtype_copy",
+      "CookedValue": 0.21379479391858106
+    },
+    {
+      "timestamp": "2026-11-24T12:34:15.1627885-08:00",
+      "InstanceName": "pid_2968_luid_0x00000000_0x00034170_phys_0_eng_0_engtype_3d",
+      "CookedValue": 0.28583960187987784
+    },
+    {
+      "timestamp": "2026-11-24T12:34:16.1739364-08:00",
+      "InstanceName": "pid_22492_luid_0x00000000_0x00034170_phys_0_eng_0_engtype_3d",
+      "CookedValue": 1.0518639261378084
+    },
+    {
+      "timestamp": "2026-11-24T12:34:16.1739364-08:00",
+      "InstanceName": "pid_22492_luid_0x00000000_0x00034170_phys_0_eng_1_engtype_copy",
+      "CookedValue": 0.12425481969551636
+    },
+    {
+      "timestamp": "2026-11-24T12:34:16.1739364-08:00",
+      "InstanceName": "pid_2968_luid_0x00000000_0x00034170_phys_0_eng_0_engtype_3d",
+      "CookedValue": 0.273886738033081
+    },
+    {
+      "timestamp": "2026-11-24T12:34:16.1739364-08:00",
+      "InstanceName": "pid_4_luid_0x00000000_0x00034170_phys_0_eng_1_engtype_copy",
+      "CookedValue": 0.11053773636873498
+    }
+  ],
+  "sample_count": 4
+}

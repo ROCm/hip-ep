@@ -1,0 +1,106 @@
+{
+  "state": "complete",
+  "started_unix": 1795552527.6062264,
+  "pid": 48140,
+  "stages": [
+    {
+      "context": 4096,
+      "command": [
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qsa\\venv\\Scripts\\python.exe",
+        "-u",
+        "scripts/qwen_qsa/measure_eight.py",
+        "benchmark",
+        "--context",
+        "4096",
+        "--output-root",
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qwen-qsa\\eight-140w-performance-v1\\performance",
+        "--stop-file",
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qwen-qsa\\eight-140w-performance-v1\\stop.json",
+        "--warmups",
+        "1",
+        "--measured-requests",
+        "3"
+      ],
+      "started_unix": 1795552527.610424,
+      "state": "complete",
+      "worker_pid": 45980,
+      "exit_code": 0,
+      "elapsed_seconds": 81.13373374938965,
+      "ac_power_lost": false
+    },
+    {
+      "context": 16384,
+      "command": [
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qsa\\venv\\Scripts\\python.exe",
+        "-u",
+        "scripts/qwen_qsa/measure_eight.py",
+        "benchmark",
+        "--context",
+        "16384",
+        "--output-root",
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qwen-qsa\\eight-140w-performance-v1\\performance",
+        "--stop-file",
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qwen-qsa\\eight-140w-performance-v1\\stop.json",
+        "--warmups",
+        "1",
+        "--measured-requests",
+        "3"
+      ],
+      "started_unix": 1795552608.749724,
+      "state": "complete",
+      "worker_pid": 46024,
+      "exit_code": 0,
+      "elapsed_seconds": 218.3384563922882,
+      "ac_power_lost": false
+    },
+    {
+      "context": 32768,
+      "command": [
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qsa\\venv\\Scripts\\python.exe",
+        "-u",
+        "scripts/qwen_qsa/measure_eight.py",
+        "benchmark",
+        "--context",
+        "32768",
+        "--output-root",
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qwen-qsa\\eight-140w-performance-v1\\performance",
+        "--stop-file",
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qwen-qsa\\eight-140w-performance-v1\\stop.json",
+        "--warmups",
+        "1",
+        "--measured-requests",
+        "3"
+      ],
+      "started_unix": 1795552827.0939538,
+      "state": "complete",
+      "worker_pid": 45552,
+      "exit_code": 0,
+      "elapsed_seconds": 413.7042999267578,
+      "ac_power_lost": false
+    }
+  ],
+  "source_sha256": {
+    "scripts\\qwen_qsa\\measure_eight.py": "b20eef01df531de993e313d0595ef169ab607c3fcdd4967db5cc1224002be14d",
+    "scripts\\qwen_qsa\\native_inference.py": "41dddd8e41a55591dd9271210ac7e9ba85dbdd7b37b16c52642ab5c3ea87081f",
+    "scripts\\qwen_qsa\\benchmark_native.py": "5d4516e372a2452f0264319739a26cf84d91d6fb432a1453f1370768a4d15bc2",
+    "scripts\\qwen_qsa\\export_eight.py": "01a5ef5931933f34d7979ef68407a02cec3d2763ff6eca798659cf9f38b5efa0",
+    "scripts\\qwen_qsa\\verify_handoff.py": "7dc4919f44796dc4e0dad6ba738100b85e91ddc58967e09b84657180d68745db",
+    "scripts\\qsa\\runtime.py": "b839b0816065d57458e749ec666c105cf019015f037e449b87632089e31586de",
+    "_local\\qwen-qsa\\eight-140w-performance-v1\\run.py": "f226ef587885f9932491aadfa190bea96e26f8fdf60562229f6c33a133d280b1"
+  },
+  "context_lengths": [
+    4096,
+    16384,
+    32768
+  ],
+  "batch": 1,
+  "warmups": 1,
+  "measured_requests": 3,
+  "decode_calls": 64,
+  "charger_watts_user_reported": 140,
+  "training_updates": 0,
+  "accuracy_evaluations": false,
+  "reused_validation": "_local/qwen-qsa/eight-qsa-v1/validation.json",
+  "stop_file": "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qwen-qsa\\eight-140w-performance-v1\\stop.json",
+  "elapsed_seconds": 713.195060968399
+}

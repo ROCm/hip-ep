@@ -1,0 +1,6 @@
+{
+  "note": "The idle preflight receipt described the initial2warmup6request proposal. Before any worker launched,the user changed this to1warmup3measured requests. All actual commands,protocols,rows and summaries implement1/3.",
+  "requested_warmups": 1,
+  "requested_measured_requests": 3,
+  "applied_before_first_launch": true
+}
