@@ -1577,9 +1577,11 @@ void SkipRmsNormOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
-// 0 or 2 quant_outputs with a positive block: an i8 copy shaped like `source`
-// and f32 scales with one entry per quant_block_size run of its last axis.
-// The kernels write both with the source's row stride and no bounds check.
+// 0 or 2 quant_outputs with a 32-element block: an i8 copy shaped like
+// `source` and f32 scales with one entry per 32-element run of its last axis.
+// The kernels write both with the source's row stride and no bounds check,
+// and always in 32-element groups, so another block size would size a_scale
+// for fewer entries than they write.
 template <typename OpT>
 static LogicalResult verifyQuantOutputs(OpT op, Value source) {
   size_t numQuant = op.getQuantOutputs().size();
@@ -1590,8 +1592,9 @@ static LogicalResult verifyQuantOutputs(OpT op, Value source) {
   if (numQuant == 0)
     return success();
   int64_t block = op.getQuantBlockSize();
-  if (block <= 0)
-    return op.emitOpError("quant_outputs require a positive quant_block_size");
+  if (block != 32)
+    return op.emitOpError("quant_outputs require quant_block_size 32, got ")
+           << block;
   auto src = dyn_cast<ShapedType>(source.getType());
   auto quant = dyn_cast<ShapedType>(op.getQuantOutputs()[0].getType());
   auto scale = dyn_cast<ShapedType>(op.getQuantOutputs()[1].getType());

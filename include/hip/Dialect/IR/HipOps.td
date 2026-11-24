@@ -2059,6 +2059,7 @@ def Hip_SkipRmsNormOp :
     attached by fusion when the normalized row feeds hip.matmul_nbits_group:
       quant_outputs[0] = int8 [..., hidden] in the dp4a deinterleaved layout
       quant_outputs[1] = f32  [..., hidden / quant_block_size] group scales
+    quant_block_size must be 32, the only group the producer kernels write.
     The runtime fills them only for the shapes hip_norm_quant_supported()
     accepts; the consumer applies the same test before reading them. The
     buffers are sized for every row regardless, so for other shapes

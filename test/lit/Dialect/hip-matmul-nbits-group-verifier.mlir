@@ -138,6 +138,36 @@ func.func @norm_quant_partial_block(%ctx: !hip.context, %x: memref<1x1x48xf16, 1
 
 // -----
 
+func.func @norm_quant_block_64(%ctx: !hip.context, %x: memref<1x1x128xf16, 1>,
+                               %r: memref<1x1x128xf16, 1>, %g: memref<128xf16, 1>,
+                               %y: memref<1x1x128xf16, 1>,
+                               %q: memref<1x1x128xi8, 1>, %s: memref<1x1x2xf32, 1>) {
+  // expected-error @+1 {{quant_outputs require quant_block_size 32, got 64}}
+  hip.skip_rms_norm(%ctx)
+      ins(%x, %r, %g : memref<1x1x128xf16, 1>, memref<1x1x128xf16, 1>, memref<128xf16, 1>)
+      outs(%y : memref<1x1x128xf16, 1>)
+      quant_outs(%q, %s : memref<1x1x128xi8, 1>, memref<1x1x2xf32, 1>)
+      {epsilon = 1.0e-05 : f32, quant_block_size = 64 : i64}
+  return
+}
+
+// -----
+
+func.func @norm_quant_no_block(%ctx: !hip.context, %x: memref<1x1x64xf16, 1>,
+                               %r: memref<1x1x64xf16, 1>, %g: memref<64xf16, 1>,
+                               %y: memref<1x1x64xf16, 1>,
+                               %q: memref<1x1x64xi8, 1>, %s: memref<1x1x2xf32, 1>) {
+  // expected-error @+1 {{quant_outputs require quant_block_size 32, got 0}}
+  hip.skip_rms_norm(%ctx)
+      ins(%x, %r, %g : memref<1x1x64xf16, 1>, memref<1x1x64xf16, 1>, memref<64xf16, 1>)
+      outs(%y : memref<1x1x64xf16, 1>)
+      quant_outs(%q, %s : memref<1x1x64xi8, 1>, memref<1x1x2xf32, 1>)
+      {epsilon = 1.0e-05 : f32}
+  return
+}
+
+// -----
+
 func.func @pre_mix_quant_wrong_scales(%ctx: !hip.context, %x: memref<1x1x64xf16, 1>,
                                       %g: memref<1x1x64xf16, 1>,
                                       %y: memref<1x1x32xf16, 1>,
