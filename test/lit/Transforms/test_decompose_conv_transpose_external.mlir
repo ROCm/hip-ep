@@ -22,13 +22,11 @@
 // RUN: hip-mlir-opt %t/memory-source.mlir --hip-decompose-conv-transpose --canonicalize | FileCheck %s --check-prefix=MEMORY
 
 // A 2x2 filter at stride 2 splits into four single-tap residues, one per
-// filter position, so each residue constant pins one value read from the file.
+// filter position. They are equal, so they stack into one wide convolution
+// whose filter holds the file's values in residue order.
 // FILE-LABEL: func.func @file_source
 // FILE-NOT: hip.conv_transpose
-// FILE-DAG: hip.constant {value = dense<1.000000e+00> : tensor<1x1x1x1xf32>}
-// FILE-DAG: hip.constant {value = dense<2.000000e+00> : tensor<1x1x1x1xf32>}
-// FILE-DAG: hip.constant {value = dense<3.000000e+00> : tensor<1x1x1x1xf32>}
-// FILE-DAG: hip.constant {value = dense<4.000000e+00> : tensor<1x1x1x1xf32>}
+// FILE: hip.constant {value = dense<{{\[}}[{{\[}}[1.000000e+00]]], {{\[}}[{{\[}}2.000000e+00]]], {{\[}}[{{\[}}3.000000e+00]]], {{\[}}[{{\[}}4.000000e+00]]]]> : tensor<4x1x1x1xf32>}
 
 // The memory address is process-local and owned by whoever recorded it, which
 // this pass cannot establish -- resolving it would dereference a bare integer.

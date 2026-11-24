@@ -34,6 +34,7 @@
 #include "gelu_fusion.hpp"
 #include "linear_attention_group_fold.hpp"
 #include "patch_embed_conv_to_gemm.hpp"
+#include "scaled_masked_softmax_fusion.hpp"
 #include "swiglu_fusion.hpp"
 #include "transpose_removal/transpose_removal.hpp"
 
@@ -856,6 +857,9 @@ constexpr unsigned kGeluFusionBenefit = 2;
 /// The only pattern rooted at `hip.linear_attention`.
 constexpr unsigned kLinearAttentionGroupFoldBenefit = 1;
 
+/// The only pattern rooted at `hip.miopen.softmax`.
+constexpr unsigned kScaledMaskedSoftmaxFusionBenefit = 1;
+
 /// apply this directory's patterns to every function body in module, failure
 /// means the embedded PDLL patterns will not parse or the driver failed
 ///
@@ -874,6 +878,8 @@ inline mlir::LogicalResult run(mlir::ModuleOp module,
   populateGeluFusionPattern(patterns, mlir::PatternBenefit(kGeluFusionBenefit));
   populateLinearAttentionGroupFoldPattern(
       patterns, mlir::PatternBenefit(kLinearAttentionGroupFoldBenefit));
+  populateScaledMaskedSoftmaxFusionPattern(
+      patterns, mlir::PatternBenefit(kScaledMaskedSoftmaxFusionBenefit));
 
   // pdl patterns here
   if (pdlBuffer.getBufferSize() != 0) {
