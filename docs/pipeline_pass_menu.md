@@ -124,6 +124,10 @@ A provider artifact records `+autotune=<space>` only.
 `--dump-problem-cache <file.json>` writes that JSON after autotune, one
 point per unique problem and one config per distinct perfConfig. The flag
 requires autotune; `HIP_ROCMLIR_SKIP_BENCHMARKING` does not produce a dump.
+The provider writes the same JSON for each compile when
+`HIPDNN_EP_ROCMLIR_DUMP_PROBLEM_CACHE=<file.json>` is set; see
+[rocmlir-fusion.md](design/rocmlir-fusion.md) for it and its hip and TOSA
+counterparts.
 Set `HIP_ROCMLIR_SKIP_BENCHMARKING=1` (any present value other than `0`,
 including empty) to skip the GPU search and affix the first enumerated
 perfConfig. Neither the shipped LUT nor an external problem cache is consulted
