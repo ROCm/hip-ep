@@ -23,7 +23,9 @@
  * embedded (the size-0 stub) resolve() reports a miss and the caller falls back
  * exactly as before, so the wiring is safe to land with an empty table.
  *
- * v3: the request/point key is three explicit HipdnnDType fields (act / wts /
+ * v4: output dtype, logical batch count and shared-input groups are exact
+ * categorical fields. Config indices use uint16; stale schema/ABI is rejected.
+ * The request/point key includes three explicit HipdnnDType fields (act / wts /
  * out) instead of a `type_bytes` element-size int -- see gemm_autotune.fbs for
  * the rationale. Two new phases (GemvNn, TiledFma) give fp32 the same
  * shape/phase coverage as fp16/bf16 (plan.md §0).
@@ -71,6 +73,7 @@ struct Request {
   HipdnnDType out_dtype = HipdnnDType::F16;
   int trans_b = 1;
   int m = 0, n = 0, k = 0;
+  int batch_count = 1, a_group = 1, b_group = 1;
 };
 
 /* WMMA tile geometry, matching the WmmaCfg fields the dispatch keys on. A

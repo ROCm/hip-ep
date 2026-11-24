@@ -5,6 +5,7 @@
 #include <hip/hip_runtime.h>
 #include <iomanip>
 #include <sstream>
+#include <stdexcept>
 #include <type_traits>
 #include "ut_gemm_rank.h"
 
@@ -20,9 +21,14 @@ void rankArgument(std::ostringstream& text, T value) {
 }
 template <auto Kernel>
 const char* rankKernelName() {
-  // The compiler resolves type/value template arguments. Token stringification
-  // would retain T/TransB, or differ for equivalent constant expressions.
-  return __PRETTY_FUNCTION__;
+  // Clang can abbreviate a function-valued template argument in
+  // __PRETTY_FUNCTION__, omitting the kernel's template arguments. The HIP
+  // registration name identifies the actual instantiated device entry instead.
+  const char* name = hipKernelNameRefByPtr(
+      reinterpret_cast<const void*>(Kernel), nullptr);
+  if (!name || !*name)
+    throw std::runtime_error("UT rank: instantiated HIP kernel name unavailable");
+  return name;
 }
 template <auto Kernel, class... Args>
 void rankRecordLaunch(dim3 grid, dim3 block, size_t shared, Args... args) {
@@ -50,6 +56,12 @@ void rankRecordLaunch(dim3 grid, dim3 block, size_t shared, Args... args) {
 namespace {
 const void* rankOperand() { return reinterpret_cast<const void*>(uintptr_t(0x10000)); }
 int rankFamily(const UtGemmShape& s) {
+  const int output = s.output < 0 ? s.dtype : s.output;
+  const int family = gemmBatchFamily(s.m,s.n,s.k,s.ta,s.tb,s.dtype,output,
+                                    s.batches,s.a_group,s.b_group);
+  if (family == 1) return 6;
+  if (family == 2) return 7;
+  if (family == 3 && s.k) return 8;
   if (s.ta || s.m < 1 || s.n < 1 || s.k < 1) return 0;
   if (s.m == 1) return s.tb ? 2 : 3;
   if (s.m < 16) return 0;
@@ -59,19 +71,37 @@ int rankFamily(const UtGemmShape& s) {
                       s.m, s.n, s.k, s.ta, s.tb)) return 4;
   return 5;
 }
-void rankInstall(int id) {
+void rankInstall(const UtGemmShape& shape, int id) {
+  const int family = rankFamily(shape);
+  gemmBatchRankConfig = family >= 6 ? id : -2;
   std::lock_guard<std::mutex> lock(g_tune_mu);
   // A dry production dispatch creates the real key. Do not duplicate its key
   // packing or use environment pins latched by other production families.
   for (auto& entry : g_lookup_first_cache) entry.second.cfg = id;
 }
 std::string rankProbe(const UtGemmShape& s, int id) {
-  rankInstall(id);
+  rankInstall(s, id);
   rankFinalLaunch.clear();
   rankDryDispatch = true;
-  const int status = hip_gemm(reinterpret_cast<void*>(uintptr_t(0x20000)), rankOperand(), rankOperand(),
-      s.beta == 0 ? nullptr : rankOperand(), const_cast<void*>(rankOperand()), s.m, s.n, s.k,
-      s.alpha, s.beta, s.ta, s.tb, s.dtype, s.crows, s.ccols);
+  const int output = s.output < 0 ? s.dtype : s.output;
+  size_t workspace = 0;
+  int status = hip_gemm_workspace_size(s.m, s.n, s.k, s.ta, s.tb, s.dtype,
+      output, s.batches, s.a_group, s.b_group, &workspace);
+  // Disjoint virtual address ranges pass the production overlap guards. Dry
+  // dispatch never dereferences operands or workspace and records each launch.
+  if (!status) status = hip_gemm_strided_batched(
+      reinterpret_cast<void*>(uintptr_t(0x20000)),
+      reinterpret_cast<const void*>(uintptr_t(0x100000000000)),
+      reinterpret_cast<const void*>(uintptr_t(0x200000000000)),
+      s.beta == 0 ? nullptr : reinterpret_cast<const void*>(uintptr_t(0x300000000000)),
+      reinterpret_cast<void*>(uintptr_t(0x400000000000)), s.m, s.n, s.k,
+      s.alpha, s.beta, s.ta, s.tb, s.dtype, output, s.crows, s.ccols,
+      s.batches, s.stride_a < 0 ? int64_t(s.m)*s.k : s.stride_a,
+      s.stride_b < 0 ? int64_t(s.n)*s.k : s.stride_b,
+      s.stride_c < 0 ? int64_t(s.crows)*s.ccols : s.stride_c,
+      s.stride_y < 0 ? int64_t(s.m)*s.n : s.stride_y,
+      s.a_group, s.b_group,
+      reinterpret_cast<void*>(uintptr_t(0x500000000000)), workspace);
   rankDryDispatch = false;
   if (status || rankFinalLaunch.empty()) return {};
   return rankFinalLaunch;
@@ -85,8 +115,10 @@ std::string rankGeometry(const UtGemmShape& s, int id) {
     if (!wmmaApplies(c, s.m, s.n, s.k)) return {};
     route = "wmma"; bm = c.bm; bn = c.bn; sw = c.swizzle_n;
     wtm = c.wt_m; wtn = c.wt_n; bk = c.bk; sk = c.split_k;
-  } else if (family == 2 || family == 3) {
+  } else if (family == 2 || family == 3 || family == 6) {
     const auto& c = family == 2 ? kGemvNt[id] : kGemvNn[id];
+    if (family == 6 && s.output >= 0 && s.output != s.dtype && c.tile_n == 0)
+      return {};
     route = family == 2 ? "gemv_nt" : "gemv_nn"; threads = c.threads; tn = c.tile_n;
   } else if (family == 4 || family == 5) {
     route = "tiled_fma";
@@ -94,6 +126,13 @@ std::string rankGeometry(const UtGemmShape& s, int id) {
       bm = c.bm; bn = c.bn; bk = c.bk; wtm = c.tm; wtn = c.tn; threads = c.threads;
     };
     if (family == 4) copy(kF32Tile[id]); else copy(kTiledFma[id]);
+  } else if (family == 7) {
+    const auto& c = kBatchedWmma[id];
+    if (!gemmBatchedWmmaLegal(c, s.m, s.n, s.k, s.batches, s.ta, s.tb)) return {};
+    route="wmma";bm=c.bm;bn=c.bn;wtm=c.wm;wtn=c.wn;bk=c.bk;sw=8;sk=c.splits;
+  } else if (family == 8) {
+    const auto& c=kBatchedFma[id];
+    route="tiled_fma";bm=c.bm;bn=c.bn;wtm=c.tm;wtn=c.tn;bk=c.bk;threads=c.threads;
   }
   char text[256];
   std::snprintf(text, sizeof(text), "route=%s;bm=%d;bn=%d;swizzle=%d;wt_m=%d;wt_n=%d;bk=%d;split_k=%d;threads=%d;tile_n=%d",
@@ -110,6 +149,9 @@ extern "C" int hipdnn_ut_gemm_config_count(const UtGemmShape* shape) {
     case 3: return kNumGemvNn;
     case 4: return kNumF32Tile;
     case 5: return kNumTiledFma;
+    case 6: return kNumGemvNn;
+    case 7: return kNumBatchedWmma;
+    case 8: return kNumBatchedFma;
     default: return 0;
   }
 }
@@ -144,7 +186,7 @@ extern "C" int hipdnn_ut_gemm_config(const UtGemmShape* shape, int id, UtGemmCon
     if (launch.empty()) return -3;
     *out = {id, geometry, launch};
   }
-  rankInstall(-1);
+  rankInstall(*shape, -1);
   return 0;
 }
 extern "C" int hipdnn_ut_gemm_select(const UtGemmShape* shape, const UtGemmConfig* config) {
@@ -152,6 +194,6 @@ extern "C" int hipdnn_ut_gemm_select(const UtGemmShape* shape, const UtGemmConfi
   if (!gemmLutLookupEnabled() || gemm_lut::stats().table_loaded || gemmForcedRoute()) return -4;
   // An unrepresentable baseline is the unchanged default; legal candidates
   // enter the same production LUT-first path as a stored table geometry.
-  rankInstall(config->id);
+  rankInstall(*shape, config->id);
   return 0;
 }

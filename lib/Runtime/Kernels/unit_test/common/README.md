@@ -247,7 +247,9 @@ validates native evidence and exports point identities, old/default/winner/
 selected configs, paired group ratios, changes, retests, exclusions and GPU/
 wall costs. Ratios involving an old candidate no longer in the final phase
 use the latest shared phase, explicitly named, or are unavailable. The native
-winner/default decision always comes from the final phase. Headers, weights,
+winner/default decision always comes from the final phase. New exact keys have
+`absent_input_table` status with empty old-config ratios and index; additions
+are counted separately from eligible unmeasured input-table points. Headers, weights,
 fallbacks, config indices, point order and unrelated fields survive rank-build.
 
 `make test` includes `test_ut_lut_from_table.py` (host-only, Python and C++

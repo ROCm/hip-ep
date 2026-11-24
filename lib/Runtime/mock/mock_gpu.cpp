@@ -489,6 +489,74 @@ int wrap_matmul_broadcast(RuntimeState *state, int op_state_slot, const void *A,
   return 0;
 }
 
+static int mockDenseInputCode(int64_t kind) {
+  return kind == 2 ? 0 : kind == 4 ? 1 : kind == 8 ? 2 : kind == -2 ? 3 : -1;
+}
+static bool mockDenseOutput(int input, int64_t output) {
+  return input >= 0 && output >= 0 && output <= 3 &&
+         (input == output || ((input == 0 || input == 3) && output == 1));
+}
+int wrap_matmul_typed(RuntimeState *state, int op_state_slot, const void *A,
+                      const void *B, void *output, int64_t M, int64_t N,
+                      int64_t K, int64_t batch_count, int64_t elem_kind,
+                      int64_t b_batch_stride, int64_t transA, int64_t transB,
+                      int64_t output_code) {
+  if (!mockDenseOutput(mockDenseInputCode(elem_kind), output_code))
+    return -1;
+  MOCK_PRINT("[MOCK] wrap_matmul_typed(output_code=%lld)\n",
+             (long long)output_code);
+  return wrap_hipblasLtMatmul(state, op_state_slot, A, B, output, M, N, K,
+                              batch_count, elem_kind, b_batch_stride, transA,
+                              transB);
+}
+int wrap_matmul_broadcast_typed(
+    RuntimeState *state, int op_state_slot, const void *A, const void *B,
+    void *output, int64_t M, int64_t N, int64_t K, int64_t elem_kind,
+    int64_t transA, int64_t transB, int64_t a_batch_rank,
+    const int64_t *a_batch_dims, int64_t b_batch_rank,
+    const int64_t *b_batch_dims, int64_t output_code) {
+  if (!mockDenseOutput(mockDenseInputCode(elem_kind), output_code))
+    return -1;
+  MOCK_PRINT("[MOCK] wrap_matmul_broadcast_typed(output_code=%lld)\n",
+             (long long)output_code);
+  return wrap_matmul_broadcast(state, op_state_slot, A, B, output, M, N, K,
+                               elem_kind, transA, transB, a_batch_rank,
+                               a_batch_dims, b_batch_rank, b_batch_dims);
+}
+int wrap_gemm_typed(RuntimeState *state, int op_state_slot, const void *A,
+                    const void *B, const void *C, void *output, int64_t M,
+                    int64_t N, int64_t K, float alpha, float beta,
+                    int64_t transA, int64_t transB, int64_t input_code,
+                    int64_t cDim0, int64_t cDim1, int64_t output_code) {
+  (void)op_state_slot;
+  (void)A;
+  (void)B;
+  (void)C;
+  (void)output;
+  (void)alpha;
+  (void)beta;
+  (void)transA;
+  (void)transB;
+  (void)cDim0;
+  (void)cDim1;
+  if (!state || input_code < 0 || input_code > 3 ||
+      !mockDenseOutput(static_cast<int>(input_code), output_code))
+    return -1;
+  MOCK_PRINT("[MOCK] wrap_gemm_typed(M=%lld, N=%lld, K=%lld, input=%lld, "
+             "output=%lld)\n",
+             (long long)M, (long long)N, (long long)K, (long long)input_code,
+             (long long)output_code);
+  return 0;
+}
+int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
+              const void *B, const void *C, void *output, int64_t M, int64_t N,
+              int64_t K, float alpha, float beta, int64_t transA,
+              int64_t transB, int64_t typeCode, int64_t cDim0, int64_t cDim1) {
+  return wrap_gemm_typed(state, op_state_slot, A, B, C, output, M, N, K, alpha,
+                         beta, transA, transB, typeCode, cDim0, cDim1,
+                         typeCode);
+}
+
 int wrap_matmul_i32(RuntimeState *state, const void *A, const void *B,
                     void *output, int64_t M, int64_t N, int64_t K,
                     int64_t batch_count, int64_t b_batch_stride) {

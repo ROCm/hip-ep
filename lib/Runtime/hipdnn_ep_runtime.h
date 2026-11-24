@@ -869,6 +869,20 @@ int wrap_matmul_broadcast(RuntimeState *state, int op_state_slot, const void *A,
                           const int64_t *a_batch_dims, int64_t b_batch_rank,
                           const int64_t *b_batch_dims);
 
+// Typed dense entries retain equal input dtypes and permit f16/bf16 to f32.
+// Uniform callers retain the historical signatures above.
+int wrap_matmul_typed(RuntimeState *state, int op_state_slot, const void *A,
+                      const void *B, void *output, int64_t M, int64_t N,
+                      int64_t K, int64_t batch_count, int64_t elem_kind,
+                      int64_t b_batch_stride, int64_t transA, int64_t transB,
+                      int64_t output_code);
+int wrap_matmul_broadcast_typed(
+    RuntimeState *state, int op_state_slot, const void *A, const void *B,
+    void *output, int64_t M, int64_t N, int64_t K, int64_t elem_kind,
+    int64_t transA, int64_t transB, int64_t a_batch_rank,
+    const int64_t *a_batch_dims, int64_t b_batch_rank,
+    const int64_t *b_batch_dims, int64_t output_code);
+
 // Int32 matmul. hipBLASLt has no int32 GEMM, and feeding i32 bits to the f32
 // entry point reads them as floats. Neither operand is transposed. The kernel
 // accumulates in int64 and wraps to int32. b_batch_stride is 0 when B is one
@@ -2121,6 +2135,11 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
               const void *B, const void *C, void *output, int64_t M, int64_t N,
               int64_t K, float alpha, float beta, int64_t transA,
               int64_t transB, int64_t typeCode, int64_t cDim0, int64_t cDim1);
+int wrap_gemm_typed(RuntimeState *state, int op_state_slot, const void *A,
+                    const void *B, const void *C, void *output, int64_t M,
+                    int64_t N, int64_t K, float alpha, float beta,
+                    int64_t transA, int64_t transB, int64_t input_code,
+                    int64_t cDim0, int64_t cDim1, int64_t output_code);
 
 // Element-wise Equal. Operand shapes are passed as 4D (N, C, H, W), left-
 // padded with 1 by the compiler; `data_type` is the INPUT (comparison

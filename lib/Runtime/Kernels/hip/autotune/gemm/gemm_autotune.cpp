@@ -30,9 +30,9 @@ namespace {
 namespace fbs = hipdnn_ep::gemm_autotune::fbs;
 namespace common_fbs = hipdnn_ep::common::fbs;
 
-constexpr uint32_t kSchemaVersion = 3;
+constexpr uint32_t kSchemaVersion = 4;
 // Bump when the config tables or the meaning of a stored geometry changes.
-constexpr const char kKernelAbi[] = "gemm-v2";
+constexpr const char kKernelAbi[] = "gemm-v3";
 
 bool logOn() {
   static const bool on = [] {
@@ -96,21 +96,45 @@ fbs::GemmTransB transBClass(int trans_b) {
  * which the old GemvNn/TiledFma phases would have overflowed). Lanes 4-7 are
  * reserved for a future field (matmul_nbits reuses this layout with more
  * lanes -- see plan.md §2.4). */
-uint64_t groupKey(fbs::GemmPhase phase, common_fbs::HipdnnDType act,
-                  common_fbs::HipdnnDType wts, fbs::GemmTransB trb) {
-  return static_cast<uint64_t>(phase) |
-         (static_cast<uint64_t>(act) << 8) |
-         (static_cast<uint64_t>(wts) << 16) |
-         (static_cast<uint64_t>(trb) << 24);
+struct GroupKey {
+  uint64_t categories, batching;
+  bool operator==(const GroupKey &other) const {
+    return categories == other.categories && batching == other.batching;
+  }
+};
+struct GroupHash {
+  size_t operator()(const GroupKey &key) const {
+    return std::hash<uint64_t>{}(key.categories) ^
+           (std::hash<uint64_t>{}(key.batching) << 1);
+  }
+};
+GroupKey groupKey(fbs::GemmPhase phase, common_fbs::HipdnnDType act,
+                  common_fbs::HipdnnDType wts, common_fbs::HipdnnDType out,
+                  fbs::GemmTransB trb, int batches, int ag, int bg) {
+  return {static_cast<uint64_t>(phase) |
+              (static_cast<uint64_t>(act) << 8) |
+              (static_cast<uint64_t>(wts) << 16) |
+              (static_cast<uint64_t>(trb) << 24) |
+              (static_cast<uint64_t>(out) << 32),
+          static_cast<uint64_t>(batches) |
+              (static_cast<uint64_t>(ag) << 16) |
+              (static_cast<uint64_t>(bg) << 32)};
 }
-
-/* Same layout as groupKey (D5 fix: v1 dropped trans_b from the fallback key,
- * conflating NN and NT winners). Named separately from groupKey because it
- * indexes a different table (fallbacks, not groups), even though the bit
- * layout happens to coincide today. */
-uint64_t fallbackKey(fbs::GemmPhase phase, common_fbs::HipdnnDType act,
-                     common_fbs::HipdnnDType wts, fbs::GemmTransB trb) {
-  return groupKey(phase, act, wts, trb);
+bool batchConsistent(int batches, int ag, int bg) {
+  return batches > 0 && batches <= 65535 && ag > 0 && bg > 0 &&
+         batches % ag == 0 && batches % bg == 0;
+}
+bool typesConsistent(common_fbs::HipdnnDType act,
+                     common_fbs::HipdnnDType wts,
+                     common_fbs::HipdnnDType out) {
+  const bool dense = act == common_fbs::HipdnnDType::F16 ||
+                     act == common_fbs::HipdnnDType::BF16 ||
+                     act == common_fbs::HipdnnDType::F32 ||
+                     act == common_fbs::HipdnnDType::F64;
+  return dense && act == wts &&
+         (out == act || (out == common_fbs::HipdnnDType::F32 &&
+                        (act == common_fbs::HipdnnDType::F16 ||
+                         act == common_fbs::HipdnnDType::BF16)));
 }
 
 // ---------------------------------------------------------------------------
@@ -132,8 +156,8 @@ struct Point {
 
 struct Table {
   std::vector<Answer> pool;
-  std::unordered_map<uint64_t, std::vector<Point>> groups;
-  std::unordered_map<uint64_t, uint16_t> fallbacks;
+  std::unordered_map<GroupKey, std::vector<Point>, GroupHash> groups;
+  std::unordered_map<GroupKey, uint16_t, GroupHash> fallbacks;
   float wm = 1.0f, wn = 1.0f, wk = 1.0f;
   bool bf16_aliases_f16 = false;
   bool loaded = false;
@@ -158,7 +182,9 @@ bool pointConsistent(const fbs::GemmTunePoint &p, fbs::GemmConfigKind kind) {
       p.out_dtype() == common_fbs::HipdnnDType::Any ||
       p.trans_b() == fbs::GemmTransB::Any)
     return false;
-  if (p.m() == 0 || p.n() == 0 || p.k() == 0)
+  if (p.m() == 0 || p.n() == 0 || p.k() == 0 ||
+      !batchConsistent(p.batch_count(), p.a_group(), p.b_group()) ||
+      !typesConsistent(p.act_dtype(), p.wts_dtype(), p.out_dtype()))
     return false;
   return kind == phaseConfigKind(p.phase());
 }
@@ -208,7 +234,8 @@ void loadBuffer(Table &t, const unsigned char *data, size_t size) {
     return;
   }
   if (!(lut->weight_m() > 0.0f) || !(lut->weight_n() > 0.0f) ||
-      !(lut->weight_k() > 0.0f)) {
+      !(lut->weight_k() > 0.0f) || !std::isfinite(lut->weight_m()) ||
+      !std::isfinite(lut->weight_n()) || !std::isfinite(lut->weight_k())) {
     if (logOn())
       fprintf(stderr, "[gemm-lut] non-positive metric weight\n");
     return;
@@ -219,9 +246,9 @@ void loadBuffer(Table &t, const unsigned char *data, size_t size) {
   t.bf16_aliases_f16 = lut->bf16_aliases_f16();
 
   const auto *configs = lut->configs();
-  if (configs->size() > 255) {
+  if (configs->size() > 65536) {
     if (logOn())
-      fprintf(stderr, "[gemm-lut] config pool %zu exceeds uint8 index; ignoring table\n", static_cast<size_t>(configs->size()));
+      fprintf(stderr, "[gemm-lut] config pool %zu exceeds uint16 index; ignoring table\n", static_cast<size_t>(configs->size()));
     return;
   }
   t.pool.reserve(configs->size());
@@ -268,8 +295,8 @@ void loadBuffer(Table &t, const unsigned char *data, size_t size) {
     point.ln = std::log2(static_cast<float>(point.n));
     point.lk = std::log2(static_cast<float>(point.k));
     point.config = static_cast<uint16_t>(idx);
-    t.groups[groupKey(p->phase(), p->act_dtype(), p->wts_dtype(),
-                      p->trans_b())]
+    t.groups[groupKey(p->phase(), p->act_dtype(), p->wts_dtype(), p->out_dtype(),
+                      p->trans_b(), p->batch_count(), p->a_group(), p->b_group())]
         .push_back(point);
     ++t.points;
   }
@@ -280,13 +307,15 @@ void loadBuffer(Table &t, const unsigned char *data, size_t size) {
       if (idx >= t.pool.size() || f->phase() == fbs::GemmPhase::Any ||
           f->act_dtype() == common_fbs::HipdnnDType::Any ||
           f->wts_dtype() == common_fbs::HipdnnDType::Any ||
-          f->trans_b() == fbs::GemmTransB::Any)
+          f->trans_b() == fbs::GemmTransB::Any ||
+          !batchConsistent(f->batch_count(), f->a_group(), f->b_group()) ||
+          !typesConsistent(f->act_dtype(), f->wts_dtype(), f->out_dtype()))
         continue;
       if (t.pool[idx].kind != phaseConfigKind(f->phase()))
         continue;
       t.fallbacks.emplace(
-          fallbackKey(f->phase(), f->act_dtype(), f->wts_dtype(),
-                     f->trans_b()),
+          groupKey(f->phase(), f->act_dtype(), f->wts_dtype(), f->out_dtype(),
+                   f->trans_b(), f->batch_count(), f->a_group(), f->b_group()),
           static_cast<uint16_t>(idx));
     }
   }
@@ -418,13 +447,15 @@ Result resolve(const Request &request, WmmaValidator wmma_valid,
               request.n, request.k);
     return result;
   }
-  if (request.act_dtype == HipdnnDType::Any ||
-      request.wts_dtype == HipdnnDType::Any)
-    return result;
-  if (request.n <= 0 || request.k <= 0)
+  if (request.m <= 0 || request.n <= 0 || request.k <= 0 ||
+      (request.trans_b != 0 && request.trans_b != 1) ||
+      !batchConsistent(request.batch_count, request.a_group, request.b_group))
     return result;
   const common_fbs::HipdnnDType act = toFbsDType(request.act_dtype);
   const common_fbs::HipdnnDType wts = toFbsDType(request.wts_dtype);
+  const common_fbs::HipdnnDType out = toFbsDType(request.out_dtype);
+  if (!typesConsistent(act, wts, out))
+    return result;
   const fbs::GemmTransB trb = transBClass(request.trans_b);
 
   const float qm = std::log2(static_cast<float>(request.m < 1 ? 1 : request.m));
@@ -434,19 +465,22 @@ Result resolve(const Request &request, WmmaValidator wmma_valid,
   auto logHeader = [&](const char *tag) {
     fprintf(stderr,
             "[gemm-lut] %s phase=%d act=%s wts=%s out=%s trb=%d M=%d N=%d "
-            "K=%d",
+            "K=%d batch=%d ag=%d bg=%d",
             tag, static_cast<int>(phase),
             common::toString(request.act_dtype),
             common::toString(request.wts_dtype),
             common::toString(request.out_dtype), request.trans_b, request.m,
-            request.n, request.k);
+            request.n, request.k, request.batch_count, request.a_group,
+            request.b_group);
   };
 
   const Point *chosen = nullptr;
   float chosen_d2 = 0.0f;
   bool via_alias = false;
 
-  const auto git = t.groups.find(groupKey(phase, act, wts, trb));
+  const auto key = groupKey(phase, act, wts, out, trb, request.batch_count,
+                            request.a_group, request.b_group);
+  const auto git = t.groups.find(key);
   if (git != t.groups.end() && !git->second.empty() &&
       searchGroup(t, git->second, qm, qn, qk, wmma_valid, gemv_valid,
                  tiled_fma_valid, ctx, result, chosen, chosen_d2)) {
@@ -459,7 +493,11 @@ Result resolve(const Request &request, WmmaValidator wmma_valid,
      * Always reported as Source::Alias, never disguised as Exact/Nearest. */
     const auto ait =
         t.groups.find(groupKey(phase, common_fbs::HipdnnDType::F16,
-                               common_fbs::HipdnnDType::F16, trb));
+                               common_fbs::HipdnnDType::F16,
+                               out == common_fbs::HipdnnDType::BF16
+                                   ? common_fbs::HipdnnDType::F16 : out,
+                               trb, request.batch_count, request.a_group,
+                               request.b_group));
     if (ait != t.groups.end() && !ait->second.empty() &&
         searchGroup(t, ait->second, qm, qn, qk, wmma_valid, gemv_valid,
                    tiled_fma_valid, ctx, result, chosen, chosen_d2)) {
@@ -484,7 +522,7 @@ Result resolve(const Request &request, WmmaValidator wmma_valid,
     return result;
   }
 
-  const auto fit = t.fallbacks.find(fallbackKey(phase, act, wts, trb));
+  const auto fit = t.fallbacks.find(key);
   if (fit != t.fallbacks.end() &&
       accept(t.pool[fit->second], wmma_valid, gemv_valid, tiled_fma_valid,
             result, ctx)) {

@@ -82,6 +82,17 @@ N    ?= 512
 K    ?= 256
 TA   ?= 0
 TB   ?= 1
+BATCH ?= 1
+A_GROUP ?= 1
+B_GROUP ?= 1
+STRIDE_A ?= -1
+STRIDE_B ?= -1
+STRIDE_C ?= -1
+STRIDE_Y ?= -1
+ALPHA ?= 1
+BETA ?= 0
+CROWS ?= 1
+CCOLS ?= -1
 
 ifeq ($(DETECTED_OS),Windows)
     HIP_SDK_WIN := $(subst /,\,$(HIP_SDK))
@@ -184,7 +195,7 @@ test: direct
 	$(call RUN_CMD,$(TARGET_DIRECT)) --coverage $(COVERAGE)
 
 test_custom: direct
-	$(call RUN_CMD,$(TARGET_DIRECT)) --m $(M) --n $(N) --k $(K) --ta $(TA) --tb $(TB)
+	$(call RUN_CMD,$(TARGET_DIRECT)) --m $(M) --n $(N) --k $(K) --ta $(TA) --tb $(TB) --batch $(BATCH) --a-group $(A_GROUP) --b-group $(B_GROUP) --stride-a $(STRIDE_A) --stride-b $(STRIDE_B) --stride-c $(STRIDE_C) --stride-y $(STRIDE_Y) --alpha $(ALPHA) --beta $(BETA) --crows $(CROWS) --ccols $(CCOLS)
 
 build: direct
 ifneq ($(PKG_DIR),)

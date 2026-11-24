@@ -44,3 +44,16 @@ transpose flag selects one custom case; dimensions must be positive. The
 legacy positional `M N K TA TB` form remains supported. `make test_custom`
 uses the same named flags and defaults. [`ut_interface.json`](../../ut_interface.json)
 records the parameters, constraints and runnable examples.
+
+Caller-owned batched workspace is allocated before correctness and timing.
+The measured entry is `hip_gemm_strided_batched`, including split reduction.
+`--batch`, `--a-group`, `--b-group` describe logical batches and consecutive
+batches sharing one physical matrix. Element strides `--stride-a`,
+`--stride-b`, `--stride-c`, `--stride-y` accept -1 for tight storage or 0 for
+input/C broadcast; output batches must not overlap. `--alpha`, `--beta`,
+`--crows`, `--ccols` expose the complete epilogue; CCOLS=-1 selects N.
+K=0 applies beta*C. Every tier crosses transpose, C broadcast, tails,
+zero/padded strides, shared inputs and workspace/output guards.
+The full CPU reference uses the exact represented input/C values.
+RANK=1 accepts `_B<batch>_ag<ag>_bg<bg>` and optional `_sa..._sb..._sc..._sy...`
+shape fields. Explicit-stride diagnostics do not add tight-layout LUT points.

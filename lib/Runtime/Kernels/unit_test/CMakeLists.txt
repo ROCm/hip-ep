@@ -155,6 +155,12 @@ add_kernel_package_ut(${_arch}
   hipdnn-kernel-ut-gemm-xbf16-wbf16-ybf16
   gemm/Xbf16_Wbf16_Ybf16/test_gemm.cpp)
 add_kernel_package_ut(${_arch}
+  hipdnn-kernel-ut-gemm-xfp16-wfp16-yfp32
+  gemm/Xfp16_Wfp16_Yfp32/test_gemm.cpp)
+add_kernel_package_ut(${_arch}
+  hipdnn-kernel-ut-gemm-xbf16-wbf16-yfp32
+  gemm/Xbf16_Wbf16_Yfp32/test_gemm.cpp)
+add_kernel_package_ut(${_arch}
   hipdnn-kernel-ut-gemm-xfp32-wfp32-yfp32
   gemm/Xfp32_Wfp32_Yfp32/test_gemm.cpp)
   add_kernel_package_ut(${_arch}

@@ -1464,8 +1464,18 @@ static void launchGemvNt(int id, hipStream_t s, const T *A, const T *B,
  * comment). Previously launchGemvNn hardcoded BLOCK=256 with no config table
  * and no tuning at all; fp32 NN decode shapes therefore had zero LUT coverage
  * (plan.md §0.1). */
+template <typename T, typename Out>
+static int launchParallelGemvNn(int threads, int tile_n, hipStream_t stream,
+    const T *a, const T *b, const Out *c, Out *y, int m, int n, int k,
+    float alpha, float beta, int crows, int ccols, int batches,
+    int64_t stride_a, int64_t stride_b, int64_t stride_c, int64_t stride_y,
+    int a_group, int b_group, int splits, float *partial);
 static constexpr GemvCfg kGemvNn[] = {
     {32, 0}, {64, 0}, {128, 0}, {256, 0}, {512, 0},
+    {128, 32}, {128, 64}, {128, 128},
+    {256, 32}, {256, 64}, {256, 128},
+    {512, 32}, {512, 64}, {512, 128},
+    {128, 256}, {256, 256}, {512, 256},
 };
 static constexpr int kNumGemvNn =
     static_cast<int>(sizeof(kGemvNn) / sizeof(kGemvNn[0]));
@@ -1474,6 +1484,18 @@ template <typename T>
 static void launchGemvNn(int id, hipStream_t s, const T *A, const T *B,
                           const T *C, T *Y, int M, int N, int K, float alpha,
                           float beta, int cDim0, int cDim1) {
+  if constexpr (std::is_same<T, double>::value) {
+    // The parallel catalog uses FP32 partials. Keep FP64 on its original
+    // double-accumulating configurations, including diagnostic selections.
+    if (id >= 5) id = 3;
+  } else {
+    if (kGemvNn[id].tile_n) {
+      (void)launchParallelGemvNn<T, T>(kGemvNn[id].threads, kGemvNn[id].tile_n, s, A, B, C, Y,
+          M, N, K, alpha, beta, cDim0, cDim1, 1, int64_t(M) * K,
+          int64_t(N) * K, 0, int64_t(M) * N, 1, 1, 1, nullptr);
+      return;
+    }
+  }
   const int threads = kGemvNn[id].threads;
   dim3 grid((N + threads - 1) / threads, M);
 #define GEMM_GEMV_NN(ID, BS)                                                 \
@@ -1762,7 +1784,8 @@ static int tuneGemvNt(hipStream_t s, const T *A, const T *B, const T *C, T *Y,
  * NT bridge above). */
 static int gemvNnConfigFromGeom(const gemm_lut::GemvAnswer &g) {
   for (int cid = 0; cid < kNumGemvNn; ++cid)
-    if (kGemvNn[cid].threads == g.threads)
+    if (kGemvNn[cid].threads == g.threads &&
+        kGemvNn[cid].tile_n == g.tile_n)
       return cid;
   return -1;
 }
@@ -1809,7 +1832,8 @@ static int tuneGemvNn(hipStream_t s, const T *A, const T *B, const T *C, T *Y,
 
   const int forced = gemmEnvInt("HIPDNN_EP_GEMM_GEMV_NN_CFG", -1);
   int best = 3; /* 256 threads, the old hardcoded default */
-  if (forced >= 0 && forced < kNumGemvNn) {
+  constexpr int count = std::is_same<T, double>::value ? 5 : kNumGemvNn;
+  if (forced >= 0 && forced < count) {
     best = forced;
   } else if (int lut = gemmLutGemvNnConfig<T>(M, N, K); lut >= 0) {
     best = lut;
@@ -1840,7 +1864,7 @@ static int tuneGemvNn(hipStream_t s, const T *A, const T *B, const T *C, T *Y,
         kInitWarm);
 
     float best_ms = 1e30f;
-    for (int cid = 0; cid < kNumGemvNn; ++cid) {
+    for (int cid = 0; cid < count; ++cid) {
       const float ms = gemmTimeConfigPeak(
           s, e0, e1,
           [&] {
@@ -2160,18 +2184,38 @@ static int launchSmallM(hipStream_t s, const T *A, const T *B, const T *C,
  * ========================================================================= */
 
 
+template <bool Nearest>
+__device__ __forceinline__ float8 gemmWmmaAccumulate(half16 a, half16 b,
+                                                   float8 accumulator) {
+  if constexpr (Nearest)
+    return accumulator + HIPDNN_WMMA_F32_16X16X16_F16(a, b, float8{});
+  else
+    return HIPDNN_WMMA_F32_16X16X16_F16(a, b, accumulator);
+}
+
+template <bool Nearest>
+__device__ __forceinline__ float8 gemmWmmaAccumulate(bf16xN a, bf16xN b,
+                                                   float8 accumulator) {
+  if constexpr (Nearest)
+    return accumulator + HIPDNN_WMMA_F32_16X16X16_BF16(a, b, float8{});
+  else
+    return HIPDNN_WMMA_F32_16X16X16_BF16(a, b, accumulator);
+}
+
 template <int BM, int BN, int WT_M, int WT_N, bool TransB, typename T, int BK,
-          bool BC = true, bool DB = true, int PGR = 1, bool TransA = false>
+          bool BC = true, bool DB = true, int PGR = 1, bool TransA = false,
+          typename Out = T, bool Batched = false, bool Nearest = false>
 __device__ __forceinline__ void GemmWmmaImpl(const T *__restrict__ A,
                                               const T *__restrict__ B,
-                                              const T *__restrict__ C,
-                                              T *__restrict__ Y, int M, int N,
+                                              const Out *__restrict__ C,
+                                              Out *__restrict__ Y, int M, int N,
                                               int K, float alpha, float beta,
                                               int cDim0, int cDim1,
                                               int swizzle_n,
                                               float *__restrict__ sk_acc,
                                               int ldb, int n_base, int lda,
-                                              int stag) {
+                                              int stag, int batch_split = 1,
+                                              int batch_split_index = 0) {
   constexpr int WM_L = BM / (WT_M * 16);
   constexpr int WN_L = BN / (WT_N * 16);
   constexpr int THR = WM_L * WN_L * 32;
@@ -2277,10 +2321,13 @@ __device__ __forceinline__ void GemmWmmaImpl(const T *__restrict__ A,
 
   int k_begin = 0;
   int k_end = K;
-  if (gridDim.z > 1) {
-    const int nkt = (K + BK - 1) / BK;
-    const int z = static_cast<int>(blockIdx.z);
-    const int sk = static_cast<int>(gridDim.z);
+  const int split_count = Batched ? batch_split : static_cast<int>(gridDim.z);
+  const int split_index = Batched ? batch_split_index : static_cast<int>(blockIdx.z);
+  if (split_count > 1) {
+    const int nkt = Batched ? int((int64_t(K) + BK - 1) / BK)
+                           : (K + BK - 1) / BK;
+    const int z = split_index;
+    const int sk = split_count;
     const int kt0 = static_cast<int>((static_cast<long long>(z) * nkt) / sk);
     const int kt1 =
         static_cast<int>((static_cast<long long>(z + 1) * nkt) / sk);
@@ -2646,8 +2693,8 @@ __device__ __forceinline__ void GemmWmmaImpl(const T *__restrict__ A,
             dst[i] = src[i];
 #pragma unroll
           for (int wn = 0; wn < WT_N; ++wn)
-            acc[wm][wn] =
-                HIPDNN_WMMA_F32_16X16X16_F16(a_frag, b_frag[wn], acc[wm][wn]);
+            acc[wm][wn] = gemmWmmaAccumulate<Nearest>(a_frag, b_frag[wn],
+                                                    acc[wm][wn]);
         }
       } else {
         bf16xN b_frag[WT_N];
@@ -2673,8 +2720,8 @@ __device__ __forceinline__ void GemmWmmaImpl(const T *__restrict__ A,
             dst[i] = src[i];
 #pragma unroll
           for (int wn = 0; wn < WT_N; ++wn)
-            acc[wm][wn] = HIPDNN_WMMA_F32_16X16X16_BF16(a_frag, b_frag[wn],
-                                                       acc[wm][wn]);
+            acc[wm][wn] = gemmWmmaAccumulate<Nearest>(a_frag, b_frag[wn],
+                                                    acc[wm][wn]);
         }
       }
     }
@@ -2796,7 +2843,7 @@ __device__ __forceinline__ void GemmWmmaImpl(const T *__restrict__ A,
 
   const bool fast = !sk_acc && (beta == 0.0f || !C) && alpha == 1.0f;
   const size_t sk_off =
-      sk_acc ? (static_cast<size_t>(blockIdx.z) * static_cast<size_t>(M) * N)
+      sk_acc ? (static_cast<size_t>(split_index) * static_cast<size_t>(M) * N)
              : 0;
 
 #if defined(__HIP_DEVICE_COMPILE__) && !HIPDNN_WMMA_GFX12
@@ -2810,8 +2857,9 @@ __device__ __forceinline__ void GemmWmmaImpl(const T *__restrict__ A,
    * row-broadcast vector (cDim0 == 1, the bias epilogue). A lane's columns
    * do not change with the row, so it reads its C value once per fragment
    * column instead of once per output in gemmStoreY. */
-  if constexpr (!BC && sizeof(T) == 2 && (PGR & 8) != 0) {
-    if (!sk_acc && C && cDim0 == 1 && (N & 1) == 0) {
+  if constexpr ((!BC || Batched) && sizeof(Out) == 2 && (PGR & 8) != 0) {
+    if (!sk_acc && C && cDim0 == 1 && (N & 1) == 0 &&
+        (!Batched || (reinterpret_cast<uintptr_t>(Y) & 3) == 0)) {
       const bool odd = (lane & 1) != 0;
 #pragma unroll
       for (int wn = 0; wn < WT_N; ++wn) {
@@ -2831,8 +2879,8 @@ __device__ __forceinline__ void GemmWmmaImpl(const T *__restrict__ A,
             const float x = __int_as_float(__builtin_amdgcn_update_dpp(
                 0, __float_as_int(odd ? v0 : v1), 0xB1, 0xF, 0xF, false));
             const int rr = mbase + hipdnn_wmma_acc_row(sub, odd ? e + 1 : e);
-            const T lo = GemmElem<T>::fromf(odd ? x : v0);
-            const T hi = GemmElem<T>::fromf(odd ? v1 : x);
+            const Out lo = GemmElem<Out>::fromf(odd ? x : v0);
+            const Out hi = GemmElem<Out>::fromf(odd ? v1 : x);
             uint32_t pk = static_cast<uint32_t>(
                               *reinterpret_cast<const uint16_t *>(&lo)) |
                           (static_cast<uint32_t>(
@@ -2847,8 +2895,9 @@ __device__ __forceinline__ void GemmWmmaImpl(const T *__restrict__ A,
       return;
     }
   }
-  if constexpr (!BC && sizeof(T) == 2) {
-    if (fast && (N & 1) == 0) {
+  if constexpr ((!BC || Batched) && sizeof(Out) == 2) {
+    if (fast && (N & 1) == 0 &&
+        (!Batched || (reinterpret_cast<uintptr_t>(Y) & 3) == 0)) {
       const bool odd = (lane & 1) != 0;
 #pragma unroll
       for (int wm = 0; wm < WT_M; ++wm) {
@@ -2864,8 +2913,8 @@ __device__ __forceinline__ void GemmWmmaImpl(const T *__restrict__ A,
             const float x = __int_as_float(__builtin_amdgcn_update_dpp(
                 0, __float_as_int(odd ? v0 : v1), 0xB1, 0xF, 0xF, false));
             const int rr = mbase + hipdnn_wmma_acc_row(sub, odd ? e + 1 : e);
-            const T lo = GemmElem<T>::fromf(odd ? x : v0);
-            const T hi = GemmElem<T>::fromf(odd ? v1 : x);
+            const Out lo = GemmElem<Out>::fromf(odd ? x : v0);
+            const Out hi = GemmElem<Out>::fromf(odd ? v1 : x);
             uint32_t pk = static_cast<uint32_t>(
                               *reinterpret_cast<const uint16_t *>(&lo)) |
                           (static_cast<uint32_t>(
@@ -2904,7 +2953,7 @@ __device__ __forceinline__ void GemmWmmaImpl(const T *__restrict__ A,
             if (sk_acc)
               sk_acc[sk_off + static_cast<size_t>(rr) * N + cc] = v;
             else if (fast)
-              Y[static_cast<size_t>(rr) * N + cc] = GemmElem<T>::fromf(v);
+              Y[static_cast<size_t>(rr) * N + cc] = GemmElem<Out>::fromf(v);
             else
               gemmStoreY(Y, C, rr, cc, N, cDim0, cDim1, v, alpha, beta);
           }
@@ -2915,7 +2964,7 @@ __device__ __forceinline__ void GemmWmmaImpl(const T *__restrict__ A,
               sk_acc[sk_off + static_cast<size_t>(rr) * N + cc] = v;
           } else if (full) {
             if (fast)
-              Y[static_cast<size_t>(rr) * N + cc] = GemmElem<T>::fromf(v);
+              Y[static_cast<size_t>(rr) * N + cc] = GemmElem<Out>::fromf(v);
             else
               gemmStoreY(Y, C, rr, cc, N, cDim0, cDim1, v, alpha, beta);
           }
@@ -20032,3 +20081,5 @@ extern "C" int hip_gemm(void *stream, const void *A, const void *B,
   }
   return -1;
 }
+
+#include "gemm_batched_impl.h"

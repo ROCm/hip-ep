@@ -1,4 +1,4 @@
-// Gemm offline autotune lookup table -- schema v3.
+// Gemm offline autotune lookup table -- schema v4.
 //
 // Same design as matmul_nbits_autotune.fbs (read that file's header for the
 // rationale): a set of measured points plus a per-group fallback; a lookup
@@ -82,14 +82,14 @@ struct GemmTunePoint {
   phase: GemmPhase;
   act_dtype: hipdnn_ep.common.fbs.HipdnnDType;
   wts_dtype: hipdnn_ep.common.fbs.HipdnnDType;
-  // out_dtype is stored but NOT part of the grouping key (see the README):
-  // every measured point today has out == act, and out only changes the
-  // epilogue store, never the tile choice. Promote it into the key later if a
-  // measured out != act point ever changes the winner -- that is a pure data
-  // change, not a re-measurement.
+  // Output dtype and batching are exact categorical keys. Mixed scores and
+  // shared-input batches must never borrow a uniform single-matrix winner.
   out_dtype: hipdnn_ep.common.fbs.HipdnnDType;
   trans_b: GemmTransB;
-  config: uint8;    // index into GemmAutotuneLut.configs
+  batch_count: uint16;
+  a_group: uint16;   // consecutive logical batches sharing one physical A
+  b_group: uint16;   // consecutive logical batches sharing one physical B
+  config: uint16;   // index into GemmAutotuneLut.configs
   m: uint16;
   n: uint32;
   k: uint16;
@@ -106,15 +106,19 @@ struct GemmFallback {
   phase: GemmPhase;
   act_dtype: hipdnn_ep.common.fbs.HipdnnDType;
   wts_dtype: hipdnn_ep.common.fbs.HipdnnDType;
+  out_dtype: hipdnn_ep.common.fbs.HipdnnDType;
   trans_b: GemmTransB;
-  config: uint8;
+  batch_count: uint16;
+  a_group: uint16;
+  b_group: uint16;
+  config: uint16;
 }
 
 table GemmAutotuneLut {
-  schema_version: uint32 = 3;
+  schema_version: uint32 = 4;
   gpu_arch: string;         // must equal the running device, e.g. "gfx1151"
   rocm_version: int32;      // advisory
-  kernel_abi: string;       // "gemm-v2"
+  kernel_abi: string;       // "gemm-v3"
   model_key: string;        // provenance label for logging
 
   // Per-dimension weights of the log-space distance:

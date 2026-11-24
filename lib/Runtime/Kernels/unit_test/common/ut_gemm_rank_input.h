@@ -10,7 +10,7 @@
 
 namespace hipdnn_ep_test {
 namespace timing {
-inline UtGemmShape gemmRankShape(const std::string& text, int dtype) {
+inline UtGemmShape gemmRankShape(const std::string& text, int dtype, int output = -1) {
   // GEMM's legacy _bias flag is op-specific. Keep the common parser strict for
   // other ops by translating only this flag before parsing.
   std::string normalized = text;
@@ -21,7 +21,10 @@ inline UtGemmShape gemmRankShape(const std::string& text, int dtype) {
   for (const auto& field : f)
     if (field.first != "M" && field.first != "N" && field.first != "K" &&
         field.first != "ta" && field.first != "tb" && field.first != "bias" &&
-        field.first != "crows" && field.first != "ccols")
+        field.first != "crows" && field.first != "ccols" &&
+        field.first != "B" && field.first != "ag" && field.first != "bg" &&
+        field.first != "sa" && field.first != "sb" && field.first != "sc" &&
+        field.first != "sy")
       throw std::invalid_argument("UT rank: unknown GEMM shape field");
   auto required = [&](const char* name) {
     auto it = f.find(name);
@@ -38,7 +41,23 @@ inline UtGemmShape gemmRankShape(const std::string& text, int dtype) {
       (f.count("crows") != f.count("ccols")) ||
       (f.count("crows") && !bias) || (crows != 1 && crows != m) || (ccols != 1 && ccols != n))
     throw std::invalid_argument("UT rank: invalid GEMM shape or C broadcast");
-  return {m, n, k, ta, tb, dtype, crows, ccols, 1.0f, bias ? 1.0f : 0.0f};
+  UtGemmShape result{m, n, k, ta, tb, dtype, crows, ccols, 1.0f, bias ? 1.0f : 0.0f};
+  result.output = output < 0 ? dtype : output;
+  result.batches = f.count("B") ? f.at("B") : 1;
+  result.a_group = f.count("ag") ? f.at("ag") : 1;
+  result.b_group = f.count("bg") ? f.at("bg") : 1;
+  if (result.batches < 1 || result.batches > 65535 || result.a_group < 1 ||
+      result.b_group < 1 || result.batches % result.a_group ||
+      result.batches % result.b_group ||
+      (result.output != dtype && !((dtype == 0 || dtype == 3) && result.output == 1)))
+    throw std::invalid_argument("UT rank: invalid GEMM output or batch groups");
+  result.stride_a = f.count("sa") ? f.at("sa") : int64_t(m) * k;
+  result.stride_b = f.count("sb") ? f.at("sb") : int64_t(n) * k;
+  result.stride_c = f.count("sc") ? f.at("sc") : int64_t(crows) * ccols;
+  result.stride_y = f.count("sy") ? f.at("sy") : int64_t(m) * n;
+  if (result.batches > 1 && result.stride_y < int64_t(m) * n)
+    throw std::invalid_argument("UT rank: overlapping GEMM output batches");
+  return result;
 }
 
 #ifdef HIPDNN_UT_RANK_GEMM_ADAPTER

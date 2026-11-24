@@ -3,12 +3,15 @@
  * Licensed under the MIT License.
  */
 #pragma once
+#include <cstdint>
 #include <string>
 
 // Standalone UT-only controls; never part of the production kernel ABI.
 struct UtGemmShape {
   int m, n, k, ta, tb, dtype, crows, ccols;
   float alpha, beta;
+  int output = -1, batches = 1, a_group = 1, b_group = 1;
+  int64_t stride_a = -1, stride_b = -1, stride_c = -1, stride_y = -1;
 };
 struct UtGemmConfig {
   int id = -1;

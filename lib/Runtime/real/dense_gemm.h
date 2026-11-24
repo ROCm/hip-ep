@@ -67,12 +67,42 @@ inline bool geometry(int64_t m, int64_t n, int64_t k, int64_t ta, int64_t tb,
          code >= 0 && code <= 3;
 }
 
+inline bool workspaceSize(int64_t m, int64_t n, int64_t k, int64_t ta,
+                          int64_t tb, int input, int output, int64_t batches,
+                          size_t &bytes, int aGroup = 1, int bGroup = 1) {
+  return geometry(m, n, k, ta, tb, input) && batches >= 0 && batches <= 65535 &&
+         hip_gemm_workspace_size(
+             static_cast<int>(m), static_cast<int>(n), static_cast<int>(k),
+             static_cast<int>(ta), static_cast<int>(tb), input, output,
+             static_cast<int>(batches), aGroup, bGroup, &bytes) == 0;
+}
+
+inline int launchBatched(void *stream, const void *a, const void *b,
+                         const void *c, void *y, int64_t m, int64_t n,
+                         int64_t k, float alpha, float beta, int64_t ta,
+                         int64_t tb, int input, int output, int64_t batches,
+                         int64_t strideA, int64_t strideB, int64_t strideC,
+                         int64_t strideY, void *workspace,
+                         size_t workspaceBytes, int64_t cRows = 1,
+                         int64_t cCols = 1, int aGroup = 1, int bGroup = 1) {
+  if (!geometry(m, n, k, ta, tb, input) || batches < 0 || batches > 65535 ||
+      (c && ((cRows != 1 && cRows != m) || (cCols != 1 && cCols != n))))
+    return -1;
+  return hip_gemm_strided_batched(
+      stream, a, b, c, y, static_cast<int>(m), static_cast<int>(n),
+      static_cast<int>(k), alpha, beta, static_cast<int>(ta),
+      static_cast<int>(tb), input, output, static_cast<int>(c ? cRows : 1),
+      static_cast<int>(c ? cCols : 1), static_cast<int>(batches), strideA,
+      strideB, strideC, strideY, aGroup, bGroup, workspace, workspaceBytes);
+}
+
 // All dense runtime entries converge here. Unsupported requests and launch
 // failures are returned to the caller; there is no vendor GEMM retry.
 inline int launch(void *stream, const void *a, const void *b, const void *c,
                   void *y, int64_t m, int64_t n, int64_t k, float alpha,
                   float beta, int64_t ta, int64_t tb, int code,
-                  int64_t cRows = 1, int64_t cCols = 1) {
+                  int64_t cRows = 1, int64_t cCols = 1,
+                  void *workspace = nullptr, size_t workspaceBytes = 0) {
   if (!geometry(m, n, k, ta, tb, code) ||
       (c && ((cRows != 1 && cRows != m) || (cCols != 1 && cCols != n)))) {
     fprintf(stderr,
@@ -98,11 +128,9 @@ inline int launch(void *stream, const void *a, const void *b, const void *c,
                     "ta=%lld tb=%lld\n",
                     (long long)m, (long long)n, (long long)k, code,
                     (long long)ta, (long long)tb);
-  int rc =
-      hip_gemm(stream, a, b, c, y, static_cast<int>(m), static_cast<int>(n),
-               static_cast<int>(k), alpha, beta, static_cast<int>(ta),
-               static_cast<int>(tb), code, static_cast<int>(c ? cRows : 1),
-               static_cast<int>(c ? cCols : 1));
+  int rc = launchBatched(stream, a, b, c, y, m, n, k, alpha, beta, ta, tb, code,
+                         code, 1, 0, 0, 0, yCount, workspace, workspaceBytes,
+                         cRows, cCols);
   if (rc)
     fprintf(stderr, "custom GEMM failed (%d); M=%lld N=%lld K=%lld dtype=%d\n",
             rc, (long long)m, (long long)n, (long long)k, code);
@@ -154,6 +182,34 @@ struct BatchLayout {
       a += coordinate * aStrides[i];
       b += coordinate * bStrides[i];
     }
+  }
+
+  // A flattened operand has one stride when every advancing leading axis
+  // advances by the product of all following output axes. A broadcast of
+  // every leading axis has stride zero. Other broadcasts retain offsets().
+  bool uniformStrides(int64_t &a, int64_t &b) const {
+    auto uniform = [&](const std::vector<int64_t> &strides, int64_t &step) {
+      step = 0;
+      int64_t following = 1;
+      bool found = false;
+      for (int i = rank - 1; i >= 0; --i) {
+        if (sizes[i] > 1) {
+          if (!found) {
+            if (strides[i] % following)
+              return false;
+            step = strides[i] / following;
+            found = true;
+          }
+          int64_t expected;
+          if (!multiply(step, following, expected) || strides[i] != expected)
+            return false;
+        }
+        if (!multiply(following, sizes[i], following))
+          return false;
+      }
+      return true;
+    };
+    return uniform(aStrides, a) && uniform(bStrides, b);
   }
 };
 

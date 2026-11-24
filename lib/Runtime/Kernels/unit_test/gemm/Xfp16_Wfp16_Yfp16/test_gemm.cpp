@@ -47,6 +47,10 @@ extern "C" const size_t kGemmLutData_size = sizeof(kGemmLutData);
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
+#include <sstream>
+#include <climits>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <random>
@@ -72,6 +76,10 @@ using Elem = __half;
 
 static float toFloat(Elem value) { return __half2float(value); }
 static Elem fromFloat(float value) { return __float2half(value); }
+static constexpr int kOutputDtype = 0;
+using Output = Elem;
+static float outputFloat(Output v) { return toFloat(v); }
+static Output outputFromFloat(float v) { return fromFloat(v); }
 
 namespace hipdnn_ep_test {
 inline int resolveCoverageTier(int argc, char** argv, int default_tier = 3) {
@@ -221,7 +229,7 @@ double rotatedMeanMs(hipStream_t stream, int /*legacy_iters*/,
   return timing::adaptiveRotatedMeanMs(
       stream, copies, launch, holdReleaseFlag(),
       [&](const int* flag) { holdStreamKernel<<<1, 1, 0, stream>>>(flag); },
-      warmTiming(), kColdSettleBytes, "gemm_fp16", "hip_gemm", timing::NoPreparation{}, ranking);
+      warmTiming(), kColdSettleBytes, "gemm_fp16", "hip_gemm_strided_batched", timing::NoPreparation{}, ranking);
 }
 }  // namespace hipdnn_ep_test
 
@@ -292,7 +300,7 @@ static std::string capture_selected_config(const char* tune_key, Fn&& launch) {
   }
 
   std::string selected =
-      !lut.empty() ? lut : (!tuned.empty() ? tuned : final_cfg);
+      !final_cfg.empty() ? final_cfg : (!lut.empty() ? lut : tuned);
   if (selected.empty()) {
     auto it = selected_by_key.find(tune_key);
     if (it != selected_by_key.end()) selected = it->second + " (cached)";
@@ -306,56 +314,104 @@ static std::string capture_selected_config(const char* tune_key, Fn&& launch) {
   return selected;
 }
 
+struct Case {
+  int m, n, k, ta, tb, c0, c1;
+  float alpha, beta;
+  const char* phase;
+  int batches = 1, a_group = 1, b_group = 1;
+  int64_t sa = -1, sb = -1, sc = -1, sy = -1;
+};
+
+static Case normalizedCase(Case t) {
+  if (t.m <= 0 || t.n <= 0 || t.k < 0 || t.ta < 0 || t.ta > 1 ||
+      t.tb < 0 || t.tb > 1 || t.batches < 1 || t.batches > 65535 ||
+      t.a_group < 1 || t.b_group < 1 || t.batches % t.a_group ||
+      t.batches % t.b_group || t.sa < -1 || t.sb < -1 || t.sc < -1 ||
+      t.sy < -1 || !std::isfinite(t.alpha) || !std::isfinite(t.beta))
+    throw std::invalid_argument("GEMM: invalid dimensions, groups, strides or scales");
+  if (t.c1 == -1) t.c1 = t.n;
+  if ((t.c0 != 1 && t.c0 != t.m) || (t.c1 != 1 && t.c1 != t.n))
+    throw std::invalid_argument("GEMM: invalid C broadcast");
+  if (t.sa < 0) t.sa = int64_t(t.m) * t.k;
+  if (t.sb < 0) t.sb = int64_t(t.n) * t.k;
+  if (t.sc < 0) t.sc = int64_t(t.c0) * t.c1;
+  if (t.sy < 0) t.sy = int64_t(t.m) * t.n;
+  if (t.batches > 1 && t.sy < int64_t(t.m) * t.n)
+    throw std::invalid_argument("GEMM: overlapping output batches");
+  return t;
+}
+
+static size_t operandCount(int batches, int group, int64_t stride,
+                           uint64_t matrix, size_t element) {
+  const uint64_t last = uint64_t(batches / group - 1);
+  const uint64_t limit = uint64_t(PTRDIFF_MAX) / element;
+  if (matrix > limit || (last && uint64_t(stride) > (limit - matrix) / last))
+    throw std::invalid_argument("GEMM: operand extent overflow");
+  return size_t(last * uint64_t(stride) + matrix);
+}
+
 static void cpuReference(const std::vector<float>& a, const std::vector<float>& b,
                          const std::vector<float>& c, std::vector<float>& y,
-                         int m, int n, int k, int ta, int tb, float alpha,
-                         float beta, int c0, int c1) {
-  auto rows = [&](int first, int last) {
-    for (int i = first; i < last; ++i)
-      for (int j = 0; j < n; ++j) {
-        float acc = 0.0f;
-        for (int kk = 0; kk < k; ++kk) {
-          const float av = ta ? a[kk * m + i] : a[i * k + kk];
-          const float bv = tb ? b[j * k + kk] : b[kk * n + j];
-          acc += av * bv;
+                         const Case& t) {
+  // Independent FP32 accumulators across output columns make NN references
+  // vectorizable without reassociating the reduction over K.
+  auto rows = [&](int64_t first, int64_t last) {
+    for (int64_t index = first; index < last; ++index) {
+      const int batch = int(index / t.m), row = int(index % t.m);
+      const size_t ao = size_t(batch / t.a_group) * t.sa;
+      const size_t bo = size_t(batch / t.b_group) * t.sb;
+      const size_t co = size_t(batch) * t.sc, yo = size_t(batch) * t.sy;
+      for (int j = 0; j < t.n; j += 16) {
+        float acc[16] = {};
+        const int width = std::min(16, t.n - j);
+        for (int kk = 0; kk < t.k; ++kk) {
+          const float av = a[ao + (t.ta ? size_t(kk)*t.m+row : size_t(row)*t.k+kk)];
+          for (int v = 0; v < width; ++v) {
+            const float bv = b[bo + (t.tb ? size_t(j+v)*t.k+kk : size_t(kk)*t.n+j+v)];
+            acc[v] += av * bv;
+          }
         }
-        float value = alpha * acc;
-        if (beta != 0.0f)
-          value += beta * c[(c0 == 1 ? 0 : i) * c1 + (c1 == 1 ? 0 : j)];
-        y[i * n + j] = value;
+        for (int v = 0; v < width; ++v) {
+          float value = t.alpha * acc[v];
+          if (t.beta != 0.0f)
+            value += t.beta * c[co + size_t(t.c0 == 1 ? 0 : row)*t.c1 + (t.c1 == 1 ? 0 : j+v)];
+          y[yo + size_t(row)*t.n+j+v] = value;
+        }
       }
+    }
   };
+  const int64_t total = int64_t(t.batches) * t.m;
   const unsigned hw = std::thread::hardware_concurrency();
-  const unsigned threads = std::min<unsigned>(hw ? hw : 4, std::max(1, m));
-  if (threads == 1 || m < 8) {
-    rows(0, m);
-    return;
-  }
+  const unsigned threads = unsigned(std::min<int64_t>(hw ? hw : 4, total));
+  const int64_t chunk = (total + threads - 1) / threads;
   std::vector<std::thread> pool;
-  const int chunk = (m + static_cast<int>(threads) - 1) / static_cast<int>(threads);
-  for (unsigned t = 0; t < threads; ++t) {
-    const int first = static_cast<int>(t) * chunk,
-              last = std::min(m, first + chunk);
+  for (unsigned i = 0; i < threads; ++i) {
+    const int64_t first = i * chunk, last = std::min(total, first + chunk);
     if (first < last) pool.emplace_back(rows, first, last);
   }
   for (auto& thread : pool) thread.join();
 }
 
-struct Case {
-  int m, n, k, ta, tb, c0, c1;
-  float alpha, beta;
-  const char* phase;
-};
-
-static int runCase(const Case& test, const hipdnn_ep_test::timing::RankRow* rank_row = nullptr) {
-  char shape_buf[192];
-  std::snprintf(shape_buf, sizeof(shape_buf), "M%d_N%d_K%d_ta%d_tb%d%s", test.m,
-                test.n, test.k, test.ta, test.tb, test.beta != 0.0f ? "_bias" : "");
-  const std::string shape = rank_row ? rank_row->shape : shape_buf;
+static int runCase(const Case& raw, const hipdnn_ep_test::timing::RankRow* rank_row = nullptr) {
+  const Case t = normalizedCase(raw);
+  std::ostringstream description;
+  description << "M" << t.m << "_N" << t.n << "_K" << t.k << "_ta" << t.ta << "_tb" << t.tb;
+  if (t.beta != 0) {
+    description << "_bias";
+    if (t.c0 != 1 || t.c1 != t.n) description << "_crows" << t.c0 << "_ccols" << t.c1;
+    if (t.beta != 1) description << "_beta" << std::setprecision(9) << t.beta;
+  }
+  if (t.alpha != 1) description << "_alpha" << std::setprecision(9) << t.alpha;
+  if (t.batches != 1 || t.a_group != 1 || t.b_group != 1)
+    description << "_B" << t.batches << "_ag" << t.a_group << "_bg" << t.b_group;
+  if (t.sa != int64_t(t.m)*t.k || t.sb != int64_t(t.n)*t.k ||
+      t.sc != int64_t(t.c0)*t.c1 || t.sy != int64_t(t.m)*t.n)
+    description << "_sa" << t.sa << "_sb" << t.sb << "_sc" << t.sc << "_sy" << t.sy;
+  const std::string shape = rank_row ? rank_row->shape : description.str();
   hipdnn_ep_test::timing::CaseScope timing_case(
-      (std::string("gemm/") + kLeafName).c_str(), shape.c_str(), "hip_gemm");
-  const UtGemmShape rank_shape{test.m, test.n, test.k, test.ta, test.tb, kGemmDtype,
-                               test.c0, test.c1, test.alpha, test.beta};
+      (std::string("gemm/") + kLeafName).c_str(), shape.c_str(), "hip_gemm_strided_batched");
+  const UtGemmShape rank_shape{t.m,t.n,t.k,t.ta,t.tb,kGemmDtype,t.c0,t.c1,t.alpha,t.beta,
+      kOutputDtype,t.batches,t.a_group,t.b_group,t.sa,t.sb,t.sc,t.sy};
   if (rank_row && std::getenv("HIPDNN_UT_RANK_CATALOG")) {
 #ifdef HIPDNN_UT_RANK_GEMM_ADAPTER
     hipdnn_ep_test::timing::printGemmCatalog(rank_shape);
@@ -368,163 +424,120 @@ static int runCase(const Case& test, const hipdnn_ep_test::timing::RankRow* rank
   std::unique_ptr<hipdnn_ep_test::timing::RankOptions> ranking;
   if (rank_row)
     ranking = std::make_unique<hipdnn_ep_test::timing::RankOptions>(
-        hipdnn_ep_test::timing::gemmRankOptions(rank_shape, *rank_row, [] { return 0.0; }));
+        hipdnn_ep_test::timing::gemmRankOptions(rank_shape,*rank_row,[] { return 0.0; }));
 #else
   if (rank_row) throw std::runtime_error("UT rank: GEMM requires standalone RANK=1 build");
 #endif
-  // Config metadata and the CPU reference are prepared before GPU admission.
-  const size_t aCount = test.ta ? static_cast<size_t>(test.k) * test.m
-                                : static_cast<size_t>(test.m) * test.k;
-  const size_t bCount = test.tb ? static_cast<size_t>(test.n) * test.k
-                                : static_cast<size_t>(test.k) * test.n;
-  const size_t yCount = static_cast<size_t>(test.m) * test.n;
-  const size_t cCount =
-      test.beta == 0.0f ? 0 : static_cast<size_t>(test.c0) * test.c1;
-  std::mt19937 rng(1234 + test.m + test.n + test.k + test.ta + test.tb);
-  std::uniform_real_distribution<float> dist(-0.5f, 0.5f);
-  std::vector<float> af(aCount), bf(bCount), cf(cCount), reference(yCount);
-  for (float& value : af) value = dist(rng);
-  for (float& value : bf) value = dist(rng);
-  for (float& value : cf) value = dist(rng);
-  cpuReference(af, bf, cf, reference, test.m, test.n, test.k, test.ta, test.tb,
-               test.alpha, test.beta, test.c0, test.c1);
+  const size_t ac = std::max<size_t>(1,operandCount(t.batches,t.a_group,t.sa,uint64_t(t.m)*t.k,sizeof(Elem)));
+  const size_t bc = std::max<size_t>(1,operandCount(t.batches,t.b_group,t.sb,uint64_t(t.n)*t.k,sizeof(Elem)));
+  const size_t cc = t.beta == 0 ? 0 : operandCount(t.batches,1,t.sc,uint64_t(t.c0)*t.c1,sizeof(Output));
+  const size_t yc = operandCount(t.batches,1,t.sy,uint64_t(t.m)*t.n,sizeof(Output));
+  const float sentinel = -123.5f;
+  constexpr size_t guardElements = 32, guardBytes = 64;
+  std::vector<float> af(ac),bf(bc),cf(cc),reference(yc,sentinel);
+  std::vector<Elem> a(ac),b(bc);
+  std::vector<Output> c(cc),y(yc+2*guardElements,outputFromFloat(sentinel));
+  std::mt19937 rng(1234+t.m+t.n+t.k+t.ta+t.tb+t.batches);
+  std::uniform_real_distribution<float> dist(-0.5f,0.5f);
+  // The reference consumes exactly the input/C bit patterns sent to the GPU.
+  for (size_t i=0;i<ac;++i) {a[i]=fromFloat(dist(rng));af[i]=toFloat(a[i]);}
+  for (size_t i=0;i<bc;++i) {b[i]=fromFloat(dist(rng));bf[i]=toFloat(b[i]);}
+  for (size_t i=0;i<cc;++i) {c[i]=outputFromFloat(dist(rng));cf[i]=outputFloat(c[i]);}
+  cpuReference(af,bf,cf,reference,t);
+  std::printf("CASE_CPU_READY leaf=%s shape=%s entries=%zu reference=full_represented_inputs\n",kLeafName,shape.c_str(),yc);
+  std::fflush(stdout);
 
-  std::vector<Elem> a(aCount), b(bCount), c(cCount), y(yCount);
-  for (size_t i = 0; i < aCount; ++i) a[i] = fromFloat(af[i]);
-  for (size_t i = 0; i < bCount; ++i) b[i] = fromFloat(bf[i]);
-  for (size_t i = 0; i < cCount; ++i) c[i] = fromFloat(cf[i]);
-
-  hipdnn_ep_test::GpuExecutionScope gpu_execution([] {
-    if (hipDeviceSynchronize() != hipSuccess) throw std::runtime_error("GEMM device synchronization failed");
+  hipdnn_ep_test::GpuExecutionScope execution([] {
+    if (hipDeviceSynchronize()!=hipSuccess) throw std::runtime_error("GEMM device synchronization failed");
   });
-  hipdnn_ep_test::GpuPhase gpu_phase;
-  gpu_phase.begin();
-  void *da = nullptr, *db = nullptr, *dc = nullptr, *dy = nullptr;
-  hipStream_t stream = nullptr;
-  auto cleanup = [&](void*) {
+  hipdnn_ep_test::GpuPhase phase;
+  phase.begin();
+  void *da=nullptr,*db=nullptr,*dc=nullptr,*dy=nullptr,*dw=nullptr;
+  hipStream_t stream=nullptr;
+  auto cleanup=[&](void*) {
     if (stream) (void)hipStreamSynchronize(stream);
-    if (da) (void)hipFree(da);
-    if (db) (void)hipFree(db);
-    if (dc) (void)hipFree(dc);
-    if (dy) (void)hipFree(dy);
+    for (void* p : {da,db,dc,dy,dw}) if(p)(void)hipFree(p);
     if (stream) (void)hipStreamDestroy(stream);
-    gpu_phase.finish(true);
+    phase.finish(true);
   };
-  const std::unique_ptr<void, decltype(cleanup)> device_owner(reinterpret_cast<void*>(1), cleanup);
+  const std::unique_ptr<void,decltype(cleanup)> owner(reinterpret_cast<void*>(1),cleanup);
+  size_t workspaceBytes=0;
+  if (hip_gemm_workspace_size(t.m,t.n,t.k,t.ta,t.tb,kGemmDtype,kOutputDtype,
+      t.batches,t.a_group,t.b_group,&workspaceBytes)) return 1;
   HIP_CHECK(hipStreamCreate(&stream));
-  HIP_CHECK(hipMalloc(&da, aCount * sizeof(Elem)));
-  HIP_CHECK(hipMalloc(&db, bCount * sizeof(Elem)));
-  HIP_CHECK(hipMalloc(&dy, yCount * sizeof(Elem)));
-  if (cCount) HIP_CHECK(hipMalloc(&dc, cCount * sizeof(Elem)));
-  HIP_CHECK(hipMemcpy(da, a.data(), aCount * sizeof(Elem), hipMemcpyHostToDevice));
-  HIP_CHECK(hipMemcpy(db, b.data(), bCount * sizeof(Elem), hipMemcpyHostToDevice));
-  if (cCount)
-    HIP_CHECK(hipMemcpy(dc, c.data(), cCount * sizeof(Elem), hipMemcpyHostToDevice));
-
-  char tune_key[64];
-  std::snprintf(tune_key, sizeof(tune_key), "%dx%dx%d_ta%d_tb%d_d%d", test.m,
-                test.n, test.k, test.ta, test.tb, kGemmDtype);
-
-  int status = 0;
-  auto warm_launch = [&] {
-    for (int w = 0; w < 3; ++w) {
-      status = hip_gemm(stream, da, db, dc, dy, test.m, test.n, test.k,
-                        test.alpha, test.beta, test.ta, test.tb, kGemmDtype,
-                        test.c0, test.c1);
-      if (status != 0) return;
-    }
-    if (hipStreamSynchronize(stream) != hipSuccess) status = 1;
+  HIP_CHECK(hipMalloc(&da,ac*sizeof(Elem)));
+  HIP_CHECK(hipMalloc(&db,bc*sizeof(Elem)));
+  HIP_CHECK(hipMalloc(&dy,y.size()*sizeof(Output)));
+  if(cc)HIP_CHECK(hipMalloc(&dc,cc*sizeof(Output)));
+  if(workspaceBytes) {
+    HIP_CHECK(hipMalloc(&dw,workspaceBytes+2*guardBytes));
+    HIP_CHECK(hipMemset(dw,0xa5,workspaceBytes+2*guardBytes));
+  }
+  HIP_CHECK(hipMemcpy(da,a.data(),ac*sizeof(Elem),hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(db,b.data(),bc*sizeof(Elem),hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(dy,y.data(),y.size()*sizeof(Output),hipMemcpyHostToDevice));
+  if(cc)HIP_CHECK(hipMemcpy(dc,c.data(),cc*sizeof(Output),hipMemcpyHostToDevice));
+  void* output=static_cast<Output*>(dy)+guardElements;
+  void* workspace=dw?static_cast<char*>(dw)+guardBytes:nullptr;
+  auto call=[&](const void* weights,void* scratch,size_t bytes) {
+    return hip_gemm_strided_batched(stream,da,weights,dc,output,t.m,t.n,t.k,t.alpha,t.beta,
+        t.ta,t.tb,kGemmDtype,kOutputDtype,t.c0,t.c1,t.batches,t.sa,t.sb,t.sc,t.sy,
+        t.a_group,t.b_group,scratch,bytes);
   };
-  std::string selected_config;
-  if (rank_row) warm_launch();
-  else selected_config = capture_selected_config(tune_key, warm_launch);
-
-  if (rank_row) {
-#ifndef HIPDNN_UT_RANK_GEMM_ADAPTER
-    throw std::runtime_error("UT rank: GEMM requires standalone RANK=1 build");
-#else
-    if (status != 0) throw std::runtime_error("UT rank: GEMM default launch failed");
-    const hipdnn_ep_test::ColdCopies weights({{db, bCount * sizeof(Elem)}});
-    auto validate = [&]() {
-      if (hip_gemm(stream, da, db, dc, dy, test.m, test.n, test.k, test.alpha,
-                   test.beta, test.ta, test.tb, kGemmDtype, test.c0, test.c1) != 0 ||
-          hipStreamSynchronize(stream) != hipSuccess ||
-          hipMemcpy(y.data(), dy, yCount * sizeof(Elem), hipMemcpyDeviceToHost) != hipSuccess)
-        throw std::runtime_error("UT rank: GEMM candidate launch/readback failed");
-      double ssd = 0.0, ssr = 0.0;
-      for (size_t i = 0; i < yCount; ++i) {
-        const double got = toFloat(y[i]), ref = reference[i], error = std::abs(got - ref);
-        if (!std::isfinite(got) || !std::isfinite(ref) || error / std::max(1.0, std::abs(ref)) > kTolerance)
-          throw std::runtime_error("UT rank: GEMM candidate CPU reference FAIL");
-        ssd += error * error; ssr += ref * ref;
-      }
-      return ssr > 0.0 ? std::sqrt(ssd / ssr) : std::sqrt(ssd);
-    };
-    ranking->validate = [select = ranking->select, validate](size_t candidate) {
-      select(candidate); return validate();
-    };
-    gpu_phase.timingBegin();
-    hipdnn_ep_test::rotatedMeanMs(stream, 0, weights, [&](int i) {
-      return hip_gemm(stream, da, weights.part(i, 0), dc, dy, test.m, test.n,
-                       test.k, test.alpha, test.beta, test.ta, test.tb, kGemmDtype, test.c0, test.c1);
-    }, ranking.get());
-    gpu_phase.timingEnd();
+  // A too-small or aliased caller workspace must fail before any kernel runs.
+  if (workspaceBytes && (!call(db,workspace,workspaceBytes-1) || !call(db,output,workspaceBytes)))
+    throw std::runtime_error("GEMM workspace guard failed");
+  auto validate=[&]() {
+    if(call(db,workspace,workspaceBytes)||hipStreamSynchronize(stream)!=hipSuccess||
+       hipMemcpy(y.data(),dy,y.size()*sizeof(Output),hipMemcpyDeviceToHost)!=hipSuccess)
+      throw std::runtime_error("GEMM launch/readback failed");
+    double ssd=0,ssr=0;
+    for(size_t i=0;i<guardElements;++i)
+      if(outputFloat(y[i])!=sentinel || outputFloat(y[guardElements+yc+i])!=sentinel)
+        throw std::runtime_error("GEMM output guard overwritten");
+    for(size_t i=0;i<yc;++i) {
+      const double got=outputFloat(y[guardElements+i]),ref=reference[i],delta=got-ref;
+      const int64_t batch=t.batches==1?0:int64_t(i)/t.sy,
+                    local=t.batches==1?int64_t(i):int64_t(i)%t.sy;
+      const bool active=batch<t.batches&&local<int64_t(t.m)*t.n;
+      if(!std::isfinite(got)||!std::isfinite(ref)||
+         (active?std::abs(delta)/std::max(1.,std::abs(ref))>kTolerance:got!=sentinel))
+        throw std::runtime_error("GEMM CPU reference or output padding FAIL");
+      if(active){ssd+=delta*delta;ssr+=ref*ref;}
+    }
+    if(dw) {
+      unsigned char guards[2*guardBytes];
+      if(hipMemcpy(guards,dw,guardBytes,hipMemcpyDeviceToHost)!=hipSuccess||
+         hipMemcpy(guards+guardBytes,static_cast<char*>(dw)+guardBytes+workspaceBytes,guardBytes,hipMemcpyDeviceToHost)!=hipSuccess)
+        throw std::runtime_error("GEMM workspace guard readback failed");
+      for(auto x:guards)if(x!=0xa5)throw std::runtime_error("GEMM workspace guard overwritten");
+    }
+    return std::sqrt(ssd/std::max(ssr,1e-30));
+  };
+  const hipdnn_ep_test::ColdCopies weights({{db,bc*sizeof(Elem)}});
+  auto launch=[&](int i){return call(weights.part(i,0),workspace,workspaceBytes);};
+  if(rank_row) {
+#ifdef HIPDNN_UT_RANK_GEMM_ADAPTER
+    ranking->validate=[select=ranking->select,validate](size_t candidate){select(candidate);return validate();};
+    phase.timingBegin();
+    hipdnn_ep_test::rotatedMeanMs(stream,0,weights,launch,ranking.get());
+    phase.timingEnd();
     return 0;
 #endif
   }
-
-  double avg_ms = 0.0;
-  double worst = 0.0;
-  int bad = 0;
-  if (status == 0) {
-    HIP_CHECK(hipMemcpy(y.data(), dy, yCount * sizeof(Elem),
-                        hipMemcpyDeviceToHost));
-    double ssd = 0.0, ssr = 0.0;
-    for (size_t i = 0; i < yCount; ++i) {
-      const double got = static_cast<double>(toFloat(y[i]));
-      const double ref = static_cast<double>(reference[i]);
-      const double error = std::abs(got - ref);
-      const double relative = error / std::max(1.0, std::abs(ref));
-      worst = std::max(worst, relative);
-      if (!std::isfinite(got) || !std::isfinite(ref) || relative > kTolerance) ++bad;
-      ssd += error * error;
-      ssr += ref * ref;
-    }
-    const double rel_l2 = ssr > 0.0 ? std::sqrt(ssd / ssr) : std::sqrt(ssd);
-
-    // Weight side is B; rotate it the way consecutive layers read DRAM.
-    const hipdnn_ep_test::ColdCopies weights({{db, bCount * sizeof(Elem)}});
-    gpu_phase.timingBegin();
-    avg_ms = hipdnn_ep_test::rotatedMeanMs(
-        stream, /*legacy*/ 20, weights, [&](int i) {
-          return hip_gemm(stream, da, weights.part(i, 0), dc, dy, test.m, test.n,
-                          test.k, test.alpha, test.beta, test.ta, test.tb,
-                          kGemmDtype, test.c0, test.c1);
-        });
-
-    gpu_phase.timingEnd();
-    const bool pass = bad == 0;
-    std::printf(
-        "%s %s M=%d N=%d K=%d ta=%d tb=%d bias=%d dtype=%d max_rel=%.4g "
-        "time_ms=%.4f fail=%d/%zu config=%s\n",
-        kDtypeName, test.phase, test.m, test.n, test.k, test.ta, test.tb,
-        test.beta != 0.0f, kGemmDtype, worst, avg_ms, bad, yCount,
-        selected_config.c_str());
-
-    hipdnn_ep_test::CsvWriter csv;
-    hipdnn_ep_test::CsvRow row;
-    row.shape = shape;
-    row.config = selected_config;
-    row.time_ms = avg_ms;
-    row.rel_l2 = rel_l2;
-    row.verdict = pass ? "PASS" : "FAIL";
-    csv.write(row);
-
-    return pass ? 0 : 1;
-  }
-
-  std::fprintf(stderr, "%s %s hip_gemm rc=%d\n", kDtypeName, test.phase, status);
-  return 1;
+  std::string selected;
+  double relL2=0;
+  selected=capture_selected_config(shape.c_str(),[&]{relL2=validate();});
+  phase.timingBegin();
+  const double ms=hipdnn_ep_test::rotatedMeanMs(stream,0,weights,launch);
+  phase.timingEnd();
+  // The post-timing check also covers reused caller workspace and rotations.
+  relL2=validate();
+  std::printf("%s %s shape=%s time_ms=%.9f relL2=%.9g config=%s PASS\n",kDtypeName,t.phase,
+      shape.c_str(),ms,relL2,selected.c_str());
+  hipdnn_ep_test::CsvWriter csv;
+  csv.write({shape,selected,ms,relL2,"PASS"});
+  return 0;
 }
 
 int main(int argc, char** argv) {
@@ -532,8 +545,9 @@ int main(int argc, char** argv) {
   if (hipdnn_ep_test::timing::rankRequested()) {
     try {
       for (const auto& row : hipdnn_ep_test::timing::readRankRows(std::string("gemm/") + kLeafName)) {
-        const auto s = hipdnn_ep_test::timing::gemmRankShape(row.shape, kGemmDtype);
-        const Case test{s.m, s.n, s.k, s.ta, s.tb, s.crows, s.ccols, s.alpha, s.beta, "rank"};
+        const auto s = hipdnn_ep_test::timing::gemmRankShape(row.shape, kGemmDtype, kOutputDtype);
+        const Case test{s.m, s.n, s.k, s.ta, s.tb, s.crows, s.ccols, s.alpha, s.beta, "rank",
+            s.batches,s.a_group,s.b_group,s.stride_a,s.stride_b,s.stride_c,s.stride_y};
         if (runCase(test, &row)) return 1;
       }
       return 0;
@@ -575,48 +589,55 @@ int main(int argc, char** argv) {
       {64, 4096, 14336, 0, 0, 1, 4096, 1.0f, 0.25f, "fixed-layout-bias"},
   };
 
-  int m = 128, n = 512, k = 256, ta = 0, tb = 1;
-  bool customRequested = false;
+  Case custom{128,512,256,0,1,1,-1,1.0f,0.0f,"custom"};
+  bool customRequested=false;
   std::vector<int> positional;
-  for (int i = 1; i < argc; ++i) {
-    if (std::strcmp(argv[i], "--coverage") == 0 ||
-        std::strcmp(argv[i], "--timing") == 0) {
-      if (++i == argc) return 2;
-      continue;
-    }
-    int* target = nullptr;
-    if (std::strcmp(argv[i], "--m") == 0) target = &m;
-    else if (std::strcmp(argv[i], "--n") == 0) target = &n;
-    else if (std::strcmp(argv[i], "--k") == 0) target = &k;
-    else if (std::strcmp(argv[i], "--ta") == 0) target = &ta;
-    else if (std::strcmp(argv[i], "--tb") == 0) target = &tb;
-    if (target) {
-      if (++i == argc) return 2;
-      *target = std::atoi(argv[i]);
-      customRequested = true;
-    } else {
-      if (argv[i][0] == '-') {
-        std::fprintf(stderr, "unknown GEMM argument: %s\n", argv[i]);
-        return 2;
+  try {
+    for(int i=1;i<argc;++i) {
+      const std::string flag=argv[i];
+      if(flag=="--coverage"||flag=="--timing") {if(++i==argc)return 2;continue;}
+      int* integer=nullptr;
+      int64_t* stride=nullptr;
+      float* scale=nullptr;
+      if(flag=="--m")integer=&custom.m;
+      else if(flag=="--n")integer=&custom.n;
+      else if(flag=="--k")integer=&custom.k;
+      else if(flag=="--ta")integer=&custom.ta;
+      else if(flag=="--tb")integer=&custom.tb;
+      else if(flag=="--batch")integer=&custom.batches;
+      else if(flag=="--a-group")integer=&custom.a_group;
+      else if(flag=="--b-group")integer=&custom.b_group;
+      else if(flag=="--crows")integer=&custom.c0;
+      else if(flag=="--ccols")integer=&custom.c1;
+      else if(flag=="--stride-a")stride=&custom.sa;
+      else if(flag=="--stride-b")stride=&custom.sb;
+      else if(flag=="--stride-c")stride=&custom.sc;
+      else if(flag=="--stride-y")stride=&custom.sy;
+      else if(flag=="--alpha")scale=&custom.alpha;
+      else if(flag=="--beta")scale=&custom.beta;
+      if(integer||stride||scale) {
+        if(++i==argc)return 2;
+        const std::string value=argv[i];size_t used=0;
+        if(integer)*integer=std::stoi(value,&used);
+        else if(stride)*stride=std::stoll(value,&used);
+        else *scale=std::stof(value,&used);
+        if(used!=value.size())return 2;
+        customRequested=true;
+      } else {
+        if(flag.empty()||flag[0]=='-')return 2;
+        size_t used=0;const int value=std::stoi(flag,&used);
+        if(used!=flag.size())return 2;
+        positional.push_back(value);
       }
-      positional.push_back(std::atoi(argv[i]));
     }
-  }
-  if (!positional.empty()) {
-    if (customRequested || positional.size() != 5) return 2;
-    m = positional[0]; n = positional[1]; k = positional[2];
-    ta = positional[3]; tb = positional[4];
-    customRequested = true;
-  }
-  if (customRequested) {
-    if (m <= 0 || n <= 0 || k <= 0 || (ta != 0 && ta != 1) ||
-        (tb != 0 && tb != 1)) {
-      std::fprintf(stderr, "GEMM requires positive M/N/K and TA/TB in {0,1}\n");
-      return 2;
+    if(!positional.empty()) {
+      if(customRequested||positional.size()!=5)return 2;
+      custom.m=positional[0];custom.n=positional[1];custom.k=positional[2];
+      custom.ta=positional[3];custom.tb=positional[4];customRequested=true;
     }
-    const Case custom{m, n, k, ta, tb, ta ? m : 1, ta ? 1 : n,
-                      1.0f, 0.0f, "custom"};
-    return runCase(custom);
+    if(customRequested)return runCase(custom);
+  } catch(const std::exception& error) {
+    std::fprintf(stderr,"GEMM custom: %s\n",error.what());return 2;
   }
 
   const int tier = hipdnn_ep_test::resolveCoverageTier(argc, argv);
@@ -632,7 +653,26 @@ int main(int argc, char** argv) {
               kDtypeName, tier, count, total, kGemmDtype);
   int failures = 0;
   for (size_t i = 0; i < count; ++i)
-    failures |= runCase(cases[indexes ? indexes[i] : i]);
+    try { failures |= runCase(cases[indexes ? indexes[i] : i]); }
+    catch(const std::exception& error){std::fprintf(stderr,"GEMM: %s\n",error.what());return 1;}
+  // Every tier crosses transpose, C broadcast, tails, periodic sharing and
+  // padded/zero batch strides; tiers thin continuous dimensions only.
+  try {
+    const int tail = tier == 1 ? 17 : tier == 2 ? 33 : 65;
+    for(int ta=0;ta<2;++ta)for(int tb=0;tb<2;++tb) {
+      for(int broadcast=0;broadcast<4;++broadcast) {
+        Case t{tail,67,129,ta,tb,broadcast&1?tail:1,broadcast&2?67:1,
+               0.75f,0.25f,"batched-tail",4,2,1};
+        t.sa=int64_t(t.m)*t.k+13;t.sb=0;
+        t.sc=int64_t(t.c0)*t.c1+7;t.sy=int64_t(t.m)*t.n+11;
+        failures|=runCase(t);
+      }
+    }
+    failures|=runCase({2,257,0,0,0,1,257,1.0f,0.5f,"K-zero",2});
+    failures|=runCase({2,256,4096,0,0,1,256,1.0f,0.0f,"parallel-NN",4,1,2});
+  } catch(const std::exception& error) {
+    std::fprintf(stderr,"GEMM coverage: %s\n",error.what());return 1;
+  }
   std::printf("%s %s (%d/%zu case(s) failing)\n", kDtypeName,
               failures ? "SOME FAILED" : "ALL PASS", failures, count);
   return failures ? 1 : 0;

@@ -1325,12 +1325,28 @@ void MatmulOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+static LogicalResult verifyDenseGemmDtypes(Operation *op, Value a, Value b,
+                                           Value output) {
+  Type input = getElementTypeOrSelf(a.getType());
+  Type other = getElementTypeOrSelf(b.getType());
+  Type result = getElementTypeOrSelf(output.getType());
+  if (input != other)
+    return op->emitOpError("GEMM inputs must have the same dtype");
+  if (result != input && !((input.isF16() || input.isBF16()) && result.isF32()))
+    return op->emitOpError(
+        "GEMM output must match the input dtype or be f32 for f16/bf16 inputs");
+  return success();
+}
+
 LogicalResult MatmulOp::verify() {
   // First the cross-cutting DPS contract (all-tensor-or-all-memref +
   // result-count parity); failures here also rule out bogus operand types,
   // so the matmul shape check below can rely on detail::getShapeOf().
   if (failed(verifyDpsComputeOp(*this, {getA(), getB(), getOutput()},
                                 /*numInits=*/1)))
+    return failure();
+
+  if (failed(verifyDenseGemmDtypes(*this, getA(), getB(), getOutput())))
     return failure();
 
   return mlir::hip::verifyHipOpShape(*this, [&] {
@@ -3550,6 +3566,20 @@ LogicalResult NGramHashMappingOp::verify() {
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange GemmOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+LogicalResult GemmOp::verify() {
+  SmallVector<Value> data = {getInputA(), getInputB(), getOutput()};
+  if (getInputC())
+    data.push_back(getInputC());
+  if (failed(verifyDpsComputeOp(*this, data, /*numInits=*/1)) ||
+      failed(
+          verifyDenseGemmDtypes(*this, getInputA(), getInputB(), getOutput())))
+    return failure();
+  if (getInputC() && getElementTypeOrSelf(getInputC().getType()) !=
+                         getElementTypeOrSelf(getOutput().getType()))
+    return emitOpError("GEMM C must have the output dtype");
+  return success();
+}
 
 void GemmOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>

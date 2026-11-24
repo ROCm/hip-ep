@@ -41,6 +41,14 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
     // Get memref types and shapes
     auto AType = cast<MemRefType>(op.getA().getType());
     auto BType = cast<MemRefType>(op.getB().getType());
+    Type inputType = AType.getElementType();
+    Type outputType =
+        cast<MemRefType>(op.getOutput().getType()).getElementType();
+    const bool mixedOutput = outputType != inputType;
+    if (BType.getElementType() != inputType ||
+        (mixedOutput &&
+         !((inputType.isF16() || inputType.isBF16()) && outputType.isF32())))
+      return op.emitError("unsupported MatMul dtype combination");
     int64_t ARank = AType.getRank();
     int64_t BRank = BType.getRank();
     int64_t transA = op.getTransA();
@@ -202,8 +210,12 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
                                      ptrType, i64Type, i64Type, i64Type,
                                      i64Type, i64Type, i64Type, i64Type,
                                      ptrType, i64Type, ptrType};
+      if (mixedOutput)
+        types.push_back(i64Type);
       auto function = LLVM::lookupOrCreateFn(
-          rewriter, module, "wrap_matmul_broadcast", types, i32Type);
+          rewriter, module,
+          mixedOutput ? "wrap_matmul_broadcast_typed" : "wrap_matmul_broadcast",
+          types, i32Type);
       if (failed(function))
         return failure();
       SmallVector<Value, 15> values = {statePtr,
@@ -221,6 +233,8 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
                                        emitBatchDims(ADesc, aBatchRank),
                                        createI64Const(bBatchRank),
                                        emitBatchDims(BDesc, bBatchRank)};
+      if (mixedOutput)
+        values.push_back(createI64Const(1));
       LLVM::CallOp::create(rewriter, loc, *function, values);
       rewriter.eraseOp(op);
       return success();
@@ -248,8 +262,12 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
         i64Type  // transB
     };
 
+    if (mixedOutput)
+      paramTypes.push_back(i64Type);
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kWrapHipblasltMatmul, paramTypes, i32Type);
+        rewriter, module,
+        mixedOutput ? "wrap_matmul_typed" : kWrapHipblasltMatmul, paramTypes,
+        i32Type);
     if (failed(funcOp))
       return failure();
 
@@ -266,6 +284,8 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
                                    bBatchStride,
                                    createI64Const(transA),
                                    createI64Const(transB)};
+    if (mixedOutput)
+      args.push_back(createI64Const(1));
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

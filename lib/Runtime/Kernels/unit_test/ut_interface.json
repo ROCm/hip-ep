@@ -81,7 +81,7 @@
         "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
       },
       "custom": {
-        "selected_by": "any of --m, --n, --k, --ta or --tb (legacy M N K TA TB also supported)",
+        "selected_by": "any custom flag; legacy M N K TA TB positional form also supported",
         "params": [
           {
             "name": "m",
@@ -140,15 +140,135 @@
               0,
               1
             ]
+          },
+          {
+            "name": "batch",
+            "flag": "--batch",
+            "make": "BATCH",
+            "type": "int",
+            "required": false,
+            "exe_default": 1,
+            "make_default": 1,
+            "description": "Logical batch count; 1..65535."
+          },
+          {
+            "name": "a_group",
+            "flag": "--a-group",
+            "make": "A_GROUP",
+            "type": "int",
+            "required": false,
+            "exe_default": 1,
+            "make_default": 1,
+            "description": "Consecutive logical batches sharing one physical A; divides batch."
+          },
+          {
+            "name": "b_group",
+            "flag": "--b-group",
+            "make": "B_GROUP",
+            "type": "int",
+            "required": false,
+            "exe_default": 1,
+            "make_default": 1,
+            "description": "Consecutive logical batches sharing one physical B; divides batch."
+          },
+          {
+            "name": "stride_a",
+            "flag": "--stride-a",
+            "make": "STRIDE_A",
+            "type": "int",
+            "required": false,
+            "exe_default": -1,
+            "make_default": -1,
+            "description": "A batch stride in elements; -1 tight, 0 broadcast."
+          },
+          {
+            "name": "stride_b",
+            "flag": "--stride-b",
+            "make": "STRIDE_B",
+            "type": "int",
+            "required": false,
+            "exe_default": -1,
+            "make_default": -1,
+            "description": "B batch stride in elements; -1 tight, 0 broadcast."
+          },
+          {
+            "name": "stride_c",
+            "flag": "--stride-c",
+            "make": "STRIDE_C",
+            "type": "int",
+            "required": false,
+            "exe_default": -1,
+            "make_default": -1,
+            "description": "C batch stride in output elements; -1 tight, 0 broadcast."
+          },
+          {
+            "name": "stride_y",
+            "flag": "--stride-y",
+            "make": "STRIDE_Y",
+            "type": "int",
+            "required": false,
+            "exe_default": -1,
+            "make_default": -1,
+            "description": "Output batch stride in elements; -1 tight; batches must not overlap."
+          },
+          {
+            "name": "alpha",
+            "flag": "--alpha",
+            "make": "ALPHA",
+            "type": "float",
+            "required": false,
+            "exe_default": 1,
+            "make_default": 1,
+            "description": "Finite product scale."
+          },
+          {
+            "name": "beta",
+            "flag": "--beta",
+            "make": "BETA",
+            "type": "float",
+            "required": false,
+            "exe_default": 0,
+            "make_default": 0,
+            "description": "Finite C scale; zero omits C."
+          },
+          {
+            "name": "crows",
+            "flag": "--crows",
+            "make": "CROWS",
+            "type": "int",
+            "required": false,
+            "exe_default": 1,
+            "make_default": 1,
+            "description": "C rows: 1 or M."
+          },
+          {
+            "name": "ccols",
+            "flag": "--ccols",
+            "make": "CCOLS",
+            "type": "int",
+            "required": false,
+            "exe_default": -1,
+            "make_default": -1,
+            "description": "C columns: 1 or N; -1 selects N."
           }
         ],
         "constraints": [
-          "M, N and K must be positive; TA and TB are 0 or 1."
+          "M/N positive, K nonnegative, TA/TB in {0,1}.",
+          "Batch <=65535 and positive input groups divide batch.",
+          "Strides are -1 for tight or nonnegative element strides; output batches do not overlap.",
+          "C is scalar, row, column or full matrix; alpha/beta are finite."
         ],
         "checks": [
-          "m > 0 and n > 0 and k > 0",
+          "m > 0 and n > 0 and k >= 0",
           "ta == 0 or ta == 1",
-          "tb == 0 or tb == 1"
+          "tb == 0 or tb == 1",
+          "batch > 0 and batch <= 65535",
+          "a_group > 0 and b_group > 0",
+          "batch % a_group == 0 and batch % b_group == 0",
+          "stride_a >= -1 and stride_b >= -1 and stride_c >= -1 and stride_y >= -1",
+          "batch == 1 or stride_y == -1 or stride_y >= m * n",
+          "crows == 1 or crows == m",
+          "ccols == -1 or ccols == 1 or ccols == n"
         ]
       },
       "examples": [
@@ -170,6 +290,21 @@
             "k": 256,
             "ta": 0,
             "tb": 1
+          }
+        },
+        {
+          "name": "shared_kv_padded_score",
+          "values": {
+            "m": 19,
+            "n": 128,
+            "k": 256,
+            "ta": 0,
+            "tb": 1,
+            "batch": 8,
+            "b_group": 4,
+            "stride_b": 33792,
+            "stride_a": 8192,
+            "stride_y": 2560
           }
         }
       ],
@@ -192,7 +327,7 @@
         "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
       },
       "custom": {
-        "selected_by": "any of --m, --n, --k, --ta or --tb (legacy M N K TA TB also supported)",
+        "selected_by": "any custom flag; legacy M N K TA TB positional form also supported",
         "params": [
           {
             "name": "m",
@@ -251,15 +386,135 @@
               0,
               1
             ]
+          },
+          {
+            "name": "batch",
+            "flag": "--batch",
+            "make": "BATCH",
+            "type": "int",
+            "required": false,
+            "exe_default": 1,
+            "make_default": 1,
+            "description": "Logical batch count; 1..65535."
+          },
+          {
+            "name": "a_group",
+            "flag": "--a-group",
+            "make": "A_GROUP",
+            "type": "int",
+            "required": false,
+            "exe_default": 1,
+            "make_default": 1,
+            "description": "Consecutive logical batches sharing one physical A; divides batch."
+          },
+          {
+            "name": "b_group",
+            "flag": "--b-group",
+            "make": "B_GROUP",
+            "type": "int",
+            "required": false,
+            "exe_default": 1,
+            "make_default": 1,
+            "description": "Consecutive logical batches sharing one physical B; divides batch."
+          },
+          {
+            "name": "stride_a",
+            "flag": "--stride-a",
+            "make": "STRIDE_A",
+            "type": "int",
+            "required": false,
+            "exe_default": -1,
+            "make_default": -1,
+            "description": "A batch stride in elements; -1 tight, 0 broadcast."
+          },
+          {
+            "name": "stride_b",
+            "flag": "--stride-b",
+            "make": "STRIDE_B",
+            "type": "int",
+            "required": false,
+            "exe_default": -1,
+            "make_default": -1,
+            "description": "B batch stride in elements; -1 tight, 0 broadcast."
+          },
+          {
+            "name": "stride_c",
+            "flag": "--stride-c",
+            "make": "STRIDE_C",
+            "type": "int",
+            "required": false,
+            "exe_default": -1,
+            "make_default": -1,
+            "description": "C batch stride in output elements; -1 tight, 0 broadcast."
+          },
+          {
+            "name": "stride_y",
+            "flag": "--stride-y",
+            "make": "STRIDE_Y",
+            "type": "int",
+            "required": false,
+            "exe_default": -1,
+            "make_default": -1,
+            "description": "Output batch stride in elements; -1 tight; batches must not overlap."
+          },
+          {
+            "name": "alpha",
+            "flag": "--alpha",
+            "make": "ALPHA",
+            "type": "float",
+            "required": false,
+            "exe_default": 1,
+            "make_default": 1,
+            "description": "Finite product scale."
+          },
+          {
+            "name": "beta",
+            "flag": "--beta",
+            "make": "BETA",
+            "type": "float",
+            "required": false,
+            "exe_default": 0,
+            "make_default": 0,
+            "description": "Finite C scale; zero omits C."
+          },
+          {
+            "name": "crows",
+            "flag": "--crows",
+            "make": "CROWS",
+            "type": "int",
+            "required": false,
+            "exe_default": 1,
+            "make_default": 1,
+            "description": "C rows: 1 or M."
+          },
+          {
+            "name": "ccols",
+            "flag": "--ccols",
+            "make": "CCOLS",
+            "type": "int",
+            "required": false,
+            "exe_default": -1,
+            "make_default": -1,
+            "description": "C columns: 1 or N; -1 selects N."
           }
         ],
         "constraints": [
-          "M, N and K must be positive; TA and TB are 0 or 1."
+          "M/N positive, K nonnegative, TA/TB in {0,1}.",
+          "Batch <=65535 and positive input groups divide batch.",
+          "Strides are -1 for tight or nonnegative element strides; output batches do not overlap.",
+          "C is scalar, row, column or full matrix; alpha/beta are finite."
         ],
         "checks": [
-          "m > 0 and n > 0 and k > 0",
+          "m > 0 and n > 0 and k >= 0",
           "ta == 0 or ta == 1",
-          "tb == 0 or tb == 1"
+          "tb == 0 or tb == 1",
+          "batch > 0 and batch <= 65535",
+          "a_group > 0 and b_group > 0",
+          "batch % a_group == 0 and batch % b_group == 0",
+          "stride_a >= -1 and stride_b >= -1 and stride_c >= -1 and stride_y >= -1",
+          "batch == 1 or stride_y == -1 or stride_y >= m * n",
+          "crows == 1 or crows == m",
+          "ccols == -1 or ccols == 1 or ccols == n"
         ]
       },
       "examples": [
@@ -281,6 +536,21 @@
             "k": 256,
             "ta": 0,
             "tb": 1
+          }
+        },
+        {
+          "name": "shared_kv_padded_score",
+          "values": {
+            "m": 19,
+            "n": 128,
+            "k": 256,
+            "ta": 0,
+            "tb": 1,
+            "batch": 8,
+            "b_group": 4,
+            "stride_b": 33792,
+            "stride_a": 8192,
+            "stride_y": 2560
           }
         }
       ],
@@ -303,7 +573,7 @@
         "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
       },
       "custom": {
-        "selected_by": "any of --m, --n, --k, --ta or --tb (legacy M N K TA TB also supported)",
+        "selected_by": "any custom flag; legacy M N K TA TB positional form also supported",
         "params": [
           {
             "name": "m",
@@ -362,15 +632,135 @@
               0,
               1
             ]
+          },
+          {
+            "name": "batch",
+            "flag": "--batch",
+            "make": "BATCH",
+            "type": "int",
+            "required": false,
+            "exe_default": 1,
+            "make_default": 1,
+            "description": "Logical batch count; 1..65535."
+          },
+          {
+            "name": "a_group",
+            "flag": "--a-group",
+            "make": "A_GROUP",
+            "type": "int",
+            "required": false,
+            "exe_default": 1,
+            "make_default": 1,
+            "description": "Consecutive logical batches sharing one physical A; divides batch."
+          },
+          {
+            "name": "b_group",
+            "flag": "--b-group",
+            "make": "B_GROUP",
+            "type": "int",
+            "required": false,
+            "exe_default": 1,
+            "make_default": 1,
+            "description": "Consecutive logical batches sharing one physical B; divides batch."
+          },
+          {
+            "name": "stride_a",
+            "flag": "--stride-a",
+            "make": "STRIDE_A",
+            "type": "int",
+            "required": false,
+            "exe_default": -1,
+            "make_default": -1,
+            "description": "A batch stride in elements; -1 tight, 0 broadcast."
+          },
+          {
+            "name": "stride_b",
+            "flag": "--stride-b",
+            "make": "STRIDE_B",
+            "type": "int",
+            "required": false,
+            "exe_default": -1,
+            "make_default": -1,
+            "description": "B batch stride in elements; -1 tight, 0 broadcast."
+          },
+          {
+            "name": "stride_c",
+            "flag": "--stride-c",
+            "make": "STRIDE_C",
+            "type": "int",
+            "required": false,
+            "exe_default": -1,
+            "make_default": -1,
+            "description": "C batch stride in output elements; -1 tight, 0 broadcast."
+          },
+          {
+            "name": "stride_y",
+            "flag": "--stride-y",
+            "make": "STRIDE_Y",
+            "type": "int",
+            "required": false,
+            "exe_default": -1,
+            "make_default": -1,
+            "description": "Output batch stride in elements; -1 tight; batches must not overlap."
+          },
+          {
+            "name": "alpha",
+            "flag": "--alpha",
+            "make": "ALPHA",
+            "type": "float",
+            "required": false,
+            "exe_default": 1,
+            "make_default": 1,
+            "description": "Finite product scale."
+          },
+          {
+            "name": "beta",
+            "flag": "--beta",
+            "make": "BETA",
+            "type": "float",
+            "required": false,
+            "exe_default": 0,
+            "make_default": 0,
+            "description": "Finite C scale; zero omits C."
+          },
+          {
+            "name": "crows",
+            "flag": "--crows",
+            "make": "CROWS",
+            "type": "int",
+            "required": false,
+            "exe_default": 1,
+            "make_default": 1,
+            "description": "C rows: 1 or M."
+          },
+          {
+            "name": "ccols",
+            "flag": "--ccols",
+            "make": "CCOLS",
+            "type": "int",
+            "required": false,
+            "exe_default": -1,
+            "make_default": -1,
+            "description": "C columns: 1 or N; -1 selects N."
           }
         ],
         "constraints": [
-          "M, N and K must be positive; TA and TB are 0 or 1."
+          "M/N positive, K nonnegative, TA/TB in {0,1}.",
+          "Batch <=65535 and positive input groups divide batch.",
+          "Strides are -1 for tight or nonnegative element strides; output batches do not overlap.",
+          "C is scalar, row, column or full matrix; alpha/beta are finite."
         ],
         "checks": [
-          "m > 0 and n > 0 and k > 0",
+          "m > 0 and n > 0 and k >= 0",
           "ta == 0 or ta == 1",
-          "tb == 0 or tb == 1"
+          "tb == 0 or tb == 1",
+          "batch > 0 and batch <= 65535",
+          "a_group > 0 and b_group > 0",
+          "batch % a_group == 0 and batch % b_group == 0",
+          "stride_a >= -1 and stride_b >= -1 and stride_c >= -1 and stride_y >= -1",
+          "batch == 1 or stride_y == -1 or stride_y >= m * n",
+          "crows == 1 or crows == m",
+          "ccols == -1 or ccols == 1 or ccols == n"
         ]
       },
       "examples": [
@@ -392,6 +782,513 @@
             "k": 256,
             "ta": 0,
             "tb": 1
+          }
+        },
+        {
+          "name": "shared_kv_padded_score",
+          "values": {
+            "m": 19,
+            "n": 128,
+            "k": 256,
+            "ta": 0,
+            "tb": 1,
+            "batch": 8,
+            "b_group": 4,
+            "stride_b": 33792,
+            "stride_a": 8192,
+            "stride_y": 2560
+          }
+        }
+      ],
+      "gaps": []
+    },
+    {
+      "leaf": "gemm/Xfp16_Wfp16_Yfp32",
+      "package_executable": "hipdnn-kernel-ut-gemm-xfp16-wfp16-yfp32.exe",
+      "source": "test_gemm.cpp",
+      "capabilities": {
+        "coverage": true,
+        "timing": "shared",
+        "mode": "lookup",
+        "rank": true
+      },
+      "suite": {
+        "args": [
+          "--coverage"
+        ],
+        "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
+      },
+      "custom": {
+        "selected_by": "any custom flag; legacy M N K TA TB positional form also supported",
+        "params": [
+          {
+            "name": "m",
+            "flag": "--m",
+            "make": "M",
+            "type": "int",
+            "required": false,
+            "exe_default": 128,
+            "make_default": 128,
+            "description": "Output rows."
+          },
+          {
+            "name": "n",
+            "flag": "--n",
+            "make": "N",
+            "type": "int",
+            "required": false,
+            "exe_default": 512,
+            "make_default": 512,
+            "description": "Output columns."
+          },
+          {
+            "name": "k",
+            "flag": "--k",
+            "make": "K",
+            "type": "int",
+            "required": false,
+            "exe_default": 256,
+            "make_default": 256,
+            "description": "Reduction extent."
+          },
+          {
+            "name": "ta",
+            "flag": "--ta",
+            "make": "TA",
+            "type": "int",
+            "required": false,
+            "exe_default": 0,
+            "make_default": 0,
+            "description": "Transpose A.",
+            "choices": [
+              0,
+              1
+            ]
+          },
+          {
+            "name": "tb",
+            "flag": "--tb",
+            "make": "TB",
+            "type": "int",
+            "required": false,
+            "exe_default": 1,
+            "make_default": 1,
+            "description": "Transpose B; 0 is NN and 1 is NT.",
+            "choices": [
+              0,
+              1
+            ]
+          },
+          {
+            "name": "batch",
+            "flag": "--batch",
+            "make": "BATCH",
+            "type": "int",
+            "required": false,
+            "exe_default": 1,
+            "make_default": 1,
+            "description": "Logical batch count; 1..65535."
+          },
+          {
+            "name": "a_group",
+            "flag": "--a-group",
+            "make": "A_GROUP",
+            "type": "int",
+            "required": false,
+            "exe_default": 1,
+            "make_default": 1,
+            "description": "Consecutive logical batches sharing one physical A; divides batch."
+          },
+          {
+            "name": "b_group",
+            "flag": "--b-group",
+            "make": "B_GROUP",
+            "type": "int",
+            "required": false,
+            "exe_default": 1,
+            "make_default": 1,
+            "description": "Consecutive logical batches sharing one physical B; divides batch."
+          },
+          {
+            "name": "stride_a",
+            "flag": "--stride-a",
+            "make": "STRIDE_A",
+            "type": "int",
+            "required": false,
+            "exe_default": -1,
+            "make_default": -1,
+            "description": "A batch stride in elements; -1 tight, 0 broadcast."
+          },
+          {
+            "name": "stride_b",
+            "flag": "--stride-b",
+            "make": "STRIDE_B",
+            "type": "int",
+            "required": false,
+            "exe_default": -1,
+            "make_default": -1,
+            "description": "B batch stride in elements; -1 tight, 0 broadcast."
+          },
+          {
+            "name": "stride_c",
+            "flag": "--stride-c",
+            "make": "STRIDE_C",
+            "type": "int",
+            "required": false,
+            "exe_default": -1,
+            "make_default": -1,
+            "description": "C batch stride in output elements; -1 tight, 0 broadcast."
+          },
+          {
+            "name": "stride_y",
+            "flag": "--stride-y",
+            "make": "STRIDE_Y",
+            "type": "int",
+            "required": false,
+            "exe_default": -1,
+            "make_default": -1,
+            "description": "Output batch stride in elements; -1 tight; batches must not overlap."
+          },
+          {
+            "name": "alpha",
+            "flag": "--alpha",
+            "make": "ALPHA",
+            "type": "float",
+            "required": false,
+            "exe_default": 1,
+            "make_default": 1,
+            "description": "Finite product scale."
+          },
+          {
+            "name": "beta",
+            "flag": "--beta",
+            "make": "BETA",
+            "type": "float",
+            "required": false,
+            "exe_default": 0,
+            "make_default": 0,
+            "description": "Finite C scale; zero omits C."
+          },
+          {
+            "name": "crows",
+            "flag": "--crows",
+            "make": "CROWS",
+            "type": "int",
+            "required": false,
+            "exe_default": 1,
+            "make_default": 1,
+            "description": "C rows: 1 or M."
+          },
+          {
+            "name": "ccols",
+            "flag": "--ccols",
+            "make": "CCOLS",
+            "type": "int",
+            "required": false,
+            "exe_default": -1,
+            "make_default": -1,
+            "description": "C columns: 1 or N; -1 selects N."
+          }
+        ],
+        "constraints": [
+          "M/N positive, K nonnegative, TA/TB in {0,1}.",
+          "Batch <=65535 and positive input groups divide batch.",
+          "Strides are -1 for tight or nonnegative element strides; output batches do not overlap.",
+          "C is scalar, row, column or full matrix; alpha/beta are finite."
+        ],
+        "checks": [
+          "m > 0 and n > 0 and k >= 0",
+          "ta == 0 or ta == 1",
+          "tb == 0 or tb == 1",
+          "batch > 0 and batch <= 65535",
+          "a_group > 0 and b_group > 0",
+          "batch % a_group == 0 and batch % b_group == 0",
+          "stride_a >= -1 and stride_b >= -1 and stride_c >= -1 and stride_y >= -1",
+          "batch == 1 or stride_y == -1 or stride_y >= m * n",
+          "crows == 1 or crows == m",
+          "ccols == -1 or ccols == 1 or ccols == n"
+        ]
+      },
+      "examples": [
+        {
+          "name": "attention_value_nn",
+          "values": {
+            "m": 4,
+            "n": 256,
+            "k": 2048,
+            "ta": 0,
+            "tb": 0
+          }
+        },
+        {
+          "name": "projection_nt",
+          "values": {
+            "m": 16,
+            "n": 512,
+            "k": 256,
+            "ta": 0,
+            "tb": 1
+          }
+        },
+        {
+          "name": "shared_kv_padded_score",
+          "values": {
+            "m": 19,
+            "n": 128,
+            "k": 256,
+            "ta": 0,
+            "tb": 1,
+            "batch": 8,
+            "b_group": 4,
+            "stride_b": 33792,
+            "stride_a": 8192,
+            "stride_y": 2560
+          }
+        }
+      ],
+      "gaps": []
+    },
+    {
+      "leaf": "gemm/Xbf16_Wbf16_Yfp32",
+      "package_executable": "hipdnn-kernel-ut-gemm-xbf16-wbf16-yfp32.exe",
+      "source": "test_gemm.cpp",
+      "capabilities": {
+        "coverage": true,
+        "timing": "shared",
+        "mode": "lookup",
+        "rank": true
+      },
+      "suite": {
+        "args": [
+          "--coverage"
+        ],
+        "coverage_default": "HIPDNN_UT_COVERAGE, else 3"
+      },
+      "custom": {
+        "selected_by": "any custom flag; legacy M N K TA TB positional form also supported",
+        "params": [
+          {
+            "name": "m",
+            "flag": "--m",
+            "make": "M",
+            "type": "int",
+            "required": false,
+            "exe_default": 128,
+            "make_default": 128,
+            "description": "Output rows."
+          },
+          {
+            "name": "n",
+            "flag": "--n",
+            "make": "N",
+            "type": "int",
+            "required": false,
+            "exe_default": 512,
+            "make_default": 512,
+            "description": "Output columns."
+          },
+          {
+            "name": "k",
+            "flag": "--k",
+            "make": "K",
+            "type": "int",
+            "required": false,
+            "exe_default": 256,
+            "make_default": 256,
+            "description": "Reduction extent."
+          },
+          {
+            "name": "ta",
+            "flag": "--ta",
+            "make": "TA",
+            "type": "int",
+            "required": false,
+            "exe_default": 0,
+            "make_default": 0,
+            "description": "Transpose A.",
+            "choices": [
+              0,
+              1
+            ]
+          },
+          {
+            "name": "tb",
+            "flag": "--tb",
+            "make": "TB",
+            "type": "int",
+            "required": false,
+            "exe_default": 1,
+            "make_default": 1,
+            "description": "Transpose B; 0 is NN and 1 is NT.",
+            "choices": [
+              0,
+              1
+            ]
+          },
+          {
+            "name": "batch",
+            "flag": "--batch",
+            "make": "BATCH",
+            "type": "int",
+            "required": false,
+            "exe_default": 1,
+            "make_default": 1,
+            "description": "Logical batch count; 1..65535."
+          },
+          {
+            "name": "a_group",
+            "flag": "--a-group",
+            "make": "A_GROUP",
+            "type": "int",
+            "required": false,
+            "exe_default": 1,
+            "make_default": 1,
+            "description": "Consecutive logical batches sharing one physical A; divides batch."
+          },
+          {
+            "name": "b_group",
+            "flag": "--b-group",
+            "make": "B_GROUP",
+            "type": "int",
+            "required": false,
+            "exe_default": 1,
+            "make_default": 1,
+            "description": "Consecutive logical batches sharing one physical B; divides batch."
+          },
+          {
+            "name": "stride_a",
+            "flag": "--stride-a",
+            "make": "STRIDE_A",
+            "type": "int",
+            "required": false,
+            "exe_default": -1,
+            "make_default": -1,
+            "description": "A batch stride in elements; -1 tight, 0 broadcast."
+          },
+          {
+            "name": "stride_b",
+            "flag": "--stride-b",
+            "make": "STRIDE_B",
+            "type": "int",
+            "required": false,
+            "exe_default": -1,
+            "make_default": -1,
+            "description": "B batch stride in elements; -1 tight, 0 broadcast."
+          },
+          {
+            "name": "stride_c",
+            "flag": "--stride-c",
+            "make": "STRIDE_C",
+            "type": "int",
+            "required": false,
+            "exe_default": -1,
+            "make_default": -1,
+            "description": "C batch stride in output elements; -1 tight, 0 broadcast."
+          },
+          {
+            "name": "stride_y",
+            "flag": "--stride-y",
+            "make": "STRIDE_Y",
+            "type": "int",
+            "required": false,
+            "exe_default": -1,
+            "make_default": -1,
+            "description": "Output batch stride in elements; -1 tight; batches must not overlap."
+          },
+          {
+            "name": "alpha",
+            "flag": "--alpha",
+            "make": "ALPHA",
+            "type": "float",
+            "required": false,
+            "exe_default": 1,
+            "make_default": 1,
+            "description": "Finite product scale."
+          },
+          {
+            "name": "beta",
+            "flag": "--beta",
+            "make": "BETA",
+            "type": "float",
+            "required": false,
+            "exe_default": 0,
+            "make_default": 0,
+            "description": "Finite C scale; zero omits C."
+          },
+          {
+            "name": "crows",
+            "flag": "--crows",
+            "make": "CROWS",
+            "type": "int",
+            "required": false,
+            "exe_default": 1,
+            "make_default": 1,
+            "description": "C rows: 1 or M."
+          },
+          {
+            "name": "ccols",
+            "flag": "--ccols",
+            "make": "CCOLS",
+            "type": "int",
+            "required": false,
+            "exe_default": -1,
+            "make_default": -1,
+            "description": "C columns: 1 or N; -1 selects N."
+          }
+        ],
+        "constraints": [
+          "M/N positive, K nonnegative, TA/TB in {0,1}.",
+          "Batch <=65535 and positive input groups divide batch.",
+          "Strides are -1 for tight or nonnegative element strides; output batches do not overlap.",
+          "C is scalar, row, column or full matrix; alpha/beta are finite."
+        ],
+        "checks": [
+          "m > 0 and n > 0 and k >= 0",
+          "ta == 0 or ta == 1",
+          "tb == 0 or tb == 1",
+          "batch > 0 and batch <= 65535",
+          "a_group > 0 and b_group > 0",
+          "batch % a_group == 0 and batch % b_group == 0",
+          "stride_a >= -1 and stride_b >= -1 and stride_c >= -1 and stride_y >= -1",
+          "batch == 1 or stride_y == -1 or stride_y >= m * n",
+          "crows == 1 or crows == m",
+          "ccols == -1 or ccols == 1 or ccols == n"
+        ]
+      },
+      "examples": [
+        {
+          "name": "attention_value_nn",
+          "values": {
+            "m": 4,
+            "n": 256,
+            "k": 2048,
+            "ta": 0,
+            "tb": 0
+          }
+        },
+        {
+          "name": "projection_nt",
+          "values": {
+            "m": 16,
+            "n": 512,
+            "k": 256,
+            "ta": 0,
+            "tb": 1
+          }
+        },
+        {
+          "name": "shared_kv_padded_score",
+          "values": {
+            "m": 19,
+            "n": 128,
+            "k": 256,
+            "ta": 0,
+            "tb": 1,
+            "batch": 8,
+            "b_group": 4,
+            "stride_b": 33792,
+            "stride_a": 8192,
+            "stride_y": 2560
           }
         }
       ],

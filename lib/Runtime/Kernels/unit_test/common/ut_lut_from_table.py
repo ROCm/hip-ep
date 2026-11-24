@@ -11,7 +11,8 @@ import ut_rank_tools as rank
 
 NBITS_KEY = ('phase', 'bits', 'group_size', 'zero_point', 'row_stride', 'm', 'n', 'k')
 GQA_KEY = ('phase', 'head_dim', 'kv_dtype', 'num_heads', 'kv_num_heads', 'batch', 'seq_q', 'seq_kv')
-GEMM_KEY = ('phase', 'act_dtype', 'wts_dtype', 'out_dtype', 'trans_b', 'm', 'n', 'k')
+GEMM_KEY = ('phase', 'act_dtype', 'wts_dtype', 'out_dtype', 'trans_b',
+            'batch_count', 'a_group', 'b_group', 'm', 'n', 'k')
 
 
 def key_fields(op):
@@ -57,22 +58,32 @@ def point_input(op, doc, point, activation='fp16', prefill_kv='fp16'):
         dtype = {'F16': 'fp16', 'BF16': 'bf16', 'F32': 'fp32'}.get(point['act_dtype'])
         if dtype is None:
             raise ValueError('GEMM dtype is not covered by these leaves')
-        if point['act_dtype'] != point['wts_dtype'] or point['act_dtype'] != point['out_dtype']:
-            raise ValueError('mixed GEMM dtypes are not expressible by the leaf')
+        output = {'F16': 'fp16', 'BF16': 'bf16', 'F32': 'fp32'}.get(point['out_dtype'])
+        if point['act_dtype'] != point['wts_dtype'] or output is None or \
+                (output != dtype and (dtype not in ('fp16', 'bf16') or output != 'fp32')):
+            raise ValueError('unsupported mixed GEMM dtypes: equal inputs and uniform or FP32 output required')
+        batches, ag, bg = (point[x] for x in ('batch_count', 'a_group', 'b_group'))
+        if not all(0 < x <= 65535 for x in (batches, ag, bg)) or batches % ag or batches % bg:
+            raise ValueError('invalid GEMM batching')
+        legacy = batches == ag == bg == 1 and dtype == output
         m, n, k = (point[x] for x in ('m', 'n', 'k'))
         tb = {'NN': 0, 'NT': 1}.get(point['trans_b'])
         phase = point['phase']
+        parallel_nn = tb == 0 and m <= 16 and (m == 1 or n <= 512) and (batches > 1 or k >= 512)
         kind = {'Wmma': 'Wmma', 'GemvNt': 'Gemv', 'GemvNn': 'Gemv', 'TiledFma': 'TiledFma'}.get(phase)
         if tb is None or kind is None:
             raise ValueError('unsupported GEMM phase/transpose category')
         if not 0 <= point['config'] < len(doc['configs']) or doc['configs'][point['config']]['kind'] != kind:
             raise ValueError('GEMM phase/config kind mismatch')
-        if (phase in ('GemvNt', 'GemvNn') and (m != 1 or tb != int(phase == 'GemvNt'))) or \
-                (phase == 'Wmma' and (m < 16 or dtype == 'fp32')) or \
-                (phase == 'TiledFma' and (m < 16 or dtype != 'fp32')):
+        if (phase == 'GemvNt' and (not legacy or m != 1 or tb != 1)) or \
+                (phase == 'GemvNn' and (tb != 0 or not (parallel_nn or (legacy and m == 1)))) or \
+                (phase == 'Wmma' and (parallel_nn or (m < 16 and legacy) or dtype == 'fp32')) or \
+                (phase == 'TiledFma' and ((m < 16 and legacy) or dtype != 'fp32')):
             raise ValueError('GEMM table phase differs from the wave32 leaf lookup route')
-        leaf = f'gemm/X{dtype}_W{dtype}_Y{dtype}'
+        leaf = f'gemm/X{dtype}_W{dtype}_Y{output}'
         shape = f'M{m}_N{n}_K{k}_ta0_tb{tb}'
+        if batches != 1 or ag != 1 or bg != 1:
+            shape += f'_B{batches}_ag{ag}_bg{bg}'
     elif op == 'matmul_nbits':
         bits = {'B2': 'u2', 'B3': 'u3', 'B4': 'u4', 'B8': 'i8'}.get(point['bits'])
         if bits is None or point['group_size'] not in ('G16', 'G32', 'G64', 'G128', 'G256', 'G512'):
@@ -223,12 +234,23 @@ def record_point(op, record):
             raise ValueError('GEMM transpose-A/bias/degenerate request has no table key')
         dtype = record['leaf'].split('/X')[1].split('_')[0]
         enum = {'fp16': 'F16', 'bf16': 'BF16', 'fp32': 'F32'}.get(dtype)
-        if enum is None or record['leaf'] != f'gemm/X{dtype}_W{dtype}_Y{dtype}' or d.get('tb') not in (0, 1):
+        output = record['leaf'].split('_Y')[-1]
+        out_enum = {'fp16': 'F16', 'bf16': 'BF16', 'fp32': 'F32'}.get(output)
+        if enum is None or out_enum is None or record['leaf'] != f'gemm/X{dtype}_W{dtype}_Y{output}' or \
+                (output != dtype and (dtype not in ('fp16', 'bf16') or output != 'fp32')) or d.get('tb') not in (0, 1):
             raise ValueError('unsupported GEMM leaf/transpose')
-        if d['M'] != 1 and d['M'] < 16:
-            raise ValueError('multirow small-M GEMM has no table key')
-        phase = ('GemvNt' if d['tb'] else 'GemvNn') if d['M'] == 1 else 'TiledFma' if dtype == 'fp32' else 'Wmma'
-        return dict(phase=phase, act_dtype=enum, wts_dtype=enum, out_dtype=enum,
+        batches, ag, bg = (d.get(x, 1) for x in ('B', 'ag', 'bg'))
+        if any(x <= 0 or x > 65535 for x in (batches, ag, bg)) or batches % ag or batches % bg:
+            raise ValueError('invalid GEMM batching')
+        if any(x in d for x in ('sa', 'sb', 'sc', 'sy')):
+            raise ValueError('explicit-stride diagnostics do not add a tight-layout LUT point')
+        selected = record['winner'] if record['insert_nondefault'] else 0
+        route = config_values(record['candidates'][selected]['config'])['route']
+        phase = {'wmma': 'Wmma', 'gemv_nt': 'GemvNt', 'gemv_nn': 'GemvNn', 'tiled_fma': 'TiledFma'}.get(route)
+        if phase is None:
+            raise ValueError('GEMM selected default has no table geometry')
+        return dict(phase=phase, act_dtype=enum, wts_dtype=enum, out_dtype=out_enum,
+                    batch_count=batches, a_group=ag, b_group=bg,
                     trans_b='NT' if d['tb'] else 'NN', m=d['M'], n=d['N'], k=d['K'])
     if op == 'matmul_nbits':
         # The leaf has no dp4a/padded route. A singleton gemv_m/naive stays skipped.
@@ -298,8 +320,8 @@ def update_points(op, doc, records):
             if wmma and c['ext']:
                 config.update(ext=1, variant=c['variant'])
         if config not in pool:
-            if len(pool) >= 256:
-                raise ValueError('config index exceeds ubyte')
+            if len(pool) >= (65536 if op == 'gemm' else 256):
+                raise ValueError('config index exceeds schema range')
             index = len(pool)
             plain = dict(config)
             if plain.pop('ext', 0):
@@ -322,12 +344,19 @@ def report(args, installed):
     rows = []
     for r in records:
         p = by_id.get((r['leaf'], r['shape']))
+        added = p is None
         if p is None:
-            raise ValueError('rank record has no representable input-table key: ' + r['shape'])
+            # A catalog rank can introduce an exact key. It has no measured old
+            # selection; importing it first would invent an old-table baseline.
+            point = record_point(args.op, r)
+            key = table_key(args.op, point)
+            if key in {table_key(args.op, old) for old in doc['points']}:
+                raise ValueError('rank record has no representable input-table key: ' + r['shape'])
+            p = dict(key=key, old_config='', point=dict(config=''))
         final = r['phases'][-1]
         measurements = {m['candidate']: m for m in final['measurements']}
         winner, default = r['candidates'][r['winner']]['config'], r['candidates'][0]['config']
-        old_id = next((i for i, c in enumerate(r['candidates']) if p['old_config'] in [c['config'], *c.get('requests', [])]), None)
+        old_id = next((i for i, c in enumerate(r['candidates']) if not added and p['old_config'] in [c['config'], *c.get('requests', [])]), None)
         old = measurements.get(old_id)
         win = measurements[r['winner']]
         ratio = lambda a, b: statistics.median(x / y for x, y in zip(a['group_means_ms'], b['group_means_ms']))
@@ -344,7 +373,8 @@ def report(args, installed):
                          winner=winner, selected=selected, winner_over_default=r['versus_default']['median'],
                          winner_over_old=ratio(common[1][r['winner']], common[1][old_id]) if common else '',
                          old_over_default=ratio(common[1][old_id], common[1][0]) if common else '', old_ratio_phase=common[0] if common else '',
-                         old_status='measured_final' if old else 'excluded' if old_id in excluded else 'not_in_final_phase',
+                         old_status='absent_input_table' if added else 'measured_final' if old else 'excluded' if old_id in excluded else 'not_in_final_phase',
+                         added=added,
                          changed=p['old_config'] not in [selected, *r['candidates'][r['winner'] if r['insert_nondefault'] else 0].get('requests', [])],
                          insert_nondefault=r['insert_nondefault'], retested=any(phase['name'] == 'confirm' for phase in r['phases']),
                          decision_status=r['decision_status'], excluded=json.dumps(sorted(excluded)),
@@ -369,7 +399,8 @@ def report(args, installed):
     summary = dict(points=len(rows), changed=sum(r['changed'] for r in rows), distribution=distribution,
                    retested_fraction=sum(r['retested'] for r in rows) / len(rows),
                    winner_unresolved_fraction=sum(r['decision_status'] == 'winner_unresolved' for r in rows) / len(rows),
-                   skipped=len(unsupported), unmeasured=len(points) - len(measured),
+                   added=sum(r['added'] for r in rows),
+                   skipped=len(unsupported), unmeasured=len(points) - len(measured & set(by_id)),
                    gpu_ms=sum(r['gpu_ms'] for r in rows), wall_ms=sum(r['wall_ms'] for r in rows if r['wall_ms'] != ''))
     if args.op == 'gemm':
         summary['imported_changes'] = sum(r['imported_change'] for r in rows)
@@ -378,7 +409,7 @@ def report(args, installed):
     if args.md:
         md = rank.private_path(args.md, installed)
         md.write_text('# LUT refresh report\n\n' + '\n'.join(f'- {k}: {v}' for k, v in summary.items()) +
-                      '\n\nWinner/default uses the final phase. Ratios involving the old config use the latest phase containing both the winner and old config, named in old_ratio_phase; no ratios cross phases. Excluded or absent old candidates without a common phase are unavailable. GPU totals cover recorded phases, with pilot GPU time separate; wall totals cover native rank calls and exclude build, CPU reference, launcher and resource waits. Unsupported points and eligible unmeasured points are counted separately.\n')
+                      '\n\nWinner/default uses the final phase. Ratios involving the old config use the latest phase containing both the winner and old config, named in old_ratio_phase; no ratios cross phases. New exact keys have absent_input_table status and no old-config ratio or index. Excluded or absent old candidates without a common phase are unavailable. GPU totals cover recorded phases, with pilot GPU time separate; wall totals cover native rank calls and exclude build, CPU reference, launcher and resource waits. Unsupported points and eligible unmeasured points are counted separately.\n')
     print(json.dumps(summary))
 
 

@@ -4388,6 +4388,20 @@ HIP_KERNEL_API int hip_gemm(void *stream, const void *A, const void *B,
                             float alpha, float beta, int transA, int transB,
                             int type_code, int cDim0, int cDim1);
 
+/* Typed complete-call GEMM. Strides are in elements; zero broadcasts an
+ * operand. Consecutive a_group/b_group batches share one physical matrix.
+ * Inputs have one dtype. Output is uniform or F16/BF16 -> F32. The caller
+ * owns workspace; querying it performs no GPU execution. */
+HIP_KERNEL_API int hip_gemm_workspace_size(
+    int M, int N, int K, int transA, int transB, int input_code,
+    int output_code, int batches, int a_group, int b_group, size_t *bytes);
+HIP_KERNEL_API int hip_gemm_strided_batched(
+    void *stream, const void *A, const void *B, const void *C, void *Y,
+    int M, int N, int K, float alpha, float beta, int transA, int transB,
+    int input_code, int output_code, int cDim0, int cDim1, int batches,
+    int64_t strideA, int64_t strideB, int64_t strideC, int64_t strideY,
+    int a_group, int b_group, void *workspace, size_t workspace_bytes);
+
 #ifdef __cplusplus
 }
 #endif

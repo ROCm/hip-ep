@@ -191,6 +191,33 @@ class TableTests(unittest.TestCase):
         self.assertEqual(row['old_status'], 'excluded')
         self.assertAlmostEqual(float(row['winner_over_old']), 1. / .9)
 
+    def test_reports_new_exact_keys_without_old_ratios(self):
+        for op in ('matmul_nbits', 'gqa', 'gemm'):
+            original = table.read_table(AUTOTUNE / op / 'lut/gfx1151.json')
+            point = table.inventory(op, original)[0][0]
+            record = synthetic(point)
+            source = self.root / (op + '-empty.json')
+            empty = copy.deepcopy(original)
+            empty['points'] = []
+            source.write_text(json.dumps(empty))
+            log = self.root / (op + '-addition.log')
+            log.write_text('UT_RANK ' + json.dumps(record) + '\n')
+            out = self.root / (op + '-addition.csv')
+            self.cli(op, 'rank-report', '--from-lut', source, '--rank-log', log, '--out', out)
+            with out.open() as stream:
+                row = next(csv.DictReader(stream))
+            self.assertEqual(row['key'], point['key'])
+            self.assertEqual(row['added'], 'True')
+            self.assertEqual(row['old_status'], 'absent_input_table')
+            for field in ('old_config', 'old_index', 'winner_over_old', 'old_over_default', 'old_ratio_phase'):
+                self.assertEqual(row[field], '')
+            self.assertEqual(float(row['winner_over_default']), .9)
+            summary = json.loads(out.with_suffix('.summary.json').read_text())
+            self.assertEqual(summary['added'], 1)
+            self.assertEqual(summary['unmeasured'], 0)
+            self.assertEqual(summary['distribution']['unavailable'], 1)
+            self.assertEqual(table.read_table(source), empty)
+
     def test_native_geometry_resolution_and_default_dedup(self):
         source = self.root / 'inputs.cpp'
         source.write_text(r'''
@@ -225,9 +252,19 @@ extern "C" int hipdnn_ut_gemm_select(const UtGemmShape*, const UtGemmConfig*) { 
 int main() {
   const auto shape = gemmRankShape("M16_N32_K64_ta0_tb1_bias_crows16_ccols1", 3);
   assert(shape.m == 16 && shape.dtype == 3 && shape.beta == 1 && shape.crows == 16 && shape.ccols == 1);
+  const auto grouped = gemmRankShape("M19_N128_K256_ta0_tb1_B8_ag1_bg4_sa8192_sb33792_sy2560", 0, 1);
+  assert(grouped.output == 1 && grouped.batches == 8 && grouped.b_group == 4 &&
+         grouped.stride_a == 8192 && grouped.stride_b == 33792 && grouped.stride_y == 2560);
+  const auto zero_stride = gemmRankShape("M2_N256_K4096_ta0_tb0_B4_ag2_bg1_sa0", 3, 1);
+  assert(zero_stride.a_group == 2 && zero_stride.stride_a == 0);
   for (const auto& bad_shape : {"M0_N32_K64_ta0_tb1", "M16_N32_K64_ta2_tb1", "M16_N32_K64_ta0_tb1_extra1",
       "M16_N32_K64_ta0_tb1_bias2", "M16_N32_K64_ta0_tb1_crows16", "M16_N32_K64_ta0_tb1_bias_crows2_ccols1"}) {
     bool bad = false; try { gemmRankShape(bad_shape, 0); } catch(const std::invalid_argument&) { bad = true; }
+    assert(bad);
+  }
+  for (const auto& bad_shape : {"M19_N128_K256_ta0_tb1_B0", "M19_N128_K256_ta0_tb1_B8_bg3",
+      "M19_N128_K256_ta0_tb1_B8_sy0", "M19_N128_K256_ta0_tb1_B65536"}) {
+    bool bad=false; try {gemmRankShape(bad_shape,0,1);}catch(const std::invalid_argument&){bad=true;}
     assert(bad);
   }
   auto gemm = gemmRankOptions(shape, RankRow{"", {"default", "id=1", "id=2", "geometry2"}, false}, [] {return 0.;});
@@ -306,6 +343,27 @@ int main() {
         self.assertEqual(doc, table.read_table(source))
         self.cli('gemm', 'rank-seed', '--from-lut', source.with_suffix('.fb'), '--out', output, success=False)
         self.cli('gemm', 'rank-seed', '--from-lut', source, '--out', source, success=False)
+
+    def test_gemm_output_batch_group_partitions_roundtrip(self):
+        doc = table.read_table(AUTOTUNE / 'gemm/lut/gfx1151.json')
+        template = next(p for p in doc['points'] if p['phase'] == 'Wmma' and p['act_dtype'] == 'F16')
+        template = dict(template, trans_b='NT')
+        points = [dict(template, m=19, n=128, k=256, out_dtype=out,
+                       batch_count=batch, a_group=1, b_group=group)
+                  for out, batch, group in [('F16', 1, 1), ('F32', 1, 1), ('F32', 8, 4), ('F32', 8, 2)]]
+        # uint16 indices survive the same importer with no renumbering.
+        doc['configs'] += [copy.deepcopy(doc['configs'][template['config']]) for _ in range(258)]
+        points[-1]['config'] = len(doc['configs']) - 1
+        self.assertGreater(points[-1]['config'], 255)
+        doc['points'] = points
+        before = copy.deepcopy(doc)
+        mapped, skipped = table.inventory('gemm', doc)
+        self.assertFalse(skipped)
+        self.assertEqual(len({p['key'] for p in mapped}), 4)
+        self.assertEqual(len({(p['leaf'], p['shape']) for p in mapped}), 4)
+        self.assertIn('_B8_ag1_bg4', mapped[2]['shape'])
+        table.update_points('gemm', doc, [synthetic(p) for p in mapped])
+        self.assertEqual(doc, before)
 
     def test_gpu_admission_boundary(self):
         source = self.root / 'phase.cpp'

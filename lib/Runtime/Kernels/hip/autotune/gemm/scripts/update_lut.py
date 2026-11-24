@@ -54,8 +54,8 @@ SHAPES = ROOT / "shapes" / "gemm_shapes.csv"
 sys.path.insert(0, str(COMMON))
 from dtype import NAME_TO_VALUE  # noqa: E402  (see autotune/common/dtype.py)
 
-SCHEMA_VERSION = 3
-KERNEL_ABI = "gemm-v2"
+SCHEMA_VERSION = 4
+KERNEL_ABI = "gemm-v3"
 
 PHASES = ("Wmma", "GemvNt", "GemvNn", "TiledFma")
 PHASE_TO_KIND = {"Wmma": "Wmma", "GemvNt": "Gemv", "GemvNn": "Gemv",
@@ -423,12 +423,13 @@ def cmd_build(args) -> int:
             "act_dtype": dtype_enum_name(act),
             "wts_dtype": dtype_enum_name(wts),
             "out_dtype": dtype_enum_name(act),  # out == act this round, §2.2
+            "batch_count": 1, "a_group": 1, "b_group": 1,
             "trans_b": "NT" if tb else "NN",
             "config": config_index(winner),
             "m": m, "n": n, "k": k,
         })
 
-    if len(pool) > 65535:
+    if len(pool) > 65536:
         print(f"[build] {len(pool)} distinct configs exceeds the uint16 "
               f"config index", file=sys.stderr)
         return 1
@@ -477,7 +478,9 @@ def compact_points(points):
     groups = collections.defaultdict(list)
     for point in points:
         key = (point["phase"], point["act_dtype"], point["wts_dtype"],
-               point.get("out_dtype"), point["trans_b"], point["n"], point["k"])
+               point.get("out_dtype"), point["trans_b"],
+               point.get("batch_count", 1), point.get("a_group", 1),
+               point.get("b_group", 1), point["n"], point["k"])
         groups[key].append(point)
     kept = []
     for key in sorted(groups):
@@ -493,7 +496,9 @@ def compact_points(points):
             i = j
     return sorted(kept, key=lambda p: (p["phase"], p["act_dtype"],
                                         p["wts_dtype"], p.get("out_dtype"),
-                                        p["trans_b"], p["n"], p["k"], p["m"],
+                                        p["trans_b"], p.get("batch_count", 1),
+                                        p.get("a_group", 1), p.get("b_group", 1),
+                                        p["n"], p["k"], p["m"],
                                         p["config"]))
 
 
@@ -502,14 +507,19 @@ def cmd_compact(args) -> int:
     dst = Path(args.out) if args.out else src
     with open(src, encoding="utf-8") as f:
         doc = json.load(f)
-    if doc.get("schema_version") != 2:
-        print(f"[compact] expected Q1 schema_version=2, got {doc.get('schema_version')}", file=sys.stderr)
+    if doc.get("schema_version") not in (2, 3, SCHEMA_VERSION):
+        print(f"[compact] unsupported schema_version={doc.get('schema_version')}", file=sys.stderr)
         return 1
-    if len(doc.get("configs", [])) > 255:
-        print("[compact] config pool exceeds uint8 range", file=sys.stderr)
+    if len(doc.get("configs", [])) > 65536:
+        print("[compact] config pool exceeds uint16 range", file=sys.stderr)
         return 1
     before = len(doc.get("points", []))
     doc["schema_version"] = SCHEMA_VERSION
+    doc["kernel_abi"] = KERNEL_ABI
+    for point in [*doc.get("points", []), *doc.get("fallbacks", [])]:
+        point.setdefault("out_dtype", point["act_dtype"])
+        for field in ("batch_count", "a_group", "b_group"):
+            point.setdefault(field, 1)
     doc["points"] = compact_points(doc.get("points", []))
     with open(dst, "w", encoding="utf-8") as f:
         json.dump(doc, f, indent=1, sort_keys=False)
@@ -558,8 +568,8 @@ import ut_lut_from_table
 def check_rank_table(doc):
     if doc.get("schema_version") != SCHEMA_VERSION or doc.get("kernel_abi") != KERNEL_ABI:
         raise ValueError("unsupported GEMM schema/kernel ABI")
-    if len(doc["configs"]) > 256:
-        raise ValueError("GEMM config index exceeds uint8")
+    if len(doc["configs"]) > 65536:
+        raise ValueError("GEMM config index exceeds uint16")
     for c in doc["configs"]:
         if c["kind"] not in ("Wmma", "Gemv", "TiledFma"):
             raise ValueError("unsupported GEMM config kind")
@@ -571,6 +581,12 @@ def check_rank_table(doc):
     for p in [*doc["points"], *doc.get("fallbacks", [])]:
         if not isinstance(p["config"], int) or not 0 <= p["config"] < len(doc["configs"]):
             raise ValueError("GEMM config index outside pool")
+        batches, ag, bg = (p[x] for x in ("batch_count", "a_group", "b_group"))
+        if any(not isinstance(x, int) or not 0 < x <= 65535 for x in (batches, ag, bg)) or batches % ag or batches % bg:
+            raise ValueError("GEMM invalid batch/shared-input grouping")
+        if p["act_dtype"] != p["wts_dtype"] or (p["out_dtype"] != p["act_dtype"] and
+                (p["act_dtype"] not in ("F16", "BF16") or p["out_dtype"] != "F32")):
+            raise ValueError("GEMM unsupported input/output dtype combination")
     for p in doc["points"]:
         if not 0 < p["m"] <= 65535 or not 0 < p["k"] <= 65535 or not 0 < p["n"] <= 2**32 - 1:
             raise ValueError("GEMM dimensions outside schema range")
