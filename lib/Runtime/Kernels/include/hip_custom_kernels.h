@@ -2639,7 +2639,8 @@ static inline int hip_norm_quant_supported(int64_t rows, int64_t norm_size,
  * group in the layout hip_matmul_nbits_quant_act_i8 produces: a_quant
  * receives norm_size int8 values, a_scale norm_size / 32 floats. The values
  * quantized are the fp16-rounded outputs, so the copy is bit-identical to
- * running hip_matmul_nbits_quant_act_i8 on `output`. Requires
+ * running hip_matmul_nbits_quant_act_i8 on `output`, and `output` itself is
+ * what hip_skip_rms_norm writes for the same row. Requires
  * hip_norm_quant_supported(outer, norm_size, 32).
  */
 HIP_KERNEL_API int hip_skip_rms_norm_quant(

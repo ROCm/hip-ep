@@ -16,7 +16,9 @@ A group whose activation comes from SkipSimplifiedLayerNormalization,
 HyperConnectionPreMix or HyperConnectionPostMix + BranchwiseRMSNorm reads the
 int8 copy of the row that the producer's kernel writes. That copy has to be
 bit-identical to the group quantizing the row itself, which
-TestGroupQuantCopyExact checks for every producer path, fallbacks included.
+TestGroupQuantCopyExact checks for every producer path, fallbacks included;
+it also checks that writing the copy leaves the skip norm's fp16 output as
+the norm alone computes it.
 """
 
 import numpy as np
@@ -547,6 +549,36 @@ class TestGroupQuantCopyExact:
             rng.uniform(-1, 1, [1, 1, K]).astype(np.float16),
         ]
         self._assert_exact(model_runner, nodes, inputs, inits, [], K, feeds)
+
+    @pytest.mark.parametrize("K", [2560, PHI35_HIDDEN, LLAMA31_HIDDEN, LLAMA2_HIDDEN])
+    def test_skip_norm_output_unchanged(self, model_runner, K):
+        """Writing the int8 copy must not change the norm's fp16 output: H from
+        a norm that feeds a group is bit-identical to H from the same norm with
+        no consumers, which takes the plain decode kernel."""
+        rng = np.random.default_rng(53)
+        gamma = rng.uniform(0.5, 1.5, [K]).astype(np.float16)
+        inits = [numpy_helper.from_array(gamma, name="gamma")]
+        norm = helper.make_node(
+            "SkipSimplifiedLayerNormalization",
+            ["X", "R", "gamma"],
+            ["H"],
+            domain="com.microsoft",
+            epsilon=1e-6,
+        )
+        inputs = [_f16_info("X", [1, 1, K]), _f16_info("R", [1, 1, K])]
+        feeds = [
+            rng.uniform(-4, 4, [1, 1, K]).astype(np.float16),
+            rng.uniform(-4, 4, [1, 1, K]).astype(np.float16),
+        ]
+        proj_nodes, proj_inits, proj_outs = _projections(rng, K)
+        h_out = _f16_info("H", [1, 1, K])
+        grouped = _model(
+            [norm] + proj_nodes, inputs, [h_out] + proj_outs, inits + proj_inits
+        )
+        alone = _model([norm], inputs, [h_out], inits)
+        got, _ = model_runner.run_sample(grouped, feeds, name=f"skip_norm_grouped_{K}")
+        want, _ = model_runner.run_sample(alone, feeds, name=f"skip_norm_alone_{K}")
+        np.testing.assert_array_equal(got[0], want[0])
 
     @pytest.mark.parametrize(
         "kind,C,H",
