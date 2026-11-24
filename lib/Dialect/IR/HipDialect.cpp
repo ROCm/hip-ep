@@ -198,12 +198,24 @@ LogicalResult RocMlirElementwiseOp::verify() {
   auto yield = cast<YieldOp>(body.getTerminator());
   if (yield.getValues().getTypes() != getResultTypes())
     return emitOpError("yields types that do not match the results");
+  // A static unit-stride slice is the input view that the anchor pass folds
+  // into the kernel's loads (absorbInputViews).
+  auto isStaticSlice = [](Operation &op) {
+    auto slice = dyn_cast<tensor::ExtractSliceOp>(op);
+    return slice && slice.getType().hasStaticShape() &&
+           slice.getSourceType().hasStaticShape() &&
+           slice.getSourceType().getRank() == slice.getType().getRank() &&
+           llvm::none_of(slice.getStaticOffsets(), ShapedType::isDynamic) &&
+           llvm::all_of(slice.getStaticStrides(),
+                        [](int64_t stride) { return stride == 1; });
+  };
   for (Operation &op : body.without_terminator()) {
     StringRef dialect = op.getDialect() ? op.getDialect()->getNamespace() : "";
     bool allowed = op.getNumRegions() == 0 &&
                    (dialect == HipDialect::getDialectNamespace() ||
                     isa<tensor::EmptyOp, tensor::ExpandShapeOp,
-                        tensor::CollapseShapeOp, arith::ConstantOp>(op));
+                        tensor::CollapseShapeOp, arith::ConstantOp>(op) ||
+                    isStaticSlice(op));
     if (!allowed)
       return op.emitOpError("is not allowed in a hip.rocmlir_elementwise body");
   }
@@ -2752,6 +2764,27 @@ void SwigluOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult SwigluOp::verify() {
+  if (!isClamped())
+    return success();
+  if (getPromoteActivation())
+    return emitOpError("promote_activation does not combine with the clamped "
+                       "form (activation_alpha, activation_beta, "
+                       "swiglu_limit)");
+  if (!std::isfinite(getActivationAlpha().convertToFloat()) ||
+      !std::isfinite(getActivationBeta().convertToFloat()))
+    return emitOpError("activation_alpha and activation_beta must be finite");
+  float limit = getSwigluLimit().convertToFloat();
+  if (!std::isfinite(limit) || limit < 0.0f)
+    return emitOpError("swiglu_limit must be finite and not negative (0 "
+                       "clamps nothing)");
+  Type element = getElementTypeOrSelf(getOutput().getType());
+  if (!element.isF32() && !element.isF16() && !element.isBF16())
+    return emitOpError("the clamped form takes f32, f16 or bf16, not ")
+           << element;
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
