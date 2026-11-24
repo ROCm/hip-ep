@@ -168,10 +168,12 @@ struct MatMulNBitsGroupOpLowering
       if (operand >= 3 || !rowOffsets || i >= nseg ||
           i >= static_cast<int64_t>(vals.size()) || (*rowOffsets)[i] == 0)
         return ptr;
-      return LLVM::GEPOp::create(
-          rewriter, loc, ptrType, i8Type, ptr,
-          ArrayRef<LLVM::GEPArg>{(*rowOffsets)[i] * rowBytes[operand]},
-          LLVM::GEPNoWrapFlags::inbounds);
+      // An SSA index: a constant GEPArg holds only 29 signed bits, which a
+      // row offset into a large weight can exceed.
+      return LLVM::GEPOp::create(rewriter, loc, ptrType, i8Type, ptr,
+                                 ArrayRef<LLVM::GEPArg>{createI64Const(
+                                     (*rowOffsets)[i] * rowBytes[operand])},
+                                 LLVM::GEPNoWrapFlags::inbounds);
     };
 
     auto AType = cast<MemRefType>(op.getA().getType());

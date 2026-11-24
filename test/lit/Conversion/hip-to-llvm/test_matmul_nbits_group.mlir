@@ -146,9 +146,37 @@ module {
   // 8 x 2 fp16 scales and 8 x 1 byte of packed zero points. The first member
   // (row 0) is passed as is.
   // CHECK-LABEL: llvm.func @group_row_offsets
-  // CHECK:       llvm.getelementptr inbounds %{{.*}}[256] : (!llvm.ptr) -> !llvm.ptr, i8
-  // CHECK:       llvm.getelementptr inbounds %{{.*}}[32] : (!llvm.ptr) -> !llvm.ptr, i8
-  // CHECK:       llvm.getelementptr inbounds %{{.*}}[8] : (!llvm.ptr) -> !llvm.ptr, i8
+  // CHECK:       %[[WOFF:.*]] = llvm.mlir.constant(256 : i64) : i64
+  // CHECK-NEXT:  llvm.getelementptr inbounds %{{.*}}[%[[WOFF]]] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+  // CHECK:       %[[SOFF:.*]] = llvm.mlir.constant(32 : i64) : i64
+  // CHECK-NEXT:  llvm.getelementptr inbounds %{{.*}}[%[[SOFF]]] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+  // CHECK:       %[[ZOFF:.*]] = llvm.mlir.constant(8 : i64) : i64
+  // CHECK-NEXT:  llvm.getelementptr inbounds %{{.*}}[%[[ZOFF]]] : (!llvm.ptr, i64) -> !llvm.ptr, i8
   // CHECK-NOT:   llvm.getelementptr
+  // CHECK:       llvm.call @wrap_matmul_nbits_group(
+
+  // A byte offset past 2^28 (10^7 rows x 32 bytes of weights) still reaches
+  // the GEP whole.
+  func.func @group_row_offsets_wide(%ctx: !hip.context,
+                                    %A: memref<1x1x64xf16, 1>,
+                                    %B: memref<10000004x2x16xui8, 1>,
+                                    %S: memref<10000004x2xf16, 1>,
+                                    %a: memref<1x1x8xf16, 1>,
+                                    %b: memref<1x1x4xf16, 1>) {
+    hip.matmul_nbits_group(%ctx) ins(%A : memref<1x1x64xf16, 1>)
+        weights(%B, %B : memref<10000004x2x16xui8, 1>,
+                         memref<10000004x2x16xui8, 1>)
+        scales(%S, %S : memref<10000004x2xf16, 1>, memref<10000004x2xf16, 1>)
+        outs(%a, %b : memref<1x1x8xf16, 1>, memref<1x1x4xf16, 1>)
+        {K = 64 : i64, N = [8, 4], bits = 4 : i64, block_size = 32 : i64,
+         accuracy_level = 4 : i64, row_offsets = array<i64: 0, 10000000>}
+    return
+  }
+
+  // CHECK-LABEL: llvm.func @group_row_offsets_wide
+  // CHECK:       %[[WOFF:.*]] = llvm.mlir.constant(320000000 : i64) : i64
+  // CHECK-NEXT:  llvm.getelementptr inbounds %{{.*}}[%[[WOFF]]] : (!llvm.ptr, i64) -> !llvm.ptr, i8
+  // CHECK:       %[[SOFF:.*]] = llvm.mlir.constant(40000000 : i64) : i64
+  // CHECK-NEXT:  llvm.getelementptr inbounds %{{.*}}[%[[SOFF]]] : (!llvm.ptr, i64) -> !llvm.ptr, i8
   // CHECK:       llvm.call @wrap_matmul_nbits_group(
 }
