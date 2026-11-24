@@ -115,6 +115,45 @@ extern "C" int hip_softmax_typed(RuntimeState *state, const void *input,
   }
 }
 
+// hip.scaled_masked_softmax: softmax over the last axis of [outer, R, C]
+// scores after the scale and the row_ids[r] == col_ids[c] mask (masked
+// elements take `fill`). The ids stay on the device; the kernel compares them
+// per element, so nothing here reads device memory.
+extern "C" int
+hip_scaled_masked_softmax(void *state, const void *input, const void *row_ids,
+                          const void *col_ids, void *output, int64_t outer,
+                          int64_t rows, int64_t cols, int64_t row_ids_len,
+                          int64_t col_ids_len, int64_t elem_size_bytes,
+                          float scale, float fill) {
+  RuntimeState *st = static_cast<RuntimeState *>(state);
+  OP_PROFILE(
+      "scaled_masked_softmax",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "%lldx%lldx%lld", (long long)outer,
+                 (long long)rows, (long long)cols);
+        return std::string(b);
+      },
+      st);
+  if (!state || !input || !row_ids || !col_ids || !output) {
+    fprintf(stderr, "[REAL] hip_scaled_masked_softmax: null argument\n");
+    return -1;
+  }
+  int rc = hip_softmax_row_scaled_masked(
+      hipdnn_ep_state_get_stream(st), input, output,
+      static_cast<const int64_t *>(row_ids), row_ids_len,
+      static_cast<const int64_t *>(col_ids), col_ids_len, outer, rows, cols,
+      scale, fill, static_cast<int>(elem_size_bytes));
+  if (rc != 0)
+    fprintf(stderr,
+            "[REAL] hip_scaled_masked_softmax: rejected outer=%lld R=%lld "
+            "C=%lld row_ids=%lld col_ids=%lld elem_size=%lld\n",
+            (long long)outer, (long long)rows, (long long)cols,
+            (long long)row_ids_len, (long long)col_ids_len,
+            (long long)elem_size_bytes);
+  return rc;
+}
+
 //===----------------------------------------------------------------------===//
 // GELU Activation (Custom HIP Kernel)
 //===----------------------------------------------------------------------===//
@@ -428,4 +467,32 @@ int wrap_swiglu_promoted(RuntimeState *state, void *gate, void *up,
   }
   return hip_swiglu_promoted(hipdnn_ep_state_get_stream(state), gate, up,
                              output, num_elements, HIP_DTYPE_FLOAT16);
+}
+
+int wrap_swiglu_clamped(RuntimeState *state, void *gate, void *up, void *output,
+                        int64_t num_elements, int64_t data_type, float alpha,
+                        float beta, float limit) {
+  OP_PROFILE(
+      "swiglu_clamped",
+      [&] { return std::string("n=") + std::to_string(num_elements); }, state);
+  if (!state || !gate || !up || !output) {
+    fprintf(stderr, "[REAL] wrap_swiglu_clamped: null argument\n");
+    return -1;
+  }
+  int hip_dtype = hipdnn_ep_to_hip_dtype_elementwise_unary(data_type);
+  if (hip_dtype != HIP_DTYPE_FLOAT32 && hip_dtype != HIP_DTYPE_FLOAT16 &&
+      hip_dtype != HIP_DTYPE_BFLOAT16) {
+    fprintf(stderr, "[REAL] wrap_swiglu_clamped: unsupported data_type %lld\n",
+            (long long)data_type);
+    return -1;
+  }
+  int result =
+      hip_swiglu_clamped(hipdnn_ep_state_get_stream(state), gate, up, output,
+                         num_elements, hip_dtype, alpha, beta, limit);
+  if (result != 0) {
+    fprintf(stderr, "[REAL] wrap_swiglu_clamped: kernel launch failed (%d)\n",
+            result);
+    return -1;
+  }
+  return 0;
 }

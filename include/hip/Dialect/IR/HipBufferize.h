@@ -152,6 +152,8 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     SwishOp::attachInterface<HipDstBufferizableModel<SwishOp>>(*ctx);
     PowOp::attachInterface<HipDstBufferizableModel<PowOp>>(*ctx);
     SwigluOp::attachInterface<HipDstBufferizableModel<SwigluOp>>(*ctx);
+    ScaledMaskedSoftmaxOp::attachInterface<
+        HipDstBufferizableModel<ScaledMaskedSoftmaxOp>>(*ctx);
     ResizeOp::attachInterface<HipDstBufferizableModel<ResizeOp>>(*ctx);
     GridSampleOp::attachInterface<HipDstBufferizableModel<GridSampleOp>>(*ctx);
     RoiAlignOp::attachInterface<HipDstBufferizableModel<RoiAlignOp>>(*ctx);

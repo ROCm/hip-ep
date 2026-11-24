@@ -10,7 +10,7 @@ namespace hip {
 namespace {
 
 // hip.causal_conv_with_state(%ctx)
-//   ins(%input, %weight, %bias, %past_state)
+//   ins(%input, %weight) bias(%bias) past_state(%past_state)
 //   outs(%output, %present_state)
 //   {activation = "silu", ndim = 1}
 // -> wrap_causal_conv_with_state(state, input, weight, bias, past_state,
