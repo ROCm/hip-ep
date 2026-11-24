@@ -111,7 +111,9 @@ bool canMakeAvailableBefore(mlir::Value v, mlir::Operation *point,
   // A value computed from `point` itself can never be moved above it.
   if (def == point)
     return false;
-  if (depth > 8 || def->getNumRegions() != 0 || !mlir::isMemoryEffectFree(def))
+  // isPure, not just memory-effect free: moveOperationDependencies refuses
+  // anything else, and by then earlier members' operands have already moved.
+  if (depth > 8 || def->getNumRegions() != 0 || !mlir::isPure(def))
     return false;
   return llvm::all_of(def->getOperands(), [&](mlir::Value operand) {
     return canMakeAvailableBefore(operand, point, depth + 1);
@@ -264,7 +266,8 @@ mlir::hip::SwigluOp matchSwiglu(mlir::hip::MatMulNBitsOp gate,
   auto swiglu = soleUserOf<mlir::hip::SwigluOp>(g);
   if (!swiglu || soleUserOf<mlir::hip::SwigluOp>(u) != swiglu ||
       swiglu.getGate() != g || swiglu.getUp() != u ||
-      swiglu.getPromoteActivation() || swiglu->getNumResults() != 1 ||
+      swiglu.getPromoteActivation() || swiglu.isClamped() ||
+      swiglu->getNumResults() != 1 ||
       swiglu->getResult(0).getType() != g.getType())
     return nullptr;
   return swiglu;
@@ -542,7 +545,9 @@ struct Piece {
 
 /// The column ranges `result` (N columns) is read through, in order, when its
 /// only readers are last-axis slices that together cover [0, N) without
-/// overlap, plus `tensor.dim` of its leading dims. Empty otherwise.
+/// overlap, plus `tensor.dim` of its leading dims. Empty otherwise, and empty
+/// when a range is one column wide: a member's N = 1 would reach the
+/// single-column GEMV paths, which the split form gains nothing from.
 llvm::SmallVector<Piece> columnPieces(mlir::Value result, int64_t n) {
   auto type = mlir::dyn_cast<mlir::RankedTensorType>(result.getType());
   if (!type || type.getRank() < 1)
@@ -573,7 +578,7 @@ llvm::SmallVector<Piece> columnPieces(mlir::Value result, int64_t n) {
   });
   int64_t next = 0;
   for (const Piece &p : pieces) {
-    if (p.offset != next || p.size <= 0)
+    if (p.offset != next || p.size < 2)
       return {};
     next += p.size;
   }

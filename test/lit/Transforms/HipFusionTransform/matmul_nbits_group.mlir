@@ -632,6 +632,62 @@ func.func @overlapping_slices_not_split(%ctx: !hip.context, %x: tensor<1x1x64xf1
 
 // -----
 
+// A one-column slice would make an N = 1 member, so the output is kept whole.
+// CHECK-LABEL: func.func @width_one_slice_not_split
+// CHECK-NOT:     hip.matmul_nbits_group
+// CHECK:         hip.matmul_nbits(
+// CHECK-COUNT-2: tensor.extract_slice
+func.func @width_one_slice_not_split(%ctx: !hip.context, %x: tensor<1x1x64xf16>,
+                                     %b: tensor<12x2x16xui8>, %s: tensor<12x2xf16>)
+    -> (tensor<1x1x11xf16>, tensor<1x1x1xf16>) {
+  %e = tensor.empty() : tensor<1x1x12xf16>
+  %y = hip.matmul_nbits(%ctx) ins(%x, %b, %s :
+      tensor<1x1x64xf16>, tensor<12x2x16xui8>, tensor<12x2xf16>)
+      outs(%e : tensor<1x1x12xf16>)
+      {K = 64 : i64, N = 12 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x1x12xf16>
+  %a = tensor.extract_slice %y[0, 0, 0] [1, 1, 11] [1, 1, 1]
+      : tensor<1x1x12xf16> to tensor<1x1x11xf16>
+  %c = tensor.extract_slice %y[0, 0, 11] [1, 1, 1] [1, 1, 1]
+      : tensor<1x1x12xf16> to tensor<1x1x1xf16>
+  return %a, %c : tensor<1x1x11xf16>, tensor<1x1x1xf16>
+}
+
+// -----
+
+// The clamped SwiGLU computes something other than the silu_mul epilogue, so
+// the pair is grouped with the concat epilogue and the swiglu stays.
+// CHECK-LABEL: func.func @clamped_swiglu_not_fused
+// CHECK:         %[[G:.*]]:2 = hip.matmul_nbits_group
+// CHECK-NOT:       epilogue
+// CHECK:         hip.swiglu(%{{.*}}) ins(%[[G]]#0, %[[G]]#1 :
+// CHECK-SAME:      swiglu_limit = 7.000000e+00
+func.func @clamped_swiglu_not_fused(%ctx: !hip.context, %x: tensor<1x1x64xf16>,
+                                    %bg: tensor<128x2x16xui8>, %sg: tensor<128x2xf16>,
+                                    %bu: tensor<128x2x16xui8>, %su: tensor<128x2xf16>)
+    -> tensor<1x1x128xf16> {
+  %eg = tensor.empty() : tensor<1x1x128xf16>
+  %g = hip.matmul_nbits(%ctx) ins(%x, %bg, %sg :
+      tensor<1x1x64xf16>, tensor<128x2x16xui8>, tensor<128x2xf16>)
+      outs(%eg : tensor<1x1x128xf16>)
+      {K = 64 : i64, N = 128 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x1x128xf16>
+  %eu = tensor.empty() : tensor<1x1x128xf16>
+  %u = hip.matmul_nbits(%ctx) ins(%x, %bu, %su :
+      tensor<1x1x64xf16>, tensor<128x2x16xui8>, tensor<128x2xf16>)
+      outs(%eu : tensor<1x1x128xf16>)
+      {K = 64 : i64, N = 128 : i64, bits = 4 : i64, block_size = 32 : i64,
+       accuracy_level = 4 : i64, zp_elem_size = 0 : i64} : tensor<1x1x128xf16>
+  %ey = tensor.empty() : tensor<1x1x128xf16>
+  %y = hip.swiglu(%ctx) ins(%g, %u : tensor<1x1x128xf16>, tensor<1x1x128xf16>)
+      outs(%ey : tensor<1x1x128xf16>)
+      {activation_alpha = 1.702 : f32, activation_beta = 1.0 : f32,
+       swiglu_limit = 7.0 : f32} : tensor<1x1x128xf16>
+  return %y : tensor<1x1x128xf16>
+}
+
+// -----
+
 // Five slices would need five members; a group holds four.
 // CHECK-LABEL: func.func @five_slices_not_split
 // CHECK-NOT:     hip.matmul_nbits_group
