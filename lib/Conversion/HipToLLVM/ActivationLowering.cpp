@@ -5,6 +5,8 @@
 
 #include "HipToLLVMUtils.h"
 
+#include <limits>
+
 namespace mlir {
 namespace hip {
 namespace {
@@ -459,6 +461,8 @@ struct PowOpLowering : public ConvertOpToLLVMPattern<PowOp> {
 
 // hip.swiglu(ctx, gate, up, output)
 //   -> wrap_swiglu(state, gate, up, output, num_elements, data_type)
+// The clamped form (activation_alpha / activation_beta / swiglu_limit):
+//   -> wrap_swiglu_clamped(<same>, alpha, beta, limit : f32)
 struct SwigluOpLowering : public ConvertOpToLLVMPattern<SwigluOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -508,6 +512,37 @@ struct SwigluOpLowering : public ConvertOpToLLVMPattern<SwigluOp> {
           op, "promoted SwiGLU requires f16 input/output");
 
     Value dataTypeVal = createI64Const(dataType);
+    if (op.isClamped()) {
+      // wrap_swiglu_clamped(..., alpha, beta, limit : f32); limit 0 (no
+      // clamp) is passed as +inf.
+      Type f32Type = rewriter.getF32Type();
+      auto createF32Const = [&](float value) -> Value {
+        return LLVM::ConstantOp::create(rewriter, loc, f32Type,
+                                        rewriter.getF32FloatAttr(value));
+      };
+      const float limit = op.getSwigluLimit().convertToFloat();
+      SmallVector<Type, 9> clampedTypes = {ptrType, ptrType, ptrType,
+                                           ptrType, i64Type, i64Type,
+                                           f32Type, f32Type, f32Type};
+      FailureOr<LLVM::LLVMFuncOp> clampedFn = LLVM::lookupOrCreateFn(
+          rewriter, module, kWrapSwigluClamped, clampedTypes, i32Type);
+      if (failed(clampedFn))
+        return failure();
+      SmallVector<Value, 9> clampedArgs = {
+          statePtr,
+          gatePtr,
+          upPtr,
+          outputPtr,
+          numElements,
+          dataTypeVal,
+          createF32Const(op.getActivationAlpha().convertToFloat()),
+          createF32Const(op.getActivationBeta().convertToFloat()),
+          createF32Const(
+              limit != 0.0f ? limit : std::numeric_limits<float>::infinity())};
+      LLVM::CallOp::create(rewriter, loc, *clampedFn, clampedArgs);
+      rewriter.eraseOp(op);
+      return success();
+    }
     SmallVector<Type, 6> paramTypes = {ptrType, ptrType, ptrType,
                                        ptrType, i64Type, i64Type};
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
@@ -623,6 +658,75 @@ struct MiopenSoftmaxOpLowering
   }
 };
 
+// hip.scaled_masked_softmax(ctx, input, row_ids, col_ids, output)
+//   -> hip_scaled_masked_softmax(state, input, row_ids, col_ids, output,
+//                                outer, R, C, row_ids_len, col_ids_len,
+//                                elem_size_bytes, scale, fill)
+// R and C are the last two input axes and outer is the product of the rest.
+struct ScaledMaskedSoftmaxOpLowering
+    : public ConvertOpToLLVMPattern<ScaledMaskedSoftmaxOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(ScaledMaskedSoftmaxOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type indexType = getIndexType();
+    Type f32Type = rewriter.getF32Type();
+
+    auto inputType = cast<MemRefType>(op.getInput().getType());
+    int rank = inputType.getRank();
+    int64_t elemSizeBytes = inputType.getElementType().isF16() ? 2 : 4;
+
+    SmallVector<Type> paramTypes = {ptrType,   ptrType,   ptrType,   ptrType,
+                                    ptrType,   indexType, indexType, indexType,
+                                    indexType, indexType, indexType, f32Type,
+                                    f32Type};
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kScaledMaskedSoftmax, paramTypes, getVoidType());
+    if (failed(funcOp))
+      return failure();
+
+    MemRefDescriptor inputDesc(adaptor.getInput());
+    Value cols = inputDesc.size(rewriter, loc, rank - 1);
+    Value rows = inputDesc.size(rewriter, loc, rank - 2);
+    Value outer = createIndexAttrConstant(rewriter, loc, indexType, 1);
+    for (int i = 0; i < rank - 2; ++i)
+      outer = LLVM::MulOp::create(rewriter, loc, outer,
+                                  inputDesc.size(rewriter, loc, i));
+    Value rowIdsLen =
+        MemRefDescriptor(adaptor.getRowIds()).size(rewriter, loc, 0);
+    Value colIdsLen =
+        MemRefDescriptor(adaptor.getColIds()).size(rewriter, loc, 0);
+    auto f32Const = [&](llvm::APFloat value) -> Value {
+      return LLVM::ConstantOp::create(
+          rewriter, loc, f32Type,
+          rewriter.getF32FloatAttr(value.convertToFloat()));
+    };
+
+    SmallVector<Value> args = {
+        adaptor.getCtx(),
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getRowIds(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getColIds(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc),
+        outer,
+        rows,
+        cols,
+        rowIdsLen,
+        colIdsLen,
+        createIndexAttrConstant(rewriter, loc, indexType, elemSizeBytes),
+        f32Const(op.getScale()),
+        f32Const(op.getFill())};
+
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 // hip.prelu(ctx, x, slope, output)
 //   -> wrap_prelu(state, x, slope, output, x_shape, x_rank, slope_shape,
 //                 slope_rank, out_shape, out_rank, data_type)
@@ -719,8 +823,8 @@ void populateActivationLoweringPatterns(const LLVMTypeConverter &converter,
                                         RewritePatternSet &patterns) {
   patterns.add<SoftplusOpLowering, GeluOpLowering, LeakyReluOpLowering,
                PReluOpLowering, LRNOpLowering, SwishOpLowering, PowOpLowering,
-               SwigluOpLowering, SiluOpLowering, MiopenSoftmaxOpLowering>(
-      converter);
+               SwigluOpLowering, SiluOpLowering, MiopenSoftmaxOpLowering,
+               ScaledMaskedSoftmaxOpLowering>(converter);
 }
 
 } // namespace hip

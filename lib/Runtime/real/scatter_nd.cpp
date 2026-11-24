@@ -132,7 +132,7 @@ int wrap_scatter_nd(RuntimeState *state, void *data, void *indices,
     for (int64_t d = 0; d < data_rank; ++d)
       data_num_elements *= data_shape[d];
     int64_t elem_size = hipdnn_ep_datatype_size(data_type);
-    if (data_num_elements > 0 && elem_size > 0) {
+    if (data_num_elements > 0 && elem_size > 0 && output != data) {
       hipError_t err = hipMemcpyAsync(output, data,
                                       static_cast<size_t>(data_num_elements) *
                                           static_cast<size_t>(elem_size),
