@@ -32,6 +32,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | ScaledSiLU (`com.microsoft`) | Decomposed to Mul + Swish (alpha 1). f16/f32 |
 | GatedAdd (`com.microsoft`) | Decomposed to Mul + Add. f16/f32, rank 1-4 |
 | SwiGLU (`hip.sigmoid` followed by two `hip.mul`) | Fused by `hip-fusion-transform` into one custom HIP kernel when the tensors are identical f16/f32/bf16/f64, each dynamic axis traces to the same runtime extent, and the intermediates have no other value uses |
+| GEGLU (two last-axis halves of one projection; exact erf-GELU on the second half as primitives or `Gelu`, then gating `Mul`) | Rewritten by the ONNX frontend to `hip.geglu` (one pass over the projection). f16/f32, static last axis, intermediates used only by the chain |
 | BiasGelu (`com.microsoft`) | Custom HIP kernel |
 | FastGelu (`com.microsoft`) | Custom HIP kernel |
 | Reciprocal | Custom HIP kernel |
@@ -183,4 +184,4 @@ These operations are handled through standard MLIR transformations and generally
 
 ## Fusion and preprocessing
 
-The frontend also recognizes or simplifies selected patterns before operation conversion, including approximate/FastGelu chains, Erf-based Gelu chains, the exported GroupNorm decomposition (Reshape to `[0, G, -1]`, InstanceNormalization with unit scale and zero bias, Reshape back, per-channel Mul/Add and an optional SiLU, fused into one GroupNorm; the unit scale and zero bias must be inline constants, so an initializer above the ORT bridge copy threshold keeps the unfused form), supported Pow forms, LpNormalization decompositions, CastLike simplification, and model-exporter cleanup patterns.
+The frontend also recognizes or simplifies selected patterns before operation conversion, including approximate/FastGelu chains, Erf-based Gelu chains, GEGLU (two last-axis halves of one projection with exact erf-GELU on the second half and a gating Mul, rewritten to `hip.geglu`), the exported GroupNorm decomposition (Reshape to `[0, G, -1]`, InstanceNormalization with unit scale and zero bias, Reshape back, per-channel Mul/Add and an optional SiLU, fused into one GroupNorm; the unit scale and zero bias must be inline constants, so an initializer above the ORT bridge copy threshold keeps the unfused form), supported Pow forms, LpNormalization decompositions, CastLike simplification, and model-exporter cleanup patterns.
