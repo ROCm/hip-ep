@@ -3429,12 +3429,16 @@ static const int* findDp4aGroupConfig(const Dp4aGroupKey& key) {
     return nullptr;
 }
 
-// Seeded with the widest segment's single-weight config; another config
-// replaces it only when at least 5% faster, so a shape whose candidates time
-// within noise keeps the same config, and the same summation order, from run
-// to run. Segment order follows the graph, and seeding from a narrow k_proj
-// left Llama-3.1-8B's q/k/v (1024+4096+1024) on 32x2 at 0.0997 ms, under the
-// tuning floor, where the q_proj config 128x2 runs it in 0.054 ms.
+// Seeded with the widest segment's single-weight config.
+// HIPDNN_EP_MATMUL_DP4A_CFG takes the seed as is, as it pins every other dp4a
+// GEMV. Otherwise the candidates are timed, in lookup mode too: the LUT has no
+// group shapes, and decode measured slower on the seed alone than on the timed
+// pick. Another config replaces the seed only when at least 5% faster, so a
+// shape whose candidates time within noise keeps the same config, and the same
+// summation order, from run to run. Segment order follows the graph, and
+// seeding from a narrow k_proj left Llama-3.1-8B's q/k/v (1024+4096+1024) on
+// 32x2 at 0.0997 ms, under the tuning floor, where the q_proj config 128x2
+// runs it in 0.054 ms.
 //
 // How it times matters more than what it times; each rule below was a
 // misranking measured in the model:
@@ -3472,8 +3476,14 @@ static int getOrTuneDp4aGroupConfig(hipStream_t stream, const int8_t* a_qb,
     std::lock_guard<std::mutex> lock(dp4a_group_tune_mutex);
     if (const int* hit = findDp4aGroupConfig(key))
         return *hit;
+    if (dp4aConfigOverride() >= 0) {
+        dp4a_group_cache.emplace_back(key, seed);
+        return seed;
+    }
 
     (void)hipStreamSynchronize(stream);
+    // Attribute a failure below to the tuning launches, not an earlier kernel.
+    (void)hipGetLastError();
     hipStream_t ts = nullptr;
     if (hipStreamCreateWithFlags(&ts, hipStreamNonBlocking) != hipSuccess)
         ts = stream;
@@ -3556,6 +3566,15 @@ static int getOrTuneDp4aGroupConfig(hipStream_t stream, const int8_t* a_qb,
     }
 
     (void)hipStreamSynchronize(ts);
+    // Timings from a failed launch rank nothing; keep the seed.
+    const hipError_t tune_err = hipGetLastError();
+    if (tune_err != hipSuccess) {
+        fprintf(stderr,
+                "[custom_kernels] dp4a group autotune launch failed (%s); "
+                "keeping config[%d]\n",
+                hipGetErrorString(tune_err), seed);
+        best_id = seed;
+    }
     if (evict)
         hipFree(evict);
     if (ts != stream)
@@ -3636,6 +3655,7 @@ extern "C" int hip_matmul_nbits_dp4a_group(
 
     const int cfg =
         getOrTuneDp4aGroupConfig(stream, a_qb, a_sc, g, K, block_size, epilogue);
+    (void)hipGetLastError();
     launchDp4aGroup(cfg, epilogue, stream, a_qb, a_sc, g, K, block_size);
     return hipGetLastError();
 }
