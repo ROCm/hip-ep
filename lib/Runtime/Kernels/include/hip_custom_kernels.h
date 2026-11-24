@@ -1351,6 +1351,15 @@ HIP_KERNEL_API int hip_mha_flash_prefill_bsnd(
     void* stream, const void* Q, const void* K, const void* V, void* O,
     int B, int N, int sq, int skv, int d, float scale);
 
+/* hip_mha_flash_prefill_bsnd_kv: hip_mha_flash_prefill_bsnd on K and V
+ * transposed to [B, N, skv, d] (what hip_mha_flash_prefill takes); Q and O
+ * stay [B, sq, N, d]. For long key ranges: every block of a head reads all of
+ * that head's keys, which in place sit a whole position (N * d) apart. Same
+ * limits and return values. */
+HIP_KERNEL_API int hip_mha_flash_prefill_bsnd_kv(
+    void* stream, const void* Q, const void* K, const void* V, void* O,
+    int B, int N, int sq, int skv, int d, float scale);
+
 /* FA-2 split-K GQA decode (sq == 1, d in {64, 96, 128, 256},
  * HPG=H/G in {1,2,3,4,5,6,8,16}, and HPG=9 at d == 128):
  * GQA-aware kernel that loads K/V tiles into LDS once and reuses them

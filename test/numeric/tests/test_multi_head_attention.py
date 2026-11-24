@@ -193,6 +193,40 @@ class TestMultiHeadAttention:
         actual, expected = model_runner.run_sample(model, [q, k, v])
         compare_outputs(actual, expected, atol=1e-2, rtol=1e-2, cos_threshold=0.999)
 
+    @pytest.mark.parametrize(
+        "batch, seq_q, seq_kv, num_heads, head_dim",
+        [
+            (1, 96, 4500, 16, 64),
+            (2, 80, 5000, 12, 72),
+        ],
+    )
+    def test_flash_prefill_long_key_range(
+        self, model_runner, batch, seq_q, seq_kv, num_heads, head_dim
+    ):
+        """Key ranges long enough that K and V are read per head.
+
+        From 8 MiB of K per batch item the runtime transposes K and V to
+        [B, N, S, H] and the BSND kernel reads those instead of the in-place
+        layout. Both shapes are just past that, and both end in a partial key
+        tile and a partial query block; the second also pads its head dim
+        (72 -> 80) and has two batch items.
+
+        Q and K are drawn wider than V so that the attention is peaked: an
+        output row then depends on which keys its query matched, so K or V
+        rows taken from the wrong head or position change it.
+        """
+        assert seq_kv * num_heads * head_dim * 2 >= 8 << 20
+        model = _make_mha_model(batch, seq_q, seq_kv, num_heads, head_dim)
+
+        rng = np.random.default_rng(7)
+        hidden = num_heads * head_dim
+        q = rng.uniform(-2.5, 2.5, [batch, seq_q, hidden]).astype(np.float16)
+        k = rng.uniform(-2.5, 2.5, [batch, seq_kv, hidden]).astype(np.float16)
+        v = rng.uniform(-1.0, 1.0, [batch, seq_kv, hidden]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [q, k, v])
+        compare_outputs(actual, expected, atol=1e-2, rtol=1e-2, cos_threshold=0.999)
+
     def test_self_attention_llama_shape(self, model_runner):
         """Self-attention at the Llama-style shape used in the LIT e2e test.
 

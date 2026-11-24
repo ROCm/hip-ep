@@ -519,7 +519,7 @@ mha_flash_bsnd_kernel(const _Float16 *__restrict__ Q,
                       const _Float16 *__restrict__ K,
                       const _Float16 *__restrict__ V,
                       _Float16 *__restrict__ O, int N, int sq, int skv, int d,
-                      float scale_log2) {
+                      float scale_log2, int kvBnsd) {
   constexpr int kTile = 16;
   constexpr int D_TILES = D_PAD / kTile;
   constexpr int S_TILES = BKV / kTile;
@@ -543,10 +543,17 @@ mha_flash_bsnd_kernel(const _Float16 *__restrict__ Q,
   const int k_off = hipdnn_wmma_k_off(pair);
 
   const size_t rowStride = static_cast<size_t>(N) * d; // one sequence position
-  const _Float16 *kBase =
-      K + static_cast<size_t>(batch) * skv * rowStride + head * d;
-  const _Float16 *vBase =
-      V + static_cast<size_t>(batch) * skv * rowStride + head * d;
+  // K/V are either in place, [B, skv, N, d], where consecutive keys of a head
+  // are a whole position apart, or [B, N, skv, d] with a head's keys back to
+  // back. Every block of a head stages all of that head's keys, so they are
+  // read once per block: in place that is from N times the address range, at
+  // one fixed offset within every position.
+  const size_t kvStride = kvBnsd ? static_cast<size_t>(d) : rowStride;
+  const size_t kvHead =
+      kvBnsd ? (static_cast<size_t>(batch) * N + head) * skv * d
+             : static_cast<size_t>(batch) * skv * rowStride + head * d;
+  const _Float16 *kBase = K + kvHead;
+  const _Float16 *vBase = V + kvHead;
 
   const int q = (blockIdx.x * NW + wave) * kTile + col;
   const bool qValid = q < sq;
@@ -591,11 +598,11 @@ mha_flash_bsnd_kernel(const _Float16 *__restrict__ Q,
         const int kr = i / kChunks, kc = i % kChunks;
         if (kr < keys && kc * 8 < d)
           kReg[r] = *reinterpret_cast<const mha_half8_t *>(
-              kBase + static_cast<size_t>(kv0 + kr) * rowStride + kc * 8);
+              kBase + static_cast<size_t>(kv0 + kr) * kvStride + kc * 8);
         const int vr = i % BKV, vc = i / BKV;
         if (vr < keys && vc * 8 < d)
           vReg[r] = *reinterpret_cast<const mha_half8_t *>(
-              vBase + static_cast<size_t>(kv0 + vr) * rowStride + vc * 8);
+              vBase + static_cast<size_t>(kv0 + vr) * kvStride + vc * 8);
       }
     }
   };
@@ -742,25 +749,19 @@ mha_flash_bsnd_kernel(const _Float16 *__restrict__ Q,
 template <int D_PAD, int NW, int BKV>
 int launchMhaBsnd(hipStream_t stream, const _Float16 *q, const _Float16 *k,
                   const _Float16 *v, _Float16 *o, int B, int N, int sq, int skv,
-                  int d, float scale) {
+                  int d, float scale, int kvBnsd) {
   constexpr float kLog2eF = 1.4426950408889634f;
   const dim3 grid((sq + NW * 16 - 1) / (NW * 16), N, B);
   (void)hipGetLastError();
   mha_flash_bsnd_kernel<D_PAD, NW, BKV><<<grid, NW * 32, 0, stream>>>(
-      q, k, v, o, N, sq, skv, d, scale * kLog2eF);
+      q, k, v, o, N, sq, skv, d, scale * kLog2eF, kvBnsd);
   return hipGetLastError() == hipSuccess ? 0 : -1;
 }
 
-} // namespace
-
-// Q [B,sq,N,d], K/V [B,skv,N,d], O [B,sq,N,d]; fp16. Returns 1 without
-// launching when the shape or alignment is outside what the kernel takes (the
-// caller then transposes K/V for hip_mha_flash_prefill), 0 on success and -1
-// on a launch failure.
-extern "C" int hip_mha_flash_prefill_bsnd(void *stream, const void *Q,
-                                          const void *K, const void *V, void *O,
-                                          int B, int N, int sq, int skv, int d,
-                                          float scale) {
+// Both entry points: kvBnsd is 0 for K/V [B,skv,N,d], 1 for [B,N,skv,d].
+int mhaFlashBsnd(void *stream, const void *Q, const void *K, const void *V,
+                 void *O, int B, int N, int sq, int skv, int d, float scale,
+                 int kvBnsd) {
   auto aligned16 = [](const void *p) {
     return (reinterpret_cast<uintptr_t>(p) & 15u) == 0;
   };
@@ -782,19 +783,44 @@ extern "C" int hip_mha_flash_prefill_bsnd(void *stream, const void *Q,
   // and from d80 on the 64-key tile no longer fits in registers.
   const bool shortKeys = skv <= 128;
   if (d_pad <= 16)
-    return shortKeys ? launchMhaBsnd<16, 4, 32>(s, q, k, v, o, B, N, sq, skv, d, scale)
-                     : launchMhaBsnd<16, 4, 64>(s, q, k, v, o, B, N, sq, skv, d, scale);
+    return shortKeys ? launchMhaBsnd<16, 4, 32>(s, q, k, v, o, B, N, sq, skv, d, scale, kvBnsd)
+                     : launchMhaBsnd<16, 4, 64>(s, q, k, v, o, B, N, sq, skv, d, scale, kvBnsd);
   if (d_pad <= 32)
-    return shortKeys ? launchMhaBsnd<32, 4, 32>(s, q, k, v, o, B, N, sq, skv, d, scale)
-                     : launchMhaBsnd<32, 4, 64>(s, q, k, v, o, B, N, sq, skv, d, scale);
+    return shortKeys ? launchMhaBsnd<32, 4, 32>(s, q, k, v, o, B, N, sq, skv, d, scale, kvBnsd)
+                     : launchMhaBsnd<32, 4, 64>(s, q, k, v, o, B, N, sq, skv, d, scale, kvBnsd);
   if (d_pad <= 48)
-    return shortKeys ? launchMhaBsnd<48, 4, 32>(s, q, k, v, o, B, N, sq, skv, d, scale)
-                     : launchMhaBsnd<48, 4, 64>(s, q, k, v, o, B, N, sq, skv, d, scale);
+    return shortKeys ? launchMhaBsnd<48, 4, 32>(s, q, k, v, o, B, N, sq, skv, d, scale, kvBnsd)
+                     : launchMhaBsnd<48, 4, 64>(s, q, k, v, o, B, N, sq, skv, d, scale, kvBnsd);
   if (d_pad <= 64)
-    return shortKeys ? launchMhaBsnd<64, 4, 32>(s, q, k, v, o, B, N, sq, skv, d, scale)
-                     : launchMhaBsnd<64, 4, 64>(s, q, k, v, o, B, N, sq, skv, d, scale);
-  if (d_pad <= 80) return launchMhaBsnd<80, 4, 32>(s, q, k, v, o, B, N, sq, skv, d, scale);
-  if (d_pad <= 96) return launchMhaBsnd<96, 4, 32>(s, q, k, v, o, B, N, sq, skv, d, scale);
-  if (d_pad <= 128) return launchMhaBsnd<128, 4, 32>(s, q, k, v, o, B, N, sq, skv, d, scale);
-  return launchMhaBsnd<160, 8, 32>(s, q, k, v, o, B, N, sq, skv, d, scale);
+    return shortKeys ? launchMhaBsnd<64, 4, 32>(s, q, k, v, o, B, N, sq, skv, d, scale, kvBnsd)
+                     : launchMhaBsnd<64, 4, 64>(s, q, k, v, o, B, N, sq, skv, d, scale, kvBnsd);
+  if (d_pad <= 80) return launchMhaBsnd<80, 4, 32>(s, q, k, v, o, B, N, sq, skv, d, scale, kvBnsd);
+  if (d_pad <= 96) return launchMhaBsnd<96, 4, 32>(s, q, k, v, o, B, N, sq, skv, d, scale, kvBnsd);
+  if (d_pad <= 128) return launchMhaBsnd<128, 4, 32>(s, q, k, v, o, B, N, sq, skv, d, scale, kvBnsd);
+  return launchMhaBsnd<160, 8, 32>(s, q, k, v, o, B, N, sq, skv, d, scale, kvBnsd);
+}
+
+} // namespace
+
+// Q [B,sq,N,d], K/V [B,skv,N,d], O [B,sq,N,d]; fp16. Returns 1 without
+// launching when the shape or alignment is outside what the kernel takes (the
+// caller then transposes K/V for hip_mha_flash_prefill), 0 on success and -1
+// on a launch failure.
+extern "C" int hip_mha_flash_prefill_bsnd(void *stream, const void *Q,
+                                          const void *K, const void *V, void *O,
+                                          int B, int N, int sq, int skv, int d,
+                                          float scale) {
+  return mhaFlashBsnd(stream, Q, K, V, O, B, N, sq, skv, d, scale, 0);
+}
+
+// The same kernel on K/V transposed to [B,N,skv,d], the layout
+// hip_mha_flash_prefill takes; Q and O stay [B,sq,N,d]. For key ranges long
+// enough that reading a head's keys from between the other heads' costs more
+// than the two transposes (16 heads x 64 over 9460 keys on gfx1150: 46-310 ms
+// in place, depending on where the buffers land, against 40-46 ms).
+extern "C" int hip_mha_flash_prefill_bsnd_kv(void *stream, const void *Q,
+                                             const void *K, const void *V,
+                                             void *O, int B, int N, int sq,
+                                             int skv, int d, float scale) {
+  return mhaFlashBsnd(stream, Q, K, V, O, B, N, sq, skv, d, scale, 1);
 }

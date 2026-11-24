@@ -492,22 +492,47 @@ extern "C" int wrap_multi_head_attention(
   // on launch, so wave64 takes the decomposed path instead.
   if (Sq > 1 && unidirectional != 1 && (((H + 15) / 16) * 16) <= 256 &&
       !hipdnn_device_is_wave64()) {
-    // Q, K, V and O are all BSND here, which the BSND kernel reads in place;
-    // it declines (rc 1) the head dims and alignments it does not take.
-    OP_ROCTX_MARK("hip_ep.op.multi_head_attention.attn.flash_bsnd");
-    const int bsnd_rc = hip_mha_flash_prefill_bsnd(
-        stream, query, key, value, output, static_cast<int>(B),
-        static_cast<int>(N), static_cast<int>(Sq), static_cast<int>(Skv),
-        static_cast<int>(H), scale);
-    if (bsnd_rc == 0)
-      return 0;
-    if (bsnd_rc < 0) {
-      fprintf(stderr,
-              "[multi_head_attention] ERROR: hip_mha_flash_prefill_bsnd failed "
-              "for B=%lld N=%lld Sq=%lld Skv=%lld H=%lld\n",
-              (long long)B, (long long)N, (long long)Sq, (long long)Skv,
-              (long long)H);
-      return -1;
+    // Q, K, V and O are all BSND here. The BSND kernel reads Q and writes O in
+    // place and takes K/V either in place or transposed to BNSD; it declines
+    // (rc 1) the head dims and alignments it does not take.
+    //
+    // Every block of a head reads all of that head's keys, and in place those
+    // sit a whole position (N * H) apart, at one offset within each. Over a
+    // long key range the staging loads then cost far more than the two
+    // transposes that put a head's keys back to back: 16 heads of 64 over 9460
+    // keys took 64-125 ms a layer in place on Strix Halo, against 29 ms for
+    // the transposing kernel. Short key ranges (the SD1.5 UNet's) time the
+    // same in either layout, so they keep the in-place read and skip the
+    // transposes.
+    constexpr size_t kKvContigMinBytes = size_t{8} << 20; // K, one batch item
+    const bool kv_contig = (size_t)Skv * N * H * 2 >= kKvContigMinBytes;
+    // Logs the outcome of a BSND launch and passes its rc through.
+    auto bsnd_result = [&](int bsnd_rc, const char *kv_layout) {
+      if (bsnd_rc == 0) {
+        RUNTIME_DEBUG_LOG(
+            "[multi_head_attention] flash BSND (%s K/V): B=%lld N=%lld "
+            "Sq=%lld Skv=%lld H=%lld scale=%.6f\n",
+            kv_layout, (long long)B, (long long)N, (long long)Sq,
+            (long long)Skv, (long long)H, (double)scale);
+      } else if (bsnd_rc < 0) {
+        fprintf(stderr,
+                "[multi_head_attention] ERROR: BSND flash kernel (%s K/V) "
+                "failed for B=%lld N=%lld Sq=%lld Skv=%lld H=%lld\n",
+                kv_layout, (long long)B, (long long)N, (long long)Sq,
+                (long long)Skv, (long long)H);
+      }
+      return bsnd_rc;
+    };
+    if (!kv_contig) {
+      OP_ROCTX_MARK("hip_ep.op.multi_head_attention.attn.flash_bsnd");
+      const int bsnd_rc = bsnd_result(
+          hip_mha_flash_prefill_bsnd(
+              stream, query, key, value, output, static_cast<int>(B),
+              static_cast<int>(N), static_cast<int>(Sq), static_cast<int>(Skv),
+              static_cast<int>(H), scale),
+          "in-place");
+      if (bsnd_rc <= 0)
+        return bsnd_rc;
     }
 
     const size_t fa_align = 64;
@@ -545,6 +570,18 @@ extern "C" int wrap_multi_head_attention(
           stderr,
           "[multi_head_attention] ERROR: flash path K/V transpose failed\n");
       return -1;
+    }
+
+    if (kv_contig) {
+      OP_ROCTX_MARK("hip_ep.op.multi_head_attention.attn.flash_bsnd_kv");
+      const int bsnd_rc = bsnd_result(
+          hip_mha_flash_prefill_bsnd_kv(
+              stream, query, d_Kbnsh, d_Vbnsh, output, static_cast<int>(B),
+              static_cast<int>(N), static_cast<int>(Sq), static_cast<int>(Skv),
+              static_cast<int>(H), scale),
+          "per-head");
+      if (bsnd_rc <= 0)
+        return bsnd_rc;
     }
 
     // Q is BSND [B,Sq,N,H] == the kernel's expected [B,sq,N,d]; O written in
