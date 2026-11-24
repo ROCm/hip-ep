@@ -709,6 +709,162 @@
         {"name": "hidden_4096_x_128_tokens", "values": {"n": 524288}}
       ],
       "gaps": []
+    },
+    {
+      "leaf": "group_norm/Xfp16_Wfp16_Yfp16",
+      "package_executable": "hipdnn-kernel-ut-group-norm-xfp16-wfp16-yfp16.exe",
+      "source": "test_group_norm.cpp",
+      "capabilities": {
+        "coverage": true,
+        "timing": "shared",
+        "mode": "label_only",
+        "rank": false
+      },
+      "suite": {
+        "args": ["--coverage"],
+        "coverage_default": "3"
+      },
+      "custom": {
+        "selected_by": "any of --n --c --spatial --groups --layout --silu --workspace; the four geometry flags are then required",
+        "make_args": "ARGS",
+        "params": [
+          {"name": "n", "flag": "--n", "type": "int", "required": true, "description": "Batch, >= 1."},
+          {"name": "c", "flag": "--c", "type": "int", "required": true, "description": "Channels, >= 1 and a multiple of groups."},
+          {"name": "spatial", "flag": "--spatial", "type": "int", "required": true, "description": "Spatial extent (product of the spatial dims), >= 1."},
+          {"name": "groups", "flag": "--groups", "type": "int", "required": true, "description": "Groups, >= 1; divides c."},
+          {"name": "layout", "flag": "--layout", "type": "enum", "choices": ["nchw", "nhwc"], "exe_default": "nchw", "description": "Memory layout of input and output."},
+          {"name": "silu", "flag": "--silu", "type": "int", "choices": [0, 1], "exe_default": 0, "description": "Fused SiLU activation."},
+          {"name": "workspace", "flag": "--workspace", "type": "enum", "choices": ["split", "none", "small", "misaligned"], "exe_default": "split", "description": "split: the full planned workspace; none: the fused path; small: a seventh of it; misaligned: the split with tensors one element off a 256-byte boundary."}
+        ],
+        "constraints": ["c is a multiple of groups", "unknown, duplicate, incomplete or unsupported arguments exit 2"],
+        "checks": ["n >= 1 and c >= 1 and spatial >= 1 and groups >= 1", "c % groups == 0"]
+      },
+      "examples": [
+        {"name": "suite_tier1", "coverage": 1},
+        {"name": "sd_vae_96x96", "values": {"n": 1, "c": 512, "spatial": 9216, "groups": 32, "layout": "nchw", "silu": 1}}
+      ],
+      "diagnostic_flags": [
+        {"flag": "--large", "description": "Also run a tensor of more than 2^31 elements in both layouts."}
+      ],
+      "devices": ["gfx1151"],
+      "gaps": []
+    },
+    {
+      "leaf": "group_norm/Xbf16_Wbf16_Ybf16",
+      "package_executable": "hipdnn-kernel-ut-group-norm-xbf16-wbf16-ybf16.exe",
+      "source": "test_group_norm.cpp",
+      "capabilities": {
+        "coverage": true,
+        "timing": "shared",
+        "mode": "label_only",
+        "rank": false
+      },
+      "suite": {
+        "args": ["--coverage"],
+        "coverage_default": "3"
+      },
+      "custom": {
+        "selected_by": "any of --n --c --spatial --groups --layout --silu --workspace; the four geometry flags are then required",
+        "make_args": "ARGS",
+        "params": [
+          {"name": "n", "flag": "--n", "type": "int", "required": true, "description": "Batch, >= 1."},
+          {"name": "c", "flag": "--c", "type": "int", "required": true, "description": "Channels, >= 1 and a multiple of groups."},
+          {"name": "spatial", "flag": "--spatial", "type": "int", "required": true, "description": "Spatial extent (product of the spatial dims), >= 1."},
+          {"name": "groups", "flag": "--groups", "type": "int", "required": true, "description": "Groups, >= 1; divides c."},
+          {"name": "layout", "flag": "--layout", "type": "enum", "choices": ["nchw", "nhwc"], "exe_default": "nchw", "description": "Memory layout of input and output."},
+          {"name": "silu", "flag": "--silu", "type": "int", "choices": [0, 1], "exe_default": 0, "description": "Fused SiLU activation."},
+          {"name": "workspace", "flag": "--workspace", "type": "enum", "choices": ["split", "none", "small", "misaligned"], "exe_default": "split", "description": "split: the full planned workspace; none: the fused path; small: a seventh of it; misaligned: the split with tensors one element off a 256-byte boundary."}
+        ],
+        "constraints": ["c is a multiple of groups", "unknown, duplicate, incomplete or unsupported arguments exit 2"],
+        "checks": ["n >= 1 and c >= 1 and spatial >= 1 and groups >= 1", "c % groups == 0"]
+      },
+      "examples": [
+        {"name": "suite_tier1", "coverage": 1},
+        {"name": "sd_vae_96x96", "values": {"n": 1, "c": 512, "spatial": 9216, "groups": 32, "layout": "nchw", "silu": 1}}
+      ],
+      "diagnostic_flags": [
+        {"flag": "--large", "description": "Also run a tensor of more than 2^31 elements in both layouts."}
+      ],
+      "devices": ["gfx1151"],
+      "gaps": []
+    },
+    {
+      "leaf": "group_norm/Xfp32_Wfp32_Yfp32",
+      "package_executable": "hipdnn-kernel-ut-group-norm-xfp32-wfp32-yfp32.exe",
+      "source": "test_group_norm.cpp",
+      "capabilities": {
+        "coverage": true,
+        "timing": "shared",
+        "mode": "label_only",
+        "rank": false
+      },
+      "suite": {
+        "args": ["--coverage"],
+        "coverage_default": "3"
+      },
+      "custom": {
+        "selected_by": "any of --n --c --spatial --groups --layout --silu --workspace; the four geometry flags are then required",
+        "make_args": "ARGS",
+        "params": [
+          {"name": "n", "flag": "--n", "type": "int", "required": true, "description": "Batch, >= 1."},
+          {"name": "c", "flag": "--c", "type": "int", "required": true, "description": "Channels, >= 1 and a multiple of groups."},
+          {"name": "spatial", "flag": "--spatial", "type": "int", "required": true, "description": "Spatial extent (product of the spatial dims), >= 1."},
+          {"name": "groups", "flag": "--groups", "type": "int", "required": true, "description": "Groups, >= 1; divides c."},
+          {"name": "layout", "flag": "--layout", "type": "enum", "choices": ["nchw", "nhwc"], "exe_default": "nchw", "description": "Memory layout of input and output."},
+          {"name": "silu", "flag": "--silu", "type": "int", "choices": [0, 1], "exe_default": 0, "description": "Fused SiLU activation."},
+          {"name": "workspace", "flag": "--workspace", "type": "enum", "choices": ["split", "none", "small", "misaligned"], "exe_default": "split", "description": "split: the full planned workspace; none: the fused path; small: a seventh of it; misaligned: the split with tensors one element off a 256-byte boundary."}
+        ],
+        "constraints": ["c is a multiple of groups", "unknown, duplicate, incomplete or unsupported arguments exit 2"],
+        "checks": ["n >= 1 and c >= 1 and spatial >= 1 and groups >= 1", "c % groups == 0"]
+      },
+      "examples": [
+        {"name": "suite_tier1", "coverage": 1},
+        {"name": "sd_vae_96x96", "values": {"n": 1, "c": 512, "spatial": 9216, "groups": 32, "layout": "nchw", "silu": 1}}
+      ],
+      "diagnostic_flags": [
+        {"flag": "--large", "description": "Also run a tensor of more than 2^31 elements in both layouts."}
+      ],
+      "devices": ["gfx1151"],
+      "gaps": []
+    },
+    {
+      "leaf": "group_norm/Xfp64_Wfp64_Yfp64",
+      "package_executable": "hipdnn-kernel-ut-group-norm-xfp64-wfp64-yfp64.exe",
+      "source": "test_group_norm.cpp",
+      "capabilities": {
+        "coverage": true,
+        "timing": "shared",
+        "mode": "label_only",
+        "rank": false
+      },
+      "suite": {
+        "args": ["--coverage"],
+        "coverage_default": "3"
+      },
+      "custom": {
+        "selected_by": "any of --n --c --spatial --groups --layout --silu --workspace; the four geometry flags are then required",
+        "make_args": "ARGS",
+        "params": [
+          {"name": "n", "flag": "--n", "type": "int", "required": true, "description": "Batch, >= 1."},
+          {"name": "c", "flag": "--c", "type": "int", "required": true, "description": "Channels, >= 1 and a multiple of groups."},
+          {"name": "spatial", "flag": "--spatial", "type": "int", "required": true, "description": "Spatial extent (product of the spatial dims), >= 1."},
+          {"name": "groups", "flag": "--groups", "type": "int", "required": true, "description": "Groups, >= 1; divides c."},
+          {"name": "layout", "flag": "--layout", "type": "enum", "choices": ["nchw", "nhwc"], "exe_default": "nchw", "description": "Memory layout of input and output."},
+          {"name": "silu", "flag": "--silu", "type": "int", "choices": [0, 1], "exe_default": 0, "description": "Fused SiLU activation."},
+          {"name": "workspace", "flag": "--workspace", "type": "enum", "choices": ["split", "none", "small", "misaligned"], "exe_default": "split", "description": "split: the full planned workspace; none: the fused path; small: a seventh of it; misaligned: the split with tensors one element off a 256-byte boundary."}
+        ],
+        "constraints": ["c is a multiple of groups", "unknown, duplicate, incomplete or unsupported arguments exit 2"],
+        "checks": ["n >= 1 and c >= 1 and spatial >= 1 and groups >= 1", "c % groups == 0"]
+      },
+      "examples": [
+        {"name": "suite_tier1", "coverage": 1},
+        {"name": "sd_vae_96x96", "values": {"n": 1, "c": 512, "spatial": 9216, "groups": 32, "layout": "nchw", "silu": 1}}
+      ],
+      "diagnostic_flags": [
+        {"flag": "--large", "description": "Also run a tensor of more than 2^31 elements in both layouts."}
+      ],
+      "devices": ["gfx1151"],
+      "gaps": []
     }
   ]
 }
