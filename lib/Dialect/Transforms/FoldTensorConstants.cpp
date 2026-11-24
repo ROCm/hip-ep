@@ -99,7 +99,7 @@ DenseElementsAttr mapBinary(DenseElementsAttr lhs, DenseElementsAttr rhs,
 /// simply stays behind for its other users.
 class PayloadResolver {
 public:
-  PayloadResolver(int64_t maxElements, int64_t evalBudget)
+  PayloadResolver(int64_t maxElements, int64_t &evalBudget)
       : maxElements(maxElements), evalBudget(evalBudget) {}
 
   DenseElementsAttr resolve(Value value) { return resolveImpl(value, 0); }
@@ -158,13 +158,16 @@ private:
       }
     } else if (auto expand = dyn_cast<tensor::ExpandShapeOp>(def)) {
       // A verified expand_shape preserves linear element order, so reshaping
-      // the payload matches its semantics. Dynamic forms bail.
+      // the payload matches its semantics. Dynamic forms bail, and the
+      // materialized reshape is bounded by the per-payload cap like every
+      // other payload this pass creates.
       auto srcType = dyn_cast<RankedTensorType>(expand.getSrc().getType());
       auto dstType = dyn_cast<RankedTensorType>(expand.getType());
       if (srcType && dstType && srcType.hasStaticShape() &&
           dstType.hasStaticShape() &&
           srcType.getElementType() == dstType.getElementType() &&
-          srcType.getNumElements() == dstType.getNumElements())
+          srcType.getNumElements() == dstType.getNumElements() &&
+          srcType.getNumElements() <= maxElements)
         if (DenseElementsAttr src = resolveImpl(expand.getSrc(), depth + 1))
           result = src.reshape(dstType);
     } else {
@@ -398,7 +401,7 @@ private:
 
   static constexpr int kMaxDepth = 128;
   int64_t maxElements;
-  int64_t evalBudget;
+  int64_t &evalBudget;
   llvm::DenseMap<Value, DenseElementsAttr> memo;
   llvm::SetVector<Operation *> tracked;
 };
@@ -420,14 +423,14 @@ struct FoldTensorConstantsPass final
     // Cumulative evaluation budget across the whole module, charged per
     // evaluated element (failed attempts included) so wide constant DAGs
     // cannot exhaust compile-time memory.
-    constexpr int64_t kEvalBudget = int64_t(1) << 22;
+    int64_t evalBudget = maxFoldTotalElements;
     IRRewriter rewriter(&getContext());
 
     for (func::FuncOp function : module.getOps<func::FuncOp>()) {
       if (function.isDeclaration() || !function.getBody().hasOneBlock())
         continue;
       Block &block = function.getBody().front();
-      PayloadResolver resolver(maxFoldElements, kEvalBudget);
+      PayloadResolver resolver(maxFoldElements, evalBudget);
 
       // Walking in block order folds producer-before-consumer chains in one
       // sweep: a folded result is an inline constant by the time a later

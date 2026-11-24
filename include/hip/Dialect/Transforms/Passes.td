@@ -503,7 +503,11 @@ def FoldTensorConstantsPass
   let options = [
     Option<"maxFoldElements", "max-fold-elements", "int64_t",
            /*default=*/"65536",
-           "Maximum tensor elements evaluated or materialized per payload">
+           "Maximum tensor elements evaluated or materialized per payload">,
+    Option<"maxFoldTotalElements", "max-fold-total-elements", "int64_t",
+           /*default=*/"4194304",
+           "Module-wide budget of evaluated elements, failed attempts "
+           "included">
   ];
 }
 

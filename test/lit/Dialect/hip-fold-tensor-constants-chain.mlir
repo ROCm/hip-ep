@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 // RUN: hip-mlir-opt --hip-fold-tensor-constants %s | FileCheck %s
+// RUN: hip-mlir-opt --hip-fold-tensor-constants='max-fold-elements=1' %s | FileCheck %s --check-prefix=CAPPED
+// RUN: hip-mlir-opt --hip-fold-tensor-constants='max-fold-total-elements=4' %s | FileCheck %s --check-prefix=BUDGET
 
 // What this file tests
 // ====================
@@ -14,6 +16,11 @@
 // splat-true carrier.
 
 // CHECK-LABEL: func.func @audio_mask_chain
+// CAPPED-LABEL: func.func @audio_mask_chain
+// CAPPED: hip.range
+// CAPPED: hip.expand
+// BUDGET-LABEL: func.func @audio_mask_chain
+// BUDGET: hip.range
 // CHECK-NOT: hip.range
 // CHECK-NOT: hip.less
 // CHECK-NOT: hip.not
@@ -92,4 +99,47 @@ func.func @keep_expand_shape_mismatch(%ctx: !hip.context, %x: tensor<3x2xf32>,
       tensor<3x2xi1>, tensor<3x2xf32>, tensor<3x2xf32>)
       outs(%where_init : tensor<3x2xf32>) : tensor<3x2xf32>
   return %result : tensor<3x2xf32>
+}
+
+// Under max-fold-elements=1 the expand_shape see-through is refused before
+// its payload is reshaped, so an oversized intermediate is never
+// materialized and nothing folds. The default run folds the chain.
+// CHECK-LABEL: func.func @capped_see_through
+// CHECK-NOT: hip.not
+// CAPPED-LABEL: func.func @capped_see_through
+// CAPPED: tensor.expand_shape
+// CAPPED: hip.not
+func.func @capped_see_through(%ctx: !hip.context, %x: tensor<1x2xf32>,
+                              %y: tensor<1x2xf32>) -> tensor<1x2xf32> {
+  %input = hip.constant {value = dense<false> : tensor<2xi1>} : tensor<2xi1>
+  %expanded = tensor.expand_shape %input [[0, 1]] output_shape [1, 2] : tensor<2xi1> into tensor<1x2xi1>
+  %not_init = tensor.empty() : tensor<1x2xi1>
+  %condition = hip.not(%ctx) ins(%expanded : tensor<1x2xi1>)
+      outs(%not_init : tensor<1x2xi1>) : tensor<1x2xi1>
+  %where_init = tensor.empty() : tensor<1x2xf32>
+  %result = hip.where(%ctx) ins(%condition, %x, %y :
+      tensor<1x2xi1>, tensor<1x2xf32>, tensor<1x2xf32>)
+      outs(%where_init : tensor<1x2xf32>) : tensor<1x2xf32>
+  return %result : tensor<1x2xf32>
+}
+
+// The evaluation budget is module-wide: with max-fold-total-elements=4 the
+// audio chain above exhausts it (its failed range attempt alone charges 169
+// elements), so this later function no longer folds even though it is only
+// 4 elements. The default run folds it.
+// CHECK-LABEL: func.func @budget_cross_function
+// CHECK-NOT: hip.not
+// BUDGET-LABEL: func.func @budget_cross_function
+// BUDGET: hip.not
+func.func @budget_cross_function(%ctx: !hip.context, %x: tensor<4xf32>,
+                                 %y: tensor<4xf32>) -> tensor<4xf32> {
+  %input = hip.constant {value = dense<false> : tensor<4xi1>} : tensor<4xi1>
+  %not_init = tensor.empty() : tensor<4xi1>
+  %condition = hip.not(%ctx) ins(%input : tensor<4xi1>)
+      outs(%not_init : tensor<4xi1>) : tensor<4xi1>
+  %where_init = tensor.empty() : tensor<4xf32>
+  %result = hip.where(%ctx) ins(%condition, %x, %y :
+      tensor<4xi1>, tensor<4xf32>, tensor<4xf32>)
+      outs(%where_init : tensor<4xf32>) : tensor<4xf32>
+  return %result : tensor<4xf32>
 }
