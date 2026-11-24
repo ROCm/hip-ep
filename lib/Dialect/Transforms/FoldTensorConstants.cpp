@@ -130,6 +130,8 @@ public:
       return evaluateLess(less, type, depth);
     if (auto range = dyn_cast<RangeOp>(op))
       return evaluateRange(range, type, depth);
+    if (auto expand = dyn_cast<ExpandOp>(op))
+      return evaluateExpand(expand, type, depth);
     return nullptr;
   }
 
@@ -309,6 +311,91 @@ private:
     return DenseElementsAttr::get(type, values);
   }
 
+  /// ONNX Expand: NumPy-broadcast the input to the shape operand. The result
+  /// is validated against the shape OPERAND, not just the input: input dims
+  /// and shape values are right-aligned, combined per broadcast rules (a dim
+  /// of 1 yields the other side, equal dims pass, 0 combines only with 0 or
+  /// 1), and the combined shape must equal the static result shape exactly.
+  DenseElementsAttr evaluateExpand(ExpandOp op, RankedTensorType type,
+                                   int depth) {
+    Type elem = type.getElementType();
+    if (!elem.isInteger(1) && !elem.isInteger(64))
+      return nullptr;
+    auto inType = dyn_cast<RankedTensorType>(op.getInput().getType());
+    auto shapeType = dyn_cast<RankedTensorType>(op.getShape().getType());
+    if (!inType || !inType.hasStaticShape() ||
+        inType.getElementType() != elem || !shapeType ||
+        shapeType.getRank() != 1 || !shapeType.hasStaticShape() ||
+        !shapeType.getElementType().isInteger(64))
+      return nullptr;
+    DenseElementsAttr shapeAttr = resolveImpl(op.getShape(), depth + 1);
+    if (!shapeAttr)
+      return nullptr;
+    SmallVector<int64_t> shapeValues;
+    for (const APInt &v : shapeAttr.getValues<APInt>()) {
+      if (v.isNegative())
+        return nullptr;
+      shapeValues.push_back(v.getSExtValue());
+    }
+
+    // Right-align input dims against the shape values and combine.
+    ArrayRef<int64_t> inShape = inType.getShape();
+    size_t rank = std::max(inShape.size(), shapeValues.size());
+    if (type.getShape().size() != rank)
+      return nullptr;
+    SmallVector<int64_t> combined(rank);
+    for (size_t i = 0; i < rank; ++i) {
+      int64_t a =
+          i < rank - inShape.size() ? 1 : inShape[i - (rank - inShape.size())];
+      int64_t b = i < rank - shapeValues.size()
+                      ? 1
+                      : shapeValues[i - (rank - shapeValues.size())];
+      if (a == b)
+        combined[i] = a;
+      else if (a == 1)
+        combined[i] = b;
+      else if (b == 1)
+        combined[i] = a;
+      else
+        return nullptr;
+      if (combined[i] != type.getDimSize(i))
+        return nullptr;
+    }
+
+    DenseElementsAttr input = resolveImpl(op.getInput(), depth + 1);
+    if (!input)
+      return nullptr;
+    if (type.getNumElements() == 0)
+      return DenseElementsAttr::get(type, ArrayRef<APInt>{});
+    if (input.isSplat())
+      return DenseElementsAttr::get(type, input.getSplatValue<APInt>());
+
+    // General path: map each output coordinate to the right-aligned input
+    // coordinate, with broadcast dims pinned to 0.
+    auto inValues = llvm::to_vector(input.getValues<APInt>());
+    SmallVector<int64_t> inStrides(inShape.size(), 1);
+    for (int64_t i = static_cast<int64_t>(inShape.size()) - 2; i >= 0; --i)
+      inStrides[i] = inStrides[i + 1] * inShape[i + 1];
+    SmallVector<APInt> folded;
+    folded.reserve(type.getNumElements());
+    SmallVector<int64_t> coord(rank, 0);
+    for (int64_t linear = 0; linear < type.getNumElements(); ++linear) {
+      int64_t inIndex = 0;
+      for (size_t i = rank - inShape.size(); i < rank; ++i) {
+        size_t inDim = i - (rank - inShape.size());
+        int64_t c = inShape[inDim] == 1 ? 0 : coord[i];
+        inIndex += c * inStrides[inDim];
+      }
+      folded.push_back(inValues[inIndex]);
+      for (int64_t i = static_cast<int64_t>(rank) - 1; i >= 0; --i) {
+        if (++coord[i] < type.getDimSize(i))
+          break;
+        coord[i] = 0;
+      }
+    }
+    return DenseElementsAttr::get(type, folded);
+  }
+
   static constexpr int kMaxDepth = 128;
   int64_t maxElements;
   int64_t evalBudget;
@@ -318,7 +405,7 @@ private:
 
 /// Kinds the sweep may replace with a carrier. Grows with the evaluators.
 bool isReplaceableKind(Operation *op) {
-  return isa<NotOp, AndOp, OrOp, LessOp, RangeOp>(op);
+  return isa<NotOp, AndOp, OrOp, LessOp, RangeOp, ExpandOp>(op);
 }
 
 struct FoldTensorConstantsPass final

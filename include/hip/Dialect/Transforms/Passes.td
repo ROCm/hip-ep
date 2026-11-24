@@ -468,20 +468,26 @@ def ForwardConcatSlotsPass : Pass<"hip-forward-concat-slots", "mlir::func::FuncO
 
 def FoldTensorConstantsPass
     : Pass<"hip-fold-tensor-constants", "mlir::ModuleOp"> {
-  let summary = "Fold constant-input boolean tensor ops before externalization";
+  let summary = "Fold constant-input tensor op chains before externalization";
   let description = [{
-    Evaluates element-wise boolean HIP tensor operations (hip.not, hip.and,
-    hip.or) at compile time when every data input is an inline hip.constant
-    of exactly the static result type (broadcasting forms are left alone),
-    replacing the result with a new inline hip.constant. Producer-before-
-    consumer chains fold in one block-order sweep. Analysis is function-local
-    and limited to single-block function bodies.
+    Evaluates compile-time-computable HIP tensor op chains and replaces their
+    results with inline hip.constant carriers. A memoized resolver follows
+    values through inline carriers, static same-count tensor.expand_shape
+    ops (payload reshape), and the evaluable op set: hip.not / hip.and /
+    hip.or (i1, exact result type), hip.less (signed i64 to i1, equal shapes
+    or one rank-0 scalar), hip.range (rank-0 i64 scalars, overflow-checked,
+    count must match the static result dim), and hip.expand (NumPy broadcast
+    validated against the shape operand). Producer-before-consumer chains
+    fold in one block-order sweep; ops whose own uses cannot be replaced are
+    still evaluated through. Analysis is function-local and limited to
+    single-block function bodies; per-payload size is bounded by the
+    max-fold-elements option and total evaluation by a module budget.
 
     A result is only replaced when every use is a destination-passing-style
     input in the same block. DPS init uses are refused so a constant never
     becomes a bufferization destination, and terminator uses are refused so
-    graph outputs stay runtime-allocated. Carriers whose payloads were
-    consumed are erased only when they become dead.
+    graph outputs stay runtime-allocated. Ops and carriers the folds consumed
+    are erased only once dead.
 
     Opt-in; runs as the last pass of the ONNX-to-HIP pipeline head, after
     conversion and the AfterConvertOnnxToHip plugin slot and before any
