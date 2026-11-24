@@ -11,9 +11,10 @@ module {
                                  %sin_cache: memref<131072x64xf16, 1>,
                                  %output: memref<1x128x4096xf16, 1>) {
     hip.rope(%ctx)
-        ins(%input, %position_ids, %cos_cache, %sin_cache :
-            memref<1x128x4096xf16, 1>, memref<1x128xi64, 1>,
+        ins(%input, %cos_cache, %sin_cache :
+            memref<1x128x4096xf16, 1>,
             memref<131072x64xf16, 1>, memref<131072x64xf16, 1>)
+        position_ids(%position_ids : memref<1x128xi64, 1>)
         outs(%output : memref<1x128x4096xf16, 1>)
         {interleaved = 0 : i64, num_heads = 32 : i64,
          rotary_embedding_dim = 128 : i64}
@@ -39,9 +40,10 @@ module {
                                          %sin_cache: memref<131072x64xf16, 1>,
                                          %output: memref<?x?x4096xf16, 1>) {
     hip.rope(%ctx)
-        ins(%input, %position_ids, %cos_cache, %sin_cache :
-            memref<?x?x4096xf16, 1>, memref<?x?xi64, 1>,
+        ins(%input, %cos_cache, %sin_cache :
+            memref<?x?x4096xf16, 1>,
             memref<131072x64xf16, 1>, memref<131072x64xf16, 1>)
+        position_ids(%position_ids : memref<?x?xi64, 1>)
         outs(%output : memref<?x?x4096xf16, 1>)
         {interleaved = 0 : i64, num_heads = 32 : i64,
          rotary_embedding_dim = 128 : i64}

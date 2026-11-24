@@ -353,3 +353,26 @@ func.func @reject_merged_dynamic_extent(%ctx: !hip.context, %g: tensor<?x?x6144x
   %o = hip.cast(%ctx) ins(%y : tensor<?x?x6144xf32>) outs(%eo : tensor<?x?x6144xf16>) {to = 10 : i64} : tensor<?x?x6144xf16>
   return %o : tensor<?x?x6144xf16>
 }
+
+// -----
+
+// A clamped f32 SwiGLU between casts stays as it is: the promoted kernel
+// computes plain SwiGLU only.
+// CHECK-LABEL: func.func @clamped_not_promoted
+// CHECK: hip.cast
+// CHECK: hip.cast
+// CHECK: hip.swiglu
+// CHECK-SAME: swiglu_limit = 7.000000e+00 : f32
+// CHECK-NOT: promote_activation
+// CHECK: hip.cast
+func.func @clamped_not_promoted(%ctx: !hip.context, %g: tensor<8x128xf16>, %u: tensor<8x128xf16>) -> tensor<8x128xf16> {
+  %eg = tensor.empty() : tensor<8x128xf32>
+  %gf = hip.cast(%ctx) ins(%g : tensor<8x128xf16>) outs(%eg : tensor<8x128xf32>) {to = 1 : i64} : tensor<8x128xf32>
+  %eu = tensor.empty() : tensor<8x128xf32>
+  %uf = hip.cast(%ctx) ins(%u : tensor<8x128xf16>) outs(%eu : tensor<8x128xf32>) {to = 1 : i64} : tensor<8x128xf32>
+  %ey = tensor.empty() : tensor<8x128xf32>
+  %y = hip.swiglu(%ctx) ins(%gf, %uf : tensor<8x128xf32>, tensor<8x128xf32>) outs(%ey : tensor<8x128xf32>) {activation_alpha = 1.702 : f32, activation_beta = 1.0 : f32, swiglu_limit = 7.0 : f32} : tensor<8x128xf32>
+  %eo = tensor.empty() : tensor<8x128xf16>
+  %o = hip.cast(%ctx) ins(%y : tensor<8x128xf32>) outs(%eo : tensor<8x128xf16>) {to = 10 : i64} : tensor<8x128xf16>
+  return %o : tensor<8x128xf16>
+}
