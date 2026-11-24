@@ -101,10 +101,10 @@ template <typename Fn>
 DenseElementsAttr mapUnary(DenseElementsAttr input, RankedTensorType type,
                            Fn fn) {
   if (input.isSplat())
-    return DenseElementsAttr::get(type, fn(input.getSplatValue<bool>()));
-  SmallVector<bool> folded;
+    return DenseElementsAttr::get(type, fn(input.getSplatValue<APInt>()));
+  SmallVector<APInt> folded;
   folded.reserve(type.getNumElements());
-  for (bool value : input.getValues<bool>())
+  for (const APInt &value : input.getValues<APInt>())
     folded.push_back(fn(value));
   return DenseElementsAttr::get(type, folded);
 }
@@ -114,11 +114,11 @@ DenseElementsAttr mapBinary(DenseElementsAttr lhs, DenseElementsAttr rhs,
                             RankedTensorType type, Fn fn) {
   if (lhs.isSplat() && rhs.isSplat())
     return DenseElementsAttr::get(
-        type, fn(lhs.getSplatValue<bool>(), rhs.getSplatValue<bool>()));
-  SmallVector<bool> folded;
+        type, fn(lhs.getSplatValue<APInt>(), rhs.getSplatValue<APInt>()));
+  SmallVector<APInt> folded;
   folded.reserve(type.getNumElements());
   for (auto [lhsValue, rhsValue] :
-       llvm::zip_equal(lhs.getValues<bool>(), rhs.getValues<bool>()))
+       llvm::zip_equal(lhs.getValues<APInt>(), rhs.getValues<APInt>()))
     folded.push_back(fn(lhsValue, rhsValue));
   return DenseElementsAttr::get(type, folded);
 }
@@ -128,13 +128,16 @@ DenseElementsAttr mapBinary(DenseElementsAttr lhs, DenseElementsAttr rhs,
 DenseElementsAttr evaluate(Operation *op, ArrayRef<DenseElementsAttr> payloads,
                            RankedTensorType type) {
   if (isa<NotOp>(op))
-    return mapUnary(payloads[0], type, [](bool value) { return !value; });
+    return mapUnary(payloads[0], type,
+                    [](const APInt &value) { return ~value; });
   if (isa<AndOp>(op))
-    return mapBinary(payloads[0], payloads[1], type,
-                     [](bool lhs, bool rhs) { return lhs && rhs; });
+    return mapBinary(
+        payloads[0], payloads[1], type,
+        [](const APInt &lhs, const APInt &rhs) { return lhs & rhs; });
   if (isa<OrOp>(op))
-    return mapBinary(payloads[0], payloads[1], type,
-                     [](bool lhs, bool rhs) { return lhs || rhs; });
+    return mapBinary(
+        payloads[0], payloads[1], type,
+        [](const APInt &lhs, const APInt &rhs) { return lhs | rhs; });
   return nullptr;
 }
 
@@ -172,6 +175,8 @@ struct FoldTensorConstantsPass final
           continue;
 
         auto type = cast<RankedTensorType>(op.getResult(0).getType());
+        if (type.getNumElements() > maxFoldElements)
+          continue;
         SmallVector<DenseElementsAttr, 2> payloads;
         for (Value input : *inputs) {
           if (DenseElementsAttr payload = getInlinePayload(input, type))

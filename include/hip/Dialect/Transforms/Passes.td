@@ -494,6 +494,11 @@ def FoldTensorConstantsPass
     "mlir::hip::HipDialect",
     "mlir::func::FuncDialect"
   ];
+  let options = [
+    Option<"maxFoldElements", "max-fold-elements", "int64_t",
+           /*default=*/"65536",
+           "Maximum tensor elements evaluated or materialized per payload">
+  ];
 }
 
 def PromoteStridedHipOperandsPass
