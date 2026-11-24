@@ -1465,7 +1465,7 @@ void matmul_nbits_gemv_dp4a_kernel(
         // after the first (blockIdx.y > 0) read the activations of rows
         // 0..TILE_M-1 and store them at its own rows. The heuristic picks
         // read-once tiles (one row tile), so it stayed hidden except where it
-        // falls back to the tile_m = 4 default: N = 1 at 5..8 rows, which is
+        // fell back to a tile_m = 4 config: N = 1 at 5..8 rows, which is
         // Flash-Next's shared_expert_gate, 48 nodes per verify call.
         int   a_lo[TILE_M][4], a_hi[TILE_M][4];
         int   a_sum_q[TILE_M];
@@ -2843,6 +2843,18 @@ static int tuneDp4aConfig(
 static std::unordered_map<std::string, int> dp4a_cache;
 static std::mutex dp4a_tune_mutex;
 
+static int dp4aEnvInt(const char* name, int fallback) {
+#ifdef _WIN32
+    char buf[16];
+    unsigned long n = GetEnvironmentVariableA(name, buf, sizeof(buf));
+    if (n == 0 || n >= sizeof(buf)) return fallback;
+    return atoi(buf);
+#else
+    const char* v = getenv(name);
+    return v ? atoi(v) : fallback;
+#endif
+}
+
 // HIPDNN_EP_MATMUL_DP4A_CFG=<id> pins the single-row dp4a config (an index into
 // kGemvConfigs) for every shape, bypassing LUT and autotune, so a candidate's
 // in-model duration can be measured; HIPDNN_EP_MATMUL_SMALLM_CFG is the M>1 analog.
@@ -3040,12 +3052,34 @@ static int getOrTuneDp4aMConfig(
     const __half* bi, __half* out,
     int64_t M, int64_t N, int64_t K, int64_t bs)
 {
+    // HIPDNN_EP_MATMUL_DP4A_M_CFG=<id> pins the M>1 dp4a config (an index into
+    // kGemvMDp4aConfigs) for every shape, so a candidate can be measured.
+    {
+        static const int forced = dp4aEnvInt("HIPDNN_EP_MATMUL_DP4A_M_CFG", -1);
+        if (forced >= 0 && forced < kNumGemvMDp4aConfigs) return forced;
+    }
     // Lookup mode answers from the heuristic and never sweeps; see
     // getOrTuneGemvMConfig for why this table cannot come from the offline LUT.
     if (matmulNbitsLutLookupEnabled()) {
         const GemvMCandidates cand =
             gemvMCandidates(kGemvMDp4aConfigs, kNumGemvMDp4aConfigs, M, N);
-        return cand.heuristic >= 0 ? cand.heuristic : 29;
+        // No candidate means N = 1 (every tile is wider than the output). The
+        // narrowest read-once tile, with its second column bounds-checked away,
+        // rather than the 512-thread tile_m = 4 default, which reads the weight
+        // twice at 5..8 rows.
+        int cid = cand.heuristic >= 0 ? cand.heuristic
+                                      : (M <= 2 ? 2 : M <= 4 ? 4 : 6);
+        // The shared heuristic keeps tile_n = 2 under tile_m = 8 because
+        // partial[8][4] spills in the fp kernel. The integer-dot kernel holds
+        // it, and for wide outputs at 5..8 rows {64, 4, 8} is the faster of the
+        // two (us per call at M = 5 / 7 / 8, pinned with the knob above):
+        //   N = 16384   182 / 178 / 178  ->  175 / 174 / 176
+        //   N = 65536   759 / 743 / 727  ->  716 / 719 / 737
+        //   N = 248320 2521 / 2388 / 2335 -> 2364 / 2346 / 2274
+        // At N = 7168 it loses (89 / 89 / 91 -> 104 / 111 / 96), as at every
+        // narrower shape measured, hence the threshold.
+        if (cid == 6 && N >= 15360) cid = 7;
+        return cid;
     }
 
     std::string key = std::to_string(M) + "_" + std::to_string(N) + "_" +
@@ -3061,6 +3095,216 @@ static int getOrTuneDp4aMConfig(
                                M, N, K, bs);
     dp4a_m_cache[key] = best;
     return best;
+}
+
+/* -----------------------------------------------------------------------
+ * W4A8 dp4a small-K GEMV: one thread per output column, every row.
+ *
+ * The dp4a kernels above split K across a block's threads (thread t takes the
+ * 32-element chunks t, t + BLOCK_SIZE, ...) and then reduce tile_m * tile_n
+ * partials across lanes. At K = 320 -- Flash-Next's hyper-connection
+ * input_mix_weight_up, 97 calls per forward on a 1.6 MB weight -- there are 10
+ * chunks, so 54 of 64 threads hold no K work and the cross-lane reduction,
+ * which grows with tile_m, is most of the kernel: 1.95 ms per forward at M=1
+ * against 7.09 ms at M=8.
+ *
+ * Here a thread owns one column and walks all of K itself, so there is no
+ * reduction, and a row costs eight sudot4 per 32 weights against activations
+ * read from LDS (every lane of a wave reads the same address). It consumes the
+ * same per-group int8 activations and applies the same per-chunk scale as the
+ * kernels above; only the float summation order over chunks differs.
+ * ----------------------------------------------------------------------- */
+static constexpr int kDp4aSmallKMaxK    = 1024;  // LDS bound; the dispatch rule is dp4aUseSmallK()
+static constexpr int kDp4aSmallKMaxM    = 8;
+static constexpr int kDp4aSmallKThreads = 64;
+
+// Tuning knobs, for A/B runs:
+//   HIPDNN_EP_MATMUL_DP4A_SMALLK_MAXK  largest K the column-per-thread kernel takes (default 640)
+//   HIPDNN_EP_MATMUL_DP4A_SMALLK_MINM  fewest rows it takes (default 2)
+//   HIPDNN_EP_MATMUL_DP4A_QUANT_G      0: the block-per-group activation quantizer
+static int dp4aSmallKLimitK() {
+    static const int v = [] {
+        const int k = dp4aEnvInt("HIPDNN_EP_MATMUL_DP4A_SMALLK_MAXK", 640);
+        return k < 32 ? 32 : (k > kDp4aSmallKMaxK ? kDp4aSmallKMaxK : k);
+    }();
+    return v;
+}
+static int dp4aSmallKMinM() {
+    static const int v = [] {
+        const int m = dp4aEnvInt("HIPDNN_EP_MATMUL_DP4A_SMALLK_MINM", 2);
+        return m < 1 ? 1 : m;
+    }();
+    return v;
+}
+static bool dp4aQuantPerGroup() {
+    static const bool v = dp4aEnvInt("HIPDNN_EP_MATMUL_DP4A_QUANT_G", 1) != 0;
+    return v;
+}
+
+// Activation quantizer for block_size == 32, one thread per (row, K-group): the
+// same per-group scale, rounding and deinterleaved byte layout as
+// matmul_nbits_quant_act_i8_kernel (bit-identical output), without its block of
+// 128 threads, two barriers and cross-wave max reduction per 32 values. Every
+// dp4a matmul starts with this launch, and with M rows of K = 10240 the block
+// form is M * 320 blocks to quantize M * 10240 values: per call 24.2 -> 18.3 us
+// at M=7 on 324x10240 (96 calls per Flash-Next forward), 15.5 -> 14.3 on
+// 640x2560 (108 calls), 9.4 -> 8.0 on 96x2560; M=1 gains 0-7%.
+__global__ void matmul_nbits_quant_act_i8_g32_kernel(
+    const __half* __restrict__ A_all,
+    int8_t*       __restrict__ a_qb_all,
+    float*        __restrict__ a_scale_all,
+    int M, int K, int k_blocks)
+{
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= M * k_blocks) return;
+    const int row = idx / k_blocks;
+    const int grp = idx - row * k_blocks;
+    const __half* __restrict__ A =
+        A_all + static_cast<int64_t>(row) * K + grp * 32;
+
+    float v[32];
+    float gmax = 0.0f;
+#pragma unroll
+    for (int j = 0; j < 32; j++) {
+        v[j] = static_cast<float>(A[j]);
+        gmax = fmaxf(gmax, fabsf(v[j]));
+    }
+    const float scale     = (gmax > 0.0f) ? (gmax * (1.0f / 127.0f)) : 1.0f;
+    const float inv_scale = (gmax > 0.0f) ? (127.0f / gmax) : 0.0f;
+    a_scale_all[static_cast<int64_t>(row) * k_blocks + grp] = scale;
+
+    int* __restrict__ q = reinterpret_cast<int*>(
+        a_qb_all + static_cast<int64_t>(row) * K + grp * 32);
+#pragma unroll
+    for (int c = 0; c < 4; c++) {
+        unsigned lo = 0, hi = 0;
+#pragma unroll
+        for (int h = 0; h < 4; h++) {
+            int e = __float2int_rn(v[c * 8 + 2 * h] * inv_scale);
+            int o = __float2int_rn(v[c * 8 + 2 * h + 1] * inv_scale);
+            e = max(-127, min(127, e));
+            o = max(-127, min(127, o));
+            lo |= (static_cast<unsigned>(e) & 0xFFu) << (8 * h);
+            hi |= (static_cast<unsigned>(o) & 0xFFu) << (8 * h);
+        }
+        q[c * 2]     = static_cast<int>(lo);
+        q[c * 2 + 1] = static_cast<int>(hi);
+    }
+}
+
+// Default ON; HIPDNN_EP_MATMUL_DP4A_SMALLK=0 restores the K-parallel kernels.
+static bool dp4aSmallKEnabled() {
+    static const bool enabled = [] {
+#ifdef _WIN32
+        char buf[8];
+        unsigned long n = GetEnvironmentVariableA(
+            "HIPDNN_EP_MATMUL_DP4A_SMALLK", buf, sizeof(buf));
+        return !(n > 0 && buf[0] == '0');
+#else
+        const char* v = getenv("HIPDNN_EP_MATMUL_DP4A_SMALLK");
+        return !(v && v[0] == '0');
+#endif
+    }();
+    return enabled;
+}
+
+// Measured per call on gfx1151 (us, K-parallel -> column-per-thread):
+//   K = 320, N = 10240: wins from 2 rows on (the comment above).
+//   K = 640, N = 2560:  12.1 -> 13.9 at M=2, 15.7 -> 16.4 at M=4, but 22.6 -> 17.4 at M=5 and 23.1 -> 20.1 at
+//                       M=7: only once the K-parallel path has to take its tile_m=8 kernels.
+//   M = 1 loses at both (9.7 -> 12.3, 14.5 -> 18.3), so one row never comes here.
+static bool dp4aUseSmallK(int64_t M, int64_t K) {
+    if (!dp4aSmallKEnabled() || M > kDp4aSmallKMaxM || K > dp4aSmallKLimitK())
+        return false;
+    if (M < 2 || M < dp4aSmallKMinM()) return false;
+    return K <= 512 || M >= 5;
+}
+__global__ __launch_bounds__(kDp4aSmallKThreads)
+void matmul_nbits_gemv_dp4a_smallk_kernel(
+    const int8_t*  __restrict__ a_qb,
+    const float*   __restrict__ a_scale,
+    const uint8_t* __restrict__ B,
+    const __half*  __restrict__ scales,
+    const uint8_t* __restrict__ zp,
+    const __half*  __restrict__ bias,
+    __half*        __restrict__ output,
+    int M, int N, int K, int block_size)
+{
+    constexpr int kMaxChunks = kDp4aSmallKMaxK / 32;
+    __shared__ int   s_a[kDp4aSmallKMaxM * kDp4aSmallKMaxK / 4];
+    __shared__ int   s_sum[kDp4aSmallKMaxM * kMaxChunks];
+    __shared__ float s_sc[kDp4aSmallKMaxM * kMaxChunks];
+
+    const int tid      = threadIdx.x;
+    const int chunks   = K / 32;
+    const int k_blocks = (K + block_size - 1) / block_size;
+    const int bs_shift = __builtin_ctz(static_cast<unsigned>(block_size));
+
+    // Row r, chunk c of the deinterleaved int8 activations is the 8 ints at
+    // (r * chunks + c) * 8, the same offset in s_a as in a_qb.
+    const int* a_words = reinterpret_cast<const int*>(a_qb);
+    for (int i = tid; i < M * (K / 4); i += kDp4aSmallKThreads)
+        s_a[i] = a_words[i];
+    for (int i = tid; i < M * chunks; i += kDp4aSmallKThreads) {
+        const int r = i / chunks;
+        const int c = i - r * chunks;
+        s_sc[i] = a_scale[r * k_blocks + ((c * 32) >> bs_shift)];
+    }
+    __syncthreads();
+    for (int i = tid; i < M * chunks; i += kDp4aSmallKThreads) {
+        int s = 0;
+#pragma unroll
+        for (int j = 0; j < 8; j++)
+            s = hipdnn_sudot4(s_a[i * 8 + j], 0x01010101, s);
+        s_sum[i] = s;
+    }
+    __syncthreads();
+
+    const int n = blockIdx.x * kDp4aSmallKThreads + tid;
+    if (n >= N) return;
+    const uint8_t* b_col = B + static_cast<int64_t>(n) * (K / 2);
+    const __half*  s_col = scales + static_cast<int64_t>(n) * k_blocks;
+    const uint8_t* z_col = zp ? zp + static_cast<int64_t>(n) * k_blocks : nullptr;
+
+    float acc[kDp4aSmallKMaxM];
+#pragma unroll
+    for (int r = 0; r < kDp4aSmallKMaxM; r++)
+        acc[r] = 0.0f;
+
+    for (int c = 0; c < chunks; c++) {
+        const uint4 b = *reinterpret_cast<const uint4*>(b_col + c * 16);
+        const unsigned comp[4] = {b.x, b.y, b.z, b.w};
+        int lo_w[4], hi_w[4];
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+            lo_w[j] = static_cast<int>(comp[j] & 0x0F0F0F0Fu);
+            hi_w[j] = static_cast<int>((comp[j] >> 4) & 0x0F0F0F0Fu);
+        }
+        const int   grp = (c * 32) >> bs_shift;
+        const float sv  = static_cast<float>(s_col[grp]);
+        const int   zv  = z_col ? static_cast<int>(z_col[grp]) : 8;
+        // M is uniform, so the predicate keeps the unroll static.
+#pragma unroll
+        for (int r = 0; r < kDp4aSmallKMaxM; r++) {
+            if (r >= M) continue;
+            const int* a = s_a + (r * chunks + c) * 8;
+            int dot = 0;
+#pragma unroll
+            for (int j = 0; j < 4; j++) {
+                dot = hipdnn_sudot4(a[2 * j], lo_w[j], dot);
+                dot = hipdnn_sudot4(a[2 * j + 1], hi_w[j], dot);
+            }
+            acc[r] += s_sc[r * chunks + c] * sv *
+                      static_cast<float>(dot - s_sum[r * chunks + c] * zv);
+        }
+    }
+
+    const float bv = bias ? static_cast<float>(bias[n]) : 0.0f;
+#pragma unroll
+    for (int r = 0; r < kDp4aSmallKMaxM; r++) {
+        if (r >= M) continue;
+        output[static_cast<int64_t>(r) * N + n] = static_cast<__half>(acc[r] + bv);
+    }
 }
 
 // Public entry: W4A8 dp4a GEMV for M rows (M == 1 is the decode path).
@@ -3097,15 +3341,34 @@ extern "C" int hip_matmul_nbits_dp4a(
     // Step 1: dynamic per-group int8 quantization of the activations.
     // One block per (K-group, row), fixed 128 threads (bs in {32,64,128,256}).
     (void)hipGetLastError();
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(matmul_nbits_quant_act_i8_kernel<128>),
-                       dim3(static_cast<unsigned>(k_blocks),
-                            static_cast<unsigned>(M)),
-                       dim3(128), 0,
-                       stream, Ah, a_qb, a_sc, K, block_size, k_blocks);
+    if (block_size == 32 && dp4aQuantPerGroup()) {
+        const int64_t groups = M * k_blocks;
+        const unsigned bt = groups < 64 ? 32u : 64u;
+        hipLaunchKernelGGL(matmul_nbits_quant_act_i8_g32_kernel,
+                           dim3(static_cast<unsigned>((groups + bt - 1) / bt)),
+                           dim3(bt), 0, stream, Ah, a_qb, a_sc,
+                           static_cast<int>(M), static_cast<int>(K),
+                           static_cast<int>(k_blocks));
+    } else {
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(matmul_nbits_quant_act_i8_kernel<128>),
+                           dim3(static_cast<unsigned>(k_blocks),
+                                static_cast<unsigned>(M)),
+                           dim3(128), 0,
+                           stream, Ah, a_qb, a_sc, K, block_size, k_blocks);
+    }
 
-    // Step 2: dp4a GEMV (autotuned config). M == 1 keeps the single-row
-    // launcher and its own tune cache, which has more history behind it.
-    if (M == 1) {
+    // Step 2: dp4a GEMV. Small K at 2..8 rows takes the column-per-thread
+    // kernel (see dp4aUseSmallK); M == 1 stays on the single-row launcher and
+    // its own tune cache, which is faster at one row.
+    if (dp4aUseSmallK(M, K)) {
+        hipLaunchKernelGGL(matmul_nbits_gemv_dp4a_smallk_kernel,
+                           dim3(static_cast<unsigned>(
+                               (N + kDp4aSmallKThreads - 1) / kDp4aSmallKThreads)),
+                           dim3(kDp4aSmallKThreads), 0, stream,
+                           a_qb, a_sc, Bp, sc, zp, bi, outp,
+                           static_cast<int>(M), static_cast<int>(N),
+                           static_cast<int>(K), static_cast<int>(block_size));
+    } else if (M == 1) {
         int cfg = getOrTuneDp4aConfig(stream, a_qb, a_sc, Bp, sc, zp, bi, outp,
                                       N, K, block_size);
         launchDp4aConfig(cfg, stream, a_qb, a_sc, Bp, sc, zp, bi, outp,

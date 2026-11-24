@@ -104,10 +104,19 @@ QWEN_9B_INT8_HIDDEN = 4096
 QWEN_9B_INT8_INTERMEDIATE = 12288
 
 # --- Qwen3.8-Flash-Next (bits=4, block_size=32, symmetric) ---
-# Source: the Qwen3.8-Flash-Next text graph. Speculative verify runs its
-# matmuls at M = 1..8 rows.
-#   (2560, 1) x48 -- MoE shared_expert_gate (N = 1)
+# Source: the Qwen3.8-Flash-Next text graph. Speculative verify runs these at
+# M = 1..8 rows, the band the W4A8 dp4a kernels own with
+# HIPDNN_EP_MATMUL_DP4A_MAX_M=8:
+#   (320, 10240) x97  -- hyper-connection input_mix_weight_up (small K)
+#   (2560, 16384) x36 -- linear-attention qkv_z_proj (tile_m=8 band at M>=5)
+#   (640, 2560) x48   -- mlp down_proj (small-K kernel from M=5)
+#   (10240, 324) x96  -- hyper-connection input_mix_down (320 K-groups per row)
+FLASH_NEXT_HC_RANK = 320
+FLASH_NEXT_HC_WIDTH = 10240
 FLASH_NEXT_HIDDEN = 2560
+FLASH_NEXT_QKVZ = 16384
+FLASH_NEXT_MLP_RANK = 640
+FLASH_NEXT_HC_DOWN = 324
 FLASH_NEXT_VERIFY_ROWS = [1, 2, 3, 4, 5, 6, 7, 8]
 
 
@@ -399,13 +408,95 @@ class TestMatMulNBits:
     # ------------------------------------------------------------------
 
     @pytest.mark.parametrize("seq_len", FLASH_NEXT_VERIFY_ROWS)
+    def test_matmul_nbits_hc_weight_up_flash_next_shape(self, model_runner, seq_len):
+        """Hyper-connection input_mix_weight_up: [1, S, 320] -> [1, S, 10240].
+
+        K = 320 is 10 dp4a chunks, below the threads of every K-parallel
+        config, so S = 2..8 takes the column-per-thread small-K kernel.
+        """
+        model = _make_matmul_nbits_model(
+            1,
+            seq_len,
+            FLASH_NEXT_HC_RANK,
+            FLASH_NEXT_HC_WIDTH,
+            scale_range=(-0.05, 0.05),
+        )
+
+        rng = np.random.default_rng(99)
+        x = rng.uniform(-1, 1, [1, seq_len, FLASH_NEXT_HC_RANK]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=2e-2, rtol=1e-2, cos_threshold=0.999)
+
+    @pytest.mark.parametrize("seq_len", FLASH_NEXT_VERIFY_ROWS)
+    def test_matmul_nbits_qkv_z_flash_next_shape(self, model_runner, seq_len):
+        """Linear-attention qkv_z_proj: [1, S, 2560] -> [1, S, 16384].
+
+        S = 5..8 runs on tile_m=8 blocks, whose rows past S are discarded.
+        """
+        model = _make_matmul_nbits_model(
+            1,
+            seq_len,
+            FLASH_NEXT_HIDDEN,
+            FLASH_NEXT_QKVZ,
+            scale_range=(-0.05, 0.05),
+        )
+
+        rng = np.random.default_rng(99)
+        x = rng.uniform(-0.5, 0.5, [1, seq_len, FLASH_NEXT_HIDDEN]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=5e-2, rtol=1e-2, cos_threshold=0.999)
+
+    @pytest.mark.parametrize("seq_len", FLASH_NEXT_VERIFY_ROWS)
+    def test_matmul_nbits_mlp_down_flash_next_shape(self, model_runner, seq_len):
+        """MLP down_proj: [1, S, 640] -> [1, S, 2560].
+
+        K = 640 stays on the K-parallel kernels at S = 1..4 and takes the
+        column-per-thread small-K kernel at S = 5..8.
+        """
+        model = _make_matmul_nbits_model(
+            1,
+            seq_len,
+            FLASH_NEXT_MLP_RANK,
+            FLASH_NEXT_HIDDEN,
+            scale_range=(-0.05, 0.05),
+        )
+
+        rng = np.random.default_rng(99)
+        x = rng.uniform(-1, 1, [1, seq_len, FLASH_NEXT_MLP_RANK]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=2e-2, rtol=1e-2, cos_threshold=0.999)
+
+    @pytest.mark.parametrize("seq_len", FLASH_NEXT_VERIFY_ROWS)
+    def test_matmul_nbits_hc_down_flash_next_shape(self, model_runner, seq_len):
+        """Hyper-connection input_mix_down: [1, S, 10240] -> [1, S, 324].
+
+        The widest K of the model: 320 activation groups per row, quantized
+        by the thread-per-group kernel (block_size 32).
+        """
+        model = _make_matmul_nbits_model(
+            1,
+            seq_len,
+            FLASH_NEXT_HC_WIDTH,
+            FLASH_NEXT_HC_DOWN,
+            scale_range=(-0.05, 0.05),
+        )
+
+        rng = np.random.default_rng(99)
+        x = rng.uniform(-0.5, 0.5, [1, seq_len, FLASH_NEXT_HC_WIDTH]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=1e-1, rtol=1e-2, cos_threshold=0.999)
+
+    @pytest.mark.parametrize("seq_len", FLASH_NEXT_VERIFY_ROWS)
     def test_matmul_nbits_single_output_flash_next_shape(self, model_runner, seq_len):
         """MoE shared_expert_gate: [1, S, 2560] -> [1, S, 1].
 
-        N = 1 is narrower than every tile of the M-blocked dp4a table, so
-        S = 5..8 runs on two row tiles of the tile_m = 4 default. The second
-        tile used to read the activations of rows 0..3: rows 4..7 came out as
-        other rows' values.
+        N = 1 is narrower than every tile of the M-blocked dp4a table. At
+        S = 5..8 it used to run on two row tiles, and the second one read the
+        activations of rows 0..3: rows 4..7 came out as other rows' values.
         """
         model = _make_matmul_nbits_model(
             1,
