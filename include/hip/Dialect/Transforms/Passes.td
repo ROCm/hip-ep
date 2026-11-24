@@ -389,6 +389,21 @@ def FoldIntoConvPass : Pass<"hip-fold-into-conv", "mlir::func::FuncOp"> {
     rounded to the element type; the originals are left for their other users,
     if any. A batch norm that is not fed by a conv, or that the fold does not
     apply to, stays a `hip.batch_norm`, which lowers to one kernel.
+
+    **Input side: a zero pad.** A conv reads zero at every padded position, so
+    a `hip.pad` in `constant` mode with a zero fill (absent or a constant 0)
+    folds into the conv that reads it: each side's pad amount is added to the
+    conv's pad on that side (`pads` keeps begin and end apart, so an
+    asymmetric, e.g. end-only, pad folds too). The conv's output extents and
+    result type stay the same. The pad folds only when:
+
+    - its result is read only as the conv's input, apart from `tensor.dim`
+      shape queries; those move to the pad's input on unpadded dims and become
+      the static padded size on padded dims (a dynamic padded dim with a shape
+      query is not folded);
+    - its amounts and axes are constants, every amount is non-negative (a
+      negative amount crops), and the batch and channel dims are not padded.
+      Batch and spatial dims may be dynamic.
   }];
 }
 

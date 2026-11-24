@@ -7,9 +7,11 @@
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
+#include <mlir/Dialect/Arith/IR/Arith.h>
 #include <mlir/Dialect/Func/IR/FuncOps.h>
 #include <mlir/Dialect/Tensor/IR/Tensor.h>
 #include <mlir/IR/BuiltinAttributes.h>
+#include <mlir/IR/Matchers.h>
 #include <mlir/IR/PatternMatch.h>
 #include <mlir/Interfaces/DestinationStyleOpInterface.h>
 #include <mlir/Support/LLVM.h>
@@ -124,6 +126,23 @@ bool feedsOnly(Value value, Operation *user) {
              return true;
            return use.getOwner() == user && !dps.isDpsInit(&use);
          });
+}
+
+/// A copy of `conv` reading `input`, `weights` and `bias` (null: none), with
+/// `pads` in place of its own when given, inserted before `conv`. It keeps the
+/// conv's init and result type, so its result shape is reified as before.
+ConvOp createConvLike(PatternRewriter &rewriter, ConvOp conv, Value input,
+                      Value weights, Value bias, ArrayAttr pads = {}) {
+  rewriter.setInsertionPoint(conv);
+  SmallVector<Value> operands{conv.getCtx(), input, weights};
+  if (bias)
+    operands.push_back(bias);
+  operands.push_back(conv.getOutput());
+  NamedAttrList attrs(conv->getAttrs());
+  if (pads)
+    attrs.set(conv.getPadsAttrName(), pads);
+  return ConvOp::create(rewriter, conv.getLoc(), conv->getResultTypes(),
+                        operands, attrs);
 }
 
 /// The new filter and bias payloads of one convolution; a null attribute
@@ -293,16 +312,12 @@ LogicalResult foldChannelAffineIntoConv(
                                    cast<RankedTensorType>(weights.getType()),
                                    payload.weights)
                     .getResult();
-    SmallVector<Value> operands{conv.getCtx(), conv.getInput(), weights};
+    Value bias = conv.getBias();
     if (payload.bias)
-      operands.push_back(
-          ConstantOp::create(rewriter, loc, biasType, payload.bias)
-              .getResult());
-    else if (Value bias = conv.getBias())
-      operands.push_back(bias);
-    operands.push_back(conv.getOutput());
-    auto rewritten = ConvOp::create(rewriter, loc, TypeRange{resultType},
-                                    operands, conv->getAttrs());
+      bias =
+          ConstantOp::create(rewriter, loc, biasType, payload.bias).getResult();
+    ConvOp rewritten =
+        createConvLike(rewriter, conv, conv.getInput(), weights, bias);
     // The remaining tensor.dim users read a shape the rewrite preserves.
     rewriter.replaceAllUsesExcept(conv->getResult(0), rewritten->getResult(0),
                                   add ? add.getOperation() : consumer);
@@ -393,12 +408,185 @@ struct ChannelConstantIntoConv : public OpRewritePattern<BinaryOp> {
   }
 };
 
+/// The payload of a constant tensor: an inline or file-backed hip.constant,
+/// or an arith.constant. Memory-address carriers are not read.
+std::optional<DenseElementsAttr> readConstantElements(Value value) {
+  auto type = dyn_cast<RankedTensorType>(value.getType());
+  if (!type || !type.hasStaticShape())
+    return std::nullopt;
+  if (auto constant = value.getDefiningOp<ConstantOp>()) {
+    FailureOr<DenseElementsAttr> data = readConstantData(constant, type);
+    if (failed(data))
+      return std::nullopt;
+    return *data;
+  }
+  DenseElementsAttr attr;
+  if (matchPattern(value, m_Constant(&attr)))
+    return attr;
+  return std::nullopt;
+}
+
+std::optional<SmallVector<int64_t>> readConstantInts(Value value) {
+  std::optional<DenseElementsAttr> data = readConstantElements(value);
+  if (!data || !data->getElementType().isInteger())
+    return std::nullopt;
+  SmallVector<int64_t> values;
+  for (const APInt &v : data->getValues<APInt>())
+    values.push_back(v.getSExtValue());
+  return values;
+}
+
+/// True if a hip.pad fill operand is absent (the default 0) or a constant
+/// zero; -0.0 also counts, since a padded cell only ever multiplies a weight.
+bool isZeroFill(Value fill) {
+  if (!fill)
+    return true;
+  std::optional<DenseElementsAttr> data = readConstantElements(fill);
+  if (!data || data->getNumElements() != 1)
+    return false;
+  if (isa<FloatType>(data->getElementType()))
+    return (*data->getValues<APFloat>().begin()).isZero();
+  if (data->getElementType().isInteger())
+    return (*data->getValues<APInt>().begin()).isZero();
+  return false;
+}
+
+/// Input-side fold. A convolution reads zero at every padded position, so a
+/// constant zero hip.pad of only the spatial dims, whose sole consumer is the
+/// conv's input, folds into the conv's own pads: each side's amount is added
+/// to that side's conv pad. Begin and end pads stay separate, so an
+/// asymmetric pad (e.g. end-only, as for "same" padding of a stride-2 conv)
+/// folds as well. The conv's output extents are unchanged: the padded input
+/// size they derive from is the same.
+///
+/// Before:
+///   %p = hip.pad(%ctx) ins(%x, %pads : tensor<?x32x112x112xf16>,
+///                                      tensor<8xi64>)   // [0,0,0,0, 0,0,1,1]
+///          cval(%zero : tensor<f16>) outs(%e : tensor<?x32x113x113xf16>)
+///   %n = tensor.dim %p, %c0 : tensor<?x32x113x113xf16>
+///   %i = tensor.empty(%n) : tensor<?x32x56x56xf16>
+///   %y = hip.conv(%ctx) ins(%p, %w : ...) outs(%i : tensor<?x32x56x56xf16>)
+///          {pads = [0, 0, 0, 0], strides = [2, 2], ...}
+/// After:
+///   %n = tensor.dim %x, %c0 : tensor<?x32x112x112xf16>
+///   %i = tensor.empty(%n) : tensor<?x32x56x56xf16>
+///   %y = hip.conv(%ctx) ins(%x, %w : ...) outs(%i : tensor<?x32x56x56xf16>)
+///          {pads = [0, 0, 1, 1], strides = [2, 2], ...}
+///
+/// The pad amounts, its axes and its fill must be constants, every amount
+/// non-negative (a negative one crops), and the batch and channel amounts
+/// zero. Batch and spatial dims may be dynamic. tensor.dim users of the pad
+/// result move to the pad's input on unpadded dims; on a padded dim they
+/// become the static padded size, and a dynamic padded dim with a tensor.dim
+/// user is not folded.
+struct PadIntoConv : public OpRewritePattern<ConvOp> {
+  using OpRewritePattern<ConvOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(ConvOp conv,
+                                PatternRewriter &rewriter) const override {
+    auto pad = conv.getInput().getDefiningOp<PadOp>();
+    if (!pad || pad->getNumResults() != 1 || conv->getNumResults() != 1)
+      return rewriter.notifyMatchFailure(conv, "input is not a tensor hip.pad");
+    Value padded = pad->getResult(0);
+    if (!feedsOnly(padded, conv) || conv.getWeights() == padded ||
+        conv.getBias() == padded)
+      return rewriter.notifyMatchFailure(
+          conv, "pad result is read other than as the conv input");
+    if (pad.getMode() != "constant" || !isZeroFill(pad.getConstantValue()))
+      return rewriter.notifyMatchFailure(conv, "not a constant zero pad");
+    auto paddedType = dyn_cast<RankedTensorType>(padded.getType());
+    if (!paddedType || paddedType.getRank() < 3)
+      return rewriter.notifyMatchFailure(conv, "expected a ranked NC... pad");
+    const int64_t rank = paddedType.getRank();
+    const int64_t spatialRank = rank - 2;
+
+    // The padded axes: the constant `axes` operand, or every axis when it is
+    // absent or empty.
+    SmallVector<int64_t> axes;
+    if (Value axesOperand = pad.getAxes()) {
+      std::optional<SmallVector<int64_t>> values =
+          readConstantInts(axesOperand);
+      if (!values)
+        return rewriter.notifyMatchFailure(conv, "pad axes not constant");
+      axes = std::move(*values);
+    }
+    if (axes.empty())
+      llvm::append_range(axes, llvm::seq<int64_t>(rank));
+    std::optional<SmallVector<int64_t>> amounts =
+        readConstantInts(pad.getPads());
+    if (!amounts || amounts->size() != 2 * axes.size())
+      return rewriter.notifyMatchFailure(conv, "pad amounts not constant");
+    SmallVector<int64_t> begin(rank, 0), end(rank, 0);
+    SmallVector<bool> seen(rank, false);
+    for (auto [index, axis] : llvm::enumerate(axes)) {
+      if (axis < 0)
+        axis += rank;
+      if (axis < 0 || axis >= rank || seen[axis])
+        return rewriter.notifyMatchFailure(conv, "invalid pad axes");
+      seen[axis] = true;
+      begin[axis] = (*amounts)[index];
+      end[axis] = (*amounts)[axes.size() + index];
+    }
+    if (llvm::any_of(llvm::concat<int64_t>(begin, end),
+                     [](int64_t amount) { return amount < 0; }))
+      return rewriter.notifyMatchFailure(conv, "pad crops");
+    if (begin[0] || end[0] || begin[1] || end[1])
+      return rewriter.notifyMatchFailure(conv, "pad on batch or channels");
+
+    ArrayAttr convPads = conv.getPads();
+    if (static_cast<int64_t>(convPads.size()) != 2 * spatialRank)
+      return rewriter.notifyMatchFailure(conv, "unexpected conv pads");
+    auto convPad = [&](int64_t index) {
+      return cast<IntegerAttr>(convPads[index]).getInt();
+    };
+    SmallVector<int64_t> pads;
+    for (int64_t i : llvm::seq<int64_t>(spatialRank))
+      pads.push_back(convPad(i) + begin[2 + i]);
+    for (int64_t i : llvm::seq<int64_t>(spatialRank))
+      pads.push_back(convPad(spatialRank + i) + end[2 + i]);
+
+    // Check every shape query before touching the IR.
+    SmallVector<std::pair<tensor::DimOp, int64_t>> dims;
+    for (Operation *user : padded.getUsers()) {
+      auto dim = dyn_cast<tensor::DimOp>(user);
+      if (!dim)
+        continue;
+      std::optional<int64_t> axis = dim.getConstantIndex();
+      if (!axis || *axis < 0 || *axis >= rank)
+        return rewriter.notifyMatchFailure(conv, "non-constant tensor.dim");
+      if ((begin[*axis] || end[*axis]) && paddedType.isDynamicDim(*axis))
+        return rewriter.notifyMatchFailure(
+            conv, "shape query of a dynamic padded dim");
+      dims.emplace_back(dim, *axis);
+    }
+
+    Value input = pad.getData();
+    for (auto [dim, axis] : dims) {
+      if (begin[axis] || end[axis]) {
+        rewriter.setInsertionPoint(dim);
+        rewriter.replaceOpWithNewOp<arith::ConstantIndexOp>(
+            dim, paddedType.getDimSize(axis));
+        continue;
+      }
+      tensor::DimOp query = dim;
+      rewriter.modifyOpInPlace(query,
+                               [&] { query.getSourceMutable().assign(input); });
+    }
+    ConvOp rewritten =
+        createConvLike(rewriter, conv, input, conv.getWeights(), conv.getBias(),
+                       rewriter.getI64ArrayAttr(pads));
+    rewriter.replaceOp(conv, rewritten->getResults());
+    rewriter.eraseOp(pad);
+    return success();
+  }
+};
+
 struct FoldIntoConvPass : public impl::FoldIntoConvPassBase<FoldIntoConvPass> {
   void runOnOperation() override {
     RewritePatternSet patterns(&getContext());
-    patterns.add<BatchNormIntoConv,
-                 ChannelConstantIntoConv<MulOp, /*IsScale=*/true>,
-                 ChannelConstantIntoConv<AddOp, /*IsScale=*/false>>(
+    patterns.add<
+        BatchNormIntoConv, ChannelConstantIntoConv<MulOp, /*IsScale=*/true>,
+        ChannelConstantIntoConv<AddOp, /*IsScale=*/false>, PadIntoConv>(
         &getContext());
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
       signalPassFailure();

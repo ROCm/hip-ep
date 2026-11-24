@@ -6,8 +6,9 @@
 // Verify a constant per-channel affine map applied to a convolution's output
 // (inference hip.batch_norm, hip.mul / hip.add by a channel-broadcast
 // constant) is folded into the filter and bias of the convolution(s)
-// producing it, also with a dynamic batch, and that the cases where the fold
-// would be wrong or unreadable are left alone.
+// producing it, and a constant zero hip.pad of the spatial dims into the
+// pads of the convolution reading it, also with a dynamic batch, and that
+// the cases where a fold would be wrong or unreadable are left alone.
 //
 // Every batch-norm case uses scale = [1, 2], B = [0.5, 1], mean = [1, 0],
 // var = [3, 0], epsilon = 1, so s = scale / sqrt(var + eps) = [0.5, 2] and
@@ -43,6 +44,15 @@
 // 26. bn_add_conv_conv_dynamic - dynamic batch through an add; tensor.dim
 //                          users of both convs move to the folded convs
 // 27. mul_mixed_type     - an f32 scale on an f16 conv is not folded
+// 28. pad_symmetric_bn   - a zero pad becomes the conv's pads, the BN after
+//                          the conv folds too
+// 29. pad_asymmetric_dynamic_batch - f16 end-only pad, dynamic batch; the
+//                          batch query moves to the pad's input
+// 30. pad_axes_conv_pads - axes operand, default fill, amounts add to the
+//                          conv's pads; a static padded-dim query folds
+// 31. pad_*              - non-zero fill, channel pad, crop, second
+//                          consumer, reflect mode, dynamic padded-dim query:
+//                          the pad stays
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --hip-fold-into-conv --canonicalize | FileCheck %s
@@ -866,4 +876,232 @@ module {
 
   // CHECK-LABEL: func.func @mul_mixed_type
   // CHECK: hip.mul
+
+  // --------------------------------------------------------------------------
+  // 28. A symmetric zero pad before a conv followed by a BN: the pad becomes
+  //     the conv's pads and the BN its filter and bias.
+  // --------------------------------------------------------------------------
+  func.func @pad_symmetric_bn(%ctx: !hip.context, %x: tensor<1x1x4x4xf32>)
+      -> tensor<1x2x4x4xf32> {
+    %pads = hip.constant {value = dense<[0, 0, 1, 1, 0, 0, 1, 1]> : tensor<8xi64>} : tensor<8xi64>
+    %zero = hip.constant {value = dense<0.0> : tensor<f32>} : tensor<f32>
+    %e = tensor.empty() : tensor<1x1x6x6xf32>
+    %p = hip.pad(%ctx) ins(%x, %pads : tensor<1x1x4x4xf32>, tensor<8xi64>)
+        cval(%zero : tensor<f32>) outs(%e : tensor<1x1x6x6xf32>) : tensor<1x1x6x6xf32>
+    %w = hip.constant {value = dense<1.0> : tensor<2x1x3x3xf32>} : tensor<2x1x3x3xf32>
+    %scale = hip.constant {value = dense<[1.0, 2.0]> : tensor<2xf32>} : tensor<2xf32>
+    %b = hip.constant {value = dense<[0.5, 1.0]> : tensor<2xf32>} : tensor<2xf32>
+    %mean = hip.constant {value = dense<[1.0, 0.0]> : tensor<2xf32>} : tensor<2xf32>
+    %var = hip.constant {value = dense<[3.0, 0.0]> : tensor<2xf32>} : tensor<2xf32>
+    %i0 = tensor.empty() : tensor<1x2x4x4xf32>
+    %c = hip.conv(%ctx) ins(%p, %w : tensor<1x1x6x6xf32>, tensor<2x1x3x3xf32>)
+        outs(%i0 : tensor<1x2x4x4xf32>)
+        {kernel_shape = [3, 3], strides = [1, 1], pads = [0, 0, 0, 0],
+         dilations = [1, 1], group = 1 : i64} : tensor<1x2x4x4xf32>
+    %i1 = tensor.empty() : tensor<1x2x4x4xf32>
+    %y = hip.batch_norm(%ctx) ins(%c, %scale, %b, %mean, %var :
+        tensor<1x2x4x4xf32>, tensor<2xf32>, tensor<2xf32>, tensor<2xf32>,
+        tensor<2xf32>) outs(%i1 : tensor<1x2x4x4xf32>)
+        {epsilon = 1.0 : f32} : tensor<1x2x4x4xf32>
+    return %y : tensor<1x2x4x4xf32>
+  }
+
+  // CHECK-LABEL: func.func @pad_symmetric_bn
+  // CHECK-SAME: %[[X:[^:]*]]: tensor<1x1x4x4xf32>
+  // CHECK-NOT: hip.pad
+  // CHECK-NOT: hip.batch_norm
+  // CHECK: %[[Y:.*]] = hip.conv(%{{.*}}) ins(%[[X]], %{{.*}}, %{{.*}} : tensor<1x1x4x4xf32>, tensor<2x1x3x3xf32>, tensor<2xf32>)
+  // CHECK-SAME: pads = [1, 1, 1, 1]
+  // CHECK-NOT: hip.pad
+  // CHECK-NOT: hip.batch_norm
+  // CHECK: return %[[Y]]
+
+  // --------------------------------------------------------------------------
+  // 29. An end-only (asymmetric) f16 pad before a stride-2 conv, dynamic
+  //     batch: the batch query moves to the pad's input.
+  // --------------------------------------------------------------------------
+  func.func @pad_asymmetric_dynamic_batch(%ctx: !hip.context,
+      %x: tensor<?x1x4x4xf16>) -> (tensor<?x2x2x2xf16>, index) {
+    %c0 = arith.constant 0 : index
+    %pads = hip.constant {value = dense<[0, 0, 0, 0, 0, 0, 1, 1]> : tensor<8xi64>} : tensor<8xi64>
+    %zero = hip.constant {value = dense<0.0> : tensor<f16>} : tensor<f16>
+    %m = tensor.dim %x, %c0 : tensor<?x1x4x4xf16>
+    %e = tensor.empty(%m) : tensor<?x1x5x5xf16>
+    %p = hip.pad(%ctx) ins(%x, %pads : tensor<?x1x4x4xf16>, tensor<8xi64>)
+        cval(%zero : tensor<f16>) outs(%e : tensor<?x1x5x5xf16>) : tensor<?x1x5x5xf16>
+    %n = tensor.dim %p, %c0 : tensor<?x1x5x5xf16>
+    %w = hip.constant {value = dense<1.0> : tensor<2x1x3x3xf16>} : tensor<2x1x3x3xf16>
+    %i0 = tensor.empty(%n) : tensor<?x2x2x2xf16>
+    %c = hip.conv(%ctx) ins(%p, %w : tensor<?x1x5x5xf16>, tensor<2x1x3x3xf16>)
+        outs(%i0 : tensor<?x2x2x2xf16>)
+        {kernel_shape = [3, 3], strides = [2, 2], pads = [0, 0, 0, 0],
+         dilations = [1, 1], group = 1 : i64} : tensor<?x2x2x2xf16>
+    return %c, %n : tensor<?x2x2x2xf16>, index
+  }
+
+  // CHECK-LABEL: func.func @pad_asymmetric_dynamic_batch
+  // CHECK-SAME: %[[X:[^:]*]]: tensor<?x1x4x4xf16>
+  // CHECK-NOT: hip.pad
+  // CHECK: %[[N:.*]] = tensor.dim %[[X]], %{{.*}} : tensor<?x1x4x4xf16>
+  // CHECK: %[[I:.*]] = tensor.empty(%[[N]]) : tensor<?x2x2x2xf16>
+  // CHECK: %[[Y:.*]] = hip.conv(%{{.*}}) ins(%[[X]], %{{.*}} : tensor<?x1x4x4xf16>, tensor<2x1x3x3xf16>) outs(%[[I]] : tensor<?x2x2x2xf16>)
+  // CHECK-SAME: pads = [0, 0, 1, 1]
+  // CHECK-NOT: hip.pad
+  // CHECK: return %[[Y]], %[[N]]
+
+  // --------------------------------------------------------------------------
+  // 30. A pad with an axes operand, arith.constant amounts, the default fill
+  //     and a conv that already pads: the amounts add per side
+  //     ([1, 0, 1, 0] + begin [0, 2] / end [1, 0] = [1, 2, 2, 0]). A query of
+  //     a static padded dim becomes the padded size.
+  // --------------------------------------------------------------------------
+  func.func @pad_axes_conv_pads(%ctx: !hip.context, %x: tensor<1x1x4x4xf32>)
+      -> (tensor<1x2x7x6xf32>, index) {
+    %c2 = arith.constant 2 : index
+    %axes = arith.constant dense<[2, -1]> : tensor<2xi64>
+    %pads = arith.constant dense<[0, 2, 1, 0]> : tensor<4xi64>
+    %e = tensor.empty() : tensor<1x1x5x6xf32>
+    %p = hip.pad(%ctx) ins(%x, %pads : tensor<1x1x4x4xf32>, tensor<4xi64>)
+        axes(%axes : tensor<2xi64>) outs(%e : tensor<1x1x5x6xf32>) : tensor<1x1x5x6xf32>
+    %h = tensor.dim %p, %c2 : tensor<1x1x5x6xf32>
+    %w = hip.constant {value = dense<1.0> : tensor<2x1x1x1xf32>} : tensor<2x1x1x1xf32>
+    %i0 = tensor.empty() : tensor<1x2x7x6xf32>
+    %c = hip.conv(%ctx) ins(%p, %w : tensor<1x1x5x6xf32>, tensor<2x1x1x1xf32>)
+        outs(%i0 : tensor<1x2x7x6xf32>)
+        {kernel_shape = [1, 1], strides = [1, 1], pads = [1, 0, 1, 0],
+         dilations = [1, 1], group = 1 : i64} : tensor<1x2x7x6xf32>
+    return %c, %h : tensor<1x2x7x6xf32>, index
+  }
+
+  // CHECK-LABEL: func.func @pad_axes_conv_pads
+  // CHECK-SAME: %[[X:[^:]*]]: tensor<1x1x4x4xf32>
+  // CHECK-DAG: %[[C5:.*]] = arith.constant 5 : index
+  // CHECK-DAG: %[[Y:.*]] = hip.conv(%{{.*}}) ins(%[[X]], %{{.*}} : tensor<1x1x4x4xf32>, tensor<2x1x1x1xf32>) {{.*}}pads = [1, 2, 2, 0]
+  // CHECK-NOT: hip.pad
+  // CHECK: return %[[Y]], %[[C5]]
+
+  // --------------------------------------------------------------------------
+  // 31. Pads that must not fold: a non-zero fill, a channel pad, a crop, a
+  //     second consumer, reflect mode, and a shape query of a dynamic padded
+  //     dim.
+  // --------------------------------------------------------------------------
+  func.func @pad_nonzero_fill(%ctx: !hip.context, %x: tensor<1x1x4x4xf32>)
+      -> tensor<1x2x4x4xf32> {
+    %pads = hip.constant {value = dense<[0, 0, 1, 1, 0, 0, 1, 1]> : tensor<8xi64>} : tensor<8xi64>
+    %one = hip.constant {value = dense<1.0> : tensor<f32>} : tensor<f32>
+    %e = tensor.empty() : tensor<1x1x6x6xf32>
+    %p = hip.pad(%ctx) ins(%x, %pads : tensor<1x1x4x4xf32>, tensor<8xi64>)
+        cval(%one : tensor<f32>) outs(%e : tensor<1x1x6x6xf32>) : tensor<1x1x6x6xf32>
+    %w = hip.constant {value = dense<1.0> : tensor<2x1x3x3xf32>} : tensor<2x1x3x3xf32>
+    %i0 = tensor.empty() : tensor<1x2x4x4xf32>
+    %c = hip.conv(%ctx) ins(%p, %w : tensor<1x1x6x6xf32>, tensor<2x1x3x3xf32>)
+        outs(%i0 : tensor<1x2x4x4xf32>)
+        {kernel_shape = [3, 3], strides = [1, 1], pads = [0, 0, 0, 0],
+         dilations = [1, 1], group = 1 : i64} : tensor<1x2x4x4xf32>
+    return %c : tensor<1x2x4x4xf32>
+  }
+
+  // CHECK-LABEL: func.func @pad_nonzero_fill
+  // CHECK: hip.pad
+  // CHECK: hip.conv{{.*}}pads = [0, 0, 0, 0]
+
+  func.func @pad_channel(%ctx: !hip.context, %x: tensor<1x1x4x4xf32>)
+      -> tensor<1x2x4x4xf32> {
+    %pads = hip.constant {value = dense<[0, 1, 0, 0, 0, 0, 0, 0]> : tensor<8xi64>} : tensor<8xi64>
+    %e = tensor.empty() : tensor<1x2x4x4xf32>
+    %p = hip.pad(%ctx) ins(%x, %pads : tensor<1x1x4x4xf32>, tensor<8xi64>)
+        outs(%e : tensor<1x2x4x4xf32>) : tensor<1x2x4x4xf32>
+    %w = hip.constant {value = dense<1.0> : tensor<2x2x1x1xf32>} : tensor<2x2x1x1xf32>
+    %i0 = tensor.empty() : tensor<1x2x4x4xf32>
+    %c = hip.conv(%ctx) ins(%p, %w : tensor<1x2x4x4xf32>, tensor<2x2x1x1xf32>)
+        outs(%i0 : tensor<1x2x4x4xf32>)
+        {kernel_shape = [1, 1], strides = [1, 1], pads = [0, 0, 0, 0],
+         dilations = [1, 1], group = 1 : i64} : tensor<1x2x4x4xf32>
+    return %c : tensor<1x2x4x4xf32>
+  }
+
+  // CHECK-LABEL: func.func @pad_channel
+  // CHECK: hip.pad
+  // CHECK: hip.conv{{.*}}pads = [0, 0, 0, 0]
+
+  func.func @pad_crop(%ctx: !hip.context, %x: tensor<1x1x4x4xf32>)
+      -> tensor<1x2x4x4xf32> {
+    %pads = hip.constant {value = dense<[0, 0, -1, 1, 0, 0, 1, -1]> : tensor<8xi64>} : tensor<8xi64>
+    %e = tensor.empty() : tensor<1x1x4x4xf32>
+    %p = hip.pad(%ctx) ins(%x, %pads : tensor<1x1x4x4xf32>, tensor<8xi64>)
+        outs(%e : tensor<1x1x4x4xf32>) : tensor<1x1x4x4xf32>
+    %w = hip.constant {value = dense<1.0> : tensor<2x1x1x1xf32>} : tensor<2x1x1x1xf32>
+    %i0 = tensor.empty() : tensor<1x2x4x4xf32>
+    %c = hip.conv(%ctx) ins(%p, %w : tensor<1x1x4x4xf32>, tensor<2x1x1x1xf32>)
+        outs(%i0 : tensor<1x2x4x4xf32>)
+        {kernel_shape = [1, 1], strides = [1, 1], pads = [0, 0, 0, 0],
+         dilations = [1, 1], group = 1 : i64} : tensor<1x2x4x4xf32>
+    return %c : tensor<1x2x4x4xf32>
+  }
+
+  // CHECK-LABEL: func.func @pad_crop
+  // CHECK: hip.pad
+  // CHECK: hip.conv{{.*}}pads = [0, 0, 0, 0]
+
+  func.func @pad_multi_use(%ctx: !hip.context, %x: tensor<1x1x4x4xf32>)
+      -> (tensor<1x2x4x4xf32>, tensor<1x1x6x6xf32>) {
+    %pads = hip.constant {value = dense<[0, 0, 1, 1, 0, 0, 1, 1]> : tensor<8xi64>} : tensor<8xi64>
+    %e = tensor.empty() : tensor<1x1x6x6xf32>
+    %p = hip.pad(%ctx) ins(%x, %pads : tensor<1x1x4x4xf32>, tensor<8xi64>)
+        outs(%e : tensor<1x1x6x6xf32>) : tensor<1x1x6x6xf32>
+    %w = hip.constant {value = dense<1.0> : tensor<2x1x3x3xf32>} : tensor<2x1x3x3xf32>
+    %i0 = tensor.empty() : tensor<1x2x4x4xf32>
+    %c = hip.conv(%ctx) ins(%p, %w : tensor<1x1x6x6xf32>, tensor<2x1x3x3xf32>)
+        outs(%i0 : tensor<1x2x4x4xf32>)
+        {kernel_shape = [3, 3], strides = [1, 1], pads = [0, 0, 0, 0],
+         dilations = [1, 1], group = 1 : i64} : tensor<1x2x4x4xf32>
+    return %c, %p : tensor<1x2x4x4xf32>, tensor<1x1x6x6xf32>
+  }
+
+  // CHECK-LABEL: func.func @pad_multi_use
+  // CHECK: hip.pad
+  // CHECK: hip.conv{{.*}}pads = [0, 0, 0, 0]
+
+  func.func @pad_reflect(%ctx: !hip.context, %x: tensor<1x1x4x4xf32>)
+      -> tensor<1x2x4x4xf32> {
+    %pads = hip.constant {value = dense<[0, 0, 1, 1, 0, 0, 1, 1]> : tensor<8xi64>} : tensor<8xi64>
+    %e = tensor.empty() : tensor<1x1x6x6xf32>
+    %p = hip.pad(%ctx) ins(%x, %pads : tensor<1x1x4x4xf32>, tensor<8xi64>)
+        outs(%e : tensor<1x1x6x6xf32>) {mode = "reflect"} : tensor<1x1x6x6xf32>
+    %w = hip.constant {value = dense<1.0> : tensor<2x1x3x3xf32>} : tensor<2x1x3x3xf32>
+    %i0 = tensor.empty() : tensor<1x2x4x4xf32>
+    %c = hip.conv(%ctx) ins(%p, %w : tensor<1x1x6x6xf32>, tensor<2x1x3x3xf32>)
+        outs(%i0 : tensor<1x2x4x4xf32>)
+        {kernel_shape = [3, 3], strides = [1, 1], pads = [0, 0, 0, 0],
+         dilations = [1, 1], group = 1 : i64} : tensor<1x2x4x4xf32>
+    return %c : tensor<1x2x4x4xf32>
+  }
+
+  // CHECK-LABEL: func.func @pad_reflect
+  // CHECK: hip.pad
+  // CHECK: hip.conv{{.*}}pads = [0, 0, 0, 0]
+
+  func.func @pad_dynamic_padded_dim_query(%ctx: !hip.context,
+      %x: tensor<1x1x?x4xf32>) -> tensor<1x2x?x4xf32> {
+    %c2 = arith.constant 2 : index
+    %c1 = arith.constant 1 : index
+    %pads = hip.constant {value = dense<[0, 0, 0, 0, 0, 0, 1, 0]> : tensor<8xi64>} : tensor<8xi64>
+    %h0 = tensor.dim %x, %c2 : tensor<1x1x?x4xf32>
+    %h1 = arith.addi %h0, %c1 : index
+    %e = tensor.empty(%h1) : tensor<1x1x?x4xf32>
+    %p = hip.pad(%ctx) ins(%x, %pads : tensor<1x1x?x4xf32>, tensor<8xi64>)
+        outs(%e : tensor<1x1x?x4xf32>) : tensor<1x1x?x4xf32>
+    %h = tensor.dim %p, %c2 : tensor<1x1x?x4xf32>
+    %w = hip.constant {value = dense<1.0> : tensor<2x1x1x1xf32>} : tensor<2x1x1x1xf32>
+    %i0 = tensor.empty(%h) : tensor<1x2x?x4xf32>
+    %c = hip.conv(%ctx) ins(%p, %w : tensor<1x1x?x4xf32>, tensor<2x1x1x1xf32>)
+        outs(%i0 : tensor<1x2x?x4xf32>)
+        {kernel_shape = [1, 1], strides = [1, 1], pads = [0, 0, 0, 0],
+         dilations = [1, 1], group = 1 : i64} : tensor<1x2x?x4xf32>
+    return %c : tensor<1x2x?x4xf32>
+  }
+
+  // CHECK-LABEL: func.func @pad_dynamic_padded_dim_query
+  // CHECK: hip.pad
+  // CHECK: hip.conv{{.*}}pads = [0, 0, 0, 0]
 }
