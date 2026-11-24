@@ -135,8 +135,8 @@ a manual-reification family define their member functions in
 `HipReifyResultShapesImpl.cpp`.
 
 Frontend-neutral destination construction lives in
-`hip/Conversion/HipConversionUtils.h`: result-shape compatibility, broadcast
-destination construction, and HIP context
+`hip/Conversion/HipConversionUtils.h`: result-shape compatibility, broadcast,
+reduction and matmul destination construction, and HIP context
 lookup. `OnnxToHipUtils` retains only ONNX import semantics and wrappers, so a
 future frontend can target HIP without depending on the ONNX conversion layer.
 
@@ -191,6 +191,13 @@ chain in a detached block until every pair succeeds.
 Imported and inferred extents follow standard
 shaped-type compatibility: a dynamic extent on either side is compatible,
 while unequal static extents are contradictions.
+
+MatMul destination construction (`createMatmulEmptyTensor`) likewise uses
+`reifyMatmulShape`, the reifier behind `MatmulOp` and `QMatmulOp`
+result-shape queries. The batch dims are right-aligned, and each one comes
+from the operand that carries it: A's, unless A has no such dim or holds a
+1 there, in which case B's. A rank-2 A or a unit-batch A against a B with a
+dynamic batch therefore takes the batch from B and not from A's first dim.
 
 Common DPS verification is similarly centralized in `verifyDpsComputeOp`. It
 checks ranked tensor/memref uniformity, destination count, result count, and
@@ -340,6 +347,7 @@ Primary regression coverage:
 | `test/lit/Conversion/onnx-to-hip/test_broadcast_destination_consistency.mlir` | Equal allocation and reified extents through collapse and bufferization |
 | `test/lit/Conversion/onnx-to-hip/test_broadcast_folded_failure_atomicity.mlir` | No partial destination or variadic chain after a folded shape conflict |
 | `test/lit/Dialect/hip-matmul-reify-shapes.mlir` | Per-op reification through `--resolve-shaped-type-result-dims` |
+| `test/lit/Conversion/onnx-to-hip/test_matmul.mlir` | ONNX MatMul destination: each batch dim comes from the operand that carries it |
 | `test/lit/Dialect/hip-matmul-shape-verifier.mlir` | Static MatMul shape validation |
 | `test/lit/Dialect/hip-loop-verifier.mlir` | Loop-carried type contract |
 | `test/lit/Dialect/hip-resolve-tensor-dims.mlir` | Production pre-bufferization dim folding |
