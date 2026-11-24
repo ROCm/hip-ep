@@ -18,6 +18,10 @@
 // 9. causal_conv_dilated_channels_first  — rejected
 // 10. causal_conv_bf16                   — rejected
 // 11. causal_conv_channels_last_bad_state — rejected
+// 12. causal_conv_unused_state_past       — none present_state, typed from past_state
+// 13. causal_conv_unused_state_no_past    — none present_state, [B, C, K-1] from weight
+// 14. causal_conv_unused_state_channels_last — none present_state, [B, (K-1)*dilation, C]
+// 15. causal_conv_unused_state_dynamic_weight — rejected (state type unknown)
 //
 // All static cases assert:
 // - context argument prepended
@@ -297,6 +301,98 @@ module {
   }
 
   // CHECK-LABEL: func.func @causal_conv_channels_last_bad_state
+  // CHECK-NOT: hip.causal_conv_with_state
+  // CHECK: onnx.Custom
+
+  // --------------------------------------------------------------------------
+  // 12-15. The present_state output is unused, so the importer types it
+  //        `none`. The runtime still writes the state, so its buffer type is
+  //        taken from past_state or derived from the weight.
+  // --------------------------------------------------------------------------
+  func.func @causal_conv_unused_state_past(
+      %input: tensor<?x64x?xf16>,
+      %weight: tensor<64x1x4xf16>,
+      %past_state: tensor<?x64x3xf16>
+  ) -> tensor<?x64x?xf16> {
+    %none = "onnx.NoValue"() {value} : () -> none
+    %output, %present_state = "onnx.Custom"(%input, %weight, %none, %past_state) {
+      function_name = "CausalConvWithState",
+      domain_name = "com.microsoft",
+      activation = "none",
+      channels_last = 0 : si64,
+      dilation = 1 : si64,
+      ndim = 1 : si64,
+      state_window = 0 : si64
+    } : (tensor<?x64x?xf16>, tensor<64x1x4xf16>, none, tensor<?x64x3xf16>)
+      -> (tensor<?x64x?xf16>, none)
+    return %output : tensor<?x64x?xf16>
+  }
+
+  // CHECK-LABEL: func.func @causal_conv_unused_state_past
+  // CHECK-SAME: (%[[CTX12:.*]]: !hip.context, %[[IN12:.*]]: tensor<?x64x?xf16>, %[[W12:.*]]: tensor<64x1x4xf16>, %[[PS12:.*]]: tensor<?x64x3xf16>)
+  // CHECK: tensor.dim %[[PS12]]
+  // CHECK: tensor.empty({{.*}}) : tensor<?x64x3xf16>
+  // CHECK: %[[R12:.*]]:2 = hip.causal_conv_with_state(%[[CTX12]]) ins(%[[IN12]], %[[W12]], %[[PS12]] : tensor<?x64x?xf16>, tensor<64x1x4xf16>, tensor<?x64x3xf16>) outs({{.*}}, {{.*}} : tensor<?x64x?xf16>, tensor<?x64x3xf16>)
+  // CHECK-NOT: onnx.Custom
+  // CHECK: return %[[R12]]#0 : tensor<?x64x?xf16>
+
+  func.func @causal_conv_unused_state_no_past(
+      %input: tensor<1x64x8xf16>,
+      %weight: tensor<64x1x4xf16>
+  ) -> tensor<1x64x8xf16> {
+    %none = "onnx.NoValue"() {value} : () -> none
+    %output, %present_state = "onnx.Custom"(%input, %weight, %none, %none) {
+      function_name = "CausalConvWithState",
+      domain_name = "com.microsoft",
+      ndim = 1 : si64
+    } : (tensor<1x64x8xf16>, tensor<64x1x4xf16>, none, none)
+      -> (tensor<1x64x8xf16>, none)
+    return %output : tensor<1x64x8xf16>
+  }
+
+  // CHECK-LABEL: func.func @causal_conv_unused_state_no_past
+  // CHECK: tensor.empty() : tensor<1x64x3xf16>
+  // CHECK: %[[R13:.*]]:2 = hip.causal_conv_with_state({{.*}}) ins({{.*}} : tensor<1x64x8xf16>, tensor<64x1x4xf16>) outs({{.*}}, {{.*}} : tensor<1x64x8xf16>, tensor<1x64x3xf16>)
+  // CHECK: return %[[R13]]#0 : tensor<1x64x8xf16>
+
+  func.func @causal_conv_unused_state_channels_last(
+      %input: tensor<?x?x64xf16>,
+      %weight: tensor<64x1x4xf16>
+  ) -> tensor<?x?x64xf16> {
+    %none = "onnx.NoValue"() {value} : () -> none
+    %output, %present_state = "onnx.Custom"(%input, %weight, %none, %none) {
+      function_name = "CausalConvWithState",
+      domain_name = "com.microsoft",
+      channels_last = 1 : si64,
+      dilation = 3 : si64,
+      ndim = 1 : si64
+    } : (tensor<?x?x64xf16>, tensor<64x1x4xf16>, none, none)
+      -> (tensor<?x?x64xf16>, none)
+    return %output : tensor<?x?x64xf16>
+  }
+
+  // CHECK-LABEL: func.func @causal_conv_unused_state_channels_last
+  // CHECK-SAME: (%{{.*}}: !hip.context, %[[IN14:.*]]: tensor<?x?x64xf16>, %{{.*}}: tensor<64x1x4xf16>)
+  // CHECK: tensor.dim %[[IN14]]
+  // CHECK: tensor.empty({{.*}}) : tensor<?x9x64xf16>
+  // CHECK: %[[R14:.*]]:2 = hip.causal_conv_with_state({{.*}}) outs({{.*}}, {{.*}} : tensor<?x?x64xf16>, tensor<?x9x64xf16>) {channels_last = true, dilation = 3 : i64, state_channels_last = true}
+  // CHECK: return %[[R14]]#0 : tensor<?x?x64xf16>
+
+  func.func @causal_conv_unused_state_dynamic_weight(
+      %input: tensor<1x64x8xf16>,
+      %weight: tensor<?x1x4xf16>
+  ) -> tensor<1x64x8xf16> {
+    %none = "onnx.NoValue"() {value} : () -> none
+    %output, %present_state = "onnx.Custom"(%input, %weight, %none, %none) {
+      function_name = "CausalConvWithState",
+      domain_name = "com.microsoft",
+      ndim = 1 : si64
+    } : (tensor<1x64x8xf16>, tensor<?x1x4xf16>, none, none)
+      -> (tensor<1x64x8xf16>, none)
+    return %output : tensor<1x64x8xf16>
+  }
+
+  // CHECK-LABEL: func.func @causal_conv_unused_state_dynamic_weight
   // CHECK-NOT: hip.causal_conv_with_state
   // CHECK: onnx.Custom
 }
