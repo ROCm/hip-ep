@@ -11,7 +11,7 @@
 // CHECK-LABEL: func.func @copy_d2h(
 // CHECK-SAME:    %[[CTX:[^:]+]]: !hipsr.context,
 // CHECK-SAME:    %[[SRC:[^:]+]]: memref<1xi64, #hipsr.mem<device>>) {
-// CHECK-NEXT:    %[[DST:.+]] = memref.alloc() {alignment = 64 : i64} : memref<1xi64, #hipsr.mem<host>>
+// CHECK-NEXT:    %[[DST:.+]] = memref.alloc() alignment = 64 : memref<1xi64, #hipsr.mem<host>>
 // CHECK-NEXT:    hipsr.copy_d2h(%[[CTX]]) ins(%[[SRC]] : memref<1xi64, #hipsr.mem<device>>) outs(%[[DST]] : memref<1xi64, #hipsr.mem<host>>){{$}}
 // CHECK-NEXT:    return
 // CHECK-NEXT:  }

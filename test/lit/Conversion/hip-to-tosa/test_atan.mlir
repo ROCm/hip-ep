@@ -45,9 +45,9 @@
 // %[[HIARG]] is an infinity at x = 0, but that lane is never selected, and at
 // x = inf it is the 0 that makes the result exactly pi/2.
 // CHECK-LABEL: func.func @atan_f32
-// CHECK-DAG: %[[ZERO:.*]] = "tosa.const"() <{values = dense<0.000000e+00> : tensor<4xf32>}>
-// CHECK-DAG: %[[ONE:.*]] = "tosa.const"() <{values = dense<1.000000e+00> : tensor<4xf32>}>
-// CHECK-DAG: %[[MONE:.*]] = "tosa.const"() <{values = dense<-1.000000e+00> : tensor<4xf32>}>
+// CHECK-DAG: %[[ZERO:.*]] = tosa.const values(dense<0.000000e+00> : tensor<4xf32>)
+// CHECK-DAG: %[[ONE:.*]] = tosa.const values(dense<1.000000e+00> : tensor<4xf32>)
+// CHECK-DAG: %[[MONE:.*]] = tosa.const values(dense<-1.000000e+00> : tensor<4xf32>)
 // CHECK: %[[AX:.*]] = tosa.abs %arg1
 // CHECK: %[[HI:.*]] = tosa.greater %[[AX]], %{{.*}}
 // CHECK: %[[MID:.*]] = tosa.greater %[[AX]], %{{.*}}
@@ -87,9 +87,9 @@ func.func @atan_f32(%ctx: !hip.context, %x: tensor<4xf32>,
 // atan kernel is __half2float / atanf / __float2half, and a degree-9 polynomial
 // in 11 mantissa bits would throw away most of what the minimax fit buys.
 // CHECK-LABEL: func.func @atan_f16
-// CHECK: %[[UP:.*]] = tosa.cast %arg1 : (tensor<2x8xf16>) -> tensor<2x8xf32>
+// CHECK: %[[UP:.*]] = tosa.cast %arg1 input_unsigned(false) : (tensor<2x8xf16>) -> tensor<2x8xf32>
 // CHECK: tosa.abs %[[UP]] : (tensor<2x8xf32>) -> tensor<2x8xf32>
-// CHECK: tosa.cast %{{.*}} : (tensor<2x8xf32>) -> tensor<2x8xf16>
+// CHECK: tosa.cast %{{.*}} input_unsigned(false) : (tensor<2x8xf32>) -> tensor<2x8xf16>
 // CHECK-NOT: hip.atan
 func.func @atan_f16(%ctx: !hip.context, %x: tensor<2x8xf16>,
                     %init: tensor<2x8xf16>) -> tensor<2x8xf16>
@@ -104,9 +104,9 @@ func.func @atan_f16(%ctx: !hip.context, %x: tensor<2x8xf16>,
 // bf16 takes the same bridge, and for the stronger reason: it carries 8
 // mantissa bits.
 // CHECK-LABEL: func.func @atan_bf16
-// CHECK: %[[UP:.*]] = tosa.cast %arg1 : (tensor<4xbf16>) -> tensor<4xf32>
+// CHECK: %[[UP:.*]] = tosa.cast %arg1 input_unsigned(false) : (tensor<4xbf16>) -> tensor<4xf32>
 // CHECK: tosa.abs %[[UP]] : (tensor<4xf32>) -> tensor<4xf32>
-// CHECK: tosa.cast %{{.*}} : (tensor<4xf32>) -> tensor<4xbf16>
+// CHECK: tosa.cast %{{.*}} input_unsigned(false) : (tensor<4xf32>) -> tensor<4xbf16>
 // CHECK-NOT: hip.atan
 func.func @atan_bf16(%ctx: !hip.context, %x: tensor<4xbf16>,
                      %init: tensor<4xbf16>) -> tensor<4xbf16>
