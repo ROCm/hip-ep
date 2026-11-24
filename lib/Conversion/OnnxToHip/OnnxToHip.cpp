@@ -287,6 +287,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateMultiHeadAttentionConversionPatterns(patterns, ctx);
   populateAttentionConversionPatterns(patterns, ctx);
   populateOnnxAttentionConversionPatterns(patterns, ctx);
+  populatePagedAttentionConversionPatterns(patterns, ctx);
   populateMatMulNBitsConversionPatterns(patterns, ctx);
   populateMatMulBnb4ConversionPatterns(patterns, ctx);
   populateQMoEConversionPatterns(patterns, ctx);
@@ -629,8 +630,10 @@ void ConvertOnnxToHipPass::runOnOperation() {
         populateQsaPairFoldPatterns(preLoweringPatterns, ctx);
         populateFastGeluFusionPatterns(preLoweringPatterns, ctx);
         populateErfGeluFusionPatterns(preLoweringPatterns, ctx);
+        populateGroupNormDecompositionFusionPatterns(preLoweringPatterns, ctx);
         populateProjectorOpsRewritePatterns(preLoweringPatterns, ctx);
         populateLpNormalizationConversionPatterns(preLoweringPatterns, ctx);
+        populateReduceSumSquareConversionPatterns(preLoweringPatterns, ctx);
         populatePowDecompositionPatterns(preLoweringPatterns, ctx);
         populateHardSigmoidConversionPatterns(preLoweringPatterns, ctx);
         ChangeFlagListener listener;

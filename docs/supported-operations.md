@@ -71,9 +71,10 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | ReduceMin | Custom HIP kernel |
 | ReduceProd | Custom HIP kernel |
 | ReduceMean | Custom HIP kernel |
+| ReduceSumSquare | Decomposed to Mul + ReduceSum, its ONNX function body. Same axes, `keepdims` and `noop_with_empty_axes` handling as ReduceSum |
 | CumSum | Custom HIP kernel |
 | Pad | Custom HIP kernel. The opset<11 form, with `pads` and the fill `value` as attributes, is rewritten to the operand form first |
-| Tile | Custom HIP kernel |
+| Tile | Static shapes with constant repeats become a broadcast: a unit dim is inserted before each repeated extent above one, `hip.expand` broadcasts the repeats, and a `tensor.collapse_shape` merges each repeat with its extent. The rocMLIR fusion folds these views into a neighbouring kernel; otherwise the expand kernel runs. A zero repeat, a dynamic shape, or a broadcast rank above 8 uses the custom HIP Tile kernel |
 | Expand | Custom HIP kernel |
 | GatherND | Custom HIP kernel |
 | ScatterND | Custom HIP kernel (reductions: none / add / mul / min / max) |
@@ -89,9 +90,10 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Compress | Custom HIP kernel; a dynamic selected extent is scanned and read back before allocation |
 | OneHot | Custom HIP kernel |
 | LayerNormalization | Custom HIP kernel |
-| InstanceNormalization | Custom HIP kernel |
+| InstanceNormalization | Custom HIP kernel. Rows of 16K elements or more use the GroupNorm split reduction with one channel per group |
 | BatchNormalization | Custom HIP kernel; inference only (`training_mode` stays on ONNX) |
-| GroupNorm (`com.microsoft`) | Custom HIP kernel; optional SiLU, NCHW or NHWC |
+| GroupNorm (`com.microsoft`) | Custom HIP kernel; optional SiLU, NCHW or NHWC; f16, bf16, f32 and f64. Groups of 16K elements or more (`HIPDNN_EP_GROUPNORM_SPLIT_SIZE` overrides the threshold) use a split reduction over the runtime workspace, sized from the device's unit count and threads per unit; the result is deterministic |
+| GroupNormalization | Same kernel as GroupNorm, NCHW, for the opset-21 per-channel scale and bias. The channel dimension must be static. The opset-18 per-group form is not supported |
 | SkipLayerNormalization (`com.microsoft`) | Decomposed to Add + LayerNormalization, including the optional input bias |
 | EmbedLayerNormalization (`com.microsoft`) | Decomposed to Gather + Add + LayerNormalization. f16/f32 tables, i32 indices. A missing position-id input uses `0 .. sequence-1` when the sequence length is static. `mask_index` is the count of ones along the sequence; with no mask it is zeros |
 | RMSNormalization | Custom HIP kernel |
@@ -105,8 +107,9 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | LpNormalization | Decomposed to Mul / ReduceSum / Sqrt / Div |
 | RotaryEmbedding (`com.microsoft`) | Custom HIP kernel |
 | RotaryEmbedding (`ai.onnx`) | Custom HIP kernel |
-| MRotaryEmbedding (`com.microsoft`) | Custom HIP kernel. Rank-3 input, `interleaved=0`, `is_packed_batching=0`, f16/f32 |
+| MRotaryEmbedding (`com.microsoft`) | Custom HIP kernel. Rank-3 input, `interleaved=0`, dense or packed batching, f16/f32 |
 | GroupQueryAttention (`com.microsoft`) | Custom HIP kernels and hipBLASLt |
+| PagedAttention (`com.microsoft`) | Shared GQA HIP computation for separate FP16 Q/K/V and PSHD page pools. Ragged multi-batch prefill/decode, inactive requests, optional full-D non-interleaved RoPE, and in-place cache outputs. Slot 16 accepts host/device i32 query/KV sizing bounds. Quantized or packed Page QKV, sinks, Q/K norm, softcap and noncausal modes are rejected; native geometry/window limits are documented in the Page UTs |
 | SparseAttentionIndexer (`com.microsoft`) | Custom HIP kernels, wave32 (RDNA) only. `qsa` policy with packed QK, head size 128, up to 8 heads, `token_budget / compress_ratio` ≤ 512, f16/f32. With `past_sequence_length`, `past_key` / `present_key` are max-capacity caches that may share one buffer. An MRoPE cos/sin table subgraph with constant section masks is folded into the op, which then reads the base tables through the position ids. The exported per-row counts subgraph (`ReduceSum(Where(selected_indices >= 0, 1, 0))`) is folded into an extra op output. Without a mask, an indexer whose selection only feeds DynamicSparseAttention is paired with it: rows that select every position skip scoring, and the rest are listed in block order |
 | DynamicSparseAttention (`com.microsoft`) | Custom HIP kernel (WMMA), wave32 (RDNA) only. `selected_only` over the main KV cache, head size 128 or 256, up to 16 query heads per KV head, f16; the op's own rotary, q/k norm and `head_sink` inputs are not supported. A surrounding packed-QKV `Split`, per-head `SimplifiedLayerNormalization` + `MRotaryEmbedding` of q/k and `Mul(output, Sigmoid(gate))` are folded into the kernel. Paired with its indexer, an unsplit call runs the dense rows of a long enough prompt on the GQA flash prefill |
 | MultiHeadAttention (`com.microsoft`) | Lowered to GroupQueryAttention or decomposed hipBLASLt/custom-kernel paths |
@@ -181,4 +184,4 @@ These operations are handled through standard MLIR transformations and generally
 
 ## Fusion and preprocessing
 
-The frontend also recognizes or simplifies selected patterns before operation conversion, including approximate/FastGelu chains, Erf-based Gelu chains, supported Pow forms, LpNormalization decompositions, CastLike simplification, and model-exporter cleanup patterns.
+The frontend also recognizes or simplifies selected patterns before operation conversion, including approximate/FastGelu chains, Erf-based Gelu chains, the exported GroupNorm decomposition (Reshape to `[0, G, -1]`, InstanceNormalization with unit scale and zero bias, Reshape back, per-channel Mul/Add and an optional SiLU, fused into one GroupNorm; the unit scale and zero bias must be inline constants, so an initializer above the ORT bridge copy threshold keeps the unfused form), supported Pow forms, LpNormalization decompositions, CastLike simplification, and model-exporter cleanup patterns.

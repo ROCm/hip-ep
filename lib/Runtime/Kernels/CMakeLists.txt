@@ -109,11 +109,13 @@ set(_kernel_sources
     hip/sparse_attention_indexer_kernel.hip
     hip/transpose_kernel.hip
     hip/causal_conv_step_kernel.hip
+    hip/varlen_causal_conv_kernel.hip
     hip/slice_kernel.hip
     hip/scatter_nd_kernel.hip
     hip/gather_block_quantized_kernel.hip
     hip/qdq_kernel.hip
     hip/softmax_kernel.hip
+    hip/scaled_masked_softmax_kernel.hip
     hip/nonzero_kernel.hip
     hip/strided_copy_kernel.hip
 )

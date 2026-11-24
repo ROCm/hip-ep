@@ -247,6 +247,10 @@ void *hipdnn_ep_alloc_output(RuntimeState *state, int64_t out_idx,
                              const int64_t *shape, int64_t rank,
                              int64_t elem_size);
 
+void *hipdnn_ep_bind_output(RuntimeState *state, int64_t out_idx,
+                            const int64_t *shape, int64_t rank,
+                            int64_t elem_size, void *source);
+
 // Initialize runtime state with external constant storage via FileSystem.
 // Used when compiled with hip_compile_with_fs.
 // Reads constants_filename and constant_sizes from the FlatBuffers blob
@@ -423,6 +427,14 @@ int hipdnn_ep_state_ensure_matmul_dp4a_scratch(RuntimeState *state,
 // serialised. See runtime_state_internal.h for design rationale.
 void *hipdnn_ep_state_get_la_scratch(RuntimeState *state);
 int hipdnn_ep_state_ensure_la_scratch(RuntimeState *state, size_t needed_size);
+
+// Per-session native Page workspace: validation status, request metadata,
+// optional rotated Q and reduction partials. Grown on demand, never
+// shrunk, freed in hipdnn_ep_state_cleanup, shared by all attention layers
+// because the stream is serialised.
+void *hipdnn_ep_state_get_paged_attention_scratch(RuntimeState *state);
+int hipdnn_ep_state_ensure_paged_attention_scratch(RuntimeState *state,
+                                                   size_t needed_size);
 
 // Per-op state slots (see docs/design/op-state-slots-design.md). The generated
 // @hipdnn_ep_op_states_init_fn (built by --generate-op-state-init) calls
@@ -1033,6 +1045,22 @@ int wrap_multi_head_attention(
     int64_t query_hidden, int64_t v_hidden, int64_t head_size,
     int64_t query_rank, int64_t element_size_bytes);
 
+// PagedAttention (com.microsoft). Pools are read/write and graph cache outputs
+// must bind to them before this call. Forward independent dynamic extents and
+// consume native workspace errors through the inference error protocol.
+int wrap_paged_attention(
+    RuntimeState *state, int32_t op_state_slot, const void *q, const void *k,
+    const void *v, void *k_pool, void *v_pool, const int32_t *cum,
+    const int32_t *past, const int32_t *table, const void *cos_cache,
+    const void *sin_cache, const int32_t *metadata, void *output,
+    int64_t tokens, int64_t key_tokens, int64_t value_tokens,
+    int64_t output_tokens, int64_t batch, int64_t pages, int64_t value_pages,
+    int64_t page_size, int64_t value_page_size, int64_t head_dim,
+    int64_t table_batch, int64_t table_columns, int64_t cum_count,
+    int64_t metadata_count, int64_t cos_rows, int64_t sin_rows,
+    int64_t num_heads, int64_t kv_heads, int64_t window, int64_t do_rotary,
+    int64_t rotary_interleaved, float scale, float softcap);
+
 // Generic element-wise tensor operation wrapper with per-operand 4D shapes.
 // Computes output = op(lhs, rhs) element-wise via the custom HIP kernels
 // (flat int kernels + hip_expand for int16/int32/int64, the native
@@ -1486,6 +1514,14 @@ int wrap_swiglu(RuntimeState *state, void *gate, void *up, void *output,
 // Half buffers with FP32 sigmoid and multiply intermediates.
 int wrap_swiglu_promoted(RuntimeState *state, void *gate, void *up,
                          void *output, int64_t num_elements, int64_t data_type);
+
+// Clamped SwiGLU (hip.swiglu with activation_alpha / activation_beta /
+// swiglu_limit): g = min(gate, limit), u = clamp(up, -limit, limit),
+// output = g / (1 + exp(-alpha * g)) * (u + beta), in FP32. limit may be
+// +inf. FLOAT, HALF and BFLOAT16.
+int wrap_swiglu_clamped(RuntimeState *state, void *gate, void *up, void *output,
+                        int64_t num_elements, int64_t data_type, float alpha,
+                        float beta, float limit);
 
 // Window-pool wrapper (uses custom HIP kernel).
 // Generic ONNX MaxPool / AveragePool / LpPool over (N, C, D_1[, D_2[, D_3]])
@@ -1976,6 +2012,21 @@ int wrap_causal_conv_with_state(
     // 1 = carry state is (batch, state_len, channels). Requires channels_last.
     int64_t state_channels_last);
 
+// Packed token-major causal depthwise convolution.
+// input/output: [total_tokens, channels]
+// weight: [channels, 1, kernel_size]
+// cumulative_sequence_length: int32 [batch + 1], device memory
+// initial_state/present_state: [batch, channels, state_len], may alias
+// state_len = (kernel_size - 1) * dilation
+// activation: 0=none, 1=silu/swish
+int wrap_varlen_causal_conv_with_state(
+    RuntimeState *state, const void *input, const void *weight,
+    const void *cumulative_sequence_length, const void *bias,
+    const void *initial_state, void *output, void *present_state,
+    int64_t total_tokens, int64_t channels, int64_t batch, int64_t kernel_size,
+    int64_t dilation, int64_t state_len, int64_t activation,
+    int64_t element_size_bytes);
+
 //==============================================================================
 // ONNX Gemm via hipBLASLt
 //==============================================================================
@@ -2032,6 +2083,16 @@ int wrap_gated_delta_net(RuntimeState *state, const void *qkv,
                          int64_t num_heads_v, int64_t head_size_qk,
                          int64_t head_size_v, float scale,
                          int64_t element_size_bytes);
+
+// Ragged variant: request b owns tokens [cu[b], cu[b+1]) of the packed qkv,
+// decay and beta, and its own state slice. scale == 0 means 1 / sqrt(dk).
+int wrap_varlen_gated_delta_net(
+    RuntimeState *state, const void *qkv, const float *decay, const float *beta,
+    const void *cumulative_sequence_length, const float *initial_state,
+    const float *a_log, const float *dt_bias, void *output, float *final_state,
+    int64_t total_tokens, int64_t batch, int64_t num_heads_qk,
+    int64_t num_heads_v, int64_t head_size_qk, int64_t head_size_v, float scale,
+    int64_t element_size_bytes);
 
 // fp16 only. past_* may alias present_*. head_size is query width / num_heads
 // (/ (num_heads + 2 * kv_num_heads) for a packed query, when key and value

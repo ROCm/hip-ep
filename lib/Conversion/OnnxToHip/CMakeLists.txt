@@ -41,6 +41,7 @@ add_library(OnnxToHip STATIC
   AttentionConversion.cpp
   OnnxAttentionConversion.cpp
   HipGqaBuilder.cpp
+  PagedAttentionConversion.cpp
   GatherConversion.cpp
   GatherElementsConversion.cpp
   TopKConversion.cpp
@@ -74,8 +75,10 @@ add_library(OnnxToHip STATIC
   RangeConversion.cpp
   FastGeluFusion.cpp
   ErfGeluFusion.cpp
+  GroupNormDecompositionFusion.cpp
   ProjectorOpsRewrites.cpp
   LpNormalizationConversion.cpp
+  ReduceSumSquareConversion.cpp
   EqualConversion.cpp
   DivConversion.cpp
   ReduceMaxConversion.cpp

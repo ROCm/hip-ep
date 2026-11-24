@@ -454,6 +454,8 @@ void populateAttentionConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
 void populateOnnxAttentionConversionPatterns(RewritePatternSet &patterns,
                                              MLIRContext *ctx);
+void populatePagedAttentionConversionPatterns(RewritePatternSet &patterns,
+                                              MLIRContext *ctx);
 void populateGatherConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
 void populateCompressConversionPatterns(RewritePatternSet &patterns,
@@ -830,6 +832,13 @@ void populatePowDecompositionPatterns(RewritePatternSet &patterns,
 void populateErfGeluFusionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 
+/// Pre-lowering pattern set: fuse Reshape(x, [0, G, -1]) ->
+/// InstanceNormalization(1, 0) -> Reshape(_, Shape(x)) -> [Mul gamma] ->
+/// [Add beta] -> [x * Sigmoid(x)] into com.microsoft GroupNorm (NCHW).
+/// See GroupNormDecompositionFusion.cpp.
+void populateGroupNormDecompositionFusionPatterns(RewritePatternSet &patterns,
+                                                  MLIRContext *ctx);
+
 /// Pre-lowering pattern set: decompose vision/projector ops that have no
 /// direct MorphiZen converter into supported primitives —
 /// AveragePool(kernel==stride) → Reshape/Transpose/ReduceMean, Pow(x, c) →
@@ -859,6 +868,13 @@ void populateHardSigmoidConversionPatterns(RewritePatternSet &patterns,
 /// "existing" ops by the next round and reach `convertComputeOps`'s
 /// converters as ordinary onnx.* ops. See LpNormalizationConversion.cpp.
 void populateLpNormalizationConversionPatterns(RewritePatternSet &patterns,
+                                               MLIRContext *ctx);
+
+/// Pre-lowering pattern set: decompose `onnx.ReduceSumSquare` into
+/// onnx.Mul + onnx.ReduceSum, its ONNX function body. Lives in the
+/// pre-lowering loop for the same reason as LpNormalization. See
+/// ReduceSumSquareConversion.cpp.
+void populateReduceSumSquareConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx);
 
 } // namespace hip

@@ -939,12 +939,19 @@ static const std::vector<ProblemCacheLut> &shippedProblemCaches() {
 }
 
 bool RocMlirAutotuner::Impl::problemCacheActive() const {
-  return kRocmlirProblemCacheBlobCount != 0 ||
-         !options.problemCachePath.empty();
+  // An external --problem-cache always applies. The shipped LUT applies only
+  // when no tuning type was provided.
+  if (!options.problemCachePath.empty())
+    return true;
+  return !options.tuningTypeProvided && kRocmlirProblemCacheBlobCount != 0;
 }
 
 std::optional<std::string> RocMlirAutotuner::Impl::lookupProblemCache(
     StringRef problem, const std::vector<std::string> &rejected) {
+  // A tuning type does not read the shipped table. Only an external path
+  // reaches the lookup below, and that file is checked before the search.
+  if (!problemCacheActive())
+    return std::nullopt;
   const auto search =
       [&](const ProblemCacheLut &lut) -> std::optional<std::string> {
     if ((!lut.gpuArch.empty() && lut.gpuArch != deviceGfx) ||
@@ -1011,15 +1018,12 @@ bool RocMlirAutotuner::Impl::autotuneKernel(ModuleOp module,
     return ok;
   }
 
-  // Look up before building the search space. problemCachePath is set only by
-  // hip-rocmlir-compiler; when it is set, that file is the only table. The
-  // in-process EP leaves it empty and uses the shipped lut/<arch>.fb. A miss
-  // then checks this compile's winner cache, then the selected tuning space.
+  // An external --problem-cache is checked first. With no external table, a
+  // tuning type skips the shipped LUT. A repeated problem then checks this
+  // compile's winner cache, then the selected tuning space.
   // A known winner is compiled in the second pool. A problem already queued
-  // waits for that pool
-  // once the search has been benchmarked. A tile that fails to compile is
-  // skipped and the next nearest row is tried. When none remain, the search
-  // runs.
+  // waits for that pool once the search has been benchmarked. A cached
+  // perfConfig that fails to compile is dropped and the search runs.
   llvm::SmallString<2048> problem;
   std::string cacheKey;
   if (succeeded(rock::getTuningProblemStr(module, problem))) {
@@ -1400,6 +1404,13 @@ bool RocMlirAutotuner::Impl::dumpProblemCache(StringRef path) const {
 RocMlirAutotuner::RocMlirAutotuner(StringRef arch,
                                    const AutotuneOptions &options)
     : impl(std::make_unique<Impl>(arch, options)) {
+  // Once per compile, and only when the caller asked for a log. An external
+  // table is used as given. With none, a provided tuning type skips the
+  // shipped LUT.
+  if (options.problemCachePath.empty() && options.tuningTypeProvided &&
+      options.log)
+    *options.log << options.logPrefix << " " << autotuneSpaceName(options.space)
+                 << " autotune skips the shipped problem-cache LUT\n";
   impl->usable = impl->checkDevice();
 }
 

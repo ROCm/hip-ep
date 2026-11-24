@@ -1036,6 +1036,15 @@ HIP_KERNEL_API int hip_swiglu_promoted(void *stream, const void *gate,
                                       const void *up, void *output,
                                       int64_t num_elements, int hip_dtype);
 
+// Clamped SwiGLU, computed in FP32 and rounded once:
+//   g = min(gate, limit), u = clamp(up, -limit, limit),
+//   output = g / (1 + exp(-alpha * g)) * (u + beta).
+// limit may be +inf. HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16, HIP_DTYPE_BFLOAT16.
+HIP_KERNEL_API int hip_swiglu_clamped(void *stream, const void *gate,
+                                      const void *up, void *output,
+                                      int64_t num_elements, int hip_dtype,
+                                      float alpha, float beta, float limit);
+
 /* =========================================================================
  * Softplus activation
  * =========================================================================
@@ -1346,6 +1355,19 @@ HIP_KERNEL_API int hip_softmax_row_2d_fp32(void* stream, const void* input, void
  * in place. Equivalent to passing `data` as both source and destination. */
 HIP_KERNEL_API int hip_softmax_row_2d_inplace(void* stream, void* data, int rows, int cols);
 HIP_KERNEL_API int hip_softmax_row_2d_inplace_fp32(void* stream, void* data, int rows, int cols);
+
+/* Last-axis softmax over [outer, R, C] scores with the scale and an id mask
+ * applied on the way in:
+ *   out[o,r,c] = softmax_c(row_ids[r] == col_ids[c] ? x[o,r,c] * scale : fill)
+ * The scaled value is rounded to the element type first. An id vector of
+ * length 1 broadcasts; any other length must be R (row_ids) or C (col_ids).
+ * elem_size_bytes: 2 for fp16, 4 for fp32. `input` may equal `output`.
+ * Returns -1 on invalid arguments. */
+HIP_KERNEL_API int hip_softmax_row_scaled_masked(
+    void* stream, const void* input, void* output, const int64_t* row_ids,
+    int64_t row_ids_len, const int64_t* col_ids, int64_t col_ids_len,
+    int64_t outer, int64_t R, int64_t C, float scale, float fill,
+    int elem_size_bytes);
 
 /* Column-wise softmax: fp32 input -> fp16 output.
  * Reads fp32 Score matrix (no fp16 overflow/inf), writes fp16 probabilities.
@@ -2465,7 +2487,21 @@ HIP_KERNEL_API int hip_batch_norm(
  * Mean/var over each (N, group). channels_last 0 is NCHW, 1 is NHWC.
  * activation 1 applies SiLU after the affine transform.
  * `hip_dtype`: FLOAT16, BFLOAT16, FLOAT32, or FLOAT64.
+ *
+ * Large groups use a split reduction whose partials live in `workspace`
+ * (device memory, 256-byte aligned). Query the size with
+ * hip_group_norm_workspace_bytes for the current device. A null or smaller
+ * workspace is valid: the kernel shrinks the split or uses a slower
+ * one-block-per-group path.
  */
+HIP_KERNEL_API size_t hip_group_norm_workspace_bytes(
+    int64_t n,
+    int64_t c,
+    int64_t spatial,
+    int64_t groups,
+    int channels_last,
+    int hip_dtype);
+
 HIP_KERNEL_API int hip_group_norm(
     void* stream,
     const void* input,
@@ -2479,6 +2515,8 @@ HIP_KERNEL_API int hip_group_norm(
     int channels_last,
     int activation,
     float epsilon,
+    void* workspace,
+    size_t workspace_bytes,
     int hip_dtype);
 
 /* =========================================================================
@@ -4126,6 +4164,19 @@ HIP_KERNEL_API int hip_causal_conv_nlc_state(
     int64_t activation,
     int64_t element_size_bytes);
 
+// Packed token-major causal depthwise conv. input/output are
+// [total_tokens, channels]; weight is [channels, 1, kernel_size];
+// cumulative_sequence_length is device int32 [batch + 1]; both states are
+// [batch, channels, (kernel_size - 1) * dilation] and may alias. activation
+// 0/1, element_size 2/4. state_len must be at most 32. Returns 0 on success.
+HIP_KERNEL_API int hip_varlen_causal_conv(
+    void *stream, const void *input, const void *weight,
+    const void *cumulative_sequence_length, const void *bias,
+    const void *initial_state, void *output, void *present_state,
+    int64_t total_tokens, int64_t channels, int64_t batch, int64_t kernel_size,
+    int64_t dilation, int64_t state_len, int64_t activation,
+    int64_t element_size_bytes);
+
 // com.microsoft GatedDeltaNet with packed QKV, gate_activation=qwen,
 // beta_activation=sigmoid, qk_l2_norm=1, update_rule=gated_delta.
 //   qkv           [B, L, 2*Hqk*dk + Hv*dv]   T = fp16 / fp32 (element_size_bytes)
@@ -4147,6 +4198,30 @@ HIP_KERNEL_API int hip_gated_delta_net(
     float* final_state,
     int64_t batch,
     int64_t seq_len,
+    int64_t num_heads_qk,
+    int64_t num_heads_v,
+    int64_t head_size_qk,
+    int64_t head_size_v,
+    float scale,
+    int element_size_bytes);
+
+// Ragged variant of hip_gated_delta_net. qkv is [T, P], decay and beta are
+// [T, Hv], output is [T, Hv, dv]; cumulative_sequence_length is int32 device
+// memory of length batch + 1 with cu[0] == 0 and cu[batch] == total_tokens.
+// A request whose range is empty or out of bounds leaves its state unchanged.
+HIP_KERNEL_API int hip_varlen_gated_delta_net(
+    void* stream,
+    const void* qkv,
+    const float* decay,
+    const float* beta,
+    const void* cumulative_sequence_length,
+    const float* initial_state,
+    const float* a_log,
+    const float* dt_bias,
+    void* output,
+    float* final_state,
+    int64_t total_tokens,
+    int64_t batch,
     int64_t num_heads_qk,
     int64_t num_heads_v,
     int64_t head_size_qk,

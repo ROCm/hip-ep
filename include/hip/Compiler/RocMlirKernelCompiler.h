@@ -143,10 +143,14 @@ bool isRocMlirElementwiseKernelModule(ModuleOp kernelModule);
 // tuning-space path.
 bool hasRocMlirComputation(ModuleOp kernelModule);
 
-// Pick the first perfConfig out of the tuning search space and compile with
-// it, or compile an elementwise kernel with no perfConfig. Expects
-// `kernelModule` to already be in rock form. This is what a caller gets when
-// it supplies no `compileOne`.
+// Compile an elementwise kernel with no perfConfig, or a conv or gemm with
+// the first perfConfig of the tuning search space that rocMLIR does not
+// reject as not applicable (for example a launch over the dispatch work-item
+// limit), without benchmarking. Each config that fails gets a warning on
+// stderr. Expects `kernelModule` to already be in rock form. Each config is
+// tried on a copy, so a conv or gemm module is left unmodified; an
+// elementwise kernel compiles in place. This is what a caller gets when it
+// supplies no `compileOne`.
 bool compileRocMlirDefaultPerfConfig(ModuleOp kernelModule, StringRef arch,
                                      CompiledKernel &out);
 

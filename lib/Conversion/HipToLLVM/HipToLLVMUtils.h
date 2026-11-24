@@ -89,6 +89,7 @@ inline constexpr const char *kWrapHyperConnectionPostMixNorm =
 inline constexpr const char *kMiopenAdd = "hip_miopen_add";
 inline constexpr const char *kMiopenMul = "hip_miopen_mul";
 inline constexpr const char *kMiopenSoftmax = "hip_miopen_softmax";
+inline constexpr const char *kScaledMaskedSoftmax = "hip_scaled_masked_softmax";
 inline constexpr const char *kWrapTranspose = "wrap_transpose";
 inline constexpr const char *kWrapGather = "wrap_gather";
 inline constexpr const char *kWrapGatherFromFile = "wrap_gather_from_file";
@@ -112,6 +113,7 @@ inline constexpr const char *kWrapSwish = "wrap_swish";   // hip.swish
 inline constexpr const char *kWrapPow = "wrap_pow";       // hip.pow
 inline constexpr const char *kWrapSwiglu = "wrap_swiglu"; // hip.swiglu
 inline constexpr const char *kWrapSwigluPromoted = "wrap_swiglu_promoted";
+inline constexpr const char *kWrapSwigluClamped = "wrap_swiglu_clamped";
 inline constexpr const char *kWrapSoftplus = "wrap_softplus"; // hip.softplus
 inline constexpr const char *kWrapElementwiseSub = "wrap_elementwise_sub";
 inline constexpr const char *kWrapRotaryEmbedding = "wrap_rotary_embedding";
@@ -132,6 +134,7 @@ inline constexpr const char *kWrapGQARingF16 =
     "wrap_group_query_attention_ring_f16";
 inline constexpr const char *kWrapMultiHeadAttention =
     "wrap_multi_head_attention";
+inline constexpr const char *kWrapPagedAttention = "wrap_paged_attention";
 inline constexpr const char *kWrapMatMulNBits = "wrap_matmul_nbits";
 inline constexpr const char *kWrapDequantBnb4 = "wrap_dequant_bnb4";
 inline constexpr const char *kWrapQMoE = "wrap_qmoe";
@@ -145,6 +148,8 @@ inline constexpr const char *kWrapDequantizeLinear = "wrap_dequantize_linear";
 inline constexpr const char *kWrapGemm = "wrap_gemm";
 inline constexpr const char *kWrapLinearAttention = "wrap_linear_attention";
 inline constexpr const char *kWrapGatedDeltaNet = "wrap_gated_delta_net";
+inline constexpr const char *kWrapVarlenGatedDeltaNet =
+    "wrap_varlen_gated_delta_net";
 inline constexpr const char *kWrapDynamicSparseAttention =
     "wrap_dynamic_sparse_attention";
 inline constexpr const char *kWrapSparseAttentionIndexer =
@@ -153,6 +158,8 @@ inline constexpr const char *kHipGetConstant = "hipdnn_ep_constant_get";
 inline constexpr const char *kHipDNNGraphExecute = "hipdnn_graph_execute";
 inline constexpr const char *kWrapCausalConvWithState =
     "wrap_causal_conv_with_state";
+inline constexpr const char *kWrapVarlenCausalConvWithState =
+    "wrap_varlen_causal_conv_with_state";
 inline constexpr const char *kWrapNGramHashMapping = "wrap_ngram_hash_mapping";
 inline constexpr const char *kWrapWhere = "wrap_where";
 inline constexpr const char *kWrapEqual = "wrap_equal";
@@ -535,6 +542,8 @@ void populateGqaLoweringPatterns(
     const DenseMap<Operation *, Value> &hostScalars);
 void populateMultiHeadAttentionLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
+void populatePagedAttentionLoweringPatterns(const LLVMTypeConverter &converter,
+                                            RewritePatternSet &patterns);
 void populateMatMulNBitsLoweringPatterns(const LLVMTypeConverter &converter,
                                          RewritePatternSet &patterns);
 void populateDequantBnb4LoweringPatterns(const LLVMTypeConverter &converter,

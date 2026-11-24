@@ -12,6 +12,76 @@
 #include <cstdio>
 #include <string>
 
+int wrap_varlen_gated_delta_net(
+    RuntimeState *state, const void *qkv, const float *decay, const float *beta,
+    const void *cumulative_sequence_length, const float *initial_state,
+    const float *a_log, const float *dt_bias, void *output, float *final_state,
+    int64_t total_tokens, int64_t batch, int64_t num_heads_qk,
+    int64_t num_heads_v, int64_t head_size_qk, int64_t head_size_v, float scale,
+    int64_t element_size_bytes) {
+  if (!state || !qkv || !decay || !beta || !cumulative_sequence_length ||
+      !initial_state || !a_log || !dt_bias || !output || !final_state) {
+    fprintf(stderr, "wrap_varlen_gated_delta_net: null required argument\n");
+    return -1;
+  }
+  if (element_size_bytes != 2 && element_size_bytes != 4) {
+    fprintf(stderr,
+            "wrap_varlen_gated_delta_net: unsupported element_size %lld "
+            "(expect 2 for fp16 or 4 for fp32)\n",
+            (long long)element_size_bytes);
+    return -1;
+  }
+  if (batch < 1 || head_size_qk < 1 || total_tokens < 0) {
+    fprintf(stderr,
+            "wrap_varlen_gated_delta_net: invalid shape tokens=%lld "
+            "batch=%lld dk=%lld\n",
+            (long long)total_tokens, (long long)batch, (long long)head_size_qk);
+    return -1;
+  }
+
+  void *stream = hipdnn_ep_state_get_stream(state);
+  if (!stream) {
+    fprintf(stderr, "wrap_varlen_gated_delta_net: null stream\n");
+    return -1;
+  }
+  if (scale == 0.0f) {
+    scale = 1.0f / std::sqrt(static_cast<float>(head_size_qk));
+  }
+
+  OP_PROFILE(
+      "varlen_gated_delta_net",
+      [&] {
+        char b[80];
+        snprintf(b, sizeof(b), "t=%lld,b=%lld,hqk=%lld,hv=%lld,dk=%lld,dv=%lld",
+                 (long long)total_tokens, (long long)batch,
+                 (long long)num_heads_qk, (long long)num_heads_v,
+                 (long long)head_size_qk, (long long)head_size_v);
+        return std::string(b);
+      },
+      state);
+
+  RUNTIME_DEBUG_LOG("[REAL] wrap_varlen_gated_delta_net: T=%lld B=%lld "
+                    "Hqk=%lld Hv=%lld dk=%lld dv=%lld scale=%f elem=%lld\n",
+                    (long long)total_tokens, (long long)batch,
+                    (long long)num_heads_qk, (long long)num_heads_v,
+                    (long long)head_size_qk, (long long)head_size_v,
+                    (double)scale, (long long)element_size_bytes);
+
+  int rc = hip_varlen_gated_delta_net(
+      stream, qkv, decay, beta, cumulative_sequence_length, initial_state,
+      a_log, dt_bias, output, final_state, total_tokens, batch, num_heads_qk,
+      num_heads_v, head_size_qk, head_size_v, scale,
+      static_cast<int>(element_size_bytes));
+  if (rc != 0) {
+    fprintf(stderr,
+            "wrap_varlen_gated_delta_net: hip_varlen_gated_delta_net failed "
+            "(%d)\n",
+            rc);
+    return -1;
+  }
+  return 0;
+}
+
 int wrap_gated_delta_net(RuntimeState *state, const void *qkv,
                          const float *decay, const float *beta,
                          const float *initial_state, const float *a_log,

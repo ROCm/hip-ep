@@ -102,6 +102,28 @@ struct HipReadbackBufferizableModel
   }
 };
 
+struct HipPagedBufferizableModel
+    : public bufferization::DstBufferizableOpInterfaceExternalModel<
+          HipPagedBufferizableModel, PagedAttentionOp> {
+  bool bufferizesToMemoryRead(Operation *op, OpOperand &operand,
+                              const bufferization::AnalysisState &) const {
+    auto page = cast<PagedAttentionOp>(op);
+    return operand.get() != page.getOutput();
+  }
+  bool mustBufferizeInPlace(Operation *op, OpOperand &operand,
+                            const bufferization::AnalysisState &) const {
+    auto page = cast<PagedAttentionOp>(op);
+    return &operand == &page.getKeyPoolMutable() ||
+           &operand == &page.getValuePoolMutable();
+  }
+  LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
+                          const bufferization::BufferizationOptions &options,
+                          bufferization::BufferizationState &state) const {
+    return HipDstBufferizableModel<PagedAttentionOp>().bufferize(
+        op, rewriter, options, state);
+  }
+};
+
 inline void
 registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
   registry.addExtension(+[](MLIRContext *ctx, HipDialect *) {
@@ -138,6 +160,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     RangeOp::attachInterface<HipDstBufferizableModel<RangeOp>>(*ctx);
     SiluOp::attachInterface<HipDstBufferizableModel<SiluOp>>(*ctx);
     GqaOp::attachInterface<HipDstBufferizableModel<GqaOp>>(*ctx);
+    PagedAttentionOp::attachInterface<HipPagedBufferizableModel>(*ctx);
     CastOp::attachInterface<HipDstBufferizableModel<CastOp>>(*ctx);
     SigmoidOp::attachInterface<HipDstBufferizableModel<SigmoidOp>>(*ctx);
     TanhOp::attachInterface<HipDstBufferizableModel<TanhOp>>(*ctx);
@@ -152,6 +175,8 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     SwishOp::attachInterface<HipDstBufferizableModel<SwishOp>>(*ctx);
     PowOp::attachInterface<HipDstBufferizableModel<PowOp>>(*ctx);
     SwigluOp::attachInterface<HipDstBufferizableModel<SwigluOp>>(*ctx);
+    ScaledMaskedSoftmaxOp::attachInterface<
+        HipDstBufferizableModel<ScaledMaskedSoftmaxOp>>(*ctx);
     ResizeOp::attachInterface<HipDstBufferizableModel<ResizeOp>>(*ctx);
     GridSampleOp::attachInterface<HipDstBufferizableModel<GridSampleOp>>(*ctx);
     RoiAlignOp::attachInterface<HipDstBufferizableModel<RoiAlignOp>>(*ctx);
@@ -179,6 +204,8 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
         HipDstBufferizableModel<DequantizeLinearOp>>(*ctx);
     CausalConvWithStateOp::attachInterface<
         HipDstBufferizableModel<CausalConvWithStateOp>>(*ctx);
+    VarlenCausalConvWithStateOp::attachInterface<
+        HipDstBufferizableModel<VarlenCausalConvWithStateOp>>(*ctx);
     NGramHashMappingOp::attachInterface<
         HipDstBufferizableModel<NGramHashMappingOp>>(*ctx);
     HipDNNGraphOp::attachInterface<HipDstBufferizableModel<HipDNNGraphOp>>(
@@ -187,6 +214,8 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     WhereOp::attachInterface<HipDstBufferizableModel<WhereOp>>(*ctx);
     LinearAttentionOp::attachInterface<
         HipDstBufferizableModel<LinearAttentionOp>>(*ctx);
+    VarlenGatedDeltaNetOp::attachInterface<
+        HipDstBufferizableModel<VarlenGatedDeltaNetOp>>(*ctx);
     GatedDeltaNetOp::attachInterface<HipDstBufferizableModel<GatedDeltaNetOp>>(
         *ctx);
     DynamicSparseAttentionOp::attachInterface<

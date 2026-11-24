@@ -111,7 +111,7 @@ controller from that `bin` directory:
 | `--timing` | `screen`, `standard`, `confirm` | `standard` | Timing preset of the shared timer (`HIPDNN_UT_TIMING`); `confirm` for formal numbers. |
 | `--leaf` | `<op>/<leaf>`, e.g. `gqa/prefill/Xfp16_Wfp16_Yfp16` | every leaf | Run only this leaf. After `--`, the rest of the command line goes to it instead of `--coverage`; see [External invocation](#external-invocation-ut_interfacejson). |
 
-The controller runs the 17 leaves serially, with `bin` as the working
+The controller runs the 21 leaves serially, with `bin` as the working
 directory so every leaf finds `custom_kernels_<arch>.dll`. It prints one
 `[<op>/<leaf>] PASS|FAIL (<ms> ms)` line per leaf and finally
 `Combined report: <path>`.
@@ -213,6 +213,7 @@ unit_test/
   qmoe_ragged_mm/Xfp16_Wu4_Yfp16/
   gather_block_quantized/Xi64_W{u4,u8,fp8}_Yfp16/
   cast/Xany_Yany_bf16/
+  group_norm/X{fp16,bf16,fp32,fp64}_W<same>_Y<same>/
 ```
 
 `unit_test/` holds one directory per op and nothing else besides the files
@@ -542,6 +543,8 @@ gather_block_quantized writes `R1024_C160_bs16_I2x8` (table rows, row length,
 block size, indices shape) with `_compact`, `_zp` and `_signed` when set, or
 the fp8 scale granularity `_tensor` / `_row` / `_block`; its `config` is always
 `fixed:elementwise` and its `time_ms` 0.
+group_norm writes `N2_C40_HW1000_G8` (batch, channels, spatial, groups); its
+`config` is `fixed:<dtype>:<layout>:<workspace>:<inputs>:silu<0|1>`.
 
 `time_ms` is the **mean per-launch** time of that case's timed launches (the
 leaf's fixed count of launches between two HIP events), not a total, and it is

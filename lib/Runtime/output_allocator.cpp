@@ -59,3 +59,20 @@ extern "C" void *hipdnn_ep_alloc_output(RuntimeState *state, int64_t out_idx,
   return state->output_allocator.allocate(state->output_allocator.self, out_idx,
                                           shape, rank, elem_size);
 }
+
+// Generated Page graph -> existing EP output callback. Failure produces a null
+// descriptor; the Page runtime rejects it before submitting any cache writes.
+extern "C" void *hipdnn_ep_bind_output(RuntimeState *state, int64_t out_idx,
+                                       const int64_t *shape, int64_t rank,
+                                       int64_t elem_size, void *source) {
+  void *bound = hipdnn_ep_alloc_output(state, out_idx, shape, rank, elem_size);
+  if (!source || bound != source) {
+    fprintf(stderr,
+            "hipdnn_ep_bind_output: output %lld must alias its input pool\n",
+            (long long)out_idx);
+    if (state)
+      (void)hipdnn_ep_state_set_error_flag(state, -1);
+    return nullptr;
+  }
+  return source;
+}

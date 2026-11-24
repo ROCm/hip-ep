@@ -1995,9 +1995,10 @@ def Hip_RopeOp : Hip_DpsOp_WithInfer<"rope"> {
     Example:
     ```mlir
     hip.rope(%ctx)
-        ins(%input, %position_ids, %cos_cache, %sin_cache :
-            memref<1x128x4096xf16, 1>, memref<1x128xi64, 1>,
+        ins(%input, %cos_cache, %sin_cache :
+            memref<1x128x4096xf16, 1>,
             memref<131072x64xf16, 1>, memref<131072x64xf16, 1>)
+        position_ids(%position_ids : memref<1x128xi64, 1>)
         outs(%output : memref<1x128x4096xf16, 1>)
         {interleaved = 0 : i64, num_heads = 32 : i64, rotary_embedding_dim = 128 : i64}
     ```
@@ -2016,17 +2017,16 @@ def Hip_RopeOp : Hip_DpsOp_WithInfer<"rope"> {
   );
 
   // position_ids is the only optional operand; MLIR resolves its presence from
-  // the operand count (no AttrSizedOperandSegments needed). Each optional group
-  // must LEAD with the `,` literal: a group's first parsable element has to be a
-  // literal / variable / custom directive, so a bare `type(...)` directive
-  // cannot open the type-list group. Anchoring on $position_ids omits it from
-  // both the value and type lists when absent; the present-form IR prints
-  // identically to before.
+  // the operand count (no AttrSizedOperandSegments needed). It has a keyword
+  // clause of its own: as a `,`-led group between $input and $cos_cache, an
+  // op without it printed three operands that the parser, committing to the
+  // group at the first `,`, read as input, position_ids and cos_cache.
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(`
-        $input (`,` $position_ids^)? `,` $cos_cache `,` $sin_cache `:`
-        type($input) (`,` type($position_ids)^)? `,` type($cos_cache) `,` type($sin_cache)
+        $input `,` $cos_cache `,` $sin_cache `:`
+        type($input) `,` type($cos_cache) `,` type($sin_cache)
     `)`
+    (`position_ids` `(` $position_ids^ `:` type($position_ids) `)`)?
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
@@ -2035,8 +2035,9 @@ def Hip_RopeOp : Hip_DpsOp_WithInfer<"rope"> {
 def Hip_MRotaryEmbeddingOp : Hip_DpsOp_AutoReifyInfer<"mrotary_embedding"> {
   let summary = "Multimodal rotary position embedding (M-RoPE)";
   let description = [{
-    com.microsoft MRotaryEmbedding restricted to rank-3 input,
-    interleaved = 0 and is_packed_batching = 0.
+    com.microsoft MRotaryEmbedding restricted to rank-3 input and
+    interleaved = 0. is_packed_batching has no separate lowering: positions
+    always come from position_ids, so S may exceed max_position.
 
     Shapes, with T = f16 or f32:
       input, output        [B, S, num_heads * head_size]          T
@@ -2334,6 +2335,7 @@ def Hip_TransposeOp : Hip_DpsOp_WithInfer<"transpose", "Output",
     attr-dict (`:` type($result_tensors)^)?
   }];
   let hasVerifier = 1;
+  let hasCanonicalizer = 1;
 }
 
 def Hip_GatherOp : Hip_DpsOp_WithInfer<"gather"> {
@@ -3016,11 +3018,29 @@ def Hip_SwigluOp : Hip_DpsOp_AutoReify<"swiglu"> {
     bf16, and f64. With promote_activation, f16 inputs and output use f32
     sigmoid and multiply intermediates; only the final result rounds to f16.
 
+    `activation_alpha`, `activation_beta` and `swiglu_limit` select the
+    clamped form `hip.qmoe` applies between its projections (GPT-OSS's
+    SwiGLU), element-wise:
+
+      g = min(gate, swiglu_limit)
+      u = clamp(up, -swiglu_limit, swiglu_limit)
+      output = g / (1 + exp(-activation_alpha * g)) * (u + activation_beta)
+
+    `swiglu_limit` 0 (the default) clamps nothing. With the defaults (alpha
+    1, beta 0, limit 0) the op is the plain SwiGLU above. The clamped form
+    computes in f32 and rounds once, for f16, bf16 and f32; it does not
+    combine with promote_activation.
+
     Example:
     ```mlir
     hip.swiglu(%ctx) ins(%gate, %up : memref<3x4xf16, 1>,
                                       memref<3x4xf16, 1>)
                        outs(%output : memref<3x4xf16, 1>)
+    hip.swiglu(%ctx) ins(%gate, %up : memref<3x4xf32, 1>,
+                                      memref<3x4xf32, 1>)
+                       outs(%output : memref<3x4xf32, 1>)
+                       {activation_alpha = 1.702 : f32,
+                        activation_beta = 1.0 : f32, swiglu_limit = 7.0 : f32}
     ```
   }];
 
@@ -3029,14 +3049,87 @@ def Hip_SwigluOp : Hip_DpsOp_AutoReify<"swiglu"> {
     Hip_TensorOrMemRef:$gate,
     Hip_TensorOrMemRef:$up,
     Hip_TensorOrMemRef:$output,
-    DefaultValuedAttr<BoolAttr, "false">:$promote_activation
+    DefaultValuedAttr<BoolAttr, "false">:$promote_activation,
+    DefaultValuedAttr<F32Attr, "1.0f">:$activation_alpha,
+    DefaultValuedAttr<F32Attr, "0.0f">:$activation_beta,
+    DefaultValuedAttr<F32Attr, "0.0f">:$swiglu_limit
   );
+
+  // Plain SwiGLU, the clamped form's attributes at their defaults.
+  let builders = [
+    OpBuilder<(ins "::mlir::TypeRange":$result_tensors, "::mlir::Value":$ctx,
+                   "::mlir::Value":$gate, "::mlir::Value":$up,
+                   "::mlir::Value":$output,
+                   CArg<"bool", "false">:$promote_activation), [{
+      build($_builder, $_state, result_tensors, ctx, gate, up, output,
+            promote_activation, ::llvm::APFloat(1.0f), ::llvm::APFloat(0.0f),
+            ::llvm::APFloat(0.0f));
+    }]>
+  ];
+
+  let extraClassDeclaration = [{
+    /// True when the clamped form's attributes differ from plain SwiGLU's.
+    bool isClamped() {
+      return getActivationAlpha().convertToFloat() != 1.0f ||
+             getActivationBeta().convertToFloat() != 0.0f ||
+             getSwigluLimit().convertToFloat() != 0.0f;
+    }
+  }];
+
+  let hasVerifier = 1;
 
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $gate `,` $up `:` type($gate) `,` type($up) `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+}
+
+def Hip_ScaledMaskedSoftmaxOp : Hip_DpsOp_AutoReify<"scaled_masked_softmax"> {
+  let summary = "Softmax over the last axis of scaled, id-masked scores";
+  let description = [{
+    With the scores viewed as [outer, R, C] (R and C the last two axes):
+
+      output[o, r, c] = softmax_c(row_ids[r] == col_ids[c]
+                                      ? round(input[o, r, c] * scale)
+                                      : fill)
+
+    where round() is to the element type, as a separate multiply would store
+    it. An id vector of length 1 broadcasts across its axis; any other length
+    must equal the axis it indexes, which the runtime checks.
+
+    Produced by hip-fusion-transform from mul(scores, scale) ->
+    where(equal(row_ids[R,1], col_ids[1,C]), ., fill) -> miopen.softmax, the
+    per-frame attention mask of Qwen-VL style vision encoders. It never
+    materializes the mask or either intermediate score tensor.
+
+    Example:
+    ```mlir
+    hip.scaled_masked_softmax(%ctx) ins(%scores, %ids, %ids :
+        memref<16x?x?xf16>, memref<?xi64>, memref<?xi64>)
+        outs(%out : memref<16x?x?xf16>) {fill = -6.5504e+04 : f32,
+        scale = 0.1178 : f32}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$row_ids,
+    Hip_TensorOrMemRef:$col_ids,
+    Hip_TensorOrMemRef:$output,
+    F32Attr:$scale,
+    F32Attr:$fill
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $row_ids `,` $col_ids `:` type($input)
+    `,` type($row_ids) `,` type($col_ids) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
 }
 
 def Hip_ReciprocalOp : Hip_DpsOp_AutoReifyInfer<"reciprocal", "Y"> {
@@ -4030,9 +4123,9 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp_AutoReify<"causal_conv_with_state", [A
     Example (1D):
     ```mlir
     hip.causal_conv_with_state(%ctx)
-        ins(%input, %weight, %bias, %past_state :
-            tensor<1x64x128xf16>, tensor<64x1x4xf16>,
-            tensor<64xf16>, tensor<1x64x3xf16>)
+        ins(%input, %weight : tensor<1x64x128xf16>, tensor<64x1x4xf16>)
+        bias(%bias : tensor<64xf16>)
+        past_state(%past_state : tensor<1x64x3xf16>)
         outs(%output, %present_state :
              tensor<1x64x128xf16>, tensor<1x64x3xf16>)
         {activation = "silu", ndim = 1 : i64}
@@ -4064,14 +4157,10 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp_AutoReify<"causal_conv_with_state", [A
 
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(`
-        $input `,` $weight
-        (`,` $bias^)?
-        (`,` $past_state^)?
-        `:`
-        type($input) `,` type($weight)
-        (`,` type($bias)^)?
-        (`,` type($past_state)^)?
+        $input `,` $weight `:` type($input) `,` type($weight)
     `)`
+    (`bias` `(` $bias^ `:` type($bias) `)`)?
+    (`past_state` `(` $past_state^ `:` type($past_state) `)`)?
     `outs` `(`
         $output `,` $present_state
         `:`
@@ -4098,6 +4187,61 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp_AutoReify<"causal_conv_with_state", [A
           "hipdnn_ep_op_state_construct_causal_conv_with_state", {});
     }
   }];
+}
+
+// Packed, token-major sibling of causal_conv_with_state. Sequences share one
+// [total_tokens, channels] activation buffer and are split by
+// cumulative_sequence_length. The carry state stays [batch, channels,
+// (kernel - 1) * dilation], oldest sample first.
+def Hip_VarlenCausalConvWithStateOp : Hip_DpsOp_AutoReify<
+    "varlen_causal_conv_with_state", [AttrSizedOperandSegments]> {
+  let summary = "Packed variable-length stateful causal depthwise convolution";
+  let description = [{
+    Depthwise causal convolution over a packed token-major batch.
+
+    `input` and `output` are [total_tokens, channels]. Sequence b occupies
+    the half-open token range
+    [cumulative_sequence_length[b], cumulative_sequence_length[b + 1]).
+    `weight` is [channels, 1, kernel_size]. `initial_state` and
+    `present_state` are [batch, channels, (kernel_size - 1) * dilation] and
+    may alias. Tap j of local token t reads local position
+    t - (kernel_size - 1 - j) * dilation; positions before the sequence come
+    from the carry state. `present_state` is the last state_len raw inputs
+    of that sequence. `activation` is none, silu, or swish.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$weight,
+    Hip_TensorOrMemRef:$cumulative_sequence_length,
+    Optional<Hip_TensorOrMemRef>:$bias,
+    Optional<Hip_TensorOrMemRef>:$initial_state,
+    Hip_TensorOrMemRef:$output,
+    Hip_TensorOrMemRef:$present_state,
+    DefaultValuedAttr<StrAttr, "\"none\"">:$activation,
+    DefaultValuedAttr<I64Attr, "1">:$dilation
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $input `,` $weight `,` $cumulative_sequence_length
+        (`,` $bias^)?
+        (`,` $initial_state^)?
+        `:`
+        type($input) `,` type($weight) `,` type($cumulative_sequence_length)
+        (`,` type($bias)^)?
+        (`,` type($initial_state)^)?
+    `)`
+    `outs` `(`
+        $output `,` $present_state
+        `:`
+        type($output) `,` type($present_state)
+    `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
 }
 
 // ===== N-gram Hash Mapping ===================================================
@@ -4348,6 +4492,69 @@ def Hip_GqaOp : Hip_DpsOp_AutoReify<"gqa", [AttrSizedOperandSegments, OpStateOpI
 
   let hasVerifier = 1;
 }
+
+// ===== Paged Attention (com.microsoft) =======================================
+
+def Hip_BindOutputOp : Hip_Op<"bind_output", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Require an externally bound output to alias an input buffer";
+  let description = [{
+    Calls the existing output allocator with the source shape. A different
+    pointer is an error; no cache copy is performed. The result descriptor is
+    null on failure, preventing the Page writer from modifying either pool.
+    Only emitted for the shared-cache outputs of PagedAttention.
+  }];
+  let arguments = (ins Hip_ContextType:$ctx, AnyMemRef:$source, I64Attr:$out_idx);
+  let results = (outs AnyMemRef:$memref);
+  let assemblyFormat = [{ `(` $ctx `,` $source `)` attr-dict `:` type($source) `->` type($memref) }];
+  let hasVerifier = 1;
+}
+
+def Hip_PagedAttentionOp : Hip_DpsOp_AutoReify<"paged_attention", [AttrSizedOperandSegments, OpStateOpInterface]> {
+  let summary = "Separate Q/K/V attention with shared PSHD page pools";
+  let description = [{
+    Separate FP16 Q/K/V [T,H*D], device i32 cumulative lengths/past/page table,
+    optional FP16 rotary caches, and host/device metadata i32[2 or 3]. Metadata
+    contains query/KV upper bounds and an optional KV lower bound; zero means
+    unknown. Bounds select backend sizing; device request lengths define masks.
+    key_pool/value_pool are read/write DPS inits and must bufferize in place.
+    Their result tensors alias the input pools, including at graph outputs.
+  }];
+  let arguments = (ins Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$query, Hip_TensorOrMemRef:$key, Hip_TensorOrMemRef:$value,
+    Hip_TensorOrMemRef:$cu_seqlens, Hip_TensorOrMemRef:$past_seqlens,
+    Hip_TensorOrMemRef:$block_table,
+    Optional<Hip_TensorOrMemRef>:$cos_cache,
+    Optional<Hip_TensorOrMemRef>:$sin_cache,
+    Optional<Hip_TensorOrMemRef>:$attention_metadata,
+    Hip_TensorOrMemRef:$output, Hip_TensorOrMemRef:$key_pool,
+    Hip_TensorOrMemRef:$value_pool,
+    I64Attr:$num_heads, I64Attr:$kv_num_heads,
+    DefaultValuedAttr<F32Attr,"0.0f">:$scale,
+    DefaultValuedAttr<I64Attr,"-1">:$local_window_size,
+    DefaultValuedAttr<F32Attr,"0.0f">:$softcap,
+    DefaultValuedAttr<I64Attr,"0">:$do_rotary,
+    DefaultValuedAttr<I64Attr,"0">:$rotary_interleaved);
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $query `,` $key `,` $value `,` $cu_seqlens `,`
+      $past_seqlens `,` $block_table `:` type($query) `,` type($key) `,`
+      type($value) `,` type($cu_seqlens) `,` type($past_seqlens) `,` type($block_table) `)`
+    (`cos` `(` $cos_cache^ `:` type($cos_cache) `)`)?
+    (`sin` `(` $sin_cache^ `:` type($sin_cache) `)`)?
+    (`metadata` `(` $attention_metadata^ `:` type($attention_metadata) `)`)?
+    `outs` `(` $output `,` $key_pool `,` $value_pool `:` type($output) `,`
+      type($key_pool) `,` type($value_pool) `)` attr-dict (`:` type($result_tensors)^)?
+  }];
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+        ::mlir::Location loc, ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(builder, loc, statePtr, slot,
+          "hipdnn_ep_op_state_construct_paged_attention", {});
+    }
+  }];
+  let hasVerifier = 1;
+}
+
+
 
 // ===== hipDNN Graph Outlining + Execution ====================================
 
@@ -4819,6 +5026,69 @@ def Hip_GatedDeltaNetOp : Hip_DpsOp_AutoReify<"gated_delta_net"> {
         $qkv `,` $decay `,` $beta `,` $initial_state `,` $a_log `,` $dt_bias
         `:` type($qkv) `,` type($decay) `,` type($beta) `,`
         type($initial_state) `,` type($a_log) `,` type($dt_bias)
+    `)`
+    `outs` `(` $output `,` $final_state `:`
+              type($output) `,` type($final_state) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+}
+
+def Hip_VarlenGatedDeltaNetOp : Hip_DpsOp_AutoReify<"varlen_gated_delta_net"> {
+  let summary = "Gated delta rule recurrence over ragged sequences "
+                "(com.microsoft GatedDeltaNet with cu_seqlens)";
+  let description = [{
+    Same recurrence as `hip.gated_delta_net`, over requests packed along one
+    token axis. Request b owns tokens [cu[b], cu[b+1]) and starts from its own
+    slice of initial_state.
+
+    Shapes, with Hv, dv, dk taken from the state, T the total token count and
+    Hqk = (P - Hv*dv) / (2*dk):
+      qkv                      [T, P]            f16 or f32
+      decay, beta              [T, Hv]           f32
+      cumulative_sequence_length [B + 1]         i32, cu[0] = 0, cu[B] = T
+      initial_state            [B, Hv, dv, dk]   f32, V-major
+      a_log, dt_bias           [Hv]              f32
+      output                   [T, Hv, dv]       T
+      final_state              [B, Hv, dv, dk]   f32
+
+    A request with no tokens passes its state through unchanged.
+
+    Example:
+    ```mlir
+    hip.varlen_gated_delta_net(%ctx)
+        ins(%qkv, %decay, %beta, %cu, %state, %a_log, %dt_bias :
+            memref<?x10240xf16, 1>, memref<?x48xf32, 1>, memref<?x48xf32, 1>,
+            memref<?xi32, 1>, memref<?x48x128x128xf32, 1>, memref<48xf32, 1>,
+            memref<48xf32, 1>)
+        outs(%out, %final : memref<?x48x128xf16, 1>,
+                            memref<?x48x128x128xf32, 1>)
+        {scale = 0.0 : f32}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$qkv,
+    Hip_TensorOrMemRef:$decay,
+    Hip_TensorOrMemRef:$beta,
+    Hip_TensorOrMemRef:$cumulative_sequence_length,
+    Hip_TensorOrMemRef:$initial_state,
+    Hip_TensorOrMemRef:$a_log,
+    Hip_TensorOrMemRef:$dt_bias,
+    Hip_TensorOrMemRef:$output,
+    Hip_TensorOrMemRef:$final_state,
+    DefaultValuedAttr<F32Attr, "0.0">:$scale
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $qkv `,` $decay `,` $beta `,` $cumulative_sequence_length `,`
+        $initial_state `,` $a_log `,` $dt_bias
+        `:` type($qkv) `,` type($decay) `,` type($beta) `,`
+        type($cumulative_sequence_length) `,` type($initial_state) `,`
+        type($a_log) `,` type($dt_bias)
     `)`
     `outs` `(` $output `,` $final_state `:`
               type($output) `,` type($final_state) `)`
