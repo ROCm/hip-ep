@@ -580,7 +580,7 @@ def cmd_report(args) -> int:
             else:
                 status = "PASS"
         lines += [
-            "| Model | Test | EP | Perplexity | main | Δ | Samples | Time (s) | Status |",
+            "| Model | Test | EP | Perplexity | main | Delta | Samples | Time (s) | Status |",
             "|-------|------|----|-----------|------|---|---------|----------|--------|",
             f"| {current['model']} | {current['test']} | {current['ep']} | "
             f"{f'{cur:.4f}' if cur is not None else '-'} | {main_cell} | {delta_cell} | "
@@ -609,6 +609,11 @@ def cmd_report(args) -> int:
 
 
 def main() -> int:
+    # Windows runners default stdout to the ANSI code page (cp1252); never let a
+    # non-encodable character in model output or the summary abort the run.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
 
