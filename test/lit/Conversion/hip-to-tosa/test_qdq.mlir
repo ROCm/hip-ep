@@ -238,7 +238,7 @@ func.func @dequantize_packed_int4_zero_point(%ctx: !hip.context,
          ins(%x, %scale : tensor<2x8xi8>, tensor<f32>)
          zero_point(%zp : tensor<i8>)
          outs(%init : tensor<2x8xf32>)
-         {axis = 1 : i64, block_size = 0 : i64, packed_bits = 4 : i64}
+         {axis = 1 : i64, block_size = 0 : i64, packed_int4}
          : tensor<2x8xf32>
   return %r : tensor<2x8xf32>
 }
