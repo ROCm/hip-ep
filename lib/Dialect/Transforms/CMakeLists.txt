@@ -27,7 +27,9 @@ add_library(HipDialectTransforms STATIC
   # instantiates the driver, only ever sees their populate declarations.
   fusion_pattern/linear_attention_group_fold.cpp
   fusion_pattern/patch_embed_conv_to_gemm.cpp
+  fusion_pattern/gelu_fusion.cpp
   fusion_pattern/swiglu_fusion.cpp
+  fusion_pattern/scaled_masked_softmax_fusion.cpp
   AddHipContextArg.cpp
   AssignOpStateSlots.cpp
   BufferUtils.cpp
@@ -51,6 +53,7 @@ add_library(HipDialectTransforms STATIC
   KernelOutline.cpp
   LoopBodyToOutParams.cpp
   LowerAllocs.cpp
+  HoistPointwiseOverViews.cpp
   MaterializeHostScalars.cpp
   OptimizeMemRefs.cpp
   Pipelines.cpp

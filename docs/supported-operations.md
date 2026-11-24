@@ -71,9 +71,10 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | ReduceMin | Custom HIP kernel |
 | ReduceProd | Custom HIP kernel |
 | ReduceMean | Custom HIP kernel |
+| ReduceSumSquare | Decomposed to Mul + ReduceSum, its ONNX function body. Same axes, `keepdims` and `noop_with_empty_axes` handling as ReduceSum |
 | CumSum | Custom HIP kernel |
 | Pad | Custom HIP kernel. The opset<11 form, with `pads` and the fill `value` as attributes, is rewritten to the operand form first |
-| Tile | Custom HIP kernel |
+| Tile | Static shapes with constant repeats become a broadcast: a unit dim is inserted before each repeated extent above one, `hip.expand` broadcasts the repeats, and a `tensor.collapse_shape` merges each repeat with its extent. The rocMLIR fusion folds these views into a neighbouring kernel; otherwise the expand kernel runs. A zero repeat, a dynamic shape, or a broadcast rank above 8 uses the custom HIP Tile kernel |
 | Expand | Custom HIP kernel |
 | GatherND | Custom HIP kernel |
 | ScatterND | Custom HIP kernel (reductions: none / add / mul / min / max) |
@@ -89,9 +90,10 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Compress | Custom HIP kernel; a dynamic selected extent is scanned and read back before allocation |
 | OneHot | Custom HIP kernel |
 | LayerNormalization | Custom HIP kernel |
-| InstanceNormalization | Custom HIP kernel |
+| InstanceNormalization | Custom HIP kernel. Rows of 16K elements or more use the GroupNorm split reduction with one channel per group |
 | BatchNormalization | Custom HIP kernel; inference only (`training_mode` stays on ONNX) |
-| GroupNorm (`com.microsoft`) | Custom HIP kernel; optional SiLU, NCHW or NHWC |
+| GroupNorm (`com.microsoft`) | Custom HIP kernel; optional SiLU, NCHW or NHWC; f16, bf16, f32 and f64. Groups of 16K elements or more (`HIPDNN_EP_GROUPNORM_SPLIT_SIZE` overrides the threshold) use a split reduction over the runtime workspace, sized from the device's unit count and threads per unit; the result is deterministic |
+| GroupNormalization | Same kernel as GroupNorm, NCHW, for the opset-21 per-channel scale and bias. The channel dimension must be static. The opset-18 per-group form is not supported |
 | SkipLayerNormalization (`com.microsoft`) | Decomposed to Add + LayerNormalization, including the optional input bias |
 | EmbedLayerNormalization (`com.microsoft`) | Decomposed to Gather + Add + LayerNormalization. f16/f32 tables, i32 indices. A missing position-id input uses `0 .. sequence-1` when the sequence length is static. `mask_index` is the count of ones along the sequence; with no mask it is zeros |
 | RMSNormalization | Custom HIP kernel |
@@ -118,17 +120,17 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | GatherBlockQuantized (`com.microsoft`) | Custom HIP kernel |
 | QuantizeLinear | Custom HIP kernel. With rocMLIR, a per-tensor or per-axis saturating quantize after a convolution becomes the conv kernel's epilogue, so the kernel writes the integer type |
 | DynamicQuantizeLinear | Decomposed to single-axis ReduceMin/ReduceMax, scale and zero-point math, and `hip.quantize_linear` with axis 0. A zero input range selects scale 1 |
-| DequantizeLinear | Custom HIP kernel. With rocMLIR, a per-tensor or per-axis dequantize of a conv activation becomes the conv kernel's prologue, so the kernel reads the integer type |
+| DequantizeLinear | Custom HIP kernel. With rocMLIR, a per-tensor or per-axis dequantize of a conv activation becomes the conv kernel's prologue, so the kernel reads the integer type. With rocMLIR autotuning on, an int4 or uint4 dequantize of constant weights runs inside the consuming kernel, which reads the packed 4-bit weights: a 1x1 conv filter (per tensor or per output channel), or a MatMul or Gemm B `[K, N]` (per tensor, per column, or blocked along K) |
 | ConvInteger | Decomposed to Cast, Sub, and `hip.conv`, then Cast back to i32 when `65025 * (C/group) * product(kernel_shape)` fits in the f32 mantissa. A longer reduction accumulates in i32 and is not rewritten to `hip.gemm`. Rank-3 NCL and rank-4 NCHW with a static or dynamic batch; channels, spatial dimensions, and weights must be static. Rank-3 is expanded to the shared 2D path. Scalar or per-output-channel weight zero point |
 | MatMulInteger | Decomposed to Cast, Sub, and `hip.matmul`, then Cast back to i32 when `65025 * K` fits in the f32 mantissa. A longer K accumulates in i32. Rank 2–4. A static rank-2 B may be shared across dynamic batch and sequence dimensions, including a dynamic M. B's K and N stay static. An uninferred K on A still lowers and accumulates in i32. A per-row zero point requires a static M. A size-1 batch on A is expanded to the result batch. A rank-2 B stays one shared matrix, and an i32 `hip.matmul` passes batch stride 0 for it. Scalar or per-row / per-column zero point |
-| QLinearConv | Custom HIP kernel. 8-bit grouped NCHW, optional int32 bias. `NOTSET` uses the pads attribute. `VALID`, `SAME_UPPER`, and `SAME_LOWER` are resolved to explicit pads. Separate from the W4A16 `hip.qconv` fusion. With `HIPDNN_EP_ROCMLIR=1`, constant parameters and a zero weight zero point move it to a rocMLIR i8 conv with a fused requantize |
+| QLinearConv | Custom HIP kernel. 8-bit grouped NCHW, optional int32 bias. `NOTSET` uses the pads attribute. `VALID`, `SAME_UPPER`, and `SAME_LOWER` are resolved to explicit pads. Separate from the W4A16 `hip.qconv` fusion. With `HIPDNN_EP_ROCMLIR=1`, constant parameters move it to a rocMLIR i8 conv with a fused requantize; ui8 weights or a non-zero weight zero point add a second i8 conv over the zero point |
 | QLinearAdd (`com.microsoft`) | Decomposed to DequantizeLinear + Add + QuantizeLinear; per-tensor scales fuse to `hip.qadd` |
 | QLinearMul (`com.microsoft`) | Decomposed to DequantizeLinear + Mul + QuantizeLinear; per-tensor scales fuse to `hip.qmul` |
 | QLinearConcat (`com.microsoft`) | Decomposed to DequantizeLinear + Concat + QuantizeLinear |
 | QLinearGlobalAveragePool (`com.microsoft`) | Decomposed to DequantizeLinear + GlobalAveragePool + QuantizeLinear. `channels_last` is transposed around the pool |
 | QLinearAveragePool (`com.microsoft`) | Decomposed to DequantizeLinear + AveragePool + QuantizeLinear. `channels_last` is transposed around the pool. Rank 3–5, int8 or uint8. Omitted strides are 1. `y_zero_point` may be omitted |
 | QLinearLeakyRelu (`com.microsoft`) | Decomposed to DequantizeLinear + LeakyRelu + QuantizeLinear. int8 or uint8. `alpha` defaults to 0.01. `Y_zero_point` may be omitted |
-| QLinearMatMul | Custom HIP kernel. Rank-2 8-bit. A and Y scales and zero points are per-tensor. B's scale and zero point are per-tensor or one value per column. Separate from the `hip.qmatmul` QDQ fusion. With `HIPDNN_EP_ROCMLIR=1`, constant parameters and a zero B zero point move it to a rocMLIR i8 matmul with a fused requantize |
+| QLinearMatMul | Custom HIP kernel. Rank-2 8-bit. A and Y scales and zero points are per-tensor. B's scale and zero point are per-tensor or one value per column. Separate from the `hip.qmatmul` QDQ fusion. With `HIPDNN_EP_ROCMLIR=1`, constant parameters move it to a rocMLIR i8 matmul with a fused requantize; ui8 B or a non-zero B zero point add a second i8 matmul over the zero point |
 | LinearAttention (`com.microsoft`) | Custom HIP kernel |
 | GatedDeltaNet (`com.microsoft`) | Custom HIP kernel. Packed QKV, `gate_activation=qwen`, `beta_activation=sigmoid`, `qk_l2_norm=1`, f16/f32; no `cu_seqlens` or state capture |
 | CausalConvWithState (`com.microsoft`) | Custom HIP kernel |
@@ -181,4 +183,4 @@ These operations are handled through standard MLIR transformations and generally
 
 ## Fusion and preprocessing
 
-The frontend also recognizes or simplifies selected patterns before operation conversion, including approximate/FastGelu chains, Erf-based Gelu chains, supported Pow forms, LpNormalization decompositions, CastLike simplification, and model-exporter cleanup patterns.
+The frontend also recognizes or simplifies selected patterns before operation conversion, including approximate/FastGelu chains, Erf-based Gelu chains, the exported GroupNorm decomposition (Reshape to `[0, G, -1]`, InstanceNormalization with unit scale and zero bias, Reshape back, per-channel Mul/Add and an optional SiLU, fused into one GroupNorm; the unit scale and zero bias must be inline constants, so an initializer above the ORT bridge copy threshold keeps the unfused form), supported Pow forms, LpNormalization decompositions, CastLike simplification, and model-exporter cleanup patterns.
