@@ -67,9 +67,10 @@ func.func @audio_mask_chain(%ctx: !hip.context,
 
 // The evaluation budget is module-wide and charges failed attempts: placed
 // immediately after the audio chain, whose attempts all FAIL under
-// max-fold-total-elements=4 (the range attempt alone charges 169), so if
-// failures were not charged this 4-element fold would still fit the budget.
-// The default run folds it.
+// max-fold-total-elements=4 (the 169-element less attempt is charged before
+// its operands resolve, so it alone exhausts the budget), so if failures
+// were not charged this 4-element fold would still fit. The default run
+// folds it.
 // CHECK-LABEL: func.func @budget_cross_function
 // CHECK-NOT: hip.not
 // BUDGET-LABEL: func.func @budget_cross_function

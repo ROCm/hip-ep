@@ -283,36 +283,42 @@ func.func @fold_less_signed(%ctx: !hip.context,
   return %r4, %r2 : tensor<4xf32>, tensor<2xf32>
 }
 
-// Unsupported element types bail before any payload access: less on i32,
-// range on i32, expand on f16.
+// Unsupported element types bail inside the evaluators, not just the audit:
+// every candidate here feeds a DPS input, so the sweep reaches the dtype
+// gates (less/i32, range/i32 via a less consumer, expand/f16 via a where
+// operand) and each one refuses.
 // CHECK-LABEL: func.func @keep_unsupported_dtypes
-// CHECK: hip.less
 // CHECK: hip.range
+// CHECK: hip.less
 // CHECK: hip.expand
-func.func @keep_unsupported_dtypes(%ctx: !hip.context, %x: tensor<2xf32>,
-                                   %y: tensor<2xf32>)
-    -> (tensor<2xf32>, tensor<2xi32>, tensor<2x2xf16>) {
-  %a32 = hip.constant {value = dense<[1, 2]> : tensor<2xi32>} : tensor<2xi32>
-  %zero32 = hip.constant {value = dense<0> : tensor<i32>} : tensor<i32>
-  %less_init = tensor.empty() : tensor<2xi1>
-  %cond = hip.less(%ctx) ins(%a32, %zero32 : tensor<2xi32>, tensor<i32>)
-      outs(%less_init : tensor<2xi1>) : tensor<2xi1>
-  %where_init = tensor.empty() : tensor<2xf32>
-  %r0 = hip.where(%ctx) ins(%cond, %x, %y :
-      tensor<2xi1>, tensor<2xf32>, tensor<2xf32>)
-      outs(%where_init : tensor<2xf32>) : tensor<2xf32>
+func.func @keep_unsupported_dtypes(%ctx: !hip.context, %cond: tensor<2x2xi1>,
+                                   %x: tensor<2xf32>, %y: tensor<2xf32>,
+                                   %h: tensor<2x2xf16>)
+    -> (tensor<2xf32>, tensor<2x2xf16>) {
   %start32 = hip.constant {value = dense<0> : tensor<i32>} : tensor<i32>
   %limit32 = hip.constant {value = dense<2> : tensor<i32>} : tensor<i32>
   %delta32 = hip.constant {value = dense<1> : tensor<i32>} : tensor<i32>
   %iota_init = tensor.empty() : tensor<2xi32>
-  %r1 = hip.range(%ctx) ins(%start32, %limit32, %delta32 : tensor<i32>, tensor<i32>, tensor<i32>)
+  %iota32 = hip.range(%ctx) ins(%start32, %limit32, %delta32 : tensor<i32>, tensor<i32>, tensor<i32>)
       outs(%iota_init : tensor<2xi32>) : tensor<2xi32>
-  %h = hip.constant {value = dense<1.0> : tensor<1x2xf16>} : tensor<1x2xf16>
+  %zero32 = hip.constant {value = dense<0> : tensor<i32>} : tensor<i32>
+  %less_init = tensor.empty() : tensor<2xi1>
+  %lcond = hip.less(%ctx) ins(%iota32, %zero32 : tensor<2xi32>, tensor<i32>)
+      outs(%less_init : tensor<2xi1>) : tensor<2xi1>
+  %where_init = tensor.empty() : tensor<2xf32>
+  %r0 = hip.where(%ctx) ins(%lcond, %x, %y :
+      tensor<2xi1>, tensor<2xf32>, tensor<2xf32>)
+      outs(%where_init : tensor<2xf32>) : tensor<2xf32>
+  %half = hip.constant {value = dense<1.0> : tensor<1x2xf16>} : tensor<1x2xf16>
   %shape = hip.constant {value = dense<[2, 2]> : tensor<2xi64>} : tensor<2xi64>
   %expand_init = tensor.empty() : tensor<2x2xf16>
-  %r2 = hip.expand(%ctx) ins(%h, %shape : tensor<1x2xf16>, tensor<2xi64>)
+  %expanded = hip.expand(%ctx) ins(%half, %shape : tensor<1x2xf16>, tensor<2xi64>)
       outs(%expand_init : tensor<2x2xf16>) : tensor<2x2xf16>
-  return %r0, %r1, %r2 : tensor<2xf32>, tensor<2xi32>, tensor<2x2xf16>
+  %wh_init = tensor.empty() : tensor<2x2xf16>
+  %r1 = hip.where(%ctx) ins(%cond, %expanded, %h :
+      tensor<2x2xi1>, tensor<2x2xf16>, tensor<2x2xf16>)
+      outs(%wh_init : tensor<2x2xf16>) : tensor<2x2xf16>
+  return %r0, %r1 : tensor<2xf32>, tensor<2x2xf16>
 }
 
 // Memref-form (post-bufferization) candidates have no results; a standalone

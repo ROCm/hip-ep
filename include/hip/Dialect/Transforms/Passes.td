@@ -476,8 +476,8 @@ def FoldTensorConstantsPass
     ops (payload reshape), and the evaluable op set: hip.not / hip.and /
     hip.or (i1, exact result type), hip.less (signed i64 to i1, equal shapes
     or one rank-0 scalar), hip.range (rank-0 i64 scalars, overflow-checked,
-    count must match the static result dim), and hip.expand (NumPy broadcast
-    validated against the shape operand). Producer-before-consumer chains
+    count must match the static result dim), and hip.expand (i1/i64
+    payloads, NumPy broadcast validated against the shape operand). Producer-before-consumer chains
     fold in one block-order sweep; ops whose own uses cannot be replaced are
     still evaluated through. Analysis is function-local and limited to
     single-block function bodies; per-payload size is bounded by the
