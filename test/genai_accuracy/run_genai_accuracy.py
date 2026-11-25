@@ -54,8 +54,35 @@ MODELS = {
         },
         "hip_provider_options": {},
     },
+    "Qwen3.8-27B": {
+        "hf_repo": "amd/Qwen3.8-27B_gpuep_1.0_gpu_128",
+        "revision": "0c75d4c27f27fce78f150fde4aee4a19ef189b6b",
+        "test": "PPL_VLM",
+        "variant": "allgpu",
+        "ci_options": {
+            "LLM_TOKENS_MITRIX": "128|128,2048|128,16384|128",
+            "HIP_CHUNK_SIZE": 512,
+        },
+        "hip_provider_options": {},
+    },
+    "Gemma-4-E4B-it": {
+        # Not on Hugging Face. The modelzoo entry
+        # gemma-4-E4B-it-awq-uint4-onnx-split-fp16-pruned_lm_head lives on
+        # xcosdaem579; it must already be in the model store (see the README),
+        # so prepare never tries to download it.
+        "hf_repo": None,
+        "revision": None,
+        "test": "PPL_VLM",
+        "variant": "allgpu",
+        "ci_options": {
+            "LLM_TOKENS_MITRIX": "128|128,2048|128,16384|128",
+        },
+        "hip_provider_options": {"enable_graph_capture": "0"},
+    },
 }
 DEFAULT_MODEL = "Qwen3.8-Flash-Next"
+# result.json source label for a model staged by hand (no Hugging Face repo).
+STAGED_SOURCE = "staged (modelzoo)"
 
 AMDGPU_GENAI_CONFIG = "genai_config_AMDGPU.json"
 CPU_FALLBACK_KEY = "session.disable_cpu_ep_fallback"
@@ -309,14 +336,27 @@ def _link_model(store_dir: Path, link: Path) -> None:
         _run(["cmd", "/c", "mklink", "/J", link, store_dir])
 
 
-def _ensure_model(venv_python: Path, spec: dict, paths: dict) -> None:
+def _ensure_model(venv_python: Path, spec: dict, paths: dict, name: str) -> bool:
+    """Make the model available; return False when a staged model is absent.
+
+    A model without a Hugging Face source is never downloaded. When it is not
+    staged in the store, its test is skipped instead of failing the run.
+    """
     store = paths["model_store"]
     if _model_present(store):
         _log(f"Model already in store, skipping download: {store}")
+    elif spec["hf_repo"] is None:
+        _log(
+            f"[SKIP] {name} is not in {store} and has no Hugging Face source; "
+            "its test is skipped. Copy the model directory there (it must contain "
+            "genai_config.json) to run it."
+        )
+        return False
     else:
         _log(f"Model not found in store, downloading to: {store}")
         _download_model(venv_python, spec, store, paths["hf_home"])
     _link_model(store, paths["model"])
+    return True
 
 
 def cmd_prepare(args) -> int:
@@ -326,7 +366,7 @@ def cmd_prepare(args) -> int:
     _sync_framework(paths["framework"])
     venv_python = _ensure_venv(paths["venv"])
     _install_package_wheels(venv_python, package_dir)
-    _ensure_model(venv_python, spec, paths)
+    _ensure_model(venv_python, spec, paths, args.model)
     return 0
 
 
@@ -470,6 +510,27 @@ def _test_params(framework_dir: Path, test: str) -> dict:
     return copy.deepcopy(template["tests"][test].get("params", {}))
 
 
+def _write_skipped_result(args, spec: dict, results_dir: Path, reason: str) -> None:
+    result = {
+        "model": args.model,
+        "hf_repo": spec["hf_repo"] or STAGED_SOURCE,
+        "revision": spec["revision"] or STAGED_SOURCE,
+        "framework_commit": ACCURACY_REPO_COMMIT,
+        "test": spec["test"],
+        "ep": "hip",
+        "variant": spec["variant"],
+        "params": {},
+        "skipped": True,
+        "success": False,
+        "error": reason,
+        "metrics": {},
+        "elapsed_seconds": 0,
+    }
+    (results_dir / "result.json").write_text(
+        json.dumps(result, indent=2) + "\n", encoding="utf-8"
+    )
+
+
 def cmd_run(args) -> int:
     paths = _paths(args)
     spec = _model_spec(args.model)
@@ -477,6 +538,16 @@ def cmd_run(args) -> int:
     work_dir = Path(args.work_dir).resolve()
     results_dir = Path(args.results_dir).resolve()
     venv_python = _venv_python(paths["venv"])
+    if spec["hf_repo"] is None and not _model_present(paths["model_store"]):
+        # A staged model that was not copied in: skip, do not fail the job.
+        reason = (
+            f"{args.model} is not in {paths['model_store']}; copy it there to run "
+            "this test"
+        )
+        results_dir.mkdir(parents=True, exist_ok=True)
+        _write_skipped_result(args, spec, results_dir, reason)
+        _log(f"[SKIP] {reason}")
+        return 0
     if (
         not venv_python.is_file()
         or not (paths["model"] / "genai_config.json").is_file()
@@ -565,8 +636,8 @@ def cmd_run(args) -> int:
 
     result = {
         "model": args.model,
-        "hf_repo": spec["hf_repo"],
-        "revision": spec["revision"],
+        "hf_repo": spec["hf_repo"] or STAGED_SOURCE,
+        "revision": spec["revision"] or STAGED_SOURCE,
         "framework_commit": ACCURACY_REPO_COMMIT,
         "test": test,
         "ep": "hip",
@@ -621,6 +692,15 @@ def cmd_report(args) -> int:
 
     if current is None:
         lines.append("No result: the accuracy run did not produce result.json.")
+    elif current.get("skipped"):
+        lines += [
+            "| Model | Test | EP | Perplexity | main | Delta | Samples | Time (s) | Status |",
+            "|-------|------|----|-----------|------|---|---------|----------|--------|",
+            f"| {current['model']} | {current['test']} | {current['ep']} | - | - | - | - | - | "
+            "SKIPPED |",
+            "",
+            f"Skipped: {current.get('error') or 'model not available'}",
+        ]
     else:
         cur = _perplexity(current)
         base = _perplexity(baseline)

@@ -523,11 +523,11 @@ jobs:
           exit $failed
 
       # -----------------------------------------------------------------------
-      # GenAI accuracy: hipdnn-accuracy-test PPL_VLM on Qwen3.8-Flash-Next
-      # through the AMDGPU (HIP) EP, gated against the latest main run. The
+      # GenAI accuracy: hipdnn-accuracy-test PPL_VLM on each VLM model listed in
+      # the steps below through the AMDGPU (HIP) EP, gated against the latest main run. The
       # framework, venv and HF cache persist under runner.workspace/genai-accuracy.
-      # The 124 GB model lives in C:\models (downloaded there only when missing)
-      # and is linked into that directory. See test/genai_accuracy/README.md.
+      # Models live in C:\models: downloaded there when missing, except
+      # Gemma-4-E4B-it, which must be staged by hand. See test/genai_accuracy/README.md.
       # -----------------------------------------------------------------------
       - name: Checkout GenAI accuracy script
         if: ${{ !inputs.docs_only && always() }}
@@ -536,29 +536,43 @@ jobs:
           path: hip-ep-src
           sparse-checkout: test/genai_accuracy
 
-      - name: Prepare GenAI accuracy (framework, venv, model)
+      - name: Prepare GenAI accuracy (framework, venv, models)
         if: ${{ !inputs.docs_only && always() }}
         timeout-minutes: 300
         shell: pwsh
         run: |
-          python hip-ep-src\test\genai_accuracy\run_genai_accuracy.py prepare `
-            --package-dir gpu-test-package `
-            --cache-root "${{ runner.workspace }}\genai-accuracy" `
-            --models-root "C:\models"
-          exit $LASTEXITCODE
+          $ErrorActionPreference = "Continue"
+          $failed = 0
+          foreach ($model in @("Qwen3.8-Flash-Next", "Qwen3.8-27B", "Gemma-4-E4B-it")) {
+            python hip-ep-src\test\genai_accuracy\run_genai_accuracy.py prepare `
+              --model $model `
+              --package-dir gpu-test-package `
+              --cache-root "${{ runner.workspace }}\genai-accuracy" `
+              --models-root "C:\models"
+            if ($LASTEXITCODE -ne 0) { Write-Host "ERROR: prepare failed for $model"; $failed = 1 }
+          }
+          exit $failed
 
-      - name: Run GenAI accuracy (Qwen3.8-Flash-Next PPL_VLM)
+      - name: Run GenAI accuracy (PPL_VLM)
         if: ${{ !inputs.docs_only && always() }}
-        timeout-minutes: 120
+        timeout-minutes: 180
         shell: pwsh
         run: |
-          python hip-ep-src\test\genai_accuracy\run_genai_accuracy.py run `
-            --package-dir gpu-test-package `
-            --cache-root "${{ runner.workspace }}\genai-accuracy" `
-            --work-dir genai-accuracy-work `
-            --results-dir genai-accuracy-results
-          exit $LASTEXITCODE
+          $ErrorActionPreference = "Continue"
+          $failed = 0
+          foreach ($model in @("Qwen3.8-Flash-Next", "Qwen3.8-27B", "Gemma-4-E4B-it")) {
+            python hip-ep-src\test\genai_accuracy\run_genai_accuracy.py run `
+              --model $model `
+              --package-dir gpu-test-package `
+              --cache-root "${{ runner.workspace }}\genai-accuracy" `
+              --models-root "C:\models" `
+              --work-dir "genai-accuracy-work\$model" `
+              --results-dir "genai-accuracy-results\$model"
+            if ($LASTEXITCODE -ne 0) { Write-Host "ERROR: GenAI accuracy run failed for $model"; $failed = 1 }
+          }
+          exit $failed
 
+      # One artifact; each model's results are in its own subdirectory.
       - name: Upload GenAI accuracy results
         if: ${{ !inputs.docs_only && always() }}
         uses: actions/upload-artifact@v4
@@ -567,9 +581,10 @@ jobs:
           path: genai-accuracy-results/
           if-no-files-found: ignore
 
-      # Baseline: genai-accuracy-results of the latest successful main push
-      # run. PRs and merge groups fail when perplexity rises more than the
-      # tolerance; pushes only report.
+      # Baseline: the newest successful main push run that uploaded
+      # genai-accuracy-results. Each model is compared against its own
+      # <model>/result.json there. PRs and merge groups fail when perplexity
+      # rises more than the tolerance; pushes only report.
       - name: Publish and gate GenAI accuracy results
         if: ${{ !inputs.docs_only && always() }}
         shell: pwsh
@@ -580,6 +595,7 @@ jobs:
           $repo = "${{ github.repository }}"
           $eventName = "${{ github.event_name }}"
           $prNumber = "${{ github.event.pull_request.number }}"
+          $models = @("Qwen3.8-Flash-Next", "Qwen3.8-27B", "Gemma-4-E4B-it")
           $baselineDir = "genai-accuracy-baseline"
           if (Test-Path -LiteralPath $baselineDir) {
             Remove-Item -LiteralPath $baselineDir -Recurse -Force
@@ -596,8 +612,8 @@ jobs:
               if (-not $art) { continue }
               New-Item -ItemType Directory -Force -Path $baselineDir | Out-Null
               gh run download $run.databaseId -R $repo -n genai-accuracy-results -D $baselineDir 2>$null
-              $resultPath = "$baselineDir/result.json"
-              if ((Test-Path -LiteralPath $resultPath) -and (Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json).success) {
+              $found = @(Get-ChildItem -LiteralPath $baselineDir -Recurse -Filter result.json -ErrorAction SilentlyContinue)
+              if ($found.Count -gt 0) {
                 $baselineNote = "run [$($run.databaseId)]($($run.url)) - ``$($run.headSha.Substring(0, 7))``"
                 Write-Host "GenAI accuracy baseline: run $($run.databaseId)"
                 break
@@ -609,20 +625,30 @@ jobs:
           }
           if (-not $baselineNote) { $baselineNote = "none found" }
 
-          $reportArgs = @(
-            "hip-ep-src\test\genai_accuracy\run_genai_accuracy.py", "report",
-            "--current", "genai-accuracy-results/result.json",
-            "--baseline-note", $baselineNote,
-            "--summary-out", "genai-accuracy-summary.md",
-            "--regressions-out", "genai-accuracy-regressions.txt"
-          )
-          if (Test-Path -LiteralPath "$baselineDir/result.json") {
-            $reportArgs += @("--baseline", "$baselineDir/result.json")
+          $summaries = @()
+          $regressions = @()
+          foreach ($model in $models) {
+            $reportArgs = @(
+              "hip-ep-src\test\genai_accuracy\run_genai_accuracy.py", "report",
+              "--current", "genai-accuracy-results/$model/result.json",
+              "--baseline-note", $baselineNote,
+              "--summary-out", "genai-accuracy-summary-$model.md",
+              "--regressions-out", "genai-accuracy-regressions-$model.txt"
+            )
+            $modelBaseline = "$baselineDir/$model/result.json"
+            if (Test-Path -LiteralPath $modelBaseline) {
+              $reportArgs += @("--baseline", $modelBaseline)
+            }
+            python @reportArgs
+            if ($LASTEXITCODE -ne 0) { Write-Host "ERROR: report failed for $model"; exit 1 }
+            $summaries += Get-Content -LiteralPath "genai-accuracy-summary-$model.md" -Raw
+            if (Test-Path -LiteralPath "genai-accuracy-regressions-$model.txt") {
+              $regressions += @(Get-Content -LiteralPath "genai-accuracy-regressions-$model.txt")
+            }
           }
-          python @reportArgs
-          if ($LASTEXITCODE -ne 0) { Write-Host "ERROR: report failed"; exit 1 }
 
-          $summary = Get-Content -LiteralPath "genai-accuracy-summary.md" -Raw
+          $summary = $summaries -join "`n"
+          Set-Content -LiteralPath "genai-accuracy-summary.md" -Value $summary -Encoding utf8
           Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
 
           if ($eventName -eq "pull_request" -and $prNumber) {
@@ -646,8 +672,8 @@ jobs:
             }
           }
 
-          if (Test-Path -LiteralPath "genai-accuracy-regressions.txt") {
-            Get-Content -LiteralPath "genai-accuracy-regressions.txt" | Write-Host
+          if ($regressions.Count -gt 0) {
+            $regressions | Write-Host
             if ($eventName -eq "pull_request" -or $eventName -eq "merge_group") {
               Write-Host "ERROR: GenAI accuracy regressed vs main"
               exit 1

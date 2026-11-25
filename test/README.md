@@ -91,7 +91,7 @@ See [test/e2e/README.md](e2e/) for running the suite and GPU setup.
 See [test/numeric/README.md](numeric/) for backends, CLI options, and the "Bring your own ONNX" pattern.
 
 ### GenAI Accuracy (`test/genai_accuracy/`)
-- **End-to-end model accuracy**: hipdnn-accuracy-test PPL_VLM on Qwen3.8-Flash-Next through the AMDGPU EP, run by the Windows GPU workflow and gated against `main`.
+- **End-to-end model accuracy**: hipdnn-accuracy-test PPL_VLM on Qwen3.8-Flash-Next, Qwen3.8-27B and Gemma-4-E4B-it through the AMDGPU EP, run by the Windows GPU workflow and gated per model against `main`.
 
 See [test/genai_accuracy/README.md](genai_accuracy/README.md) for pins, pass criteria, and local runs.
 
