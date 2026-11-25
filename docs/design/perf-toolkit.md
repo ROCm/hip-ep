@@ -180,7 +180,7 @@ postprocessor is not needed.
 
 | Layer | Ground truth |
 |---|---|
-| End to end | Uninstrumented TTFT/TPS in an interleaved A/B with one reversed block |
+| End to end | Uninstrumented TTFT/TPS in an interleaved A/B with one reversed block; rounds with more than 5% stalled decode tokens are flagged as host noise and compared on fast-decile ms/token instead of the mean |
 | Runner | A/A run (identical arms) must give an interval that includes zero |
 | Kernel timestamps | `calib/hipep_calib.hip`: spin kernels of exact duration on the constant-rate wall clock |
 | Attribution | Calibration kernels must land in the ROCTx phase that launched them |

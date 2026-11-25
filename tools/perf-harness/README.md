@@ -95,12 +95,21 @@ For the runner itself, an A/A run (two identical arms) must give an interval
 that spans zero, and a deliberate slowdown must be detected
 (`HIPDNN_EP_MATMUL_DP4A=0` is about +25% ms/token on Laguna-XS-2.1 decode).
 
+Host stalls make individual decode tokens take two to three times as long, on
+every arm, and swamp a mean-TPS comparison. The `vlm` driver records per-token
+times, so its rows carry `p10_ms` and `slow_pct`; when `ab summary` flags
+stalled rounds, compare `--metric tps_p10` (kernel speed) or drop and re-run
+those rounds. `model_benchmark` prints no per-token times, so only `tps` and
+`tps_p50` apply to it. Before each run the harness kills competing benchmark
+processes and refuses to continue if one survives: a process stuck in GPU
+driver teardown keeps its device memory until reboot.
+
 ## Commands
 
 | command | does |
 |---|---|
 | `bench ttft\|tps` | one clean measurement appended to `<metric>_summary.csv`; `--perf-ops` for per-family event timing (throughput invalid) |
-| `ab run`, `ab summary` | interleaved, order-reversible A/B over DLL or env arms; paired interval |
+| `ab run`, `ab summary` | interleaved, order-reversible A/B over DLL or env arms; paired interval. `ab run` aborts at the first run that yields no result. `ab summary --metric tps_p50\|tps_p10` compares median or fast-decile ms/token and flags rounds whose stalled-token share (`slow_pct`, tokens over 1.5x the run's p10) exceeds `--max-slow-pct` |
 | `trace run`, `trace cmd`, `trace report` | run under the shim (profiling build) and post-process |
 | `trace compare` | a shim trace against a ktrace capture (counts, attribution) |
 | `trace finalize-ktrace` | rocprofv3 export of a ktrace raw spool, as ktrace's C++ `finalize` writes it |

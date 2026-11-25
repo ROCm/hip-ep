@@ -134,9 +134,15 @@ def main(argv: list[str] | None = None) -> int:
     s = absub.add_parser("summary")
     s.add_argument("csv", type=Path)
     s.add_argument("--baseline", required=True)
-    s.add_argument("--metric", choices=("ttft", "tps"), default="ttft")
+    s.add_argument("--metric", choices=tuple(ab.METRICS), default="ttft")
     s.add_argument("--drop", type=int, nargs="*", default=[])
     s.add_argument("--tag-re", default=ab.DEFAULT_TAG)
+    s.add_argument(
+        "--max-slow-pct",
+        type=float,
+        default=ab.DEFAULT_MAX_SLOW_PCT,
+        help="flag rounds where an arm has more stalled decode tokens than this",
+    )
     s.add_argument("--json", type=Path)
 
     t = sub.add_parser("trace", help="run under the trace shim / post-process")
@@ -270,7 +276,9 @@ def main(argv: list[str] | None = None) -> int:
                 f"--metric {a.metric} --baseline {arms[0].name}"
             )
             return 0
-        res = ab.summarize(a.csv, a.baseline, a.metric, a.drop, a.tag_re)
+        res = ab.summarize(
+            a.csv, a.baseline, a.metric, a.drop, a.tag_re, a.max_slow_pct
+        )
         if a.json:
             a.json.write_text(
                 json.dumps(

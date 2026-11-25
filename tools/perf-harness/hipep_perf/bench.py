@@ -70,6 +70,30 @@ def parse_prompt_tokens(lines: list[str]) -> int | None:
     return None
 
 
+# A token this much slower than the run's fast decile is a host-side stall, not
+# kernel time: stalls are bimodal (2-3x), so the factor only has to clear
+# ordinary decode jitter.
+SLOW_FACTOR = 1.5
+
+
+def token_stats(times_ms: list[float], reps: int) -> dict[str, float] | None:
+    """Fast decile and stalled-token share of per-token decode times.
+
+    Each iteration's first step follows prefill and is always slow, so it is
+    left out of the stall share. The mean absorbs stalls that hit both arms of
+    an A/B unevenly; p10 and p50 do not, and the share says how much to trust
+    the mean.
+    """
+    if not times_ms:
+        return None
+    srt = sorted(times_ms)
+    p10 = srt[int(0.1 * (len(srt) - 1))]
+    per_iter = len(times_ms) // reps if reps and len(times_ms) % reps == 0 else 0
+    steady = [t for i, t in enumerate(times_ms) if not (per_iter and i % per_iter == 0)]
+    slow = sum(t > SLOW_FACTOR * p10 for t in steady)
+    return {"p10_ms": p10, "slow_pct": 100.0 * slow / max(len(steady), 1)}
+
+
 @dataclass
 class BenchSpec:
     tag: str
@@ -221,7 +245,8 @@ def _wait(p: subprocess.Popen, log: Path | None, grace: float = 60) -> int:
                 return p.wait(timeout=15)
             except subprocess.TimeoutExpired:
                 print(
-                    f"    !! pid {p.pid} did not terminate (stuck in the driver); moving on"
+                    f"    !! pid {p.pid} did not terminate (stuck in the driver); "
+                    "the next run will refuse to start"
                 )
                 return -1
 
@@ -237,11 +262,26 @@ def _artifacts(env: HarnessEnv) -> list[str]:
 
 
 def _append_csv(path: Path, row: dict) -> None:
-    new = not path.exists()
-    with path.open("a", newline="") as f:
+    if path.exists():
+        with path.open(newline="") as f:
+            reader = csv.DictReader(f)
+            header = list(reader.fieldnames or [])
+            missing = [k for k in row if k not in header]
+            # A CSV from an older harness lacks newer columns; appending under
+            # its header would shift every later value one column over.
+            old_rows = list(reader) if missing else None
+        if old_rows is not None:
+            header += missing
+            with path.open("w", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=header, restval="")
+                w.writeheader()
+                w.writerows(old_rows)
+        with path.open("a", newline="") as f:
+            csv.DictWriter(f, fieldnames=header, restval="").writerow(row)
+        return
+    with path.open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(row))
-        if new:
-            w.writeheader()
+        w.writeheader()
         w.writerow(row)
 
 
@@ -329,7 +369,11 @@ def _parse(spec: BenchSpec, log: Path, json_out: Path) -> dict | None:
     if spec.driver == "vlm":
         if not json_out.exists():
             return None
-        s = json.loads(json_out.read_text())["summary"]
+        doc = json.loads(json_out.read_text())
+        s = doc["summary"]
+        tokens = token_stats(
+            doc.get("raw_measurements", {}).get("token_gen_times_ms", []), spec.reps
+        )
         tb = s.get("token_breakdown", {})
         prompt = tb.get("prompt_tokens", spec.seqlen)
         pre = {
@@ -351,6 +395,7 @@ def _parse(spec: BenchSpec, log: Path, json_out: Path) -> dict | None:
         )
     else:
         lines = log.read_text(errors="replace").splitlines()
+        tokens = None  # model_benchmark prints no per-token times
         prompt = parse_prompt_tokens(lines) or spec.seqlen
         pre = parse_block(lines, PREFILL_HEADER)
         dec = parse_block(lines, DECODE_HEADER)
@@ -378,6 +423,8 @@ def _parse(spec: BenchSpec, log: Path, json_out: Path) -> dict | None:
         "gen": spec.gen,
         "reps": spec.reps,
         "n": dec.get("n", ""),
+        "p10_ms": round(tokens["p10_ms"], 3) if tokens else "",
+        "slow_pct": round(tokens["slow_pct"], 1) if tokens else "",
     }
 
 
@@ -388,7 +435,9 @@ def _echo(spec: BenchSpec, row: dict, rc: int) -> None:
             f"stddev {row['stddev_ms']:,.0f} ms   (exit={rc})"
         )
     else:
+        slow = "" if row["slow_pct"] == "" else f", slow {row['slow_pct']:.1f}%"
         print(
             f"\n=== TPS [{spec.tag}] = {row['tps']:.2f} tok/s   ({row['ms_per_token']:.2f} ms/token, "
-            f"p50 {row['p50_ms']:.2f}, stddev {row['stddev_ms']:.2f})   n={row['n']} (exit={rc})"
+            f"p50 {row['p50_ms']:.2f}, stddev {row['stddev_ms']:.2f}{slow})   "
+            f"prompt {row['prompt_tokens']} tok, n={row['n']} (exit={rc})"
         )

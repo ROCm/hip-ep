@@ -40,7 +40,15 @@ from .proc import Harness
 from .stats import paired
 
 DEFAULT_TAG = r"^ab\d*_(?P<arm>.+)_r(?P<round>\d+)$"
-METRICS = {"ttft": ("ttft_ms", "ms", 0), "tps": ("ms_per_token", "ms/tok", 3)}
+# tps_p50 and tps_p10 compare kernel speed when host stalls swamp the mean;
+# p10 needs per-token times, which only the vlm driver records.
+METRICS = {
+    "ttft": ("ttft_ms", "ms", 0),
+    "tps": ("ms_per_token", "ms/tok", 3),
+    "tps_p50": ("p50_ms", "ms/tok", 3),
+    "tps_p10": ("p10_ms", "ms/tok", 3),
+}
+DEFAULT_MAX_SLOW_PCT = 5.0
 
 
 @dataclass
@@ -97,7 +105,10 @@ def run(
             **{k: arm.env[k] for k in keys if k in arm.env},
         }
         spec.extra_env = {"TEMP": str(temp), "TMP": str(temp)}
-        bench.run(env, spec)
+        if bench.run(env, spec) is None:
+            # A broken setup fails every run the same way; finishing the rounds
+            # only produces a CSV with holes that looks like a completed A/B.
+            raise SystemExit(f"run {tag} produced no result; A/B aborted")
 
     with Harness(env.out_root).lock():
         if prime:
@@ -122,6 +133,7 @@ def summarize(
     metric: str = "ttft",
     drop: list[int] | None = None,
     tag_re: str = DEFAULT_TAG,
+    max_slow_pct: float = DEFAULT_MAX_SLOW_PCT,
 ) -> list[dict]:
     """Print the paired table; returns one dict per non-baseline arm."""
     column, unit, dp = METRICS[metric]
@@ -130,14 +142,24 @@ def summarize(
     if rows and column not in rows[0]:
         raise SystemExit(
             f"{csv_path} has no {column!r} column; --metric {metric} expects "
-            f"the CSV written by the {metric} bench"
+            f"the CSV written by the {metric.split('_')[0]} bench"
         )
     rx = re.compile(tag_re)
     runs: dict[int, dict[str, float]] = defaultdict(dict)
+    slow: dict[int, float] = defaultdict(float)
     for row in rows:
         m = rx.match(row["tag"])
-        if m:
-            runs[int(m.group("round"))][m.group("arm")] = float(row[column])
+        if not m:
+            continue
+        if row[column] == "":
+            raise SystemExit(
+                f"{row['tag']} has no {column}; the model_benchmark driver records "
+                "no per-token times, use --metric tps_p50"
+            )
+        rnd = int(m.group("round"))
+        runs[rnd][m.group("arm")] = float(row[column])
+        if row.get("slow_pct"):
+            slow[rnd] = max(slow[rnd], float(row["slow_pct"]))
     drop = drop or []
     kept = sorted(r for r in runs if r not in drop)
     if not kept:
@@ -145,9 +167,19 @@ def summarize(
     arms = [baseline] + sorted({a for r in kept for a in runs[r]} - {baseline})
     print(f"metric: {column} ({unit}); lower is better")
     print("round  " + "".join(f"{a:>12}" for a in arms))
+    stalled = sorted(r for r in runs if slow[r] > max_slow_pct)
     for r in sorted(runs):
         cells = "".join(f"{runs[r].get(a, float('nan')):12.{dp}f}" for a in arms)
-        print(f"{r:5d}  {cells}" + ("   <- dropped" if r in drop else ""))
+        note = "   <- dropped" if r in drop else ""
+        if r in stalled:
+            note += f"   <- stalls: {slow[r]:.0f}% slow tokens"
+        print(f"{r:5d}  {cells}{note}")
+    if stalled:
+        print(
+            f"rounds {stalled} have more than {max_slow_pct:g}% stalled tokens in some "
+            "arm: host noise, not kernel time. Compare --metric tps_p10/tps_p50, or "
+            f"--drop {' '.join(map(str, stalled))} and re-run the rounds."
+        )
     print(
         f"\n{'arm':>10} {'n':>3} {'mean':>10} {'vs base':>11} {'sd of diff':>12} "
         f"{'95% CI':>24} {'%':>8}"

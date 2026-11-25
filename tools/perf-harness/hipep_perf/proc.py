@@ -72,6 +72,21 @@ def kill_by_name(*images: str) -> None:
         )
 
 
+def pids_by_name(image: str) -> list[int]:
+    out = subprocess.run(
+        ["tasklist", "/FI", f"IMAGENAME eq {image}", "/FO", "CSV", "/NH"],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout
+    pids = []
+    for line in out.splitlines():
+        cells = [c.strip('"') for c in line.split('","')]
+        if len(cells) > 1 and cells[0].lower() == image.lower() and cells[1].isdigit():
+            pids.append(int(cells[1]))
+    return pids
+
+
 class Harness:
     """Lock, driver registry and teardown rooted at one output directory."""
 
@@ -121,6 +136,7 @@ class Harness:
             "RadeonDeveloperService.exe",
             "RadeonDeveloperServiceCLI.exe",
         )
+        killed: list[tuple[int, str]] = []
         if self.drivers_path.exists():
             for line in self.drivers_path.read_text().splitlines():
                 parts = line.split()
@@ -128,5 +144,21 @@ class Harness:
                     pid, ct = int(parts[0]), parts[1]
                     if str(creation_time(pid)) == ct:
                         kill_tree(pid)
+                        killed.append((pid, ct))
             self.drivers_path.unlink(missing_ok=True)
         time.sleep(2)
+        survivors: list[int] = []
+        for _ in range(5):
+            survivors = pids_by_name("model_benchmark.exe") + [
+                pid for pid, ct in killed if str(creation_time(pid)) == ct
+            ]
+            if not survivors:
+                return
+            time.sleep(2)
+        # A process stuck in GPU driver teardown ignores TerminateProcess and
+        # keeps its device memory, so every later run would be measured against
+        # a GPU that is partly taken.
+        raise SystemExit(
+            f"benchmark process(es) {survivors} survived a forced kill (stuck in "
+            "the GPU driver) and still hold GPU memory; reboot before measuring"
+        )
