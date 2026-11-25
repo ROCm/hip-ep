@@ -4,10 +4,9 @@
  */
 
 // Graph - a split as the backend described it (hipep_backend.h), rebuilt as
-// ggml tensors of the library's own: metadata only, no memory. The frontend
-// reads ggml tensors (SplitGraph.h, SplitCompiler.h); which ggml the backend
-// was built with does not matter to it but for the operations' parameters
-// (the description's ggml_version).
+// tensors of the library's own (GgmlTensor.h): metadata only, no memory, and
+// no ggml linked. Which ggml the backend was built with does not matter but
+// for the operations' parameters (the description's ggml_version).
 
 #ifndef HIPEP_BACKEND_GRAPH_H
 #define HIPEP_BACKEND_GRAPH_H
@@ -16,10 +15,9 @@
 
 #include "hip/Frontend/Ggml/SplitGraph.h"
 
+#include <deque>
 #include <string>
 #include <vector>
-
-struct ggml_context;
 
 namespace hipep_backend {
 
@@ -35,11 +33,10 @@ std::string compatibilityError(const hipep_backend_split_desc &desc);
 
 class Graph {
 public:
-  /// Throws when the description is compatibilityError, names an operation this
-  /// ggml does not have in the split, or does not number the split's tensors
-  /// as describeSplit does.
+  /// Throws when the description is compatibilityError, names a type ggml
+  /// does not have, or does not number the split's tensors as describeSplit
+  /// does.
   explicit Graph(const hipep_backend_split_desc &desc);
-  ~Graph();
   Graph(const Graph &) = delete;
   Graph &operator=(const Graph &) = delete;
 
@@ -57,7 +54,8 @@ public:
   std::string variant;
 
 private:
-  ggml_context *context_ = nullptr;
+  /// The tensors, as described; they do not move.
+  std::deque<hip::ggml::Tensor> storage_;
 };
 
 /// A description that outlives the caller's: a compile in the background.

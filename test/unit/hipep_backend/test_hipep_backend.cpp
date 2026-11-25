@@ -5,8 +5,9 @@
 
 //===- test_hipep_backend.cpp - libhipep_backend without a device --------===//
 //
-// A split as a ggml backend describes it (hipep_backend.h), built on the CPU
-// and described as ggml-hipep describes it: what the library rebuilds of it
+// A split as a ggml backend describes it (hipep_backend.h), built as ggml
+// builds its graphs and described as ggml-hipep describes it: what the
+// library rebuilds of it
 // (Graph.h), which extents the split's operations make one size and which the
 // model fixes, what a dynamic signature keeps, whether compiled shapes fit a
 // split, and which operations it takes.
@@ -15,15 +16,15 @@
 #include "Graph.h"
 #include "Ops.h"
 
-#include "hip/Dialect/Ggml/IR/GgmlLayout.h"
+#include "hip/Frontend/Ggml/GgmlTensor.h"
 #include "hip/Frontend/Ggml/SplitCompiler.h"
-
-#include "ggml.h"
+#include "hip/kquant_abi.h"
 
 #include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <functional>
 #include <iterator>
 #include <memory>
@@ -33,6 +34,7 @@
 #include <vector>
 
 namespace capture = hip::ggml::capture;
+using hip::ggml::Tensor;
 
 namespace {
 
@@ -46,13 +48,168 @@ void check(bool passed, const std::string &what) {
 }
 
 //===----------------------------------------------------------------------===//
+// Graphs built as ggml builds them (ggml.c's constructors), on no device
+//===----------------------------------------------------------------------===//
+
+/// ggml's type numbers the tests use.
+constexpr int32_t kF32 = 0, kF16 = 1, kQ4K = 12, kI32 = 26, kI64 = 27,
+                  kBF16 = 30;
+
+size_t typeSize(int32_t type) {
+  return static_cast<size_t>(hip::ggml::typeLayout(type)->typeSize);
+}
+
+struct Context {
+  std::deque<Tensor> tensors;
+
+  /// ggml_new_tensor_impl: a view's source is the root of a view chain.
+  Tensor *tensor(int32_t type, std::initializer_list<int64_t> ne,
+                 const size_t *nb = nullptr, const Tensor *viewSrc = nullptr,
+                 size_t viewOffs = 0) {
+    if (viewSrc != nullptr && viewSrc->viewSrc != nullptr) {
+      viewOffs += viewSrc->viewOffs;
+      viewSrc = viewSrc->viewSrc;
+    }
+    Tensor &t = tensors.emplace_back();
+    t.type = type;
+    int d = 0;
+    for (int64_t n : ne)
+      t.ne[d++] = n;
+    if (nb != nullptr) {
+      std::copy(nb, nb + 4, t.nb);
+    } else {
+      const auto layout = *hip::ggml::typeLayout(type);
+      t.nb[0] = static_cast<size_t>(layout.typeSize);
+      t.nb[1] = t.nb[0] * static_cast<size_t>(t.ne[0] / layout.blockElements);
+      for (int i = 2; i < 4; ++i)
+        t.nb[i] = t.nb[i - 1] * static_cast<size_t>(t.ne[i - 1]);
+    }
+    t.viewSrc = viewSrc;
+    t.viewOffs = viewOffs;
+    return &t;
+  }
+  Tensor *like(const Tensor *a) {
+    return tensor(a->type, {a->ne[0], a->ne[1], a->ne[2], a->ne[3]});
+  }
+  Tensor *viewOf(const Tensor *a) {
+    return tensor(a->type, {a->ne[0], a->ne[1], a->ne[2], a->ne[3]}, a->nb, a);
+  }
+  static Tensor *named(Tensor *t, const char *name) {
+    t->name = name;
+    return t;
+  }
+
+  Tensor *mulMat(const Tensor *a, const Tensor *b) {
+    Tensor *r = tensor(kF32, {a->ne[1], b->ne[1], b->ne[2], b->ne[3]});
+    r->op = "MUL_MAT";
+    r->src[0] = a, r->src[1] = b;
+    return r;
+  }
+  Tensor *add(const Tensor *a, const Tensor *b) {
+    Tensor *r = like(a);
+    r->op = "ADD";
+    r->src[0] = a, r->src[1] = b;
+    return r;
+  }
+  Tensor *cpy(const Tensor *a, const Tensor *b) {
+    Tensor *r = viewOf(b);
+    r->op = "CPY";
+    r->src[0] = a, r->src[1] = b;
+    return r;
+  }
+  Tensor *reshape3d(const Tensor *a, int64_t ne0, int64_t ne1, int64_t ne2) {
+    Tensor *r = tensor(a->type, {ne0, ne1, ne2}, nullptr, a);
+    r->op = "RESHAPE";
+    r->src[0] = a;
+    return r;
+  }
+  /// ggml_rope_ext without frequency factors.
+  Tensor *rope(const Tensor *a, const Tensor *positions, int nDims, int mode,
+               int nCtxOrig, float freqBase) {
+    Tensor *r = like(a);
+    const float floats[6] = {freqBase, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f};
+    r->opParams[1] = nDims;
+    r->opParams[2] = mode;
+    r->opParams[4] = nCtxOrig;
+    std::memcpy(r->opParams + 5, floats, sizeof(floats));
+    r->op = "ROPE";
+    r->src[0] = a, r->src[1] = positions;
+    return r;
+  }
+  Tensor *view(const Tensor *a, std::initializer_list<int64_t> ne,
+               const size_t (&nb)[4], size_t offset) {
+    Tensor *r = tensor(a->type, ne, nb, a, offset);
+    std::memcpy(r->opParams, &offset, sizeof(offset));
+    r->op = "VIEW";
+    r->src[0] = a;
+    return r;
+  }
+  Tensor *view2d(const Tensor *a, int64_t ne0, int64_t ne1, size_t nb1,
+                 size_t offset) {
+    const size_t nb[4] = {typeSize(a->type), nb1, nb1 * ne1, nb1 * ne1};
+    return view(a, {ne0, ne1}, nb, offset);
+  }
+  Tensor *view3d(const Tensor *a, int64_t ne0, int64_t ne1, int64_t ne2,
+                 size_t nb1, size_t nb2, size_t offset) {
+    const size_t nb[4] = {typeSize(a->type), nb1, nb2, nb2 * ne2};
+    return view(a, {ne0, ne1, ne2}, nb, offset);
+  }
+  Tensor *permute(const Tensor *a, int a0, int a1, int a2, int a3) {
+    Tensor *r = viewOf(a);
+    const int axes[4] = {a0, a1, a2, a3};
+    for (int i = 0; i < 4; ++i) {
+      r->ne[axes[i]] = a->ne[i];
+      r->nb[axes[i]] = a->nb[i];
+      r->opParams[i] = axes[i];
+    }
+    r->op = "PERMUTE";
+    r->src[0] = a;
+    return r;
+  }
+  Tensor *setRows(const Tensor *a, const Tensor *b, const Tensor *c) {
+    Tensor *r = viewOf(a);
+    r->op = "SET_ROWS";
+    r->src[0] = b, r->src[1] = c, r->src[2] = a;
+    return r;
+  }
+  Tensor *flashAttn(const Tensor *q, const Tensor *k, const Tensor *v,
+                    const Tensor *mask, float scale) {
+    Tensor *r = tensor(kF32, {v->ne[0], q->ne[2], q->ne[1], q->ne[3]});
+    const float floats[3] = {scale, 0.0f, 0.0f};
+    std::memcpy(r->opParams, floats, sizeof(floats));
+    r->op = "FLASH_ATTN_EXT";
+    r->src[0] = q, r->src[1] = k, r->src[2] = v, r->src[3] = mask;
+    return r;
+  }
+
+  /// ggml_build_forward_expand's nodes: what `roots` compute, sources first.
+  static std::vector<const Tensor *>
+  forward(std::initializer_list<const Tensor *> roots) {
+    std::vector<const Tensor *> nodes;
+    std::unordered_set<const Tensor *> visited;
+    std::function<void(const Tensor *)> visit = [&](const Tensor *t) {
+      if (!visited.insert(t).second)
+        return;
+      for (const Tensor *source : t->src)
+        if (source != nullptr)
+          visit(source);
+      if (t->op != "NONE")
+        nodes.push_back(t);
+    };
+    for (const Tensor *root : roots)
+      visit(root);
+    return nodes;
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // A split description, built as ggml-hipep builds it (split-desc.cpp)
 //===----------------------------------------------------------------------===//
 
 struct SplitDescBuilder {
   std::vector<hipep_backend_tensor_desc> tensors;
-  std::vector<const ggml_tensor *> originals;
-  std::unordered_map<const ggml_tensor *, int32_t> index;
+  std::vector<const Tensor *> originals;
+  std::unordered_map<const Tensor *, int32_t> index;
   /// Weights and caches by name: on the CPU no buffer says so.
   std::unordered_set<std::string> weights;
   std::unordered_set<std::string> caches;
@@ -61,18 +218,16 @@ struct SplitDescBuilder {
     hipep_backend_split_desc d{};
     d.abi = HIPEP_BACKEND_ABI_VERSION;
     d.tensor_size = sizeof(hipep_backend_tensor_desc);
-    unsigned major = 0, minor = 0, patch = 0;
-    std::sscanf(ggml_version(), "%u.%u.%u", &major, &minor, &patch);
-    d.ggml_version = major * 10000 + minor * 100 + patch;
+    d.ggml_version = 10000; // ggml 1.0.0
     d.tensors = tensors.data();
     d.n_tensors = tensors.size();
     return d;
   }
 
-  hipep_backend_tensor_desc leafDesc(const ggml_tensor *t) const {
+  hipep_backend_tensor_desc leafDesc(const Tensor *t) const {
     hipep_backend_tensor_desc d{};
     d.op = "NONE";
-    d.name = t->name;
+    d.name = t->name.c_str();
     d.type = t->type;
     for (int i = 0; i < 4; ++i) {
       d.ne[i] = t->ne[i];
@@ -81,22 +236,22 @@ struct SplitDescBuilder {
     for (int32_t &s : d.src)
       s = -1;
     d.view_src = -1;
-    d.flags = t->flags | GGML_TENSOR_FLAG_COMPUTE;
+    d.flags = t->flags | 16; // GGML_TENSOR_FLAG_COMPUTE
     d.role = weights.count(t->name)  ? HIPEP_BACKEND_ROLE_WEIGHT
              : caches.count(t->name) ? HIPEP_BACKEND_ROLE_KV_CACHE
                                      : HIPEP_BACKEND_ROLE_NODE;
     return d;
   }
-  void setOp(hipep_backend_tensor_desc &d, const ggml_tensor *t,
-             const int32_t *src, int32_t view) {
-    d.op = ggml_op_name(t->op);
-    std::memcpy(d.op_params, t->op_params, sizeof(d.op_params));
-    for (int i = 0; i < GGML_MAX_SRC; ++i)
+  void setOp(hipep_backend_tensor_desc &d, const Tensor *t, const int32_t *src,
+             int32_t view) {
+    d.op = t->op.c_str();
+    std::memcpy(d.op_params, t->opParams, sizeof(d.op_params));
+    for (int i = 0; i < hip::ggml::kMaxSources; ++i)
       d.src[i] = src[i];
     d.view_src = view;
-    d.view_offs = t->view_offs;
+    d.view_offs = t->viewOffs;
   }
-  int32_t push(const ggml_tensor *t, hipep_backend_tensor_desc d) {
+  int32_t push(const Tensor *t, hipep_backend_tensor_desc d) {
     const int32_t i = static_cast<int32_t>(tensors.size());
     for (int32_t &s : d.src)
       if (s == -2)
@@ -106,23 +261,23 @@ struct SplitDescBuilder {
     index.emplace(t, i);
     return i;
   }
-  int32_t addSource(const ggml_tensor *t,
-                    const std::unordered_set<const ggml_tensor *> &nodes) {
+  int32_t addSource(const Tensor *t,
+                    const std::unordered_set<const Tensor *> &nodes) {
     if (t == nullptr)
       return -1;
     if (auto found = index.find(t); found != index.end())
       return found->second;
-    if (t->view_src != nullptr && t->op != GGML_OP_NONE && nodes.count(t) == 0)
+    if (t->viewSrc != nullptr && t->op != "NONE" && nodes.count(t) == 0)
       return addTensor(t, nodes, false);
     return push(t, leafDesc(t));
   }
-  int32_t addTensor(const ggml_tensor *t,
-                    const std::unordered_set<const ggml_tensor *> &nodes,
+  int32_t addTensor(const Tensor *t,
+                    const std::unordered_set<const Tensor *> &nodes,
                     bool node) {
-    int32_t src[GGML_MAX_SRC];
-    for (int i = 0; i < GGML_MAX_SRC; ++i)
+    int32_t src[hip::ggml::kMaxSources];
+    for (int i = 0; i < hip::ggml::kMaxSources; ++i)
       src[i] = t->src[i] == t ? -2 : addSource(t->src[i], nodes);
-    const int32_t view = addSource(t->view_src, nodes);
+    const int32_t view = addSource(t->viewSrc, nodes);
     hipep_backend_tensor_desc d = leafDesc(t);
     setOp(d, t, src, view);
     d.in_split = node;
@@ -131,28 +286,20 @@ struct SplitDescBuilder {
   }
 
   /// The split: `nodes`, in order.
-  SplitDescBuilder(const std::vector<const ggml_tensor *> &nodes,
+  SplitDescBuilder(const std::vector<const Tensor *> &nodes,
                    std::unordered_set<std::string> weightNames = {},
                    std::unordered_set<std::string> cacheNames = {})
       : weights(std::move(weightNames)), caches(std::move(cacheNames)) {
-    const std::unordered_set<const ggml_tensor *> set(nodes.begin(),
-                                                      nodes.end());
-    for (const ggml_tensor *n : nodes)
+    const std::unordered_set<const Tensor *> set(nodes.begin(), nodes.end());
+    for (const Tensor *n : nodes)
       addTensor(n, set, true);
   }
 
-  int32_t indexOf(const ggml_tensor *t) const {
+  int32_t indexOf(const Tensor *t) const {
     auto found = index.find(t);
     return found == index.end() ? -1 : found->second;
   }
 };
-
-std::vector<const ggml_tensor *> nodesOf(const ggml_cgraph *graph) {
-  std::vector<const ggml_tensor *> nodes;
-  for (int i = 0; i < ggml_graph_n_nodes(const_cast<ggml_cgraph *>(graph)); ++i)
-    nodes.push_back(ggml_graph_node(const_cast<ggml_cgraph *>(graph), i));
-  return nodes;
-}
 
 /// The symbol whose places include (tensor, dimension), or null.
 const capture::SymbolSpec::Symbol *symbolAt(const capture::SymbolSpec &spec,
@@ -169,56 +316,29 @@ capture::SymbolSpec deriveSymbols(const SplitDescBuilder &builder) {
   return capture::captureSplit(graph.split, graph.tensors, nullptr)->symbols;
 }
 
-struct Context {
-  ggml_context *context;
-  Context() {
-    ggml_init_params params{size_t(16) << 20, nullptr, /*no_alloc=*/true};
-    context = ggml_init(params);
-  }
-  ~Context() { ggml_free(context); }
-  ggml_tensor *named(ggml_tensor *t, const char *name) {
-    return ggml_set_name(t, name);
-  }
-};
-
 /// One attention layer as llama.cpp builds it, the way the backend is handed
 /// it: its activation a copy the scheduler made of another device's tensor,
 /// the cache's window as wide as the mask, the cache written at the step's
 /// rows.
 struct AttentionLayer : Context {
-  ggml_cgraph *graph = nullptr;
+  std::vector<const Tensor *> nodes;
   AttentionLayer(int64_t tokens, int64_t slots) {
-    ggml_tensor *positions =
-        named(ggml_new_tensor_1d(context, GGML_TYPE_I32, tokens), "inp_pos");
-    ggml_tensor *x =
-        named(ggml_new_tensor_2d(context, GGML_TYPE_F32, 64, tokens),
-              "HIPEP0#node_1#0");
-    ggml_tensor *w = named(ggml_new_tensor_2d(context, GGML_TYPE_F32, 64, 64),
-                           "blk.0.attn_q.weight");
-    ggml_tensor *q =
-        ggml_reshape_3d(context, ggml_mul_mat(context, w, x), 16, 4, tokens);
-    q = ggml_rope_ext(context, q, positions, nullptr, 16, 0, 4096, 10000.0f,
-                      1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
-    ggml_tensor *cache = named(
-        ggml_new_tensor_2d(context, GGML_TYPE_F16, 64, 1024), "cache_k_l0");
-    ggml_tensor *rows = named(
-        ggml_new_tensor_1d(context, GGML_TYPE_I64, tokens), "self_k_idxs");
-    ggml_tensor *written = ggml_set_rows(context, cache, x, rows);
-    ggml_tensor *k =
-        ggml_view_3d(context, cache, 16, 4, slots, 16 * 2, 64 * 2, 0);
-    ggml_tensor *mask = named(
-        ggml_new_tensor_2d(context, GGML_TYPE_F16, slots, tokens), "kq_mask");
-    ggml_tensor *out = ggml_flash_attn_ext(
-        context, ggml_permute(context, q, 0, 2, 1, 3),
-        ggml_permute(context, k, 0, 2, 1, 3),
-        ggml_permute(context, k, 0, 2, 1, 3), mask, 0.25f, 0.0f, 0.0f);
-    graph = ggml_new_graph(context);
-    ggml_build_forward_expand(graph, written);
-    ggml_build_forward_expand(graph, out);
+    Tensor *positions = named(tensor(kI32, {tokens}), "inp_pos");
+    Tensor *x = named(tensor(kF32, {64, tokens}), "HIPEP0#node_1#0");
+    Tensor *w = named(tensor(kF32, {64, 64}), "blk.0.attn_q.weight");
+    Tensor *q = reshape3d(mulMat(w, x), 16, 4, tokens);
+    q = rope(q, positions, 16, 0, 4096, 10000.0f);
+    Tensor *cache = named(tensor(kF16, {64, 1024}), "cache_k_l0");
+    Tensor *rows = named(tensor(kI64, {tokens}), "self_k_idxs");
+    Tensor *written = setRows(cache, x, rows);
+    Tensor *k = view3d(cache, 16, 4, slots, 16 * 2, 64 * 2, 0);
+    Tensor *mask = named(tensor(kF16, {slots, tokens}), "kq_mask");
+    Tensor *out = flashAttn(permute(q, 0, 2, 1, 3), permute(k, 0, 2, 1, 3),
+                            permute(k, 0, 2, 1, 3), mask, 0.25f);
+    nodes = forward({written, out});
   }
   SplitDescBuilder splitDesc() const {
-    return SplitDescBuilder(nodesOf(graph), {"blk.0.attn_q.weight"},
-                            {"cache_k_l0"});
+    return SplitDescBuilder(nodes, {"blk.0.attn_q.weight"}, {"cache_k_l0"});
   }
   int32_t leafIndex(const char *name) const {
     const SplitDescBuilder d = splitDesc();
@@ -300,13 +420,9 @@ void testSingleTokenIsStatic() {
 /// nothing outside the split says what it counts.
 void testSchedulerCopyInput() {
   Context c;
-  ggml_tensor *copy =
-      c.named(ggml_new_tensor_2d(c.context, GGML_TYPE_F32, 64, 7),
-              "HIPEP0#inp_embd_rows#0");
-  ggml_tensor *w = c.named(ggml_new_tensor_2d(c.context, GGML_TYPE_F32, 64, 32),
-                           "blk.0.ffn.weight");
-  const SplitDescBuilder split({ggml_mul_mat(c.context, w, copy)},
-                               {"blk.0.ffn.weight"});
+  Tensor *copy = c.named(c.tensor(kF32, {64, 7}), "HIPEP0#inp_embd_rows#0");
+  Tensor *w = c.named(c.tensor(kF32, {64, 32}), "blk.0.ffn.weight");
+  const SplitDescBuilder split({c.mulMat(w, copy)}, {"blk.0.ffn.weight"});
   const capture::SymbolSpec spec = deriveSymbols(split);
   const int32_t copyIndex = split.indexOf(copy);
   check(symbolAt(spec, copyIndex, 1) != nullptr,
@@ -318,14 +434,11 @@ void testSchedulerCopyInput() {
 /// its heads' (a number), the rotation that the positions are its rows.
 void testReshapeFixesWidth() {
   Context c;
-  ggml_tensor *x = c.named(ggml_new_tensor_2d(c.context, GGML_TYPE_F32, 64, 7),
-                           "HIPEP0#node_1#0");
-  ggml_tensor *positions = c.named(
-      ggml_new_tensor_1d(c.context, GGML_TYPE_I32, 7), "HIPEP0#inp_pos#0");
-  ggml_tensor *rotated = ggml_rope_ext(
-      c.context, ggml_reshape_3d(c.context, x, 16, 4, 7), positions, nullptr,
-      16, 0, 4096, 10000.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
-  const SplitDescBuilder split({rotated}, {});
+  Tensor *x = c.named(c.tensor(kF32, {64, 7}), "HIPEP0#node_1#0");
+  Tensor *positions = c.named(c.tensor(kI32, {7}), "HIPEP0#inp_pos#0");
+  Tensor *reshaped = c.reshape3d(x, 16, 4, 7);
+  Tensor *rotated = c.rope(reshaped, positions, 16, 0, 4096, 10000.0f);
+  const SplitDescBuilder split(Context::forward({rotated}), {});
   const capture::SymbolSpec spec = deriveSymbols(split);
   const auto *rows = symbolAt(spec, split.indexOf(x), 1);
   check(rows != nullptr && symbolAt(spec, split.indexOf(positions), 0) == rows,
@@ -339,14 +452,11 @@ void testReshapeFixesWidth() {
 /// the view that merges the two says they multiply to the row's width.
 void testMergedViewFixesHeads() {
   Context c;
-  ggml_tensor *keys =
-      c.named(ggml_new_tensor_3d(c.context, GGML_TYPE_F32, 16, 4, 7), "Kcur-0");
-  ggml_tensor *rows = c.named(ggml_new_tensor_1d(c.context, GGML_TYPE_I64, 7),
-                              "HIPEP0#attn_inp_k_idxs#0");
-  ggml_tensor *cache = c.named(
-      ggml_new_tensor_2d(c.context, GGML_TYPE_F16, 64, 256), "cache_k_l0");
-  ggml_tensor *flat = ggml_view_2d(c.context, keys, 64, 7, keys->nb[2], 0);
-  const SplitDescBuilder split({ggml_set_rows(c.context, cache, flat, rows)},
+  Tensor *keys = c.named(c.tensor(kF32, {16, 4, 7}), "Kcur-0");
+  Tensor *rows = c.named(c.tensor(kI64, {7}), "HIPEP0#attn_inp_k_idxs#0");
+  Tensor *cache = c.named(c.tensor(kF16, {64, 256}), "cache_k_l0");
+  Tensor *flat = c.view2d(keys, 64, 7, keys->nb[2], 0);
+  const SplitDescBuilder split(Context::forward({c.setRows(cache, flat, rows)}),
                                {}, {"cache_k_l0"});
   const capture::SymbolSpec spec = deriveSymbols(split);
   const auto *tokens = symbolAt(spec, split.indexOf(rows), 0);
@@ -392,7 +502,7 @@ void testDescriptionOrder() {
 capture::SplitDescription::Tensor leafTensor(std::initializer_list<int64_t> ne,
                                              bool weight = false) {
   capture::SplitDescription::Tensor t;
-  t.op = GGML_OP_NONE;
+  t.op = "NONE";
   int d = 0;
   for (int64_t n : ne)
     t.ne[d++] = n;
@@ -401,7 +511,7 @@ capture::SplitDescription::Tensor leafTensor(std::initializer_list<int64_t> ne,
 }
 
 capture::SplitDescription::Tensor
-nodeTensor(ggml_op op, std::initializer_list<int32_t> src,
+nodeTensor(const char *op, std::initializer_list<int32_t> src,
            std::initializer_list<int64_t> ne) {
   capture::SplitDescription::Tensor t = leafTensor(ne);
   t.op = op;
@@ -420,20 +530,20 @@ capture::SplitDescription attentionSplit(int64_t tokens, int64_t slots,
   d.tensors.push_back(leafTensor({tokens}));
   d.tensors.push_back(leafTensor({64, tokens}));
   d.tensors.push_back(leafTensor({64, 64}, /*weight=*/true));
-  d.tensors.push_back(nodeTensor(GGML_OP_MUL_MAT, {2, 1}, {64, tokens}));
-  d.tensors.push_back(nodeTensor(GGML_OP_RESHAPE, {3}, {16, 4, tokens}));
-  d.tensors.push_back(nodeTensor(GGML_OP_ROPE, {4, 0}, {16, 4, tokens}));
+  d.tensors.push_back(nodeTensor("MUL_MAT", {2, 1}, {64, tokens}));
+  d.tensors.push_back(nodeTensor("RESHAPE", {3}, {16, 4, tokens}));
+  d.tensors.push_back(nodeTensor("ROPE", {4, 0}, {16, 4, tokens}));
   d.tensors.push_back(leafTensor({64, rows}));
   d.tensors.push_back(leafTensor({slots, tokens}));
   capture::SplitDescription::Tensor view =
-      nodeTensor(GGML_OP_VIEW, {6}, {16, 4, slots});
+      nodeTensor("VIEW", {6}, {16, 4, slots});
   view.viewSrc = 6;
   d.tensors.push_back(view);
   d.tensors.push_back(
-      nodeTensor(GGML_OP_FLASH_ATTN_EXT, {5, 8, 8, 7}, {16, 4, tokens}));
+      nodeTensor("FLASH_ATTN_EXT", {5, 8, 8, 7}, {16, 4, tokens}));
   d.tensors.push_back(leafTensor({tokens}));
   capture::SplitDescription::Tensor write =
-      nodeTensor(GGML_OP_SET_ROWS, {6, 3, 10}, {64, rows});
+      nodeTensor("SET_ROWS", {6, 3, 10}, {64, rows});
   write.viewSrc = 6;
   d.tensors.push_back(write);
   return d;
@@ -457,14 +567,16 @@ void testDynamicSignature() {
 void testCompiledShapesFit() {
   // Compiled for the activation's rows as s0 (bounded 1..16) and their
   // bytes as 256 * s0.
-  const nlohmann::json term = {{"offset", 0}, {"terms", {{"s0", 1}}}};
-  const nlohmann::json bytes = {{"offset", 0}, {"terms", {{"s0", 256}}}};
-  const nlohmann::json shapes = {
-      {"symbols", {{{"name", "s0"}, {"minimum", 1}, {"maximum", 16}}}},
-      {"tensors",
-       {{{"ne", {64, term, 1, 1}},
-         {"nb", {4, 256, bytes, bytes}},
-         {"view_offs", 0}}}}};
+  using llvm::json::Array, llvm::json::Object;
+  const auto times = [](int64_t coefficient) {
+    return Object{{"offset", 0}, {"terms", Object{{"s0", coefficient}}}};
+  };
+  const llvm::json::Value shapes = Object{
+      {"symbols",
+       Array{Object{{"name", "s0"}, {"minimum", 1}, {"maximum", 16}}}},
+      {"tensors", Array{Object{{"ne", Array{64, times(1), 1, 1}},
+                               {"nb", Array{4, 256, times(256), times(256)}},
+                               {"view_offs", 0}}}}};
   const capture::SplitShapes fitted(shapes);
   const auto one = [](int64_t rows) {
     capture::SplitDescription d;
@@ -487,41 +599,47 @@ void testCompiledShapesFit() {
 
 void testSupportedOps() {
   Context c;
-  ggml_tensor *a = ggml_new_tensor_2d(c.context, GGML_TYPE_Q4_K, 256, 8);
-  ggml_tensor *b = ggml_new_tensor_2d(c.context, GGML_TYPE_F32, 256, 4);
-  const auto supported = [](const ggml_tensor *op) {
+  Tensor *a = c.tensor(kQ4K, {256, 8});
+  Tensor *b = c.tensor(kF32, {256, 4});
+  const auto supported = [](const Tensor *op) {
     SplitDescBuilder d({}, {});
     d.addTensor(op, {op}, true);
     return hipep_backend::supports(d.desc());
   };
-  check(supported(ggml_mul_mat(c.context, a, b)),
-        "a product by a packed weight");
-  check(!supported(ggml_mul_mat(c.context, b, a)),
-        "no product of a packed activation");
-  check(supported(ggml_add(c.context, b, b)), "a sum");
-  ggml_tensor *h = ggml_new_tensor_2d(c.context, GGML_TYPE_BF16, 256, 4);
-  check(!supported(ggml_add(c.context, h, h)),
-        "no bf16 sum (the runtime has none)");
-  ggml_tensor *dst = ggml_new_tensor_2d(c.context, GGML_TYPE_F32, 256, 4);
-  check(!supported(ggml_cpy(c.context, b, dst)), "no copy into another tensor");
+  check(supported(c.mulMat(a, b)), "a product by a packed weight");
+  check(!supported(c.mulMat(b, a)), "no product of a packed activation");
+  check(supported(c.add(b, b)), "a sum");
+  Tensor *h = c.tensor(kBF16, {256, 4});
+  check(!supported(c.add(h, h)), "no bf16 sum (the runtime has none)");
+  Tensor *dst = c.tensor(kF32, {256, 4});
+  check(!supported(c.cpy(b, dst)), "no copy into another tensor");
 }
 
-/// The dialect's block layouts (GgmlLayout.h) against ggml's own tables, for
-/// every type this ggml has.
-void testBlockLayoutsMatchGgml() {
-  for (int t = 0; t < GGML_TYPE_COUNT; ++t) {
-    const auto type = static_cast<ggml_type>(t);
-    if (ggml_blck_size(type) == 0)
-      continue; // A removed type.
-    const std::string name = ggml_type_name(type);
-    const std::optional<mlir::ggml::BlockLayout> layout =
-        mlir::ggml::getBlockLayout(name);
-    check(layout.has_value(), name + " has a block layout");
-    if (layout)
-      check(layout->typeSize == static_cast<int64_t>(ggml_type_size(type)) &&
-                layout->blockElements == ggml_blck_size(type),
-            name + "'s block layout is ggml's");
+/// ggml's type numbers (GgmlTensor.h) name types the dialect has a block
+/// layout of, and the K-quants' and Q8_1's layouts are the kernels'.
+void testTypeTable() {
+  int named = 0;
+  for (int32_t t = 0; t < 64; ++t) {
+    const std::optional<std::string> name = hip::ggml::typeName(t);
+    if (!name)
+      continue;
+    ++named;
+    check(hip::ggml::typeLayout(t).has_value(), *name + " has a block layout");
   }
+  check(named == 36, "ggml has 36 types");
+  check(hip::ggml::typeName(12) == std::string("q4_K") &&
+            hip::ggml::typeName(26) == std::string("i32") &&
+            !hip::ggml::typeName(4).has_value(),
+        "q4_K is 12, i32 26, 4 a removed type");
+  const auto layout = [](int32_t type) { return *hip::ggml::typeLayout(type); };
+  check(layout(12).typeSize == HIP_KQUANT_Q4_K_BLOCK_SIZE &&
+            layout(13).typeSize == HIP_KQUANT_Q5_K_BLOCK_SIZE &&
+            layout(14).typeSize == HIP_KQUANT_Q6_K_BLOCK_SIZE &&
+            layout(12).blockElements == HIP_KQUANT_BLOCK_ELEMENTS,
+        "the K-quants' blocks are the kernels'");
+  check(layout(9).typeSize == HIP_Q8_1_BLOCK_SIZE &&
+            layout(9).blockElements == HIP_Q8_1_BLOCK_ELEMENTS,
+        "Q8_1's blocks are the kernels'");
 }
 
 } // namespace
@@ -538,7 +656,7 @@ int main() {
   testDynamicSignature();
   testCompiledShapesFit();
   testSupportedOps();
-  testBlockLayoutsMatchGgml();
+  testTypeTable();
   if (failures != 0) {
     std::printf("%d check(s) failed\n", failures);
     return 1;

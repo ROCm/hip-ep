@@ -13,10 +13,9 @@
 // A field is here because nothing else here says it. What one field already
 // determines is not spelled a second time: a count is the length of the list
 // it counts, a node's result is the node, and a write's extent is the extent
-// of the value it produces. The exception is what only GGML's own type tables
-// could recompute -- how many bytes a quantized tensor occupies -- which the
-// capture reads from GGML and keeps, because no reader of this structure could
-// work it out.
+// of the value it produces. The exception is what only the type's block
+// layout could recompute -- how many bytes a quantized tensor occupies --
+// which the capture works out (GgmlTensor.h) and keeps.
 //
 //===----------------------------------------------------------------------===//
 
@@ -43,9 +42,9 @@ struct Value {
   std::string ggmlType;
   Extents ne{};
   Extents nb{};
-  /// What GGML's own type tables say these extents and strides occupy, which
-  /// does not follow from `ne` and `nb` alone, because a quantized type packs
-  /// several elements into one block.
+  /// The bytes these extents and strides occupy, which do not follow from
+  /// `ne` and `nb` alone, because a quantized type packs several elements into
+  /// one block.
   int64_t byteCount = 0;
   /// The buffer this value occupies and where in it it begins. A value that
   /// owns its buffer names itself.

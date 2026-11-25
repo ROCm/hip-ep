@@ -8,9 +8,9 @@
 // What a ggml backend is handed is a split: a run of the scheduler's graph,
 // its nodes pointing at tensors other splits made, the model's weights, the
 // KV cache, llama.cpp's inputs. libhipep_backend rebuilds it from the
-// backend's description (hipep_backend.h) as ggml tensors of its own, with
-// what ggml's tensors do not say of themselves (SplitTensors), and the
-// compiler captures it from there (SplitCompiler.h).
+// backend's description (hipep_backend.h) as tensors of its own
+// (GgmlTensor.h), with what ggml's tensors do not say of themselves
+// (SplitTensors), and the compiler captures it from there (SplitCompiler.h).
 //
 // The description is the split's identity: its tensors' metadata alone,
 // never their data. Two splits of one shape (two layers of a model) describe
@@ -30,9 +30,9 @@
 #ifndef HIP_FRONTEND_GGML_SPLITGRAPH_H
 #define HIP_FRONTEND_GGML_SPLITGRAPH_H
 
-#include "ggml.h"
+#include "hip/Frontend/Ggml/GgmlTensor.h"
 
-#include <nlohmann/json.hpp>
+#include "llvm/Support/JSON.h"
 
 #include <array>
 #include <cstdint>
@@ -50,7 +50,7 @@ namespace hip::ggml::capture {
 /// A split's computed nodes, in order, and which of them are read outside
 /// it.
 struct SplitNodes {
-  std::vector<const ggml_tensor *> nodes;
+  std::vector<const Tensor *> nodes;
   std::vector<bool> exported;
 };
 
@@ -58,8 +58,8 @@ struct SplitNodes {
 /// weights (of the sizes they were loaded at, whatever the step) and its
 /// caches (of the sizes the context made).
 struct SplitTensors {
-  std::unordered_set<const ggml_tensor *> weights;
-  std::unordered_set<const ggml_tensor *> caches;
+  std::unordered_set<const Tensor *> weights;
+  std::unordered_set<const Tensor *> caches;
 };
 
 /// A split, described: its tensors in an order every source precedes its
@@ -71,10 +71,11 @@ struct SplitDescription {
     int32_t type = 0;
     int64_t ne[4] = {1, 1, 1, 1};
     size_t nb[4] = {0, 0, 0, 0};
-    int32_t op = 0;
-    int32_t opParams[GGML_MAX_OP_PARAMS / sizeof(int32_t)] = {};
+    /// ggml's operation name; "NONE" for a leaf.
+    std::string op = "NONE";
+    int32_t opParams[kOpParams] = {};
     int32_t flags = 0;
-    int32_t src[GGML_MAX_SRC];
+    int32_t src[kMaxSources];
     int32_t viewSrc = -1;
     size_t viewOffs = 0;
     /// A node whose value may be read outside the split.
@@ -92,7 +93,7 @@ struct SplitDescription {
   };
   std::vector<Tensor> tensors;
   /// The original tensor each describes.
-  std::vector<const ggml_tensor *> originals;
+  std::vector<const hip::ggml::Tensor *> originals;
 };
 
 /// Cuts the split out: the sources of its nodes outside it become leaves - a
@@ -103,7 +104,7 @@ SplitDescription describeSplit(const SplitNodes &split,
                                const SplitTensors &tensors);
 
 /// For a look at it (the cache keeps it beside the code).
-nlohmann::json toJson(const SplitDescription &description);
+llvm::json::Value toJson(const SplitDescription &description);
 
 /// What two descriptions of one compiled graph share: everything but the
 /// tensors' names, hashed.
@@ -139,15 +140,17 @@ struct SymbolSpec {
   std::vector<Symbol> symbols;
   bool empty() const { return symbols.empty(); }
 };
-nlohmann::json toJson(const SymbolSpec &spec);
-SymbolSpec symbolSpecFromJson(const nlohmann::json &document);
+llvm::json::Value toJson(const SymbolSpec &spec);
+/// Throws when `document` is not a SymbolSpec.
+SymbolSpec symbolSpecFromJson(const llvm::json::Value &document);
 
 /// A compile's shapes (shapes.json): each described tensor's extents,
 /// strides and view offset as expressions of its symbols, null for one the
 /// code does not hold (a view nothing compiled reads).
 class SplitShapes {
 public:
-  explicit SplitShapes(const nlohmann::json &document);
+  /// Throws when `document` is not shapes.json.
+  explicit SplitShapes(const llvm::json::Value &document);
   /// Whether `description` is the compiled graph at some sizes: each symbol
   /// bound where an extent is it alone, within its bounds, every expression
   /// then equal to the described number; `error` says what does not.
@@ -163,7 +166,7 @@ private:
     bool present = false;
     Expr ne[4], nb[4], viewOffs;
   };
-  Expr parse(const nlohmann::json &e);
+  Expr parse(const llvm::json::Value &e);
   /// fits, with the symbols' values.
   bool bind(const SplitDescription &description, std::vector<int64_t> &values,
             std::string *error = nullptr) const;

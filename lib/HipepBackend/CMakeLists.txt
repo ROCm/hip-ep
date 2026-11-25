@@ -70,8 +70,3 @@ set_property(TARGET hipep_backend APPEND PROPERTY LINK_DEPENDS
 install(TARGETS hipep_backend LIBRARY DESTINATION lib)
 install(FILES include/hipep_backend.h DESTINATION include)
 install(FILES cmake/hipep_backendConfig.cmake DESTINATION lib/cmake/hipep_backend)
-# ggml is linked in: its license beside it.
-include(GNUInstallDirs)
-install(FILES "${PROJECT_SOURCE_DIR}/lib/Runtime/Kernels/licenses/llama.cpp/LICENSE"
-  RENAME LICENSE-llama.cpp
-  DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/hipep_backend")

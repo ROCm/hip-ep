@@ -310,7 +310,6 @@ hipdnn_ep_add_external_plugins()
 # backend compiles and runs its splits with; after the compiler and the EP's
 # JIT (backend-mlir-compiler) they build on.
 if(HIPDNN_EP_BUILD_GGML)
-  include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/Ggml.cmake)
   add_subdirectory(lib/Frontend/Ggml)
   add_subdirectory(lib/HipepBackend)
 endif()

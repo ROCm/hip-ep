@@ -3,8 +3,8 @@
 # ** Licensed under the MIT License.
 ##
 
-# The split frontend (HIPDNN_EP_BUILD_GGML): ggml tensors captured, emitted
-# as the ggml dialect. Links ggml (cmake/Ggml.cmake).
+# The split frontend (HIPDNN_EP_BUILD_GGML): a split's tensors (GgmlTensor.h)
+# captured, emitted as the ggml dialect. Links no ggml.
 
 set(_ggml_incgen_targets
   GgmlSourceIncGen
@@ -13,12 +13,11 @@ set(_ggml_incgen_targets
   GgmlEnumsIncGen
   GgmlOpsIncGen)
 
-# The capture reads ggml's tensors and links no MLIR: `CapturedGraph.h`
-# includes the generated parameter structs alone.
-add_library(GgmlCapture STATIC CaptureGraph.cpp SplitGraph.cpp)
+# The capture links no MLIR: `CapturedGraph.h` includes the generated
+# parameter structs alone.
+add_library(GgmlCapture STATIC CaptureGraph.cpp GgmlTensor.cpp SplitGraph.cpp)
 add_dependencies(GgmlCapture ${_ggml_incgen_targets})
-target_include_directories(GgmlCapture PRIVATE "${HIPDNN_EP_GGML_SOURCE_DIR}/src")
-target_link_libraries(GgmlCapture PUBLIC ggml-base NlohmannJson)
+target_link_libraries(GgmlCapture PUBLIC LLVMSupport)
 set_target_properties(GgmlCapture PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 add_library(GgmlEmitter STATIC GgmlEmitter.cpp)

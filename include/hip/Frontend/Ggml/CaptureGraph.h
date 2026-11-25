@@ -7,8 +7,8 @@
 //
 // Walking the nodes of a split a ggml backend is handed and writing down what
 // they are. This is the whole of the GGML side of the conversion, and it needs
-// nothing from llama.cpp: a graph built by hand with ggml's own constructors
-// is observed the same way, which is what lets a test build one and check what
+// nothing from llama.cpp: a graph described by hand (GgmlTensor.h) is
+// observed the same way, which is what lets a test build one and check what
 // the capture made of it.
 //
 //===----------------------------------------------------------------------===//
@@ -17,8 +17,7 @@
 #define HIP_FRONTEND_GGML_CAPTUREGRAPH_H
 
 #include "hip/Frontend/Ggml/CapturedGraph.h"
-
-#include "ggml.h"
+#include "hip/Frontend/Ggml/GgmlTensor.h"
 
 #include <string>
 #include <unordered_map>
@@ -33,9 +32,9 @@ namespace hip::ggml::capture {
 /// an input of the split (a weight a constant); a view of an outside tensor
 /// is a view the split takes. `ids`, when given, gets each value's id.
 CapturedGraph
-observeSplit(const std::vector<const ggml_tensor *> &nodes,
+observeSplit(const std::vector<const Tensor *> &nodes,
              const std::vector<bool> &exported, const std::string &name,
-             std::unordered_map<const ggml_tensor *, int64_t> *ids = nullptr);
+             std::unordered_map<const Tensor *, int64_t> *ids = nullptr);
 
 } // namespace hip::ggml::capture
 

@@ -31,8 +31,6 @@
 #include "hip/Frontend/Ggml/GgmlEmitter.h"
 #include "hip/Frontend/Ggml/SplitGraph.h"
 
-#include "ggml.h"
-
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Diagnostics.h"
@@ -40,11 +38,12 @@
 #include "mlir/Parser/Parser.h"
 #include "mlir/Pass/PassManager.h"
 
+#include "llvm/Support/FormatVariadic.h"
+#include "llvm/Support/JSON.h"
+
 #include "compilation_options_generated.h"
 #include "hip/Compiler/CompilerDriver.h"
 #include "hip/Support/DiskFileSystem.h"
-
-#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <array>
@@ -79,14 +78,12 @@ int64_t describedIndex(const capture::Value &value) {
 /// capture's), and which outputs may be written into an input's memory: a
 /// state's update that nothing reads the old bytes of afterwards (`donated`,
 /// [output, input] pairs).
-nlohmann::json bindings(const capture::CapturedGraph &graph,
-                        mlir::ModuleOp module) {
+llvm::json::Value bindings(const capture::CapturedGraph &graph,
+                           mlir::ModuleOp module) {
   std::map<int64_t, const capture::Value *> values;
   for (const capture::Value &value : graph.values)
     values.emplace(value.id, &value);
-  nlohmann::json inputs = nlohmann::json::array(),
-                 outputs = nlohmann::json::array(),
-                 donated = nlohmann::json::array();
+  llvm::json::Array inputs, outputs, donated;
   for (const capture::Input &input : graph.inputs)
     inputs.push_back(describedIndex(*values.at(input.id)));
   for (const capture::Output &output : graph.outputs)
@@ -102,25 +99,28 @@ nlohmann::json bindings(const capture::CapturedGraph &graph,
     fail("the split's states cannot be read: ", reason);
   for (auto [pair, decision] : llvm::zip(*pairs, *donation))
     if (decision.inPlace)
-      donated.push_back({pair.outputIndex, pair.inputIndex});
-  return nlohmann::json{{"inputs", std::move(inputs)},
-                        {"outputs", std::move(outputs)},
-                        {"donated", std::move(donated)}};
+      donated.push_back(
+          llvm::json::Array{static_cast<int64_t>(pair.outputIndex),
+                            static_cast<int64_t>(pair.inputIndex)});
+  return llvm::json::Object{{"inputs", std::move(inputs)},
+                            {"outputs", std::move(outputs)},
+                            {"donated", std::move(donated)}};
 }
 
 /// A shape expression as shapes.json spells it: a number, or
 /// {"offset": c, "terms": {symbol: coefficient}}.
-nlohmann::json expression(mlir::Attribute attribute) {
+llvm::json::Value expression(mlir::Attribute attribute) {
   std::optional<mlir::ggml::ShapeExprView> view =
       mlir::ggml::getShapeExprView(attribute);
   if (!view)
     fail("a split tensor's layout holds no shape expression");
   if (view->isConstant())
     return view->offset;
-  nlohmann::json terms = nlohmann::json::object();
+  llvm::json::Object terms;
   for (const auto &[symbol, coefficient] : view->terms)
     terms[symbol.str()] = coefficient;
-  return nlohmann::json{{"offset", view->offset}, {"terms", std::move(terms)}};
+  return llvm::json::Object{{"offset", view->offset},
+                            {"terms", std::move(terms)}};
 }
 
 /// Each described tensor's extents, strides and view offset as the module
@@ -128,13 +128,13 @@ nlohmann::json expression(mlir::Attribute attribute) {
 /// the symbols with their bounds: the guard a split is checked against
 /// before this code runs it (SplitShapes). A tensor the module does not
 /// hold is null: nothing compiled reads it.
-nlohmann::json shapes(mlir::ModuleOp module,
-                      const capture::SplitDescription &description) {
+llvm::json::Value shapes(mlir::ModuleOp module,
+                         const capture::SplitDescription &description) {
   auto entry = module.lookupSymbol<mlir::func::FuncOp>("main_graph");
   if (!entry)
     fail("the split's module has no main_graph");
 
-  nlohmann::json tensors = nlohmann::json::array();
+  llvm::json::Array tensors;
   for (size_t i = 0; i < description.tensors.size(); ++i)
     tensors.push_back(nullptr);
   const auto record = [&](mlir::Value value, mlir::StringAttr name) {
@@ -145,16 +145,16 @@ nlohmann::json shapes(mlir::ModuleOp module,
     const size_t index = std::stoul(name.getValue().substr(1).str());
     if (index >= tensors.size())
       return;
-    nlohmann::json ne = nlohmann::json::array(), nb = nlohmann::json::array();
+    llvm::json::Array ne, nb;
     for (mlir::Attribute e : layout.getExtents())
       ne.push_back(expression(e));
     for (mlir::Attribute e : layout.getStrides())
       nb.push_back(expression(e));
-    nlohmann::json shape{{"ne", std::move(ne)}, {"nb", std::move(nb)}};
-    shape["view_offs"] =
-        description.tensors[index].viewSrc >= 0
-            ? expression(layout.getOffset())
-            : nlohmann::json(description.tensors[index].viewOffs);
+    llvm::json::Object shape{{"ne", std::move(ne)}, {"nb", std::move(nb)}};
+    shape["view_offs"] = description.tensors[index].viewSrc >= 0
+                             ? expression(layout.getOffset())
+                             : llvm::json::Value(static_cast<int64_t>(
+                                   description.tensors[index].viewOffs));
     tensors[index] = std::move(shape);
   };
   for (mlir::BlockArgument argument : entry.getArguments())
@@ -166,32 +166,37 @@ nlohmann::json shapes(mlir::ModuleOp module,
              op->getAttrOfType<mlir::StringAttr>("ggml.source_name"));
   });
 
-  nlohmann::json symbols = nlohmann::json::array();
+  llvm::json::Array symbols;
   if (auto declared = module->getAttrOfType<mlir::ArrayAttr>("ggml.symbols"))
     for (mlir::Attribute attribute : declared) {
       auto d = llvm::dyn_cast<mlir::DictionaryAttr>(attribute);
       auto name = d ? d.getAs<mlir::StringAttr>("name") : nullptr;
       if (!name)
         continue;
-      nlohmann::json symbol{{"name", name.getValue().str()}};
+      llvm::json::Object symbol{{"name", name.getValue().str()}};
       if (auto minimum = d.getAs<mlir::IntegerAttr>("minimum"))
         symbol["minimum"] = minimum.getInt();
       if (auto maximum = d.getAs<mlir::IntegerAttr>("maximum"))
         symbol["maximum"] = maximum.getInt();
-      if (auto product = d.getAs<mlir::ArrayAttr>("product"))
+      if (auto product = d.getAs<mlir::ArrayAttr>("product")) {
+        llvm::json::Array factors;
         for (mlir::Attribute factor : product)
-          symbol["product"].push_back(
+          factors.push_back(
               llvm::cast<mlir::StringAttr>(factor).getValue().str());
+        symbol["product"] = std::move(factors);
+      }
       symbols.push_back(std::move(symbol));
     }
-  return nlohmann::json{{"symbols", std::move(symbols)},
-                        {"tensors", std::move(tensors)}};
+  return llvm::json::Object{{"symbols", std::move(symbols)},
+                            {"tensors", std::move(tensors)}};
 }
 
-void write(const fs::path &path, const nlohmann::json &document,
-           int indent = -1) {
+void write(const fs::path &path, const llvm::json::Value &document,
+           bool pretty = false) {
   std::ofstream out(path);
-  out << document.dump(indent) << "\n";
+  out << (pretty ? llvm::formatv("{0:2}", document).str()
+                 : llvm::formatv("{0}", document).str())
+      << "\n";
   if (!out)
     fail("cannot write ", path.string());
 }
@@ -199,9 +204,9 @@ void write(const fs::path &path, const nlohmann::json &document,
 /// Each captured value named by the described tensor it is ("t7"); a leaf
 /// read in the shape the description gives it (a cache written whole is read
 /// in the shape it is written in).
-void nameValues(capture::CapturedGraph &graph,
-                const capture::SplitDescription &description,
-                const std::unordered_map<const ggml_tensor *, int64_t> &ids) {
+void nameValues(
+    capture::CapturedGraph &graph, const capture::SplitDescription &description,
+    const std::unordered_map<const hip::ggml::Tensor *, int64_t> &ids) {
   std::unordered_map<int64_t, int64_t> indexOfId;
   for (size_t i = 0; i < description.originals.size(); ++i) {
     auto found = ids.find(description.originals[i]);
@@ -215,7 +220,7 @@ void nameValues(capture::CapturedGraph &graph,
     const capture::SplitDescription::Tensor &t =
         description.tensors[found->second];
     value.name = "t" + std::to_string(found->second);
-    if (t.op == GGML_OP_NONE)
+    if (t.op == "NONE")
       for (unsigned d = 0; d < 4; ++d) {
         value.ne[d] = t.ne[d];
         value.nb[d] = static_cast<int64_t>(t.nb[d]);
@@ -348,13 +353,13 @@ bool isCandidate(const capture::SplitDescription &description,
                  const std::vector<bool> &isModelMemory, int32_t t, int d) {
   const capture::SplitDescription::Tensor &x =
       description.tensors[static_cast<size_t>(t)];
-  if (x.op == GGML_OP_NONE)
+  if (x.op == "NONE")
     return !isModelMemory[static_cast<size_t>(t)];
-  if (x.op != GGML_OP_VIEW || x.viewSrc < 0)
+  if (x.op != "VIEW" || x.viewSrc < 0)
     return false;
   const capture::SplitDescription::Tensor &from =
       description.tensors[static_cast<size_t>(x.viewSrc)];
-  if (from.op != GGML_OP_NONE || from.weight)
+  if (from.op != "NONE" || from.weight)
     return false;
   const bool cache = isModelMemory[static_cast<size_t>(x.viewSrc)];
   bool along = false;
@@ -383,7 +388,7 @@ int64_t viewBound(const capture::SplitDescription &description, int32_t t,
   int64_t room =
       static_cast<int64_t>(storage.nb[3]) * storage.ne[3] -
       static_cast<int64_t>(x.viewOffs) -
-      static_cast<int64_t>(ggml_type_size(static_cast<ggml_type>(x.type)));
+      hip::ggml::typeLayout(x.type).value_or(hip::ggml::TypeLayout{}).typeSize;
   for (int e = 0; e < 4; ++e)
     if (e != d)
       room -= (x.ne[e] - 1) * static_cast<int64_t>(x.nb[e]);
@@ -428,8 +433,8 @@ capture::SymbolSpec deriveSymbols(const capture::SplitDescription &description,
   std::set<std::string> inputClasses;
   for (const Seed &guess : guesses)
     if (std::optional<std::string> c = classOf(guess);
-        c && description.tensors[static_cast<size_t>(guess.tensor)].op ==
-                 GGML_OP_NONE)
+        c &&
+        description.tensors[static_cast<size_t>(guess.tensor)].op == "NONE")
       inputClasses.insert(*c);
 
   // Each class left a symbol, s0, s1, ... in the order they are read.
@@ -445,8 +450,7 @@ capture::SymbolSpec deriveSymbols(const capture::SplitDescription &description,
       name->second = "s" + std::to_string(names.size() - 1);
     seeds.push_back({guess.tensor, guess.dimension, name->second});
     int64_t &maximum = bounds.emplace(name->second, kUnbounded).first->second;
-    if (description.tensors[static_cast<size_t>(guess.tensor)].op ==
-        GGML_OP_VIEW)
+    if (description.tensors[static_cast<size_t>(guess.tensor)].op == "VIEW")
       maximum = std::min(maximum,
                          viewBound(description, guess.tensor, guess.dimension));
   }
@@ -491,31 +495,29 @@ std::unique_ptr<SplitCapture> captureSplit(const SplitNodes &split,
   // of storage outside the split) and what they read. A view nothing of it
   // reads is not captured - its extents (a cache window's length) would be
   // numbers the code is compiled for, to no use.
-  std::unordered_map<const ggml_tensor *, size_t> indexOf;
+  std::unordered_map<const hip::ggml::Tensor *, size_t> indexOf;
   for (size_t i = 0; i < result->description.originals.size(); ++i)
     indexOf.emplace(result->description.originals[i], i);
-  std::vector<const ggml_tensor *> nodes;
+  std::vector<const hip::ggml::Tensor *> nodes;
   std::vector<bool> exported;
-  std::unordered_set<const ggml_tensor *> read;
+  std::unordered_set<const hip::ggml::Tensor *> read;
   for (size_t i = split.nodes.size(); i-- > 0;) {
-    const ggml_tensor *node = split.nodes[i];
+    const hip::ggml::Tensor *node = split.nodes[i];
     const bool output = result->description.tensors[indexOf.at(node)].output;
-    const bool view = node->op == GGML_OP_VIEW || node->op == GGML_OP_RESHAPE ||
-                      node->op == GGML_OP_PERMUTE ||
-                      node->op == GGML_OP_TRANSPOSE;
+    const bool view = hip::ggml::isView(*node);
     if (view && !output && read.count(node) == 0)
       continue;
     nodes.push_back(node);
     exported.push_back(output);
-    for (const ggml_tensor *source : node->src)
+    for (const hip::ggml::Tensor *source : node->src)
       if (source != nullptr)
         read.insert(source);
-    if (node->view_src != nullptr)
-      read.insert(node->view_src);
+    if (node->viewSrc != nullptr)
+      read.insert(node->viewSrc);
   }
   std::reverse(nodes.begin(), nodes.end());
   std::reverse(exported.begin(), exported.end());
-  std::unordered_map<const ggml_tensor *, int64_t> ids;
+  std::unordered_map<const hip::ggml::Tensor *, int64_t> ids;
   CapturedGraph graph = observeSplit(nodes, exported, "split", &ids);
   if (!graph.untypedNodes.empty())
     fail("the split holds an operation the capture has no semantics for: ",
@@ -593,10 +595,11 @@ void compileSplit(const SplitCapture &captured,
     fail("the HIP compiler refused the module",
          compileError.empty() ? std::string() : ": " + compileError);
 
-  write(directory / "bindings.json", bindings(captured.graph, *module), 2);
+  write(directory / "bindings.json", bindings(captured.graph, *module),
+        /*pretty=*/true);
   write(directory / "shapes.json", shapes(*module, captured.description));
   write(directory / "split.json", toJson(captured.description));
-  write(directory / "symbols.json", toJson(captured.symbols), 2);
+  write(directory / "symbols.json", toJson(captured.symbols), /*pretty=*/true);
 }
 
 } // namespace hip::ggml::capture

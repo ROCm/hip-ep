@@ -17,9 +17,6 @@
 
 #include "hip/Frontend/Ggml/Error.h"
 
-#include "ggml-impl.h"
-#include "ggml.h"
-
 #include <algorithm>
 #include <cstdint>
 #include <string>
@@ -33,34 +30,32 @@ namespace {
 using hip::ggml::fail;
 
 struct WalkedGraph {
-  std::vector<const ggml_tensor *> values;
-  std::vector<const ggml_tensor *> nodes;
-  std::unordered_map<const ggml_tensor *, int32_t> ids;
-  std::unordered_set<const ggml_tensor *> visited;
+  std::vector<const Tensor *> values;
+  std::vector<const Tensor *> nodes;
+  std::unordered_map<const Tensor *, int32_t> ids;
+  std::unordered_set<const Tensor *> visited;
   /// What the split reads from outside.
-  std::unordered_set<const ggml_tensor *> external;
+  std::unordered_set<const Tensor *> external;
 
-  bool isExternal(const ggml_tensor *tensor) const {
+  bool isExternal(const Tensor *tensor) const {
     return external.count(tensor) != 0;
   }
 };
 
-bool isLayoutAlias(ggml_op operation);
-
 /// A split's values: its nodes, the views of outside tensors they read, and
 /// what those read from outside - not walked past.
 void collectSplitValue(WalkedGraph &graph,
-                       const std::unordered_set<const ggml_tensor *> &inside,
-                       const ggml_tensor *tensor) {
+                       const std::unordered_set<const Tensor *> &inside,
+                       const Tensor *tensor) {
   if (tensor == nullptr || graph.visited.count(tensor) != 0)
     return;
   graph.visited.insert(tensor);
   const bool node = inside.count(tensor) != 0 ||
-                    (tensor->view_src != nullptr && isLayoutAlias(tensor->op));
+                    (tensor->viewSrc != nullptr && isView(*tensor));
   if (node) {
-    if (tensor->view_src != nullptr)
-      collectSplitValue(graph, inside, tensor->view_src);
-    for (const ggml_tensor *source : tensor->src)
+    if (tensor->viewSrc != nullptr)
+      collectSplitValue(graph, inside, tensor->viewSrc);
+    for (const Tensor *source : tensor->src)
       collectSplitValue(graph, inside, source);
   } else {
     graph.external.insert(tensor);
@@ -71,36 +66,24 @@ void collectSplitValue(WalkedGraph &graph,
     graph.nodes.push_back(tensor);
 }
 
-const ggml_tensor *storageRoot(const ggml_tensor *tensor) {
-  std::unordered_set<const ggml_tensor *> visited;
-  while (tensor != nullptr && tensor->view_src != nullptr) {
+const Tensor *storageRoot(const Tensor *tensor) {
+  std::unordered_set<const Tensor *> visited;
+  while (tensor != nullptr && tensor->viewSrc != nullptr) {
     if (!visited.insert(tensor).second) {
       fail("cycle in GGML tensor view chain");
     }
-    tensor = tensor->view_src;
+    tensor = tensor->viewSrc;
   }
   return tensor;
 }
 
-bool isLayoutAlias(ggml_op operation) {
-  switch (operation) {
-  case GGML_OP_RESHAPE:
-  case GGML_OP_VIEW:
-  case GGML_OP_PERMUTE:
-  case GGML_OP_TRANSPOSE:
-    return true;
-  default:
-    return false;
-  }
-}
-
-std::optional<int> writeDestinationSlot(const ggml_tensor &tensor,
-                                        const ggml_tensor *outputRoot) {
-  if (tensor.op == GGML_OP_SET_ROWS && tensor.src[2] != nullptr &&
+std::optional<int> writeDestinationSlot(const Tensor &tensor,
+                                        const Tensor *outputRoot) {
+  if (tensor.op == "SET_ROWS" && tensor.src[2] != nullptr &&
       storageRoot(tensor.src[2]) == outputRoot) {
     return 2;
   }
-  for (int slot = 0; slot < GGML_MAX_SRC; ++slot) {
+  for (int slot = 0; slot < kMaxSources; ++slot) {
     if (tensor.src[slot] != nullptr && tensor.src[slot] != &tensor &&
         storageRoot(tensor.src[slot]) == outputRoot) {
       return slot;
@@ -121,27 +104,22 @@ template <typename Element> Extents extentsOf(const Element *values) {
 // numbers, and the correspondence is declared beside each dialect value.
 #include "hip/Dialect/Ggml/IR/GgmlEnumNames.inc"
 
-NodeParameters typedParameters(const ggml_tensor &tensor) {
+NodeParameters typedParameters(const Tensor &tensor) {
   const auto i32 = [&](int index) {
-    return static_cast<int64_t>(ggml_get_op_params_i32(&tensor, index));
+    return static_cast<int64_t>(opParamI32(tensor, index));
   };
-  const auto f32 = [&](int index) {
-    return ggml_get_op_params_f32(&tensor, index);
-  };
-  switch (tensor.op) {
+  const auto f32 = [&](int index) { return opParamF32(tensor, index); };
 #include "hip/Dialect/Ggml/IR/GgmlDecode.inc"
-  default:
-    return UnsupportedParameters{};
-  }
+  return UnsupportedParameters{};
 }
 
 std::string
-classifyExternal(const ggml_tensor &tensor,
-                 const std::unordered_set<const ggml_tensor *> &stateRoots) {
+classifyExternal(const Tensor &tensor,
+                 const std::unordered_set<const Tensor *> &stateRoots) {
   if (stateRoots.count(&tensor) != 0) {
     return "state";
   }
-  if ((tensor.flags & GGML_TENSOR_FLAG_INPUT) != 0) {
+  if ((tensor.flags & kFlagInput) != 0) {
     return "input";
   }
   return "constant";
@@ -149,16 +127,15 @@ classifyExternal(const ggml_tensor &tensor,
 
 } // namespace
 
-CapturedGraph
-observeSplit(const std::vector<const ggml_tensor *> &nodes,
-             const std::vector<bool> &exported, const std::string &name,
-             std::unordered_map<const ggml_tensor *, int64_t> *ids) {
+CapturedGraph observeSplit(const std::vector<const Tensor *> &nodes,
+                           const std::vector<bool> &exported,
+                           const std::string &name,
+                           std::unordered_map<const Tensor *, int64_t> *ids) {
   WalkedGraph graph;
-  const std::unordered_set<const ggml_tensor *> inside(nodes.begin(),
-                                                       nodes.end());
-  for (const ggml_tensor *node : nodes)
+  const std::unordered_set<const Tensor *> inside(nodes.begin(), nodes.end());
+  for (const Tensor *node : nodes)
     collectSplitValue(graph, inside, node);
-  std::unordered_set<const ggml_tensor *> outputs;
+  std::unordered_set<const Tensor *> outputs;
   for (size_t i = 0; i < nodes.size(); ++i)
     if (exported[i])
       outputs.insert(nodes[i]);
@@ -168,22 +145,22 @@ observeSplit(const std::vector<const ggml_tensor *> &nodes,
 
   // Where a value's storage begins: its view chain's root, no further than
   // what the split reads from outside.
-  const auto rootOf = [&](const ggml_tensor *tensor) {
-    while (tensor->view_src != nullptr && !graph.isExternal(tensor))
-      tensor = tensor->view_src;
+  const auto rootOf = [&](const Tensor *tensor) {
+    while (tensor->viewSrc != nullptr && !graph.isExternal(tensor))
+      tensor = tensor->viewSrc;
     return tensor;
   };
-  std::unordered_set<const ggml_tensor *> mutatingNodes;
-  std::unordered_map<const ggml_tensor *, std::vector<int32_t>> stateWrites;
-  std::unordered_set<const ggml_tensor *> stateRoots;
-  for (const ggml_tensor *tensor : graph.nodes) {
-    const ggml_tensor *root = rootOf(tensor);
-    if (root == tensor || isLayoutAlias(tensor->op)) {
+  std::unordered_set<const Tensor *> mutatingNodes;
+  std::unordered_map<const Tensor *, std::vector<int32_t>> stateWrites;
+  std::unordered_set<const Tensor *> stateRoots;
+  for (const Tensor *tensor : graph.nodes) {
+    const Tensor *root = rootOf(tensor);
+    if (root == tensor || isView(*tensor)) {
       continue;
     }
     const bool aliasesOperandStorage =
-        std::any_of(tensor->src, tensor->src + GGML_MAX_SRC,
-                    [root, &rootOf](const ggml_tensor *operand) {
+        std::any_of(tensor->src, tensor->src + kMaxSources,
+                    [root, &rootOf](const Tensor *operand) {
                       return operand != nullptr && rootOf(operand) == root;
                     });
     if (!aliasesOperandStorage) {
@@ -200,8 +177,8 @@ observeSplit(const std::vector<const ggml_tensor *> &nodes,
     stateWrites[root].push_back(graph.ids.at(tensor));
   }
 
-  std::unordered_map<const ggml_tensor *, std::string> roles;
-  for (const ggml_tensor *tensor : graph.values) {
+  std::unordered_map<const Tensor *, std::string> roles;
+  for (const Tensor *tensor : graph.values) {
     roles.emplace(tensor, graph.isExternal(tensor)
                               ? classifyExternal(*tensor, stateRoots)
                               : "intermediate");
@@ -209,29 +186,27 @@ observeSplit(const std::vector<const ggml_tensor *> &nodes,
 
   CapturedGraph observed;
   observed.name = name;
-  for (const ggml_tensor *tensor : graph.values) {
-    const ggml_tensor *root = rootOf(tensor);
-    const int64_t byteCount = static_cast<int64_t>(ggml_nbytes(tensor));
-    const int64_t storageByteLength = static_cast<int64_t>(ggml_nbytes(root));
+  for (const Tensor *tensor : graph.values) {
+    const Tensor *root = rootOf(tensor);
+    const int64_t byteCount = static_cast<int64_t>(nbytes(*tensor));
+    const int64_t storageByteLength = static_cast<int64_t>(nbytes(*root));
     // A view a split reads from outside is storage of its own.
     const int64_t viewOffset =
-        root == tensor ? 0 : static_cast<int64_t>(tensor->view_offs);
+        root == tensor ? 0 : static_cast<int64_t>(tensor->viewOffs);
     if (viewOffset > storageByteLength ||
         byteCount > storageByteLength - viewOffset) {
-      fail("tensor view exceeds its storage root: " +
-           std::string(tensor->name));
+      fail("tensor view exceeds its storage root: " + tensor->name);
     }
-    // GGML normalizes a chain of views to its root, so `view_src` is the
+    // GGML normalizes a chain of views to its root, so `viewSrc` is the
     // storage the value already names and is not recorded again.
-    if (tensor->view_src != nullptr && root != tensor &&
-        tensor->view_src != root) {
-      fail("tensor view is not rooted at its storage: " +
-           std::string(tensor->name));
+    if (tensor->viewSrc != nullptr && root != tensor &&
+        tensor->viewSrc != root) {
+      fail("tensor view is not rooted at its storage: " + tensor->name);
     }
     Value value;
     value.id = graph.ids.at(tensor);
     value.name = tensor->name;
-    value.ggmlType = ggml_type_name(tensor->type);
+    value.ggmlType = typeName(tensor->type).value_or("");
     value.ne = extentsOf(tensor->ne);
     value.nb = extentsOf(tensor->nb);
     value.byteCount = byteCount;
@@ -240,8 +215,8 @@ observeSplit(const std::vector<const ggml_tensor *> &nodes,
     observed.values.push_back(std::move(value));
   }
 
-  for (const ggml_tensor *tensor : graph.nodes) {
-    const ggml_tensor *outputRoot = rootOf(tensor);
+  for (const Tensor *tensor : graph.nodes) {
+    const Tensor *outputRoot = rootOf(tensor);
     const std::optional<int> destinationSlot =
         mutatingNodes.count(tensor) != 0
             ? writeDestinationSlot(*tensor, outputRoot)
@@ -250,15 +225,15 @@ observeSplit(const std::vector<const ggml_tensor *> &nodes,
     Node node;
     node.id = graph.ids.at(tensor);
     node.name = tensor->name;
-    node.operation = ggml_op_name(tensor->op);
+    node.operation = tensor->op;
     node.parameters = typedParameters(*tensor);
     if (destinationSlot)
       node.writeSlot = *destinationSlot;
     if (std::holds_alternative<UnsupportedParameters>(node.parameters))
       observed.untypedNodes.push_back({node.id, node.operation});
 
-    for (int slot = 0; slot < GGML_MAX_SRC; ++slot) {
-      const ggml_tensor *sourceTensor = tensor->src[slot];
+    for (int slot = 0; slot < kMaxSources; ++slot) {
+      const Tensor *sourceTensor = tensor->src[slot];
       if (sourceTensor == nullptr) {
         continue;
       }
@@ -267,7 +242,7 @@ observeSplit(const std::vector<const ggml_tensor *> &nodes,
     observed.nodes.push_back(std::move(node));
   }
 
-  for (const ggml_tensor *tensor : graph.values) {
+  for (const Tensor *tensor : graph.values) {
     const std::string &role = roles.at(tensor);
     if (role != "input" && role != "state" && role != "constant") {
       continue;
@@ -279,9 +254,9 @@ observeSplit(const std::vector<const ggml_tensor *> &nodes,
     observed.inputs.push_back(std::move(input));
   }
 
-  for (const ggml_tensor *tensor : graph.nodes) {
+  for (const Tensor *tensor : graph.nodes) {
     const bool isExported = outputs.count(tensor) != 0;
-    const ggml_tensor *root = rootOf(tensor);
+    const Tensor *root = rootOf(tensor);
     const auto writes = stateWrites.find(root);
     const bool stateUpdate = writes != stateWrites.end() &&
                              !writes->second.empty() &&
@@ -297,7 +272,7 @@ observeSplit(const std::vector<const ggml_tensor *> &nodes,
     observed.outputs.push_back(std::move(output));
   }
 
-  for (const ggml_tensor *tensor : graph.values) {
+  for (const Tensor *tensor : graph.values) {
     if (roles.at(tensor) != "state" || rootOf(tensor) != tensor) {
       continue;
     }

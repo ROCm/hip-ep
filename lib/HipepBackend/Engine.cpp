@@ -13,11 +13,12 @@
 #include "hip/Support/DiskFileSystem.h"
 #include "hip/artifact_abi.h"
 
-#include "ggml.h"
-
 #include <hip/hip_runtime_api.h>
 
-#include <nlohmann/json.hpp>
+#include "llvm/Support/FormatVariadic.h"
+#include "llvm/Support/JSON.h"
+
+#include <iterator>
 
 #include <dlfcn.h>
 #include <unistd.h>
@@ -78,22 +79,31 @@ const std::string &compilerIdentity() {
   return identity;
 }
 
-nlohmann::json readJson(const fs::path &path) {
+/// The document at `path`; null when there is none or it is no JSON.
+llvm::json::Value readJson(const fs::path &path) {
   std::ifstream in(path);
   if (!in)
     return nullptr;
-  try {
-    return nlohmann::json::parse(in);
-  } catch (const std::exception &) {
+  std::string text((std::istreambuf_iterator<char>(in)),
+                   std::istreambuf_iterator<char>());
+  llvm::Expected<llvm::json::Value> document = llvm::json::parse(text);
+  if (!document) {
+    llvm::consumeError(document.takeError());
     return nullptr;
   }
+  return std::move(*document);
 }
 
-void writeJson(const fs::path &path, const nlohmann::json &document) {
+/// The document on one line, its objects' keys sorted.
+std::string printJson(const llvm::json::Value &document) {
+  return llvm::formatv("{0}", document).str();
+}
+
+void writeJson(const fs::path &path, const llvm::json::Value &document) {
   const fs::path temporary = path.string() + ".tmp." + std::to_string(getpid());
   {
     std::ofstream out(temporary);
-    out << document.dump() << "\n";
+    out << printJson(document) << "\n";
   }
   std::error_code ignored;
   fs::rename(temporary, path, ignored);
@@ -101,9 +111,10 @@ void writeJson(const fs::path &path, const nlohmann::json &document) {
 
 /// The bytes a tensor of these sizes spans (ggml_nbytes).
 size_t bytesOf(const SplitDescription::Tensor &t) {
-  const auto type = static_cast<ggml_type>(t.type);
-  const size_t block = static_cast<size_t>(ggml_blck_size(type));
-  size_t bytes = block == 1 ? ggml_type_size(type)
+  const hip::ggml::TypeLayout layout =
+      hip::ggml::typeLayout(t.type).value_or(hip::ggml::TypeLayout{0, 1});
+  const size_t block = static_cast<size_t>(layout.blockElements);
+  size_t bytes = block == 1 ? static_cast<size_t>(layout.typeSize)
                             : static_cast<size_t>(t.ne[0]) * t.nb[0] /
                                   std::max<size_t>(block, 1);
   for (int d = block == 1 ? 0 : 1; d < 4; ++d)
@@ -330,8 +341,9 @@ Engine::dynamicCodeOf(const std::string &name) {
   }
   std::vector<DynamicCode::Variant> variants;
   for (auto it = generations.rbegin(); it != generations.rend(); ++it) {
-    const nlohmann::json symbols = readJson(it->second / "symbols.json");
-    const std::string symbolsKey = symbols.is_object() ? symbols.dump() : "";
+    const llvm::json::Value symbols = readJson(it->second / "symbols.json");
+    const std::string symbolsKey =
+        symbols.getAsObject() != nullptr ? printJson(symbols) : "";
     std::error_code ignored;
     if (std::any_of(variants.begin(), variants.end(),
                     [&](const DynamicCode::Variant &v) {
@@ -354,7 +366,7 @@ Engine::dynamicCodeOf(const std::string &name) {
     }
     variants.push_back({code, symbolsKey, it->second.filename().string()});
   }
-  const nlohmann::json refused =
+  const llvm::json::Value refused =
       readJson(cache / ("d" + name + ".refused.json"));
   std::string failure;
   if (std::ifstream failed(cache / ("d" + name + ".failed")); failed) {
@@ -367,10 +379,12 @@ Engine::dynamicCodeOf(const std::string &name) {
   dynamic->failure = failure;
   dynamic->variants = std::move(variants);
   dynamic->generation = generations.empty() ? 0L : generations.rbegin()->first;
-  if (refused.is_object() &&
-      refused.value("compiler", "") == compilerIdentity())
-    for (const nlohmann::json &r : refused.at("refused"))
-      dynamic->refused.insert(r.get<std::string>());
+  if (const llvm::json::Object *o = refused.getAsObject();
+      o != nullptr && o->getString("compiler") == compilerIdentity())
+    if (const llvm::json::Array *list = o->getArray("refused"))
+      for (const llvm::json::Value &r : *list)
+        if (std::optional<llvm::StringRef> symbols = r.getAsString())
+          dynamic->refused.insert(symbols->str());
   return dynamic;
 }
 
@@ -526,7 +540,7 @@ void Engine::process(Job job) {
       captured = capture::captureSplit(graph->split, graph->tensors, nullptr);
       job.symbols = captured->symbols.empty()
                         ? ""
-                        : capture::toJson(captured->symbols).dump();
+                        : printJson(capture::toJson(captured->symbols));
       bool staticShapes = false;
       std::string staticReason;
       std::shared_ptr<Compiled> previous;
@@ -555,7 +569,7 @@ void Engine::process(Job job) {
       if (!staticShapes && previous) {
         // The nodes its code of these symbols handed out are handed out too:
         // the new code runs the splits the old one ran.
-        std::unordered_map<const ggml_tensor *, size_t> nodeIndex;
+        std::unordered_map<const hip::ggml::Tensor *, size_t> nodeIndex;
         for (size_t j = 0; j < graph->split.nodes.size(); ++j)
           nodeIndex.emplace(graph->split.nodes[j], j);
         for (int32_t i : previous->sortedOutputs)
@@ -637,8 +651,7 @@ void Engine::finish(const Job &job, std::shared_ptr<Compiled> code,
   if (job.dynamic) {
     const std::string name = job.key.substr(1);
     std::shared_ptr<DynamicCode> dynamic = dynamicCodeOf(name);
-    nlohmann::json refused{{"compiler", compilerIdentity()},
-                           {"refused", nlohmann::json::array()}};
+    llvm::json::Array refusedSymbols;
     std::string replaced;
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -670,9 +683,11 @@ void Engine::finish(const Job &job, std::shared_ptr<Compiled> code,
       std::lock_guard<std::mutex> lock(mutex_);
       dynamic->refused.insert(job.symbols);
       for (const std::string &r : dynamic->refused)
-        refused["refused"].push_back(r);
+        refusedSymbols.push_back(r);
     }
-    writeJson(cache / (job.key + ".refused.json"), refused);
+    writeJson(cache / (job.key + ".refused.json"),
+              llvm::json::Object{{"compiler", compilerIdentity()},
+                                 {"refused", std::move(refusedSymbols)}});
     if (logging())
       std::fprintf(stderr, "hipep_backend: dynamic-shape code %s refused: %s\n",
                    name.substr(0, 12).c_str(), error.c_str());
@@ -836,46 +851,63 @@ std::shared_ptr<Compiled> Engine::load(const std::string &directory,
     return nullptr;
   }
 
-  nlohmann::json metadata, bindings;
-  try {
-    metadata = nlohmann::json::parse(metadataJson());
-  } catch (const std::exception &e) {
-    error = std::string("the artifact's metadata: ") + e.what();
+  llvm::Expected<llvm::json::Value> metadataDocument =
+      llvm::json::parse(metadataJson());
+  if (!metadataDocument) {
+    error = "the artifact's metadata: " +
+            llvm::toString(metadataDocument.takeError());
     return nullptr;
   }
-  bindings = readJson(dir / "bindings.json");
-  if (!bindings.is_object()) {
-    error = "no bindings.json";
+  const llvm::json::Object *metadata = metadataDocument->getAsObject();
+  const llvm::json::Value bindingsDocument = readJson(dir / "bindings.json");
+  const llvm::json::Object *bindings = bindingsDocument.getAsObject();
+  if (metadata == nullptr || bindings == nullptr) {
+    error = "no metadata or no bindings.json";
     return nullptr;
   }
-  for (const nlohmann::json &t :
-       metadata.value("inputs", nlohmann::json::array())) {
-    code->inputShapes.push_back(t.value("shape", std::vector<int64_t>{}));
-    code->inputElementSizes.push_back(t.value("element_size", int64_t{4}));
+  const llvm::json::Array empty;
+  const auto arrayOr = [&](const llvm::json::Object &o, llvm::StringRef key) {
+    const llvm::json::Array *array = o.getArray(key);
+    return array != nullptr ? array : &empty;
+  };
+  for (const llvm::json::Value &value : *arrayOr(*metadata, "inputs")) {
+    std::vector<int64_t> shape;
+    int64_t elementSize = 4;
+    if (const llvm::json::Object *t = value.getAsObject()) {
+      for (const llvm::json::Value &e : *arrayOr(*t, "shape"))
+        shape.push_back(e.getAsInteger().value_or(0));
+      elementSize = t->getInteger("element_size").value_or(4);
+    }
+    code->inputShapes.push_back(std::move(shape));
+    code->inputElementSizes.push_back(elementSize);
   }
-  code->inputs = bindings["inputs"].get<std::vector<int32_t>>();
-  code->outputs = bindings["outputs"].get<std::vector<int32_t>>();
+  for (const llvm::json::Value &i : *arrayOr(*bindings, "inputs"))
+    code->inputs.push_back(static_cast<int32_t>(i.getAsInteger().value_or(-1)));
+  for (const llvm::json::Value &i : *arrayOr(*bindings, "outputs"))
+    code->outputs.push_back(
+        static_cast<int32_t>(i.getAsInteger().value_or(-1)));
   code->sortedOutputs = code->outputs;
   std::sort(code->sortedOutputs.begin(), code->sortedOutputs.end());
-  const size_t outputs =
-      metadata.value("outputs", nlohmann::json::array()).size();
+  const size_t outputs = arrayOr(*metadata, "outputs")->size();
   if (code->inputs.size() != code->inputShapes.size() ||
       code->outputs.size() != outputs) {
     error = "the code's inputs and outputs are not the split's tensors";
     return nullptr;
   }
   code->donatedFrom.assign(code->outputs.size(), -1);
-  for (const nlohmann::json &pair :
-       bindings.value("donated", nlohmann::json::array())) {
-    const size_t output = pair.at(0).get<size_t>();
-    if (output < code->donatedFrom.size())
-      code->donatedFrom[output] = pair.at(1).get<int>();
+  for (const llvm::json::Value &value : *arrayOr(*bindings, "donated")) {
+    const llvm::json::Array *pair = value.getAsArray();
+    if (pair == nullptr || pair->size() != 2)
+      continue;
+    const int64_t output = (*pair)[0].getAsInteger().value_or(-1);
+    if (output >= 0 && static_cast<size_t>(output) < code->donatedFrom.size())
+      code->donatedFrom[output] =
+          static_cast<int>((*pair)[1].getAsInteger().value_or(-1));
   }
   if (fs::exists(dir / "shapes.json")) {
+    const llvm::json::Value shapes = readJson(dir / "shapes.json");
     try {
-      std::ifstream in(dir / "shapes.json");
-      code->shapes =
-          std::make_shared<capture::SplitShapes>(nlohmann::json::parse(in));
+      code->shapes = std::make_shared<capture::SplitShapes>(shapes);
     } catch (const std::exception &e) {
       error = std::string("shapes.json: ") + e.what();
       return nullptr;

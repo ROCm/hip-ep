@@ -7,7 +7,7 @@
 
 #include "Graph.h"
 
-#include "ggml.h"
+#include "hip/Frontend/Ggml/GgmlTensor.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -19,14 +19,14 @@ namespace hipep_backend {
 namespace {
 
 bool isDenseType(int32_t type) {
-  return type == GGML_TYPE_F32 || type == GGML_TYPE_F16 ||
-         type == GGML_TYPE_I32 || type == GGML_TYPE_I64;
+  const std::string name = hip::ggml::typeName(type).value_or("");
+  return name == "f32" || name == "f16" || name == "i32" || name == "i64";
 }
 
 /// A weight the native K-quant kernels multiply by as llama.cpp stored it.
 bool isKQuantType(int32_t type) {
-  return type == GGML_TYPE_Q4_K || type == GGML_TYPE_Q5_K ||
-         type == GGML_TYPE_Q6_K;
+  const std::string name = hip::ggml::typeName(type).value_or("");
+  return name == "q4_K" || name == "q5_K" || name == "q6_K";
 }
 
 bool isView(const std::string &op) {
