@@ -13,7 +13,7 @@ from pathlib import Path
 
 from verify_handoff import WORK, sha
 
-TASK = WORK / "bfcl-v4-50"
+TASK = Path(os.environ.get("QWEN_BFCL_TASK", WORK / "bfcl-v4-50"))
 
 
 def load(path):
@@ -52,7 +52,7 @@ def prompt(tokenizer, messages):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", action="store_true")
-    parser.add_argument("--variant", choices=["Original", "Changed"])
+    parser.add_argument("--variant", choices=["Original", "Changed", "Eight"])
     parser.add_argument("--queue", type=Path)
     parser.add_argument("--capacity", type=int, default=32768)
     args = parser.parse_args()
@@ -106,7 +106,21 @@ def main():
     validation = load(WORK / "native-gqa/full-model-validation.json")
     for name, expected in validation["binary_sha256"].items():
         assert sha(WORK / "native-gqa/install/bin" / name) == expected, name
-    model = Native(WORK / "native-gqa/models" / args.variant, args.capacity)
+    folder = WORK / "native-gqa/models" / args.variant
+    selector_layers = [] if args.variant == "Original" else [27, 31, 35, 39]
+    if args.variant == "Eight":
+        from export_eight import EXPORT_SHA, LAYERS
+
+        checked = load(WORK / "eight-qsa-v1/validation.json")
+        assert checked["status"] == "passed"
+        assert checked["binary_sha256"] == validation["binary_sha256"]
+        folder = WORK / "eight-qsa-v1/models/Eight"
+        exported = load(folder / "export.json")
+        assert exported["selector_sha256"] == EXPORT_SHA
+        assert exported["selector_layers"] == LAYERS
+        assert exported["onnx_sha256"] == checked["graph_sha256"]
+        selector_layers = LAYERS
+    model = Native(folder, args.capacity)
     pointers = {name: tensor.data_ptr() for name, tensor in model.caches.items()}
     write(
         args.queue / "ready.json",
@@ -117,6 +131,12 @@ def main():
             "binary_sha256": validation["binary_sha256"],
             "eos_token_ids": sorted(eos),
             "training_updates": 0,
+            "model_folder": str(folder),
+            "graph_sha256": model.export["onnx_sha256"],
+            "selector_layers": selector_layers,
+            "selector_export_sha256": model.export.get("selector_sha256")
+            if selector_layers
+            else None,
         },
     )
     idle = time.monotonic()
@@ -188,7 +208,7 @@ def main():
                     generation_seconds=time.perf_counter() - started,
                     prefill_pruning_eligible=length > 2052,
                     pruning_eligible=length + len(tokens) - 2 >= 2052,
-                    qsa_pruning_exercised=args.variant == "Changed"
+                    qsa_pruning_exercised=args.variant in ["Changed", "Eight"]
                     and length + len(tokens) - 2 >= 2052,
                     message_role_counts={
                         role: sum(m["role"] == role for m in request["messages"])

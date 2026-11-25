@@ -1,47 +1,53 @@
 {
   "source_performance_sha256": "bed3190aca4590fcc1ad85d566a7442e630e5dbbe348a0193400f554f762ff49",
-  "generator_sha256": "c97ca54a42c1a59b020e68560e89a17af3e503967e815ef6dac6494f584dc14d",
+  "generator_sha256": "88f6e72d1320c84ed13ba7377eddee212a9c1446c9c3bd694f106ef62119dcb6",
   "document_hash_normalization": "UTF-8 text with LF line endings",
   "documents": {
     "docs/experiments/qwen-qsa-eight-selector-results.md": {
-      "normalized_lf_sha256": "e1be1a37192d960fdf6e6d0bae923383d038c53da19fc2de568c09e340aa4cfe",
-      "normalized_utf8_bytes": 3611
+      "normalized_lf_sha256": "26f045bf971f28370422aee4f298acfea176c18b57c6443c8ff19579477a95b1",
+      "normalized_utf8_bytes": 3723
     },
     "docs/reproducibility/qwen-eight-hip-ep/README.md": {
-      "normalized_lf_sha256": "eef08f7317c9ce1a4390cadb7dfc723a1578eff75a1cd89961c146f9903cf51f",
-      "normalized_utf8_bytes": 15078
+      "normalized_lf_sha256": "497f19f7d43eb052d972445ade315943fcf91159dae5cbdec9f494d040a01a86",
+      "normalized_utf8_bytes": 16155
     },
     "docs/experiments/qwen-qsa-native-gqa-results.md": {
-      "normalized_lf_sha256": "2f915530452bccaada5ba43ad599c6d1f2a8df90711d96d4d40e3d99e0e0300a",
-      "normalized_utf8_bytes": 18242
+      "normalized_lf_sha256": "e8cc591c76388c888123711818f7ac63506a1eea3ba98049df4995e9d0e2e02e",
+      "normalized_utf8_bytes": 18350
     },
     "docs/reproducibility/qwen-hip-ep/README.md": {
-      "normalized_lf_sha256": "1a71d5de30719a7fdb15c3d40cb2c6c0c0624bcdaac053e75a3d3ef9cb66ef86",
-      "normalized_utf8_bytes": 17358
+      "normalized_lf_sha256": "c6bbe357c135a8a12c076e3aa1d7ba3897e0b46e758848218a28f88d9df580a8",
+      "normalized_utf8_bytes": 17466
     },
     "docs/reproducibility/qwen-hip-ep/AUDIT.md": {
-      "normalized_lf_sha256": "44e587085a837ee45ed392fee22d7254ab34bec9524558cf1c5e6b4d8a2ac25d",
-      "normalized_utf8_bytes": 11608
+      "normalized_lf_sha256": "e5afd7a2d5f3b178bc168b276a029fca33d35a88bc64170c58a52a32f88c689a",
+      "normalized_utf8_bytes": 11716
     },
     "docs/reproducibility/qwen-hip-ep/PR_DESCRIPTION.md": {
-      "normalized_lf_sha256": "75073a023fde6b65d2c39ebe4ff553e858363c61e367ce785252e174e174cc1d",
-      "normalized_utf8_bytes": 3844
+      "normalized_lf_sha256": "822784d1de1567c8dff0850ff0f8968c403a46c72147487b737feccce0c11e18",
+      "normalized_utf8_bytes": 3952
     },
     "docs/design/qwen-qsa-native-gqa.md": {
-      "normalized_lf_sha256": "1074b5e9a0cabeef903efd1ea4bdd6aaa2806ded55d92dffa2ebf2bb7d3c886d",
-      "normalized_utf8_bytes": 9857
+      "normalized_lf_sha256": "104da92f62de0bf24fce51bf5eed0a3e9bd3e8ab3268aa9999542315ba3b9eb5",
+      "normalized_utf8_bytes": 9965
     },
     "docs/experiments/qwen-qsa-bfcl-v4-50.md": {
-      "normalized_lf_sha256": "b82496ba918b9795f79b347e6b791292d808e03f0ecae8334f7707e6a185fe56",
-      "normalized_utf8_bytes": 8001
+      "normalized_lf_sha256": "8615a04b73416217bde21e74a2a29584d5fb9960036ff27673641d5c2e339398",
+      "normalized_utf8_bytes": 8081
     },
     "docs/experiments/qwen-qsa-memory.md": {
-      "normalized_lf_sha256": "d68abcae1ab2b7eb2edf6bddc46e03d6672b841181ad4fb154550c9f0a974c83",
-      "normalized_utf8_bytes": 3616
+      "normalized_lf_sha256": "1b1edacc382ea3e35fc662bfa0df5884915b505412b5cbe9f1d4159cb97dfb71",
+      "normalized_utf8_bytes": 3724
     },
     "README.md": {
       "normalized_lf_sha256": "182a4fe9f8ac77449f76e726930e31802cf6a88b75dc6184e23e2f5e53e12430",
       "normalized_utf8_bytes": 7517
+    },
+    "docs/experiments/qwen-qsa-eight-bfcl-v4-50.md": {
+      "normalized_lf_sha256": "298a724d758dc3a7d6523f745d15154bf36209d6b2fe5bf7725886d1ff9c38e3",
+      "normalized_utf8_bytes": 4804
     }
-  }
+  },
+  "bfcl_eight_summary_sha256": "32cb614f73ce96537af93e4a27bdd91bea876be25e2ea4969387c33e26ee8414",
+  "bfcl_eight_status_sha256": "4a7c1fcc113a73b1d60312ca05e0865b424ff8715bf85494dc5a9e049cd4f8b1"
 }

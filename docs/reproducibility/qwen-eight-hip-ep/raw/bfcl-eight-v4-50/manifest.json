@@ -1,0 +1,463 @@
+{
+  "bfcl_revision": "6ea57973c7a6097fd7c5915698c54c17c5b1b6c8",
+  "seed": 42,
+  "cases": [
+    {
+      "category": "simple_python",
+      "index": 58,
+      "id": "simple_python_58",
+      "pair_index": 0,
+      "declared_turns": 1,
+      "declared_user_messages": 1,
+      "function_count": 1
+    },
+    {
+      "category": "simple_python",
+      "index": 328,
+      "id": "simple_python_328",
+      "pair_index": 1,
+      "declared_turns": 1,
+      "declared_user_messages": 1,
+      "function_count": 1
+    },
+    {
+      "category": "simple_java",
+      "index": 3,
+      "id": "simple_java_3",
+      "pair_index": 2,
+      "declared_turns": 1,
+      "declared_user_messages": 1,
+      "function_count": 1
+    },
+    {
+      "category": "simple_java",
+      "index": 94,
+      "id": "simple_java_94",
+      "pair_index": 3,
+      "declared_turns": 1,
+      "declared_user_messages": 1,
+      "function_count": 1
+    },
+    {
+      "category": "simple_javascript",
+      "index": 15,
+      "id": "simple_javascript_15",
+      "pair_index": 4,
+      "declared_turns": 1,
+      "declared_user_messages": 1,
+      "function_count": 1
+    },
+    {
+      "category": "simple_javascript",
+      "index": 17,
+      "id": "simple_javascript_17",
+      "pair_index": 5,
+      "declared_turns": 1,
+      "declared_user_messages": 1,
+      "function_count": 1
+    },
+    {
+      "category": "multiple",
+      "index": 35,
+      "id": "multiple_35",
+      "pair_index": 6,
+      "declared_turns": 1,
+      "declared_user_messages": 1,
+      "function_count": 2
+    },
+    {
+      "category": "multiple",
+      "index": 57,
+      "id": "multiple_57",
+      "pair_index": 7,
+      "declared_turns": 1,
+      "declared_user_messages": 1,
+      "function_count": 2
+    },
+    {
+      "category": "parallel",
+      "index": 26,
+      "id": "parallel_26",
+      "pair_index": 8,
+      "declared_turns": 1,
+      "declared_user_messages": 1,
+      "function_count": 1
+    },
+    {
+      "category": "parallel",
+      "index": 188,
+      "id": "parallel_188",
+      "pair_index": 9,
+      "declared_turns": 1,
+      "declared_user_messages": 1,
+      "function_count": 1
+    },
+    {
+      "category": "parallel_multiple",
+      "index": 173,
+      "id": "parallel_multiple_173",
+      "pair_index": 10,
+      "declared_turns": 1,
+      "declared_user_messages": 1,
+      "function_count": 2
+    },
+    {
+      "category": "parallel_multiple",
+      "index": 189,
+      "id": "parallel_multiple_189",
+      "pair_index": 11,
+      "declared_turns": 1,
+      "declared_user_messages": 1,
+      "function_count": 4
+    },
+    {
+      "category": "irrelevance",
+      "index": 139,
+      "id": "irrelevance_139",
+      "pair_index": 12,
+      "declared_turns": 1,
+      "declared_user_messages": 1,
+      "function_count": 1
+    },
+    {
+      "category": "irrelevance",
+      "index": 228,
+      "id": "irrelevance_228",
+      "pair_index": 13,
+      "declared_turns": 1,
+      "declared_user_messages": 1,
+      "function_count": 1
+    },
+    {
+      "category": "live_simple",
+      "index": 44,
+      "id": "live_simple_44-18-0",
+      "pair_index": 14,
+      "declared_turns": 1,
+      "declared_user_messages": 1,
+      "function_count": 1
+    },
+    {
+      "category": "live_simple",
+      "index": 216,
+      "id": "live_simple_216-117-8",
+      "pair_index": 15,
+      "declared_turns": 1,
+      "declared_user_messages": 1,
+      "function_count": 1
+    },
+    {
+      "category": "live_multiple",
+      "index": 61,
+      "id": "live_multiple_61-23-0",
+      "pair_index": 16,
+      "declared_turns": 1,
+      "declared_user_messages": 1,
+      "function_count": 3
+    },
+    {
+      "category": "live_multiple",
+      "index": 65,
+      "id": "live_multiple_65-26-1",
+      "pair_index": 17,
+      "declared_turns": 1,
+      "declared_user_messages": 1,
+      "function_count": 3
+    },
+    {
+      "category": "live_parallel",
+      "index": 2,
+      "id": "live_parallel_2-0-2",
+      "pair_index": 18,
+      "declared_turns": 1,
+      "declared_user_messages": 1,
+      "function_count": 1
+    },
+    {
+      "category": "live_parallel",
+      "index": 3,
+      "id": "live_parallel_3-0-3",
+      "pair_index": 19,
+      "declared_turns": 1,
+      "declared_user_messages": 1,
+      "function_count": 1
+    },
+    {
+      "category": "live_parallel_multiple",
+      "index": 7,
+      "id": "live_parallel_multiple_7-6-0",
+      "pair_index": 20,
+      "declared_turns": 1,
+      "declared_user_messages": 1,
+      "function_count": 2
+    },
+    {
+      "category": "live_parallel_multiple",
+      "index": 16,
+      "id": "live_parallel_multiple_16-14-0",
+      "pair_index": 21,
+      "declared_turns": 1,
+      "declared_user_messages": 1,
+      "function_count": 2
+    },
+    {
+      "category": "live_irrelevance",
+      "index": 27,
+      "id": "live_irrelevance_27-2-15",
+      "pair_index": 22,
+      "declared_turns": 1,
+      "declared_user_messages": 1,
+      "function_count": 1
+    },
+    {
+      "category": "live_irrelevance",
+      "index": 616,
+      "id": "live_irrelevance_616-195-4",
+      "pair_index": 23,
+      "declared_turns": 1,
+      "declared_user_messages": 1,
+      "function_count": 5
+    },
+    {
+      "category": "live_relevance",
+      "index": 6,
+      "id": "live_relevance_6-6-0",
+      "pair_index": 24,
+      "declared_turns": 1,
+      "declared_user_messages": 1,
+      "function_count": 4
+    },
+    {
+      "category": "live_relevance",
+      "index": 11,
+      "id": "live_relevance_11-11-0",
+      "pair_index": 25,
+      "declared_turns": 1,
+      "declared_user_messages": 1,
+      "function_count": 4
+    },
+    {
+      "category": "multi_turn_base",
+      "index": 56,
+      "id": "multi_turn_base_56",
+      "pair_index": 26,
+      "declared_turns": 3,
+      "declared_user_messages": 3,
+      "function_count": 22
+    },
+    {
+      "category": "multi_turn_base",
+      "index": 107,
+      "id": "multi_turn_base_107",
+      "pair_index": 27,
+      "declared_turns": 5,
+      "declared_user_messages": 5,
+      "function_count": 20
+    },
+    {
+      "category": "multi_turn_base",
+      "index": 114,
+      "id": "multi_turn_base_114",
+      "pair_index": 28,
+      "declared_turns": 5,
+      "declared_user_messages": 5,
+      "function_count": 30
+    },
+    {
+      "category": "multi_turn_base",
+      "index": 139,
+      "id": "multi_turn_base_139",
+      "pair_index": 29,
+      "declared_turns": 2,
+      "declared_user_messages": 2,
+      "function_count": 34
+    },
+    {
+      "category": "multi_turn_base",
+      "index": 166,
+      "id": "multi_turn_base_166",
+      "pair_index": 30,
+      "declared_turns": 5,
+      "declared_user_messages": 5,
+      "function_count": 28
+    },
+    {
+      "category": "multi_turn_base",
+      "index": 179,
+      "id": "multi_turn_base_179",
+      "pair_index": 31,
+      "declared_turns": 4,
+      "declared_user_messages": 4,
+      "function_count": 18
+    },
+    {
+      "category": "multi_turn_miss_func",
+      "index": 1,
+      "id": "multi_turn_miss_func_1",
+      "pair_index": 32,
+      "declared_turns": 5,
+      "declared_user_messages": 4,
+      "function_count": 17
+    },
+    {
+      "category": "multi_turn_miss_func",
+      "index": 40,
+      "id": "multi_turn_miss_func_40",
+      "pair_index": 33,
+      "declared_turns": 5,
+      "declared_user_messages": 4,
+      "function_count": 27
+    },
+    {
+      "category": "multi_turn_miss_func",
+      "index": 71,
+      "id": "multi_turn_miss_func_71",
+      "pair_index": 34,
+      "declared_turns": 6,
+      "declared_user_messages": 5,
+      "function_count": 21
+    },
+    {
+      "category": "multi_turn_miss_func",
+      "index": 150,
+      "id": "multi_turn_miss_func_150",
+      "pair_index": 35,
+      "declared_turns": 3,
+      "declared_user_messages": 2,
+      "function_count": 17
+    },
+    {
+      "category": "multi_turn_miss_func",
+      "index": 178,
+      "id": "multi_turn_miss_func_178",
+      "pair_index": 36,
+      "declared_turns": 6,
+      "declared_user_messages": 5,
+      "function_count": 26
+    },
+    {
+      "category": "multi_turn_miss_func",
+      "index": 194,
+      "id": "multi_turn_miss_func_194",
+      "pair_index": 37,
+      "declared_turns": 7,
+      "declared_user_messages": 6,
+      "function_count": 17
+    },
+    {
+      "category": "multi_turn_miss_param",
+      "index": 39,
+      "id": "multi_turn_miss_param_39",
+      "pair_index": 38,
+      "declared_turns": 5,
+      "declared_user_messages": 5,
+      "function_count": 18
+    },
+    {
+      "category": "multi_turn_miss_param",
+      "index": 55,
+      "id": "multi_turn_miss_param_55",
+      "pair_index": 39,
+      "declared_turns": 6,
+      "declared_user_messages": 6,
+      "function_count": 31
+    },
+    {
+      "category": "multi_turn_miss_param",
+      "index": 71,
+      "id": "multi_turn_miss_param_71",
+      "pair_index": 40,
+      "declared_turns": 6,
+      "declared_user_messages": 6,
+      "function_count": 22
+    },
+    {
+      "category": "multi_turn_miss_param",
+      "index": 87,
+      "id": "multi_turn_miss_param_87",
+      "pair_index": 41,
+      "declared_turns": 5,
+      "declared_user_messages": 5,
+      "function_count": 22
+    },
+    {
+      "category": "multi_turn_miss_param",
+      "index": 108,
+      "id": "multi_turn_miss_param_108",
+      "pair_index": 42,
+      "declared_turns": 6,
+      "declared_user_messages": 6,
+      "function_count": 30
+    },
+    {
+      "category": "multi_turn_miss_param",
+      "index": 195,
+      "id": "multi_turn_miss_param_195",
+      "pair_index": 43,
+      "declared_turns": 5,
+      "declared_user_messages": 5,
+      "function_count": 32
+    },
+    {
+      "category": "multi_turn_long_context",
+      "index": 23,
+      "id": "multi_turn_long_context_23",
+      "pair_index": 44,
+      "declared_turns": 3,
+      "declared_user_messages": 3,
+      "function_count": 27
+    },
+    {
+      "category": "multi_turn_long_context",
+      "index": 24,
+      "id": "multi_turn_long_context_24",
+      "pair_index": 45,
+      "declared_turns": 4,
+      "declared_user_messages": 4,
+      "function_count": 27
+    },
+    {
+      "category": "multi_turn_long_context",
+      "index": 26,
+      "id": "multi_turn_long_context_26",
+      "pair_index": 46,
+      "declared_turns": 3,
+      "declared_user_messages": 3,
+      "function_count": 18
+    },
+    {
+      "category": "multi_turn_long_context",
+      "index": 86,
+      "id": "multi_turn_long_context_86",
+      "pair_index": 47,
+      "declared_turns": 3,
+      "declared_user_messages": 3,
+      "function_count": 36
+    },
+    {
+      "category": "multi_turn_long_context",
+      "index": 91,
+      "id": "multi_turn_long_context_91",
+      "pair_index": 48,
+      "declared_turns": 2,
+      "declared_user_messages": 2,
+      "function_count": 32
+    },
+    {
+      "category": "multi_turn_long_context",
+      "index": 97,
+      "id": "multi_turn_long_context_97",
+      "pair_index": 49,
+      "declared_turns": 6,
+      "declared_user_messages": 6,
+      "function_count": 32
+    }
+  ],
+  "scope": "50-case stratified component pilot: 26 single-turn, 24 multi-turn",
+  "excluded": [
+    "web_search",
+    "memory",
+    "format_sensitivity"
+  ],
+  "official_overall_score": false
+}

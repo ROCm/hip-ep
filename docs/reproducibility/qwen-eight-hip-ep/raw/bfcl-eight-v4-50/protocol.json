@@ -1,0 +1,68 @@
+{
+  "benchmark": "BFCL v4 frozen50-case component pilot",
+  "variants": [
+    "Eight"
+  ],
+  "model": "Qwen/Qwen3.8-27B",
+  "model_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+  "bfcl_revision": "6ea57973c7a6097fd7c5915698c54c17c5b1b6c8",
+  "manifest_sha256": "44389ecac70f1713d9ce33a55d5191a6444bcd5dfc6a16d6ff3efc313e87442e",
+  "selector_layers": [
+    3,
+    7,
+    23,
+    27,
+    31,
+    35,
+    39,
+    63
+  ],
+  "selector_export_sha256": "8915ef00df9ad755808591862b473ee0e265cfd405ce1fc787bf948aea56eeeb",
+  "graph_sha256": "2c385a8e9aa957d8da0ffb3f740f857514e7ef1ff322f49dde4d42d8bbecce93",
+  "backbone_sha256": "44b55d43fbd271cc85a3234fcc43950d11a8b343c89a8f7e642ebf60487e3262",
+  "binary_sha256": {
+    "hipgpu.dll": "399e7b10ac8c8da1142f36347bbdf4fa4ab58a0de6ecda190993cc3d12cc100e",
+    "custom_kernels_gfx1151.dll": "80183ff88257bb6c753365ced254beb36e88b11e5622e3351c74520df43e4fb7",
+    "hip-mlir-opt.exe": "8b32e457c69a1e8e2fc44360f55254c09e681b1b40fa0811c8a06ea017f45653",
+    "hip-compiler.exe": "e67e146993bb2ca080b51bf53054cb0414c1e521afb6d0c9e621b54e4017c574"
+  },
+  "batch": 1,
+  "capacity": 32768,
+  "max_new_tokens": 1024,
+  "thinking": false,
+  "decoding": "greedy; both official EOS IDs; no constrained decoding",
+  "phase_policy": "sparse prefill and sparse decode",
+  "initial_source_sha256": {
+    "scripts/qwen_qsa/run_bfcl_eight.py": "469d08ab52f3699719e439b41402f61b46574c3a6829419ba959fe30fcd17868",
+    "scripts/qwen_qsa/run_bfcl.py": "fd9fa9904ed611be7c4c9c3d4fad9362f6d9d6300b5de6084d16e78cd9976117",
+    "scripts/qwen_qsa/bfcl_client.py": "9fd18c92d7917e78ce936bbfd389d36d83a8c5f6034288cd58f0300bdfb057de",
+    "scripts/qwen_qsa/bfcl_worker.py": "395c5c601867b19d9a165eb5f1eda8a00d4ecfb7a72db6c8bfeb11b896c05812",
+    "scripts/qwen_qsa/native_inference.py": "41dddd8e41a55591dd9271210ac7e9ba85dbdd7b37b16c52642ab5c3ea87081f",
+    "scripts/qwen_qsa/verify_handoff.py": "7dc4919f44796dc4e0dad6ba738100b85e91ddc58967e09b84657180d68745db",
+    "scripts/qwen_qsa/export_eight.py": "01a5ef5931933f34d7979ef68407a02cec3d2763ff6eca798659cf9f38b5efa0",
+    "scripts/qwen_qsa/audit_bfcl_tokens.py": "6e45363db5452dbaa6ad3e0dc202ec36aa2c772930df5427a5807e4734944616",
+    "scripts/qsa/bfcl_native_eval.py": "2354907d9997634f9c3d2ec0ebefc40fe37c4db94e84d2af48cf0d6fb640e9dd",
+    "scripts/qsa/runtime.py": "b839b0816065d57458e749ec666c105cf019015f037e449b87632089e31586de"
+  },
+  "source_policy": "Each attempt snapshots exact sources; never overwrite completed rows or raw generations",
+  "reused_original_task": "_local/qwen-qsa/bfcl-v4-50",
+  "reused_original_rows_sha256": "8bf91e3e84ccd19cbe6b6c0511324284cb3941bedba8ed1dfb37ea01becc234b",
+  "reused_original_audit_sha256": "4fcb3be644f37912b6ccb9e8b90d13ee0a64a56dc3c7d823cb91d64d90795cde",
+  "baseline_not_rerun": true,
+  "training_updates": 0,
+  "official_overall_score": false,
+  "acceptance_gate_enabled": false,
+  "exclusions": [
+    "web_search",
+    "memory",
+    "format_sensitivity"
+  ],
+  "minimum_available_ram_bytes": 4294967296,
+  "maximum_attempt_seconds": 18000,
+  "tokenizer_sha256": {
+    "tokenizer.json": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+    "tokenizer_config.json": "b11349aafa7cdc6a320767cf7ceb29ed82f7eda5d65e8e0819e76f0ce947bf27",
+    "chat_template.jinja": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
+    "generation_config.json": "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e"
+  }
+}

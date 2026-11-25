@@ -7,7 +7,7 @@ Licensed under the MIT License.
 <!-- QWEN_EIGHT_PERFORMANCE_BEGIN -->
 ## Latest eight-selector performance
 
-All accuracy results below belong to the historical four-selector checkpoint. The eight-selector BFCL numbers in planning documents are duration estimates, not accuracy results.
+All accuracy results below belong to the historical four-selector checkpoint. The Eight-only pilot is tracked separately in the latest paper handoff.
 
 **Decode throughput improved over four selectors at every measured length.** Prefill is slower at 4K/16K and slightly faster at 32K. All eight weights, including the overlapping four positions, come from checkpoint 640; this is not a layer-count-only change.
 
@@ -19,7 +19,7 @@ All accuracy results below belong to the historical four-selector checkpoint. Th
 
 Eight uses one warmup and three measured requests at batch one, with 64 common teacher-forced decode inputs. Default/four controls are reused across runs (two warmups, six requests, two resident sessions sharing cache buffers); Eight has one resident session. No paired confidence interval or isolated layer-count causal claim applies. Both prefill and decode use QSA at all eight selected layers.
 
-Eight-selector BFCL/GSM8K accuracy and application-memory comparisons have not been run on hip-ep. The source checkpoint still misses its fixed 32K PPL gate. Historical four-selector accuracy, memory and paired intervals do not transfer to Eight. See the [eight-selector report](qwen-qsa-eight-selector-results.md) and [raw-data paper handoff](../reproducibility/qwen-eight-hip-ep/README.md).
+The fixed 50-case BFCL component pilot scores Eight 29/50 versus reused Original 26/50; no new Original generation was run. This is not the official overall BFCL score. Eight GSM8K and application-memory comparisons remain unmeasured. The source checkpoint still misses its fixed 32K PPL gate; this pilot does not establish accepted long-context quality. See the [eight-selector report](qwen-qsa-eight-selector-results.md) and [raw-data paper handoff](../reproducibility/qwen-eight-hip-ep/README.md).
 <!-- QWEN_EIGHT_PERFORMANCE_END -->
 
 The same pinned Qwen/Qwen3.8-27B W4A16 backbone runs with default attention and frozen QSA at layers27/31/35/39 on Radeon8060S/gfx1151. Batch1, one resident full-model session at a time, measured native binaries, no training or calibration. All50 cases run in both variants.

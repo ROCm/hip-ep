@@ -25,8 +25,8 @@ The 140W charger rating is user-reported. All sampled AC states stayed connected
 
 The locked timing prefixes concatenate known 4K test windows; they are not a natural-long quality holdout. 64K and batched measurements remain excluded.
 
-Eight-selector BFCL/GSM8K accuracy and application-memory comparisons have not been run on hip-ep. The source checkpoint still misses its fixed 32K PPL gate. Historical four-selector accuracy, memory and paired intervals do not transfer to Eight.
+The fixed 50-case BFCL component pilot scores Eight 29/50 versus reused Original 26/50; no new Original generation was run. This is not the official overall BFCL score. Eight GSM8K and application-memory comparisons remain unmeasured. The source checkpoint still misses its fixed 32K PPL gate; this pilot does not establish accepted long-context quality.
 
-See the [paper handoff](../reproducibility/qwen-eight-hip-ep/README.md), [performance JSON](../reproducibility/qwen-eight-hip-ep/eight-140w-performance.json), [CSV](../reproducibility/qwen-eight-hip-ep/eight-140w-performance.csv) and [runtime-estimate JSON](../reproducibility/qwen-eight-hip-ep/evaluation-time-estimate.json). The handoff links all raw rows, saved aggregates, protocols, exact identities and local immutable ZIP receipts. Runtime estimates are planning ranges; no accuracy evaluation is scheduled.
+See the [paper handoff](../reproducibility/qwen-eight-hip-ep/README.md), [performance JSON](../reproducibility/qwen-eight-hip-ep/eight-140w-performance.json), [CSV](../reproducibility/qwen-eight-hip-ep/eight-140w-performance.csv) and [runtime-estimate JSON](../reproducibility/qwen-eight-hip-ep/evaluation-time-estimate.json). The handoff links all raw rows, saved aggregates, protocols, exact identities and local immutable ZIP receipts. Runtime estimates are planning ranges; the current BFCL status is stated above.
 
 Regenerate the linked performance documentation with `python scripts/qwen_qsa/performance_docs.py` from the repository root. It verifies the saved raw-row arithmetic and hashes and uses no GPU.

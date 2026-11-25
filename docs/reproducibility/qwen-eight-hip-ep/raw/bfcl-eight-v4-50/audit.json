@@ -1,0 +1,15 @@
+{
+  "status": "passed",
+  "cases": 50,
+  "rows": 50,
+  "auditor_sha256": "5d0daab9caac665fb6c6f382018ce1ab0e77eb8c680949de58d549e58bc06aff",
+  "official_scores_recomputed": true,
+  "first_prompts_identical": true,
+  "native_request_response_identity_verified": true,
+  "correct": {
+    "Eight": 29
+  },
+  "manifest_sha256": "44389ecac70f1713d9ce33a55d5191a6444bcd5dfc6a16d6ff3efc313e87442e",
+  "protocol_sha256": "571fa5e0f40ebc3bcc9efc57bc3f031fcedf750a73c1e08cae706b833c8d5bc9",
+  "rows_sha256": "5aeb0d81640973aef02009224c73dc8c5bab8574ea69227b6a43d83f788417bc"
+}

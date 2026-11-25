@@ -135,6 +135,24 @@ def update_documents():
         "Eight-selector BFCL/GSM8K accuracy and application-memory comparisons have not been run on hip-ep. "
         "The source checkpoint still misses its fixed 32K PPL gate. Historical four-selector accuracy, memory and paired intervals do not transfer to Eight."
     )
+    bfcl_summary_path = PACKET / "bfcl-eight-summary.json"
+    bfcl_status_path = PACKET / "bfcl-eight-status.json"
+    bfcl_report = ROOT / "docs/experiments/qwen-qsa-eight-bfcl-v4-50.md"
+    if bfcl_summary_path.exists():
+        bfcl = json.loads(bfcl_summary_path.read_text(encoding="utf-8"))
+        assert bfcl["state"] == "complete"
+        quality = (
+            f"The fixed 50-case BFCL component pilot scores Eight {bfcl['variants']['Eight']['correct']}/50 "
+            f"versus reused Original {bfcl['variants']['Original']['correct']}/50; no new Original generation was run. "
+            "This is not the official overall BFCL score. Eight GSM8K and application-memory comparisons remain unmeasured. "
+            "The source checkpoint still misses its fixed 32K PPL gate; this pilot does not establish accepted long-context quality."
+        )
+    elif bfcl_status_path.exists():
+        quality = (
+            "The user-authorized Eight-only BFCL50 pilot is running with the prior Original baseline reused. "
+            "No final Eight accuracy result is available yet. Eight GSM8K and application-memory comparisons remain unmeasured. "
+            "The source checkpoint still misses its fixed 32K PPL gate."
+        )
     header = "<!--\nCopyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.\nLicensed under the MIT License.\n-->\n"
     report = (
         header + "# Qwen eight-selector QSA: performance through 32K\n\n"
@@ -157,7 +175,7 @@ def update_documents():
         + "\n\n"
         f"See the [paper handoff]({link(REPORT, PACKET / 'README.md')}), [performance JSON]({link(REPORT, PACKET / 'eight-140w-performance.json')}), "
         f"[CSV]({link(REPORT, PACKET / 'eight-140w-performance.csv')}) and [runtime-estimate JSON]({link(REPORT, PACKET / 'evaluation-time-estimate.json')}). "
-        "The handoff links all raw rows, saved aggregates, protocols, exact identities and local immutable ZIP receipts. Runtime estimates are planning ranges; no accuracy evaluation is scheduled.\n\n"
+        "The handoff links all raw rows, saved aggregates, protocols, exact identities and local immutable ZIP receipts. Runtime estimates are planning ranges; the current BFCL status is stated above.\n\n"
         "Regenerate the linked performance documentation with `python scripts/qwen_qsa/performance_docs.py` from the repository root. It verifies the saved raw-row arithmetic and hashes and uses no GPU.\n"
     )
     REPORT.write_text(report, encoding="utf-8")
@@ -181,7 +199,7 @@ def update_documents():
         "docs/reproducibility/qwen-hip-ep/AUDIT.md": "The audit below describes the historical implementation/merge checks. Eight reuses the measured native build; no new merged-candidate throughput campaign is claimed.",
         "docs/reproducibility/qwen-hip-ep/PR_DESCRIPTION.md": "This performance addendum belongs to local branch `codex/qwen-eight-qsa-perf`; the historical four-selector merge-candidate validation below remains separately identified.",
         "docs/design/qwen-qsa-native-gqa.md": "The same native operator/math/cache contract now has four- and eight-selector exports. The eight-selector variant reuses the measured kernels and compiler.",
-        "docs/experiments/qwen-qsa-bfcl-v4-50.md": "All accuracy results below belong to the historical four-selector checkpoint. The eight-selector BFCL numbers in planning documents are duration estimates, not accuracy results.",
+        "docs/experiments/qwen-qsa-bfcl-v4-50.md": "All accuracy results below belong to the historical four-selector checkpoint. The Eight-only pilot is tracked separately in the latest paper handoff.",
         "docs/experiments/qwen-qsa-memory.md": "All memory measurements below belong to four selectors. Host RAM guards in the eight-selector performance run are not a new GPU-memory comparison.",
     }
     for name, note in legacy.items():
@@ -205,6 +223,8 @@ def update_documents():
         "- [Qwen isolated default/QSA memory-only matrix]",
     )
     changed.append(root_readme)
+    if bfcl_report.exists():
+        changed.append(bfcl_report)
     registry = dict(
         source_performance_sha256=digest(PACKET / "eight-140w-performance.json"),
         generator_sha256=digest(Path(__file__)),
@@ -221,6 +241,10 @@ def update_documents():
             for p in changed
         },
     )
+    if bfcl_summary_path.exists():
+        registry["bfcl_eight_summary_sha256"] = digest(bfcl_summary_path)
+    if bfcl_status_path.exists():
+        registry["bfcl_eight_status_sha256"] = digest(bfcl_status_path)
     (PACKET / "documentation.json").write_text(json.dumps(registry, indent=2) + "\n")
     manifest_path = PACKET / "manifest.json"
     manifest = json.loads(manifest_path.read_text())

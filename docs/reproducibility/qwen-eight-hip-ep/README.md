@@ -4,7 +4,7 @@ Licensed under the MIT License.
 -->
 # Qwen hip-ep: eight-selector performance and evaluation planning
 
-**Current state:** the clean eight-selector performance campaign is complete at B1/4K,16K,32K after the140W charger change. It uses **one warmup and three measured requests per shape**, as requested. BFCL and GSM8K have not been started for this checkpoint. No64K or batched shapes were run.
+**Current state:** the clean eight-selector performance campaign is complete at B1/4K,16K,32K after the140W charger change. It uses **one warmup and three measured requests per shape**, as requested. The Eight-only BFCL50 pilot is complete: **Eight 29/50 versus reused Original 26/50**. GSM8K remains unstarted. No64K or batched shapes were run.
 
 ## Eight selectors: completed charged-power performance
 
@@ -38,7 +38,15 @@ The charger rating is user-reported. AC state was checked about once per second 
 Eight uses one warmup and three measured requests at batch one, with 64 common teacher-forced decode inputs. Default/four controls are reused across runs (two warmups, six requests, two resident sessions sharing cache buffers); Eight has one resident session. No paired confidence interval or isolated layer-count causal claim applies. Both prefill and decode use QSA at all eight selected layers. See the [standalone performance report](../../experiments/qwen-qsa-eight-selector-results.md).
 <!-- QWEN_EIGHT_PERFORMANCE_END -->
 
-## Estimated evaluation durations — no accuracy runs started
+<!-- EIGHT_BFCL_RESULT_BEGIN -->
+## Eight-selector BFCL result
+
+**Eight 29/50 (58.0%)**, reused Original **26/50 (52.0%)**, historical Four **24/50**. Only Eight was generated. The fixed50-case component pilot is nongating,not the official overall BFCL score. The [full BFCL report](../../experiments/qwen-qsa-eight-bfcl-v4-50.md), [summary JSON](bfcl-eight-summary.json), and `raw/bfcl-eight-v4-50/` retain component scores,prompt/output/call/turn distributions,cap/context/step stops,pruning exposure,and official/token audits. [Local BFCL archive](bfcl-eight-archive.json) binds complete generated texts/prompts/token IDs and exact source/attempt snapshots.
+<!-- EIGHT_BFCL_RESULT_END -->
+
+## Estimated evaluation durations — planning reference
+
+BFCL has now completed: Eight 29/50 versus reused Original 26/50. The completed campaign took 130.8 minutes including native load,generation,official scoring and independent audits. The tables below retain the prior planning estimates; differing output/tool trajectories are not a fixed-work speed comparison.
 
 These are planning estimates derived **after** measured performance. Each actual historical BFCL prompt and generated token is costed separately using the new prefill/decode curves,then calibrated to historical generation time and actual tool/queue overhead. Both previous trajectories are used:294/283 generation calls,2,217,075/2,117,348 processed prompt tokens,and14,333/13,899 output tokens. The50 fixed cases include26 single-turn and24 multi-turn cases,1–7 declared turns,cap1024,thinking disabled. GSM128 uses its historical11,167 prompt and43,494 output tokens,cap512,thinking disabled. This is not a single decode-TPS multiplier.
 
@@ -101,7 +109,7 @@ The worker then had no in-band boundary stop, so its in-flight request was termi
 
 ## Handoff and remaining scope
 
-The charger Original4K check and the newly authorized Eight B1/4K,16K,32K campaign are complete. The original paired4K pilot was superseded by that request. Evaluation-duration estimates are now saved above; BFCL50 and GSM8K128 remain unstarted and require the user’s next instruction. No64K,batched or accuracy run is scheduled.
+The charger Original4K check and the newly authorized Eight B1/4K,16K,32K campaign are complete. The original paired4K pilot was superseded by that request. Evaluation-duration estimates are now saved above; The authorized Eight-only BFCL50 pilot is complete (29/50 versus reused Original 26/50). GSM8K remains unstarted; no64K or batched run is scheduled.
 
 [validation.json](validation.json) preserves eight-node dispatch/cache/finite/replay controls; [transfer-provenance.json](transfer-provenance.json) distinguishes the handoff commit from the sibling repository’s later observed HEAD. [original-control-status.json](original-control-status.json) captures the narrowed scope. Current local branch: `codex/qwen-eight-qsa-perf`. The [historical four-selector packet](../qwen-hip-ep/README.md), old results and measured installation are unchanged. New source snapshots/logs remain in `_local/qwen-qsa/eight-qsa-v1/` and `_local/qwen-qsa/original-short-control-v1/`. Nothing is pushed.
 

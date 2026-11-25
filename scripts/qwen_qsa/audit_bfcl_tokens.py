@@ -8,11 +8,12 @@ import argparse
 import csv
 import hashlib
 import json
+import os
 from pathlib import Path
 
 from verify_handoff import WORK, sha
 
-TASK = WORK / "bfcl-v4-50"
+TASK = Path(os.environ.get("QWEN_BFCL_TASK", WORK / "bfcl-v4-50"))
 
 
 def load(path):
@@ -41,7 +42,7 @@ def step_limit_logs(value):
 def workload_checks(rows):
     profile = {r["id"]: r for r in load(TASK / "initial-profile.json")["cases"]}
     stops, groups = {}, {}
-    for variant in ["Original", "Changed"]:
+    for variant in sorted({r["variant"] for r in rows}):
         selected = [r for r in rows if r["variant"] == variant]
         stops[variant] = [
             r["id"] for r in selected if list(step_limit_logs(r["metadata"]))
@@ -93,8 +94,9 @@ def main():
         if s.endswith(b"\n")
     )
     rows = [json.loads(s) for s in raw.splitlines()]
-    assert 0 < len(rows) <= 100
-    assert args.partial or len(rows) == 100
+    expected = 50 * len(protocol.get("variants", ["Original", "Changed"]))
+    assert 0 < len(rows) <= expected
+    assert args.partial or len(rows) == expected
     profile = {r["id"]: r for r in load(TASK / "initial-profile.json")["cases"]}
     turns = []
     for row in rows:
@@ -126,7 +128,7 @@ def main():
             assert response["input_plus_output_tokens"] == n + len(tokens)
             assert response["pruning_eligible"] == (n + len(tokens) - 2 >= 2052)
             assert response["qsa_pruning_exercised"] == (
-                row["variant"] == "Changed" and response["pruning_eligible"]
+                row["variant"] in ["Changed", "Eight"] and response["pruning_eligible"]
             )
             if response["finish_reason"] == "eos":
                 assert tokens[-1] in eos and not any(t in eos for t in tokens[:-1])
@@ -176,7 +178,7 @@ def main():
         status="passed",
         cases=len({r["id"] for r in rows}),
         variant_rows=len(rows),
-        complete=len(rows) == 100,
+        complete=len(rows) == expected,
         generations=count,
         capped_generations=capped,
         actual_qsa_pruned_generations=eligible,

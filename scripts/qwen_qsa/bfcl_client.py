@@ -19,7 +19,7 @@ import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-TASK = ROOT / "_local/qwen-qsa/bfcl-v4-50"
+TASK = Path(os.environ.get("QWEN_BFCL_TASK", ROOT / "_local/qwen-qsa/bfcl-v4-50"))
 os.environ["BFCL_PROJECT_ROOT"] = str(TASK)
 os.environ["HIP_EP_BFCL_TASK"] = str(TASK)
 sys.path.insert(0, str(ROOT / "scripts/qsa"))
@@ -69,6 +69,11 @@ def source_control():
 
 
 class QwenHandler(official.NativeHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.variant = self.model_name_underline_replaced.rsplit("_", 1)[-1]
+        assert self.variant in ["Original", "Changed", "Eight"]
+
     @override
     def _query_prompting(self, inference_data):
         identifier = uuid.uuid4().hex
@@ -118,7 +123,7 @@ def handler(variant, queue=None):
     return QwenHandler("Qwen/Qwen3.8-27B", 0, name, False, queue=queue)
 
 
-for variant in ["Original", "Changed"]:
+for variant in ["Original", "Changed", "Eight"]:
     name = "HipEP-Qwen27B-" + variant
     official.registry.MODEL_CONFIG_MAPPING[name] = types.SimpleNamespace(
         model_name="Qwen/Qwen3.8-27B",
@@ -159,7 +164,7 @@ def prepare():
 
     config = official.load_dataset_entry("multi_turn_base")[0]["initial_config"]
     states = []
-    for variant in ["Original", "Changed", "Original"]:
+    for variant in ["Original", "Changed", "Eight", "Original"]:
         _, state = execute_multi_turn_func_call(
             [],
             config,
@@ -168,7 +173,7 @@ def prepare():
             "qwen-pilot-isolation-control",
         )
         states.append(state["GorillaFileSystem"])
-    assert states[0] is states[2] and states[0] is not states[1]
+    assert states[0] is states[3] and len({id(s) for s in states[:3]}) == 3
     rng, cases, initial = random.Random(42), [], []
     for category in official.SINGLE_TURN_CATEGORY + official.MULTI_TURN_CATEGORY:
         entries = official.load_dataset_entry(category)
@@ -291,12 +296,19 @@ def audit():
 
     rows = [json.loads(s) for s in (TASK / "rows.jsonl").read_text().splitlines()]
     cases = load(TASK / "manifest.json")["cases"]
-    assert len(rows) == 100 and len({(r["variant"], r["id"]) for r in rows}) == 100
+    protocol = load(TASK / "protocol.json")
+    variants = protocol.get("variants", ["Original", "Changed"])
+    expected_rows = 50 * len(variants)
+    assert (
+        len(rows) == expected_rows
+        and len({(r["variant"], r["id"]) for r in rows}) == expected_rows
+    )
+    frozen = {c["id"]: c for c in load(TASK / "initial-profile.json")["cases"]}
     indexed = {(r["variant"], r["id"]): r for r in rows}
     cached, totals = {}, Counter()
     for case in cases:
         first_prompts = []
-        for variant in ["Original", "Changed"]:
+        for variant in variants:
             row = indexed[variant, case["id"]]
             assert row["protocol_sha256"] == sha(TASK / "protocol.json")
             category, index = case["category"], case["index"]
@@ -348,13 +360,18 @@ def audit():
                 )
             first_prompts.append(responses[0]["prompt"])
             totals[variant] += int(row["correct"])
-        assert first_prompts[0] == first_prompts[1], case["id"]
+        assert all(p == first_prompts[0] for p in first_prompts), case["id"]
+        assert (
+            hashlib.sha256(first_prompts[0].encode()).hexdigest()
+            == frozen[case["id"]]["initial_prompt_sha256"]
+        )
     write(
         TASK / "audit.json",
         dict(
             status="passed",
             cases=50,
-            rows=100,
+            rows=expected_rows,
+            auditor_sha256=sha(Path(__file__)),
             official_scores_recomputed=True,
             first_prompts_identical=True,
             native_request_response_identity_verified=True,
@@ -365,7 +382,7 @@ def audit():
         ),
     )
     print(
-        "All 100 variant rows independently rescored; request identities and initial prompts verified",
+        f"All {expected_rows} variant rows independently rescored; request identities and frozen initial prompts verified",
         dict(totals),
         flush=True,
     )
@@ -375,7 +392,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prepare", action="store_true")
     parser.add_argument("--audit", action="store_true")
-    parser.add_argument("--variant", choices=["Original", "Changed"])
+    parser.add_argument("--variant", choices=["Original", "Changed", "Eight"])
     parser.add_argument("--queue", type=Path)
     args = parser.parse_args()
     source_control()
