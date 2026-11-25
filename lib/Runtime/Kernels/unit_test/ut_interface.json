@@ -2823,6 +2823,14 @@
         {
           "name": "HIPDNN_UT_DENSE_CAPACITY",
           "description": "Comparison-only positive dense storage capacity, applied symmetrically to old/new controls for capacity sentinels; no production dispatch change."
+        },
+        {
+          "name": "HIPDNN_UT_PAGED_RUNTIME",
+          "description": "1 with RUNTIME=1 build measures valid nonempty unpinned cases through the actual production wrap_paged_attention_v2. Uses real stream, sticky status, scratch and op-state accessors; profile disabled; shared timer has no hold kernel. Native empty/error coverage remains separate."
+        },
+        {
+          "name": "HIPDNN_UT_RUNTIME_METADATA",
+          "description": "Runtime-adapter metadata location: host (default), device, or none. Host/device supply query/KV sizing bounds; none omits them. Requires RUNTIME=1 build and HIPDNN_UT_PAGED_RUNTIME=1."
         }
       ],
       "build_inputs": {
@@ -3219,6 +3227,14 @@
         {
           "name": "HIPDNN_UT_DENSE_CAPACITY",
           "description": "Comparison-only positive dense storage capacity, applied symmetrically to old/new controls for capacity sentinels; no production dispatch change."
+        },
+        {
+          "name": "HIPDNN_UT_PAGED_RUNTIME",
+          "description": "1 with RUNTIME=1 build measures valid nonempty unpinned cases through the actual production wrap_paged_attention_v2. Uses real stream, sticky status, scratch and op-state accessors; profile disabled; shared timer has no hold kernel. Native empty/error coverage remains separate."
+        },
+        {
+          "name": "HIPDNN_UT_RUNTIME_METADATA",
+          "description": "Runtime-adapter metadata location: host (default), device, or none. Host/device supply query/KV sizing bounds; none omits them. Requires RUNTIME=1 build and HIPDNN_UT_PAGED_RUNTIME=1."
         }
       ],
       "build_inputs": {

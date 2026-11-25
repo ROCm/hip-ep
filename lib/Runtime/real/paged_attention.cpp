@@ -13,15 +13,14 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <iomanip>
-#include <limits>
 #include <map>
-#include <sstream>
 #include <type_traits>
 #include <vector>
 
 struct PagedAttentionState : OpStateT<PagedAttentionState> {
   std::map<std::string, hipdnn_ep::PagedAttentionResult> prepared;
+  // Request values remain dynamic; reuse only the storage, never the lengths.
+  std::vector<int32_t> cumulative, past;
 };
 extern "C" int8_t
 hipdnn_ep_op_state_construct_paged_attention(RuntimeState *state,
@@ -89,6 +88,11 @@ static int wrapPagedAttentionImpl(
   void *stream = tokens ? hipdnn_ep_state_get_stream(state) : nullptr;
   if (tokens && !stream)
     return fail(HIP_PAGED_ATTENTION_INVALID_ARGUMENT);
+  auto *opState = tokens
+                      ? PagedAttentionState::get_op_state(state, op_state_slot)
+                      : nullptr;
+  if (tokens && !opState)
+    return fail(HIP_PAGED_ATTENTION_INVALID_ARGUMENT);
   int32_t bounds[3] = {};
   int32_t *error_flag = nullptr;
   int max_queries = 0;
@@ -103,7 +107,10 @@ static int wrapPagedAttentionImpl(
     // workspace status, so preserve the session error before any cache writes.
     // Request lengths define the phase. Metadata contains sizing bounds,
     // independently of whether its producer left it on host or device.
-    std::vector<int32_t> host_cum(batch + 1), host_past(batch);
+    opState->cumulative.resize(batch + 1);
+    opState->past.resize(batch);
+    auto &host_cum = opState->cumulative;
+    auto &host_past = opState->past;
     int32_t prior_status = 0;
     if (hipMemcpyAsync(&prior_status, error_flag, sizeof(prior_status),
                        hipMemcpyDeviceToHost,
@@ -208,34 +215,48 @@ static int wrapPagedAttentionImpl(
   if (hipdnn_ep_state_ensure_paged_attention_scratch(state, bytes))
     return fail(HIP_PAGED_ATTENTION_HIP_ERROR);
   void *workspace = hipdnn_ep_state_get_paged_attention_scratch(state);
-  auto *opState = PagedAttentionState::get_op_state(state, op_state_slot);
-  if (!opState)
-    return fail(HIP_PAGED_ATTENTION_INVALID_ARGUMENT);
   const char *mode = std::getenv("HIPDNN_PAGED_ATTENTION_AUTOTUNE_MODE");
   const bool online = mode && std::strcmp(mode, "online") == 0;
   if (mode && *mode && !online && std::strcmp(mode, "lookup") &&
       std::strcmp(mode, "auto"))
     return fail(HIP_PAGED_ATTENTION_INVALID_ARGUMENT);
-  std::ostringstream key;
+  char keyBuffer[768];
   // LUT points require phase + "_" as their leading discriminator. Keep
   // ordinary Page keys unchanged and distinguish the FP32 MRoPE input path.
-  key << (desc.phase == HIP_PAGED_ATTENTION_DECODE ? "decode" : "prefill");
-  if constexpr (Mrope)
-    key << "_mrope_f32_f16_r" << mrope->rotaryDim << "_sections"
-        << mrope->sectionT << '-' << mrope->sectionH << '-' << mrope->sectionW
-        << "_layout" << mrope->layout << "_rscale"
-        << std::setprecision(std::numeric_limits<float>::max_digits10)
-        << mrope->scale;
-  key << "_model_b" << batch << "_t" << tokens << "_h" << num_heads << "_g"
-      << kv_heads << "_d" << head_dim << "_p" << pages << "_s" << page_size
-      << "_cols" << table_columns << "_qbound" << bounds[0] << "_kvbound"
-      << bounds[1] << "_lower" << bounds[2] << "_maxq" << max_queries
-      << "_maxkv" << max_kv << "_window" << window << "_rotary" << do_rotary
-      << "_scale" << scale << "_maxpos" << cos_rows << "_mode"
-      << (online ? "online" : "lookup");
+  const char *phase =
+      desc.phase == HIP_PAGED_ATTENTION_DECODE ? "decode" : "prefill";
+  int length = 0;
+  if constexpr (Mrope) {
+    length = std::snprintf(
+        keyBuffer, sizeof(keyBuffer),
+        "%s_mrope_f32_f16_r%lld_sections%lld-%lld-%lld_layout%lld_rscale%.9g",
+        phase, (long long)mrope->rotaryDim, (long long)mrope->sectionT,
+        (long long)mrope->sectionH, (long long)mrope->sectionW,
+        (long long)mrope->layout, double(mrope->scale));
+  } else {
+    length = std::snprintf(keyBuffer, sizeof(keyBuffer), "%s", phase);
+  }
+  if (length < 0 || size_t(length) >= sizeof(keyBuffer))
+    return fail(HIP_PAGED_ATTENTION_INVALID_ARGUMENT);
+  const size_t prefix = length;
+  // Keep the existing six-digit ordinary / nine-digit fused float keys.
+  length = std::snprintf(
+      keyBuffer + prefix, sizeof(keyBuffer) - prefix,
+      "_model_b%lld_t%lld_h%lld_g%lld_d%lld_p%lld_s%lld_cols%lld"
+      "_qbound%d_kvbound%d_lower%d_maxq%d_maxkv%d_window%lld_rotary%lld"
+      "_scale%.*g_maxpos%lld_mode%s",
+      (long long)batch, (long long)tokens, (long long)num_heads,
+      (long long)kv_heads, (long long)head_dim, (long long)pages,
+      (long long)page_size, (long long)table_columns, bounds[0], bounds[1],
+      bounds[2], max_queries, max_kv, (long long)window, (long long)do_rotary,
+      Mrope ? 9 : 6, double(scale), (long long)cos_rows,
+      online ? "online" : "lookup");
+  if (length < 0 || size_t(length) >= sizeof(keyBuffer) - prefix)
+    return fail(HIP_PAGED_ATTENTION_INVALID_ARGUMENT);
+  const std::string key(keyBuffer);
   OP_PROFILE(
-      Mrope ? "paged_mrope_attention" : "paged_attention",
-      [&] { return key.str(); }, state);
+      Mrope ? "paged_mrope_attention" : "paged_attention", [&] { return key; },
+      state);
   // Session preparations belong to this compiler-assigned op slot and are
   // destroyed by the existing OpState cleanup. They never masquerade as LUT
   // hits.
@@ -248,7 +269,8 @@ static int wrapPagedAttentionImpl(
       return hip_paged_attention_f16_configured_v2(
           stream, &desc, workspace, bytes, &config, sizeof(config));
   };
-  auto cached = opState->prepared.find(key.str());
+  bool prepared = false;
+  auto cached = opState->prepared.find(key);
   if (cached != opState->prepared.end()) {
     result = cached->second;
     result.source = "session:prepared:" + result.source;
@@ -256,7 +278,7 @@ static int wrapPagedAttentionImpl(
   } else {
     result = online ? hipdnn_ep::PagedAttentionResult{gqa_paged_default(desc),
                                                       "online"}
-                    : hipdnn_ep::resolvePagedAttention(desc, key.str());
+                    : hipdnn_ep::resolvePagedAttention(desc, key);
     if (result.source.rfind("lookup:", 0) == 0)
       rc = configured(result.config);
     else {
@@ -267,22 +289,9 @@ static int wrapPagedAttentionImpl(
         result.source += "->autotune:mrope-production-prepare";
       } else {
         rc = hipdnn_ep::preparePagedAttention(stream, desc, workspace, bytes,
-                                              key.str(), online, &result);
+                                              key, online, &result);
       }
-      if (!rc) {
-        int status = 0;
-        if (hipMemcpyAsync(&status, workspace, sizeof(status),
-                           hipMemcpyDeviceToHost,
-                           static_cast<hipStream_t>(stream)) != hipSuccess ||
-            hipStreamSynchronize(static_cast<hipStream_t>(stream)) !=
-                hipSuccess)
-          return fail(HIP_PAGED_ATTENTION_HIP_ERROR);
-        if (!status) {
-          if (opState->prepared.size() >= 256)
-            opState->prepared.erase(opState->prepared.begin());
-          opState->prepared.emplace(key.str(), result);
-        }
-      }
+      prepared = !rc;
     }
   }
   // prepare appends AND computes attention. Do not execute a second append.
@@ -297,12 +306,18 @@ static int wrapPagedAttentionImpl(
     return fail(HIP_PAGED_ATTENTION_HIP_ERROR);
   if (status)
     return fail(status);
+  // The one completion read also qualifies a newly prepared configuration.
+  // A failed preparation never enters the session cache.
+  if (prepared) {
+    if (opState->prepared.size() >= 256)
+      opState->prepared.erase(opState->prepared.begin());
+    opState->prepared.emplace(key, result);
+  }
   RUNTIME_DEBUG_LOG("[paged-runtime] key=%s source=%s config=%d,%d,%d,%d,%d,%d "
                     "workspace=%zu\n",
-                    key.str().c_str(), result.source.c_str(),
-                    result.config.splits, result.config.bkv, result.config.hb,
-                    result.config.qw, result.config.mt, result.config.nd,
-                    bytes);
+                    key.c_str(), result.source.c_str(), result.config.splits,
+                    result.config.bkv, result.config.hb, result.config.qw,
+                    result.config.mt, result.config.nd, bytes);
   return 0;
 }
 

@@ -99,6 +99,11 @@ struct Fixture {
 };
 
 void reset() {
+  if (opState)
+    opState->deletor(opState);
+  opState = nullptr;
+  CHECK(hipdnn_ep_op_state_construct_paged_attention(
+            reinterpret_cast<RuntimeState *>(&stateToken), 0) == 0);
   cap = Capture{};
   sessionError = 0;
   scratch.fill(0);
@@ -286,6 +291,45 @@ void testMropeBoundary() {
   CHECK(cap.mrope.position_ids == f.positions.data() && f.unchanged());
 }
 
+void testPreparedCompletionAndDynamicLengths() {
+  for (bool fused : {false, true}) {
+    reset();
+    Fixture f;
+    cap.lookupHit = false;
+    auto call = [&] { return fused ? f.mropeCall() : f.call(); };
+    CHECK(call() == 0);
+    CHECK(cap.syncs == 2 && cap.copies == 5);
+    CHECK(cap.prepares + cap.mropePrepares == 1);
+    CHECK(call() == 0);
+    CHECK(cap.syncs == 4 && cap.copies == 10);
+    CHECK(cap.prepares + cap.mropePrepares == 1);
+    CHECK(cap.launches + cap.mropeLaunches == 1);
+    // Reuse storage but read new request values before phase/config selection.
+    f.cum = {{0, 2, 2}};
+    f.metadata = {{2, 2, 0}};
+    CHECK(call() == 0);
+    CHECK(cap.prepares + cap.mropePrepares == 2);
+    CHECK(cap.lookupKey.rfind("prefill_", 0) == 0);
+    f.cum = {{0, 3, 2}};
+    CHECK(call() == HIP_PAGED_ATTENTION_BAD_CUM);
+    CHECK(cap.prepares + cap.mropePrepares == 2);
+
+    reset();
+    f = Fixture{};
+    cap.lookupHit = false;
+    cap.nativeStatus = HIP_PAGED_ATTENTION_BAD_PAGE;
+    CHECK(call() == HIP_PAGED_ATTENTION_BAD_PAGE);
+    CHECK(cap.syncs == 2 && cap.copies == 5);
+    // A failed device status must not publish the prepared configuration.
+    sessionError = 0;
+    cap.nativeStatus = 0;
+    CHECK(call() == 0);
+    CHECK(cap.prepares + cap.mropePrepares == 2);
+    CHECK(cap.launches + cap.mropeLaunches == 0);
+    CHECK(f.unchanged());
+  }
+}
+
 } // namespace
 
 extern "C" void *hipdnn_ep_state_get_stream(RuntimeState *) {
@@ -388,11 +432,13 @@ PagedAttentionResult resolvePagedAttention(const hip_paged_attention_f16_desc &,
   cap.lookupKey = key;
   return {{}, cap.lookupHit ? "lookup:cpu-contract" : "fallback:absent"};
 }
-int preparePagedAttention(void *, const hip_paged_attention_f16_desc &, void *,
-                          size_t, const std::string &, bool,
+int preparePagedAttention(void *, const hip_paged_attention_f16_desc &d,
+                          void *workspace, size_t, const std::string &, bool,
                           PagedAttentionResult *) {
   ++cap.prepares;
-  return -1;
+  cap.desc = d;
+  *static_cast<int32_t *>(workspace) = cap.nativeStatus;
+  return cap.nativeReturn;
 }
 } // namespace hipdnn_ep
 int main() {
@@ -412,6 +458,7 @@ int main() {
   testRequestPhaseAndBounds();
   testMropeBoundary();
   testRotaryWindowForwarding();
+  testPreparedCompletionAndDynamicLengths();
   if (opState)
     opState->deletor(opState);
   if (failures)
