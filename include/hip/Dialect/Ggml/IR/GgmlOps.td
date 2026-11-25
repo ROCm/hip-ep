@@ -125,7 +125,7 @@ def Ggml_MulMatOp : Ggml_Op<"mul_mat", [Pure]> {
   let ggmlOperation = "MUL_MAT";
   let ggmlParameters = "MatmulParameters";
   let ggmlSources = [
-    FromI32Enum<"precision", 0, "compute_precision_name", "ggml_prec">,
+    FromI32Enum<"precision", 0, "compute_precision_name">,
     FromI32<"hint", 1>
   ];
 }
@@ -167,7 +167,7 @@ def Ggml_ViewOp : Ggml_ViewLikeOp<"view", []> {
   let ggmlAliasedOperand = 0;
   let ggmlParameters = "ViewParameters";
   let ggmlSources = [
-    FromTensor<"byte_offset", "int64_t", "view_offs", "byteOffset">
+    FromTensor<"byte_offset", "int64_t", "viewOffs", "byteOffset">
   ];
 }
 
@@ -225,7 +225,7 @@ def Ggml_RopeOp : Ggml_Op<"rope", [Pure]> {
   let ggmlSources = [
     FromI32<"n_past", 0, "pastTokenCount">,
     FromI32<"dimensions", 1>,
-    FromI32Enum<"mode", 2, "rope_mode_name", "int">,
+    FromI32Enum<"mode", 2, "rope_mode_name">,
     FromI32<"legacy_context", 3>,
     FromI32<"original_context", 4>,
     FromF32<"frequency_base", 5>,
@@ -295,8 +295,7 @@ def Ggml_FlashAttentionExtOp : Ggml_Op<"flash_attention_ext", [Pure, AttrSizedOp
     FromF32<"scale", 0>,
     FromF32<"max_bias", 1, "maxBias">,
     FromF32<"logit_softcap", 2, "logitSoftcap">,
-    FromTensorEnum<"precision", "ggml_flash_attn_ext_get_prec(&tensor)",
-                    "compute_precision_name">
+    FromI32Enum<"precision", 3, "compute_precision_name">
   ];
 }
 
@@ -322,8 +321,7 @@ def Ggml_GluOp : Ggml_Op<"glu", [Pure]> {
   // A GLU splits one operand in half unless it was given two.
   let ggmlOperandArguments = [FromOperandPresence<"split", 1>];
   let ggmlSources = [
-    FromTensorEnum<"glu_kind", "ggml_get_glu_op(&tensor)", "glu_kind_name",
-                   "kind">,
+    FromI32Enum<"glu_kind", 0, "glu_kind_name", "kind">,
     FromI32Flag<"swapped", 1>,
     FromF32<"alpha", 2>,
     FromF32<"limit", 3>

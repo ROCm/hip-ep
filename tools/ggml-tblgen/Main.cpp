@@ -90,9 +90,7 @@ std::string typeOf(const Record &source) {
   if (source.isSubClassOf("FromI32Run"))
     return "std::array<int64_t, " +
            std::to_string(source.getValueAsInt("count")) + ">";
-  if (source.isSubClassOf("FromI32Enum") ||
-      source.isSubClassOf("FromI32MaskedEnum") ||
-      source.isSubClassOf("FromTensorEnum"))
+  if (source.isSubClassOf("FromI32Enum"))
     return "std::string";
   if (source.isSubClassOf("FromTensor"))
     return source.getValueAsString("type").str();
@@ -160,18 +158,26 @@ void emitParameters(const RecordKeeper &records, raw_ostream &os) {
   os << ",\n                 UnsupportedParameters>;\n";
 }
 
+/// Reading an operation's configuration out of `tensor` (GgmlTensor.h), by
+/// the name GGML gives the operation: `i32(index)` and `f32(index)` read
+/// `op_params`.
 void emitDecode(const RecordKeeper &records, raw_ostream &os) {
   // Operations GGML configures with nothing. What they do to their operands is
   // the whole of their semantics.
+  bool first = true;
   for (const Record *op : operations(records)) {
-    if (op->getValueAsString("ggmlParameters").empty())
-      os << "case GGML_OP_" << op->getValueAsString("ggmlOperation") << ":\n";
+    if (!op->getValueAsString("ggmlParameters").empty())
+      continue;
+    os << (first ? "if (" : " ||\n    ") << "tensor.op == \""
+       << op->getValueAsString("ggmlOperation") << "\"";
+    first = false;
   }
-  os << "  return std::monostate{};\n";
+  if (!first)
+    os << ")\n  return std::monostate{};\n";
 
   const auto decodeCase = [&](StringRef operation, StringRef structure,
                               ArrayRef<const Record *> sources) {
-    os << "case GGML_OP_" << operation << ": {\n";
+    os << "if (tensor.op == \"" << operation << "\") {\n";
     os << "  capture::" << structure << " parameters;\n";
     for (const Record *source : sources) {
       os << "  parameters." << memberOf(*source) << " = ";
@@ -185,24 +191,15 @@ void emitDecode(const RecordKeeper &records, raw_ostream &os) {
       else if (source->isSubClassOf("FromF32"))
         os << "f32(" << source->getValueAsInt("index") << ")";
       else if (source->isSubClassOf("FromI32Enum"))
-        os << source->getValueAsString("spelling") << "(static_cast<"
-           << source->getValueAsString("cast") << ">(i32("
-           << source->getValueAsInt("index") << ")))";
-      else if (source->isSubClassOf("FromI32MaskedEnum"))
-        os << source->getValueAsString("spelling") << "(static_cast<"
-           << source->getValueAsString("cast") << ">(i32("
-           << source->getValueAsInt("index") << ") & "
-           << source->getValueAsInt("mask") << "))";
+        os << source->getValueAsString("spelling") << "(i32("
+           << source->getValueAsInt("index") << "))";
       else if (source->isSubClassOf("FromI32Run")) {
         os << "{";
         for (int64_t index = 0; index < source->getValueAsInt("count"); ++index)
           os << (index ? ", " : "") << "i32("
              << source->getValueAsInt("index") + index << ")";
         os << "}";
-      } else if (source->isSubClassOf("FromTensorEnum"))
-        os << source->getValueAsString("spelling") << "("
-           << source->getValueAsString("expression") << ")";
-      else if (source->isSubClassOf("FromTensor"))
+      } else if (source->isSubClassOf("FromTensor"))
         os << "tensor." << source->getValueAsString("expression");
       else if (source->isSubClassOf("Fixed"))
         os << source->getValueAsString("expression");
@@ -241,9 +238,7 @@ void emitAttributes(const RecordKeeper &records, raw_ostream &os) {
     for (const Record *source : sources) {
       if (!source->getValueAsBit("attribute"))
         continue; // The result type already states it.
-      const bool symbolic = source->isSubClassOf("FromI32Enum") ||
-                            source->isSubClassOf("FromI32MaskedEnum") ||
-                            source->isSubClassOf("FromTensorEnum");
+      const bool symbolic = source->isSubClassOf("FromI32Enum");
       os << (symbolic ? "  symbolized(\"" : "  attribute(\"")
          << source->getValueAsString("argument") << "\", configured->"
          << memberOf(*source) << ");\n";
@@ -256,27 +251,22 @@ void emitAttributes(const RecordKeeper &records, raw_ostream &os) {
 ///
 /// A dialect enumeration and the GGML one it comes from agree on the names
 /// they use, not on the numbers: `GGML_PREC_F32` is ten where the dialect's
-/// `f32` is one. So this switches on the enumerator, and llama.cpp reordering
-/// its enumerations cannot silently remap anything.
+/// `f32` is one. So this switches on the number GGML stores, as each case
+/// declares it, and refuses one it does not declare.
 void emitEnumNames(const RecordKeeper &records, raw_ostream &os) {
   for (const Record *enumeration :
        records.getAllDerivedDefinitions("Ggml_GgmlEnum")) {
-    StringRef type = enumeration->getValueAsString("ggmlType");
-    const bool numeric = type == "int";
-    os << "const char *" << enumeration->getValueAsString("ggmlSpelling") << "("
-       << type << " value) {\n  switch (value) {\n";
+    StringRef spelling = enumeration->getValueAsString("ggmlSpelling");
+    os << "const char *" << spelling << "(int value) {\n  switch (value) {\n";
     for (const Record *value :
          enumeration->getValueAsListOfDefs("enumerants")) {
-      os << "  case " << value->getValueAsString("ggmlEnumerator")
-         << ":\n    return \"" << value->getValueAsString("str") << "\";\n";
+      os << "  case " << value->getValueAsInt("ggmlValue") << ": // "
+         << value->getValueAsString("ggmlEnumerator") << "\n    return \""
+         << value->getValueAsString("str") << "\";\n";
     }
-    StringRef exhausted = enumeration->getValueAsString("ggmlExhausted");
-    if (!exhausted.empty())
-      os << "  case " << exhausted << ":\n    break;\n";
-    if (numeric)
-      os << "  default:\n    break;\n";
-    os << "  }\n  fail(\"unsupported pinned llama.cpp " << type << " value \", "
-       << (numeric ? "value" : "static_cast<int>(value)") << ");\n}\n\n";
+    os << "  default:\n    break;\n  }\n  fail(\"unsupported ggml "
+       << enumeration->getValueAsString("className")
+       << " value \", value);\n}\n\n";
   }
 }
 
