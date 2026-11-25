@@ -102,7 +102,7 @@ func.func @batched_b_rank3(%ctx: !hip.context, %a: tensor<8x4x16xf32>,
 // stay where they are.
 
 // CHECK-LABEL: func.func @trans_b
-// CHECK: %[[BT:.*]] = tosa.transpose %arg2 {perms = array<i32: 0, 1, 3, 2>}
+// CHECK: %[[BT:.*]] = tosa.transpose %arg2 perms([0, 1, 3, 2])
 // CHECK-SAME: -> tensor<1x12x64x577xf16>
 // CHECK: %[[A:.*]] = tosa.reshape %arg1, {{.*}} -> tensor<12x577x64xf16>
 // CHECK: %[[B:.*]] = tosa.reshape %[[BT]], {{.*}} -> tensor<12x64x577xf16>
@@ -126,7 +126,7 @@ func.func @trans_b(%ctx: !hip.context, %a: tensor<1x12x577x64xf16>,
 // transA on a rank-3 operand: K is the leading of the two trailing dims.
 
 // CHECK-LABEL: func.func @trans_a_rank3
-// CHECK: %[[AT:.*]] = tosa.transpose %arg1 {perms = array<i32: 0, 2, 1>}
+// CHECK: %[[AT:.*]] = tosa.transpose %arg1 perms([0, 2, 1])
 // CHECK-SAME: -> tensor<8x4x16xf32>
 // CHECK: %[[A:.*]] = tosa.reshape %[[AT]], {{.*}} -> tensor<8x4x16xf32>
 // CHECK: %[[B:.*]] = tosa.reshape %arg2, {{.*}} -> tensor<8x16x32xf32>
@@ -148,8 +148,8 @@ func.func @trans_a_rank3(%ctx: !hip.context, %a: tensor<8x16x4xf32>,
 // in their logical order.
 
 // CHECK-LABEL: func.func @trans_both_unbatched_b
-// CHECK-DAG: %[[AT:.*]] = tosa.transpose %arg1 {perms = array<i32: 0, 2, 1>}
-// CHECK-DAG: %[[BT:.*]] = tosa.transpose %arg2 {perms = array<i32: 1, 0>}
+// CHECK-DAG: %[[AT:.*]] = tosa.transpose %arg1 perms([0, 2, 1])
+// CHECK-DAG: %[[BT:.*]] = tosa.transpose %arg2 perms([1, 0])
 // CHECK: %[[A:.*]] = tosa.reshape %[[AT]], {{.*}} -> tensor<1x24x16xf32>
 // CHECK: %[[B:.*]] = tosa.reshape %[[BT]], {{.*}} -> tensor<1x16x32xf32>
 // CHECK: %[[MM:.*]] = tosa.matmul %[[A]], %[[B]]
@@ -213,7 +213,7 @@ func.func @unit_broadcast_batch_second(
 // those operands empty for a non-quantized integer.
 
 // CHECK-LABEL: func.func @matmul_i32
-// CHECK: %[[ZP:.*]] = "tosa.const"() <{values = dense<0> : tensor<1xi32>}> : () -> tensor<1xi32>
+// CHECK: %[[ZP:.*]] = tosa.const values(dense<0> : tensor<1xi32>) : () -> tensor<1xi32>
 // CHECK: tosa.matmul {{.*}}, %[[ZP]], %[[ZP]]
 // CHECK-SAME: -> tensor<1x2x5xi32>
 // CHECK-NOT: hip.matmul
@@ -229,7 +229,7 @@ func.func @matmul_i32(%ctx: !hip.context, %a: tensor<2x3xi32>,
 // -----
 
 // CHECK-LABEL: func.func @matmul_i32_batched
-// CHECK: %[[ZP:.*]] = "tosa.const"() <{values = dense<0> : tensor<1xi32>}> : () -> tensor<1xi32>
+// CHECK: %[[ZP:.*]] = tosa.const values(dense<0> : tensor<1xi32>) : () -> tensor<1xi32>
 // CHECK: tosa.matmul {{.*}}, %[[ZP]], %[[ZP]]
 // CHECK-SAME: -> tensor<4x2x5xi32>
 // CHECK-NOT: hip.matmul

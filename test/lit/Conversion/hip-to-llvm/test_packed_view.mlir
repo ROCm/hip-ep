@@ -13,7 +13,7 @@
 // CHECK: %[[SHIFT:.*]] = llvm.add %[[BASE_OFF]], %{{.*}}
 // CHECK: %[[PTR:.*]] = llvm.getelementptr %[[ALIGNED]][%[[SHIFT]]] : (!llvm.ptr, i64) -> !llvm.ptr, f32
 // CHECK: llvm.insertvalue %[[PTR]], %{{.*}}[1]
-// CHECK: %[[ZERO:.*]] = llvm.mlir.constant(0 : index) : i64
+// CHECK: %[[ZERO:.*]] = llvm.mlir.constant(0 : i64) : i64
 // CHECK: llvm.insertvalue %[[ZERO]], %{{.*}}[2]
 func.func @packed_view(%cat: memref<1x8x2x2xf32>) -> memref<1x4x2x2xf32> {
   %c16 = arith.constant 16 : index
