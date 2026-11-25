@@ -7,13 +7,13 @@
 // GPU-free unit test for the output allocator runtime contract.
 //
 // Compiles lib/Runtime/output_allocator.cpp natively against the MOCK runtime
-// types (no HIP), constructs a RuntimeState on the stack, and exercises the two
-// entry points directly:
+// types (no HIP), constructs a RuntimeState on the stack, and exercises the
+// allocator and alias-binding entry points directly:
 //   * forwarding of (self, out_idx, shape, rank, elem_size) + the returned ptr
 //   * null-guard when no allocator is installed / cleared / null state
 //
-// The full end-to-end path (generated hip.alloc_output + EP-installed
-// allocator) is not wired up yet; this isolates the runtime contract.
+// These host checks do not execute generated code, install an actual EP
+// callback or validate device writes; they isolate the runtime contract.
 //===----------------------------------------------------------------------===//
 
 #include "hipdnn_ep_runtime.h"
@@ -25,6 +25,8 @@
 namespace {
 
 int g_failures = 0;
+int g_runtime_error = 0;
+int g_runtime_error_calls = 0;
 
 #define CHECK(cond)                                                            \
   do {                                                                         \
@@ -143,10 +145,119 @@ void test_alloc_null_state() {
   CHECK(g_cap.calls == 0);
 }
 
+void test_shared_cache_binding() {
+  g_cap = StubCapture{};
+  g_runtime_error = 0;
+  int input_pool = 0, other_pool = 0;
+  RuntimeState st = makeState();
+  hipdnn_output_allocator_t alloc{nullptr, stub_allocate};
+  hipdnn_ep_set_output_allocator(&st, &alloc);
+  const int64_t shape[4] = {256, 256, 4, 256};
+  g_cap.ret = &input_pool;
+  CHECK(hipdnn_ep_bind_output(&st, 1, shape, 4, 2, &input_pool) == &input_pool);
+  CHECK(g_cap.calls == 1 && g_cap.out_idx == 1 && g_cap.rank == 4);
+  CHECK(g_runtime_error == 0);
+  g_cap.ret = &other_pool;
+  CHECK(hipdnn_ep_bind_output(&st, 1, shape, 4, 2, &input_pool) == nullptr);
+  CHECK(g_runtime_error != 0);
+  CHECK(input_pool == 0 && other_pool == 0);
+}
+
+void test_independent_pool_bindings() {
+  g_cap = StubCapture{};
+  g_runtime_error = 0;
+  g_runtime_error_calls = 0;
+  int key_pool[2] = {11, 12};
+  int value_pool[2] = {21, 22};
+  RuntimeState st = makeState();
+  hipdnn_output_allocator_t alloc{nullptr, stub_allocate};
+  hipdnn_ep_set_output_allocator(&st, &alloc);
+  const int64_t shape[4] = {256, 256, 4, 256};
+
+  g_cap.ret = key_pool;
+  CHECK(hipdnn_ep_bind_output(&st, 1, shape, 4, 2, key_pool) == key_pool);
+  CHECK(g_cap.out_idx == 1 && g_cap.shape == shape && g_cap.elem_size == 2);
+  g_cap.ret = value_pool;
+  CHECK(hipdnn_ep_bind_output(&st, 2, shape, 4, 2, value_pool) == value_pool);
+  CHECK(g_cap.out_idx == 2 && g_cap.calls == 2);
+  CHECK(g_runtime_error_calls == 0);
+
+  // The right shape is insufficient: the callback must bind each actual pool.
+  g_cap.ret = key_pool;
+  CHECK(hipdnn_ep_bind_output(&st, 2, shape, 4, 2, value_pool) == nullptr);
+  CHECK(g_runtime_error != 0 && g_runtime_error_calls == 1);
+  g_cap.ret = value_pool;
+  CHECK(hipdnn_ep_bind_output(&st, 1, shape, 4, 2, key_pool) == nullptr);
+  CHECK(g_runtime_error_calls == 2);
+  CHECK(key_pool[0] == 11 && key_pool[1] == 12);
+  CHECK(value_pool[0] == 21 && value_pool[1] == 22);
+}
+
+void test_binding_failure_boundaries() {
+  const int64_t shape[4] = {256, 256, 4, 256};
+  int input_pool = 31;
+  RuntimeState st = makeState();
+
+  g_cap = StubCapture{};
+  g_runtime_error = 0;
+  g_runtime_error_calls = 0;
+  CHECK(hipdnn_ep_bind_output(&st, 1, shape, 4, 2, &input_pool) == nullptr);
+  CHECK(g_cap.calls == 0 && g_runtime_error_calls == 1);
+  CHECK(g_runtime_error != 0);
+  CHECK(g_runtime_error != 0 && input_pool == 31);
+
+  hipdnn_output_allocator_t alloc{nullptr, stub_allocate};
+  hipdnn_ep_set_output_allocator(&st, &alloc);
+  g_cap = StubCapture{};
+  g_runtime_error = 0;
+  g_runtime_error_calls = 0;
+  CHECK(hipdnn_ep_bind_output(&st, 1, shape, 4, 2, &input_pool) == nullptr);
+  CHECK(g_cap.calls <= 1 && g_runtime_error_calls == 1);
+  CHECK(g_runtime_error != 0);
+  CHECK(input_pool == 31);
+
+  // Even a callback returning null cannot make a null source a valid alias.
+  g_cap = StubCapture{};
+  g_runtime_error = 0;
+  g_runtime_error_calls = 0;
+  CHECK(hipdnn_ep_bind_output(&st, 1, shape, 4, 2, nullptr) == nullptr);
+  CHECK(g_cap.calls <= 1 && g_runtime_error_calls == 1);
+  CHECK(g_runtime_error != 0);
+  g_cap.ret = &input_pool;
+  g_runtime_error = 0;
+  CHECK(hipdnn_ep_bind_output(&st, 1, shape, 4, 2, nullptr) == nullptr);
+  CHECK(g_runtime_error_calls == 2 && g_runtime_error != 0 && input_pool == 31);
+
+  hipdnn_ep_set_output_allocator(&st, nullptr);
+  g_cap = StubCapture{};
+  g_runtime_error = 0;
+  g_runtime_error_calls = 0;
+  CHECK(hipdnn_ep_bind_output(&st, 1, shape, 4, 2, &input_pool) == nullptr);
+  CHECK(g_cap.calls == 0 && g_runtime_error_calls == 1);
+  CHECK(g_runtime_error != 0);
+
+  g_cap = StubCapture{};
+  g_runtime_error = 0;
+  g_runtime_error_calls = 0;
+  CHECK(hipdnn_ep_bind_output(nullptr, 1, shape, 4, 2, &input_pool) == nullptr);
+  CHECK(g_cap.calls == 0 && g_runtime_error_calls == 0);
+}
+
 } // namespace
+
+// This GPU-free unit checks callback binding and failure forwarding. Device
+// aggregation is validated separately with the real runtime/native kernels.
+extern "C" int hipdnn_ep_state_set_error_flag(RuntimeState *, int code) {
+  ++g_runtime_error_calls;
+  g_runtime_error = code;
+  return 0;
+}
 
 int main() {
   test_forwarding();
+  test_shared_cache_binding();
+  test_independent_pool_bindings();
+  test_binding_failure_boundaries();
   test_null_guard();
   test_nullptr_setter_arg();
   test_set_null_state();

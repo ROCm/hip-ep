@@ -1,0 +1,25 @@
+diff --git a/src/models/preprocessing/word_piece_compat.h b/src/models/preprocessing/word_piece_compat.h
+index 88ccf12..1c5a5fb 100644
+--- a/src/models/preprocessing/word_piece_compat.h
++++ b/src/models/preprocessing/word_piece_compat.h
+@@ -3,19 +3,5 @@
+ 
+ #pragma once
+ 
++// Use the word-piece ABI types from the pinned extensions header.
+ #include "ortx_tokenizer.h"
+-
+-// The extensions package used by this build does not export a word-piece query.
+-// These stand-ins keep timestamp grouping compiling. Every field stays zero, so
+-// that path does not invent word boundaries.
+-enum OrtxWordBoundaryStyle {
+-  OrtxWordBoundaryStyle_None = 0,
+-  OrtxWordBoundaryStyle_SuffixBpe = 1,
+-};
+-
+-struct OrtxWordPieceInfo {
+-  int is_special;
+-  int starts_word;
+-  int ends_word;
+-  OrtxWordBoundaryStyle boundary_style;
+-};

@@ -168,11 +168,92 @@ struct CausalConvWithStateOpLowering
   }
 };
 
+struct VarlenCausalConvWithStateOpLowering
+    : public ConvertOpToLLVMPattern<VarlenCausalConvWithStateOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(VarlenCausalConvWithStateOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i64Type = rewriter.getI64Type();
+
+    auto createI64Const = [&](int64_t value) -> Value {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(value));
+    };
+    Value nullPtr = LLVM::ZeroOp::create(rewriter, loc, ptrType);
+
+    if (!op.getInitialState())
+      return op.emitError("initial_state is required");
+    auto inputType = cast<MemRefType>(op.getInput().getType());
+    auto weightType = cast<MemRefType>(op.getWeight().getType());
+    auto stateType = cast<MemRefType>(op.getInitialState().getType());
+    if (inputType.getRank() != 2 || weightType.getRank() != 3 ||
+        stateType.getRank() != 3)
+      return op.emitError("unexpected varlen causal conv rank");
+
+    Value totalTokens =
+        getMemRefDimSize(inputType, 0, adaptor.getInput(), rewriter, loc);
+    Value channels =
+        getMemRefDimSize(inputType, 1, adaptor.getInput(), rewriter, loc);
+    Value batch = getMemRefDimSize(stateType, 0, adaptor.getInitialState(),
+                                   rewriter, loc);
+    Value kernelSize =
+        getMemRefDimSize(weightType, 2, adaptor.getWeight(), rewriter, loc);
+    Value stateLen = getMemRefDimSize(stateType, 2, adaptor.getInitialState(),
+                                      rewriter, loc);
+
+    llvm::StringRef activationStr = op.getActivation();
+    int64_t activationEnum =
+        (activationStr == "silu" || activationStr == "swish") ? 1 : 0;
+    unsigned elemSizeBytes =
+        inputType.getElementType().getIntOrFloatBitWidth() / 8;
+
+    SmallVector<Type, 16> paramTypes = {
+        ptrType, ptrType, ptrType, ptrType, ptrType, ptrType, ptrType, ptrType,
+        i64Type, i64Type, i64Type, i64Type, i64Type, i64Type, i64Type, i64Type};
+    FailureOr<LLVM::LLVMFuncOp> funcOp =
+        LLVM::lookupOrCreateFn(rewriter, module, kWrapVarlenCausalConvWithState,
+                               paramTypes, rewriter.getI32Type());
+    if (failed(funcOp))
+      return failure();
+
+    SmallVector<Value, 16> args = {
+        adaptor.getCtx(),
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getWeight(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getCumulativeSequenceLength(),
+                                   rewriter, loc),
+        adaptor.getBias()
+            ? extractContiguousMemRefPtr(adaptor.getBias(), rewriter, loc)
+            : nullPtr,
+        extractContiguousMemRefPtr(adaptor.getInitialState(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getPresentState(), rewriter, loc),
+        totalTokens,
+        channels,
+        batch,
+        kernelSize,
+        createI64Const(op.getDilation()),
+        stateLen,
+        createI64Const(activationEnum),
+        createI64Const(elemSizeBytes)};
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 } // namespace
 
 void populateCausalConvWithStateLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
-  patterns.add<CausalConvWithStateOpLowering>(converter);
+  patterns
+      .add<CausalConvWithStateOpLowering, VarlenCausalConvWithStateOpLowering>(
+          converter);
 }
 
 } // namespace hip

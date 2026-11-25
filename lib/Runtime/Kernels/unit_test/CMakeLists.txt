@@ -66,6 +66,12 @@ function(add_kernel_package_ut arch executable_name source_file)
     list(APPEND ut_includes ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/hip/autotune/gqa)
   endif()
 
+  if(source_file MATCHES "^paged_attention/")
+    # Page host drivers use the production resolver and geometry helpers from
+    # custom_kernels_<arch>, including the registry embedded in that library.
+    list(APPEND ut_includes ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/hip/autotune/paged_attention)
+  endif()
+
   if(source_file MATCHES "^qmoe/")
     list(APPEND ut_includes ${CMAKE_SOURCE_DIR}/lib/Runtime/real ${CMAKE_SOURCE_DIR}/include
       ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/hip/autotune/matmul_nbits)
@@ -140,6 +146,18 @@ function(add_kernel_package_ut arch executable_name source_file)
 endfunction()
 
 foreach(_arch IN LISTS HIP_ARCHITECTURES)
+  add_kernel_package_ut(${_arch}
+    hipdnn-kernel-ut-paged-attention-decode-xfp16-wfp16-yfp16
+    paged_attention/decode/Xfp16_Wfp16_Yfp16/test_paged_attention.cpp)
+  add_kernel_package_ut(${_arch}
+    hipdnn-kernel-ut-paged-attention-decode-xfp32-wfp16-yfp16-mrope
+    paged_attention/decode/Xfp32_Wfp16_Yfp16_mrope/test_paged_attention.cpp)
+  add_kernel_package_ut(${_arch}
+    hipdnn-kernel-ut-paged-attention-prefill-xfp16-wfp16-yfp16
+    paged_attention/prefill/Xfp16_Wfp16_Yfp16/test_paged_attention.cpp)
+  add_kernel_package_ut(${_arch}
+    hipdnn-kernel-ut-paged-attention-prefill-xfp32-wfp16-yfp16-mrope
+    paged_attention/prefill/Xfp32_Wfp16_Yfp16_mrope/test_paged_attention.cpp)
   if(HIP_EP_RING_ENABLED AND (_arch STREQUAL "gfx1151" OR _arch STREQUAL "gfx11-generic"))
     add_kernel_package_ut(${_arch}
       hipdnn-kernel-ut-gqa-ring-xfp16-wfp16-yfp16

@@ -37,6 +37,7 @@
 #include "../../../common/ut_gpu_execution_scope.h"
 #include <hip/hip_runtime.h>
 #include "../../../common/hip_adaptive_timing.h"
+#include "../../../common/ut_gqa_input_binding.h"
 #include "../../../common/ut_gqa_rank_input.h"
 #include <hip/hip_fp16.h>
 
@@ -48,6 +49,7 @@
 #include <cstring>
 #include <fstream>
 #include <functional>
+#include <memory>
 #include <random>
 #include <vector>
 #include <string>
@@ -139,6 +141,10 @@ inline std::string besideExe(const std::string& name) {
 inline std::vector<std::string> captureLogLines(
     const char* env_var, const std::string& tmp_name,
     const std::function<void()>& fn) {
+  // Normal measurements leave production configuration logging disabled.
+  // A separate diagnostic process observes routes without poisoning timing.
+  if (!std::getenv("HIPDNN_UT_GQA_DIAGNOSTIC")) { fn(); return {}; }
+  if (!env_var) { fn(); return {}; }
   const char* leaf_stderr = std::getenv("HIPDNN_KERNEL_UT_STDERR");
   const bool redirect = !leaf_stderr || !leaf_stderr[0];
   const std::string path = redirect ? besideExe(tmp_name) : leaf_stderr;
@@ -419,6 +425,7 @@ struct Case {
   // -inf (and -3.4e38, which rounds to -inf in fp16) must not turn a fully
   // masked KV split into NaN.
   float pad_value = -65504.0f;
+  int copy = 0, copy_splits = 0;
 };
 
 // results.csv shape: the parameters that tell any two cases apart. The window,
@@ -433,6 +440,7 @@ static std::string case_shape(const Case& c) {
   if (c.pad > 0) s += "_pad" + std::to_string(c.pad);
   if (c.pad > 0 && std::isinf(c.pad_value)) s += "_ninf";
   else if (c.pad > 0 && c.pad_value < -65504.0f) s += "_m3e38";
+  if (c.copy) s += "_copy_splits" + std::to_string(c.copy_splits);
   return s;
 }
 
@@ -609,6 +617,8 @@ static double run_kernel(DecodeMode mode, const Case& c, float scale,
     for (size_t i = 0; i < tmp.size(); ++i) host_O[i] = __half2float(tmp[i]);
   }
 
+  // Config capture belongs to the preceding correctness call.
+  _putenv_s("HIPDNN_GQA_AUTOTUNE_LOG", "");
   return hipdnn_ep_test::rotatedMeanMs(nullptr, iters, kv, [&](int i) {
     return launch(kv.k(i), kv.v(i), kv.rows());
   }, use_wmma < 0 ? "hip_gqa_flash_decode" : "hip_gqa_flash_decode_configured");
@@ -664,6 +674,8 @@ static double run_kernel_lut(const Case& c, float scale,
     for (size_t i = 0; i < tmp.size(); ++i) host_O[i] = __half2float(tmp[i]);
   }
 
+  // Config capture belongs to the preceding correctness call.
+  _putenv_s("HIPDNN_GQA_AUTOTUNE_LOG", "");
   return hipdnn_ep_test::rotatedMeanMs(nullptr, iters, kv, [&](int i) {
     return hip_gqa_flash_decode_configured(nullptr, dQ, kv.k(i), kv.v(i), dO, dPart,
                                     B, H, G, D, c.total, kv.rows(), MAX_SPLITS,
@@ -691,13 +703,27 @@ static double run_fused(const Case& c, float scale,
                         hipMemcpyDeviceToHost));
     for (size_t i = 0; i < tmp.size(); ++i) host_O[i] = __half2float(tmp[i]);
   }
+  // Config capture belongs to the preceding correctness call.
+  _putenv_s("HIPDNN_GQA_AUTOTUNE_LOG", "");
   return hipdnn_ep_test::rotatedMeanMs(nullptr, iters, kv, [&](int i) {
     return hip_gqa_fused_decode(nullptr, dQ, kv.k(i), kv.v(i), dO, B, H, G, D,
                          c.total, kv.rows(), scale, dSeq);
   }, "hip_gqa_fused_decode");
 }
 
+extern "C" int hip_gqa_flash_decode_fused_copy(
+    void*, const void*, const void*, const void*, const void*, const void*,
+    void*, void*, void*, void*, int, int, int, int, int, int, int, int, int,
+    float, const void*, int, const void*, int);
+
 static int run_case(const Case& c, int iters, unsigned seed, bool verbose, const hipdnn_ep_test::timing::RankRow* rank_row = nullptr) {
+  if (c.copy) {
+    if (const char* error = gqaCopyInputError(c.B, c.H, c.G, c.D,
+        c.max_seq, c.total, c.window, c.copy_splits, MAX_SPLITS)) {
+      std::fprintf(stderr, "Invalid COPY input: %s\n", error);
+      return 1;
+    }
+  }
   hipdnn_ep_test::timing::CaseScope timing_case("gqa/decode/Xfp16_Wfp16_Yfp16", case_shape(c), "hip_gqa_flash_decode");
   const UtGqaShape rank_shape{c.B, c.H, c.G, c.D, 1, c.total, c.window, 0, MAX_SPLITS};
   if (rank_row && std::getenv("HIPDNN_UT_RANK_CATALOG")) {
@@ -725,6 +751,10 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose, const
   for (auto& x : Vv) x = dist(rng);
   for (auto& x : Sink) x = dist(rng);  // natural-unit sink logits
 
+  const std::vector<float> Kb = make_key_bias(c);
+  std::vector<float> ref;
+  cpu_reference(c, Q, K, Vv, Seq, Sink, Kb, scale, ref);
+
   // fp16 device copies.
   auto to_half = [](const std::vector<float>& f) {
     std::vector<__half> h(f.size());
@@ -732,6 +762,12 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose, const
     return h;
   };
   auto hQ = to_half(Q), hK = to_half(K), hV = to_half(Vv), hSink = to_half(Sink);
+  gqaInputBinding(case_shape(c).c_str(), "Q_fp16", hQ);
+  gqaInputBinding(case_shape(c).c_str(), "K_fp16", hK);
+  gqaInputBinding(case_shape(c).c_str(), "V_fp16", hV);
+  gqaInputBinding(case_shape(c).c_str(), "sink_fp16", hSink);
+  gqaInputBinding(case_shape(c).c_str(), "seq_i32", Seq);
+  gqaInputBinding(case_shape(c).c_str(), "key_bias_fp32", Kb);
 
   __half *dQ, *dK, *dV, *dO, *dSink;
   float* dPart;
@@ -749,7 +785,6 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose, const
   HIP_CHECK(hipMemcpy(dV, hV.data(), hV.size() * sizeof(__half), hipMemcpyHostToDevice));
   HIP_CHECK(hipMemcpy(dSink, hSink.data(), hSink.size() * sizeof(__half), hipMemcpyHostToDevice));
   HIP_CHECK(hipMemcpy(dSeq, Seq.data(), Seq.size() * sizeof(int), hipMemcpyHostToDevice));
-  const std::vector<float> Kb = make_key_bias(c);
   __half* dKb = nullptr;
   if (!Kb.empty()) {
     const auto hKb = to_half(Kb);
@@ -758,13 +793,124 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose, const
                         hipMemcpyHostToDevice));
   }
 
-  std::vector<float> ref;
-  cpu_reference(c, Q, K, Vv, Seq, Sink, Kb, scale, ref);
 
   // The rows a launch reads: the window when there is one, else every key.
-  const hipdnn_ep_test::ColdKvCopies kv(
+  auto kv_owner = std::make_unique<hipdnn_ep_test::ColdKvCopies>(
       dK, dV, B * G, max_seq, static_cast<size_t>(D) * sizeof(__half),
       c.window > 0 ? std::max(0, c.total - c.window) : 0, c.total);
+  const auto& kv = *kv_owner;
+  auto finish_device = [&] {
+    kv_owner.reset();
+    hipFree(dQ); hipFree(dK); hipFree(dV); hipFree(dO);
+    hipFree(dSink); hipFree(dSeq); hipFree(dPart);
+    if (dKb) hipFree(dKb);
+    gpu_execution.finish();
+  };
+
+
+  if (c.copy) {
+    // Test the public COPY=true entry: history reads, KV append and attention.
+    // The existing cold-KV rotation and complete-call timer remain the owner.
+    constexpr size_t guard = 16;
+    const __half sentinel = __float2half(19.0f);
+    std::vector<__half> nk(static_cast<size_t>(G) * D), nv(nk.size());
+    for (int g = 0; g < G; ++g)
+      for (int e = 0; e < D; ++e) {
+        nk[g * D + e] = hK[(static_cast<size_t>(g) * max_seq + c.total - 1) * D + e];
+        nv[g * D + e] = hV[(static_cast<size_t>(g) * max_seq + c.total - 1) * D + e];
+      }
+    __half *dnk, *dnv, *nkbase, *nvbase, *pastkbase, *pastvbase, *pk, *pv, *co;
+    std::vector<__half> expected_k(hK.size() + 2 * guard, sentinel);
+    std::vector<__half> expected_v(hV.size() + 2 * guard, sentinel);
+    std::vector<__half> expected_o(ref.size() + 2 * guard, sentinel);
+    for (int g = 0; g < G; ++g)
+      for (int row = 0; row < c.total; ++row)
+        for (int e = 0; e < D; ++e) {
+          const size_t at = (static_cast<size_t>(g) * max_seq + row) * D + e;
+          expected_k[guard + at] = hK[at]; expected_v[guard + at] = hV[at];
+        }
+    std::vector<__half> guarded_nk(nk.size() + 2 * guard, sentinel), guarded_nv(nv.size() + 2 * guard, sentinel);
+    std::copy(nk.begin(), nk.end(), guarded_nk.begin() + guard);
+    std::copy(nv.begin(), nv.end(), guarded_nv.begin() + guard);
+    std::vector<__half> guarded_pastk(hK.size() + 2 * guard, sentinel), guarded_pastv(hV.size() + 2 * guard, sentinel);
+    std::copy(hK.begin(), hK.end(), guarded_pastk.begin() + guard);
+    std::copy(hV.begin(), hV.end(), guarded_pastv.begin() + guard);
+    HIP_CHECK(hipMalloc(&nkbase, guarded_nk.size() * sizeof(__half)));
+    HIP_CHECK(hipMalloc(&nvbase, guarded_nv.size() * sizeof(__half)));
+    HIP_CHECK(hipMalloc(&pastkbase, guarded_pastk.size() * sizeof(__half)));
+    HIP_CHECK(hipMalloc(&pastvbase, guarded_pastv.size() * sizeof(__half)));
+    dnk = nkbase + guard; dnv = nvbase + guard;
+    HIP_CHECK(hipMemcpy(nkbase, guarded_nk.data(), guarded_nk.size() * sizeof(__half), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(nvbase, guarded_nv.data(), guarded_nv.size() * sizeof(__half), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(pastkbase, guarded_pastk.data(), guarded_pastk.size() * sizeof(__half), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(pastvbase, guarded_pastv.data(), guarded_pastv.size() * sizeof(__half), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMalloc(&pk, expected_k.size() * sizeof(__half)));
+    HIP_CHECK(hipMalloc(&pv, expected_v.size() * sizeof(__half)));
+    HIP_CHECK(hipMalloc(&co, expected_o.size() * sizeof(__half)));
+    HIP_CHECK(hipMemcpy(dnk, nk.data(), nk.size() * sizeof(__half), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(dnv, nv.data(), nv.size() * sizeof(__half), hipMemcpyHostToDevice));
+    std::vector<__half> blank(expected_k.size(), sentinel);
+    HIP_CHECK(hipMemcpy(pk, blank.data(), blank.size() * sizeof(__half), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(pv, blank.data(), blank.size() * sizeof(__half), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(co, expected_o.data(), expected_o.size() * sizeof(__half), hipMemcpyHostToDevice));
+    auto launch_copy = [&](const void* k, const void* v, int rows) {
+      return hip_gqa_flash_decode_fused_copy(nullptr, dQ, k, v, dnk, dnv,
+          pk + guard, pv + guard, co + guard, dPart, B, H, G, D, c.total - 1,
+          rows, max_seq, MAX_SPLITS, c.copy_splits, scale,
+          c.sink ? dSink : nullptr, c.smooth, dKb, max_seq);
+    };
+    int rc = launch_copy(pastkbase + guard, pastvbase + guard, max_seq);
+    if (rc) {
+      HIP_CHECK(hipDeviceSynchronize());
+      hipFree(nkbase); hipFree(nvbase); hipFree(pastkbase); hipFree(pastvbase); hipFree(pk); hipFree(pv); hipFree(co);
+      finish_device();
+      std::printf("COPY_DECLINED B=%d H=%d G=%d D=%d past=%d capacity=%d splits=%d rc=%d\n",
+                  B, H, G, D, c.total - 1, max_seq, c.copy_splits, rc);
+      return 1;
+    }
+    HIP_CHECK(hipDeviceSynchronize());
+    const double ms = hipdnn_ep_test::rotatedMeanMs(nullptr, 0, kv, [&](int i) {
+      return launch_copy(kv.k(i), kv.v(i), kv.rows());
+    }, "hip_gqa_flash_decode_fused_copy");
+    HIP_CHECK(hipDeviceSynchronize());
+    std::vector<__half> actual_k(expected_k.size()), actual_v(expected_v.size()), actual_o(expected_o.size());
+    std::vector<__half> source_k(hK.size()), source_v(hV.size()), new_k(guarded_nk.size()), new_v(guarded_nv.size());
+    std::vector<__half> actual_pastk(guarded_pastk.size()), actual_pastv(guarded_pastv.size());
+    HIP_CHECK(hipMemcpy(actual_k.data(), pk, actual_k.size() * sizeof(__half), hipMemcpyDeviceToHost));
+    HIP_CHECK(hipMemcpy(actual_v.data(), pv, actual_v.size() * sizeof(__half), hipMemcpyDeviceToHost));
+    HIP_CHECK(hipMemcpy(actual_o.data(), co, actual_o.size() * sizeof(__half), hipMemcpyDeviceToHost));
+    HIP_CHECK(hipMemcpy(source_k.data(), dK, source_k.size() * sizeof(__half), hipMemcpyDeviceToHost));
+    HIP_CHECK(hipMemcpy(source_v.data(), dV, source_v.size() * sizeof(__half), hipMemcpyDeviceToHost));
+    HIP_CHECK(hipMemcpy(new_k.data(), nkbase, new_k.size() * sizeof(__half), hipMemcpyDeviceToHost));
+    HIP_CHECK(hipMemcpy(new_v.data(), nvbase, new_v.size() * sizeof(__half), hipMemcpyDeviceToHost));
+    HIP_CHECK(hipMemcpy(actual_pastk.data(), pastkbase, actual_pastk.size() * sizeof(__half), hipMemcpyDeviceToHost));
+    HIP_CHECK(hipMemcpy(actual_pastv.data(), pastvbase, actual_pastv.size() * sizeof(__half), hipMemcpyDeviceToHost));
+    hipFree(nkbase); hipFree(nvbase); hipFree(pastkbase); hipFree(pastvbase); hipFree(pk); hipFree(pv); hipFree(co);
+    finish_device();
+    bool guards_ok = !std::memcmp(actual_k.data(), expected_k.data(), actual_k.size() * sizeof(__half)) &&
+                     !std::memcmp(actual_v.data(), expected_v.data(), actual_v.size() * sizeof(__half));
+    guards_ok = guards_ok && !std::memcmp(source_k.data(), hK.data(), hK.size() * sizeof(__half)) &&
+                !std::memcmp(source_v.data(), hV.data(), hV.size() * sizeof(__half)) &&
+                !std::memcmp(new_k.data(), guarded_nk.data(), guarded_nk.size() * sizeof(__half)) &&
+                !std::memcmp(new_v.data(), guarded_nv.data(), guarded_nv.size() * sizeof(__half));
+    guards_ok = guards_ok && !std::memcmp(actual_pastk.data(), guarded_pastk.data(), guarded_pastk.size() * sizeof(__half)) &&
+                !std::memcmp(actual_pastv.data(), guarded_pastv.data(), guarded_pastv.size() * sizeof(__half));
+    std::vector<float> output(ref.size());
+    for (size_t i = 0; i < actual_o.size(); ++i) {
+      if (i < guard || i >= guard + ref.size())
+        guards_ok = guards_ok && __half2float(actual_o[i]) == 19.0f;
+      else output[i - guard] = __half2float(actual_o[i]);
+    }
+    const double error = rel_l2(output, ref);
+    const bool ok = guards_ok && error < 2e-2;
+    hipdnn_ep_test::CsvWriter csv;
+    hipdnn_ep_test::CsvRow row;
+    row.shape = case_shape(c); row.config = "copy:splits=" + std::to_string(c.copy_splits);
+    row.time_ms = ms; row.rel_l2 = error; row.verdict = ok ? "PASS" : "FAIL"; csv.write(row);
+    std::printf("COPY_VALIDATION %s source/new/present/output_guards=%s relL2=%.8g ms=%.8g %s\n",
+                row.shape.c_str(), guards_ok ? "PASS" : "FAIL", error, ms, row.verdict.c_str());
+    return ok ? 0 : 1;
+  }
 
   if (rank_row) {
 #ifndef HIPDNN_UT_RANK_GQA_ADAPTER
@@ -793,7 +939,7 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose, const
     hipdnn_ep_test::rotatedMeanMs(nullptr, 0, kv, [&](int i) {
       return rank_launch(kv.k(i), kv.v(i), kv.rows());
     }, "hip_gqa_flash_decode_configured", &options);
-    hipFree(dQ); hipFree(dK); hipFree(dV); hipFree(dO); hipFree(dSink); hipFree(dSeq); hipFree(dPart); hipFree(dKb);
+    finish_device();
     return 0;
 #endif
   }
@@ -802,12 +948,10 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose, const
   // (default impl @ 8 splits). scalar8/wmma8 give per-impl correctness coverage.
   // --prod-only drops all three: when comparing two builds, the extra configs
   // would run between the timed ones and move the clock state under them.
-  std::vector<float> O_auto, O_base, O_wmma, O_scalar;
+  std::vector<float> O_auto, O_base, O_wmma, O_scalar, O_fused;
 
-  // Every launch runs inside a capture window so the config that was actually
-  // dispatched can be recorded. The op's [gqa-cfg] diagnostic latches on at its
-  // first read and then prints once per dispatch, so a launch left outside a
-  // window would spill those lines onto the console.
+  // Capture the config from the first correctness call. run_kernel clears
+  // the capture flag before entering the shared timer.
   std::string launched_cfg;
   auto timed = [&](DecodeMode mode, std::vector<float>& out, std::string* cfg) {
     double ms = 0.0;
@@ -833,13 +977,8 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose, const
     ms_base   = timed(MODE_BASELINE, O_base,   nullptr);
     ms_wmma   = timed(MODE_WMMA8,    O_wmma,   nullptr);
     ms_scalar = timed(MODE_SCALAR8,  O_scalar, nullptr);
-    l2_base   = rel_l2(O_base, ref);
-    l2_wmma   = rel_l2(O_wmma, ref);
-    l2_scalar = rel_l2(O_scalar, ref);
-    l2_ab     = rel_l2(O_wmma, O_scalar);
   }
 
-  double l2_auto   = rel_l2(O_auto, ref);
 
   // One-block-per-head fused decode = the OLDEST baseline (pre-split-K); only
   // valid without window/sink, and very slow at long context, so it is opt-in
@@ -848,12 +987,28 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose, const
       g_do_fused && (c.window <= 0 && !c.sink && !c.smooth && c.pad <= 0);
   double ms_fused = 0.0; double l2_fused = 0.0; bool fused_ran = false;
   if (fused_ok_shape) {
-    std::vector<float> O_fused;
     int fiters = iters < 16 ? iters : 16;
     ms_fused = run_fused(c, scale, dQ, dK, dV, dO, dSeq, fiters, kv, O_fused);
-    l2_fused = rel_l2(O_fused, ref);
     fused_ran = true;
   }
+
+#ifdef HIPDNN_LUT_LINKED_EXTERNALLY
+  const bool use_lut = kernel_ut_lookup_mode() && hip_gqa_autotune_table_loaded();
+#else
+  const bool use_lut = false;
+#endif
+  // Finish the device phase before CPU comparison and CSV emission. A later
+  // lookup measurement reacquires admission while retaining owned input buffers.
+  if (use_lut) gpu_execution.finish();
+  else finish_device();
+  if (!g_prod_only) {
+    l2_base   = rel_l2(O_base, ref);
+    l2_wmma   = rel_l2(O_wmma, ref);
+    l2_scalar = rel_l2(O_scalar, ref);
+    l2_ab     = rel_l2(O_wmma, O_scalar);
+  }
+  double l2_auto = rel_l2(O_auto, ref);
+  if (fused_ran) l2_fused = rel_l2(O_fused, ref);
 
   const double tol = 2e-2;  // fp16 accumulation tolerance
   bool ok = (l2_auto < tol) && (!fused_ran || l2_fused < tol);
@@ -862,16 +1017,17 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose, const
 
   const std::string csv_shape = case_shape(c);
 #ifdef HIPDNN_LUT_LINKED_EXTERNALLY
-  if (kernel_ut_lookup_mode() && hip_gqa_autotune_table_loaded()) {
+  if (use_lut) {
+    hipdnn_ep_test::GpuExecutionScope gpu_lut([] { HIP_CHECK(hipDeviceSynchronize()); });
     using namespace hipdnn_ep_test;
     std::vector<float> O_lut;
     double ms_lut = 0.0;
     hipdnn_ep::GqaTuneSource src{};
     hipdnn_ep::GqaDecodeConfig lut_cfg{};
     // The resolver hands back the config and where it came from, so both are
-    // read from it directly. The capture window is only here to keep the op's
-    // per-dispatch diagnostic off the console.
-    captureLogLines("HIPDNN_GQA_AUTOTUNE_LOG", "_cfg_capture.tmp", [&]() {
+    // read from it directly. Configuration logging stays disabled while
+    // the lookup entry is timed.
+    captureLogLines(nullptr, "", [&]() {
       ms_lut = run_kernel_lut(c, scale, dQ, dK, dV, dO, dPart, dSeq, dSink,
                               dKb, iters, kv, O_lut, src, lut_cfg);
     });
@@ -880,6 +1036,8 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose, const
                   "lookup:impl=%s splits=%d bkv=%d (%s)",
                   lut_cfg.use_wmma ? "wmma" : "scalar", lut_cfg.splits,
                   lut_cfg.bkv, hipdnn_ep::gqa_tune_source_name(src));
+    finish_device();
+    gpu_lut.finish();
     const double l2_lut = rel_l2(O_lut, ref);
     const bool lut_ok = l2_lut < tol;
     ok = ok && lut_ok;
@@ -955,9 +1113,6 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose, const
   g_rows.push_back({std::string(c.name), H, G, D, c.total, c.window, c.sink,
                     c.smooth, ms_scalar, ms_base, ms_auto, l2_auto, ok});
 
-  hipFree(dQ); hipFree(dK); hipFree(dV); hipFree(dO);
-  hipFree(dSink); hipFree(dSeq); hipFree(dPart);
-  if (dKb) hipFree(dKb);
   return ok ? 0 : 1;
 }
 
@@ -1007,6 +1162,7 @@ int main(int argc, char** argv) {
   bool all = false, verbose = false;
   Case single = {"custom", 1, 64, 8, 64, 8192, 8192, 0, 0, 0};
   bool have_single = false;
+  std::string only_shape;
 
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -1017,6 +1173,7 @@ int main(int argc, char** argv) {
     else if (a == "--fused") g_do_fused = true;
     else if (a == "--prod-only") g_prod_only = true;
     else if (a == "--only" && i + 1 < argc) { g_only = argv[++i]; all = true; }
+    else if (a == "--only-shape" && i + 1 < argc) { only_shape = argv[++i]; all = true; }
     else if (a == "--iters") next(iters);
     else if (a == "--seed") { int s; next(s); seed = (unsigned)s; }
     else if (a == "--b") { next(single.B); have_single = true; }
@@ -1028,9 +1185,19 @@ int main(int argc, char** argv) {
     else if (a == "--window") { next(single.window); have_single = true; }
     else if (a == "--sink") { next(single.sink); have_single = true; }
     else if (a == "--smooth") { next(single.smooth); have_single = true; }
+    else if (a == "--copy") { next(single.copy); have_single = true; }
+    else if (a == "--splits") { next(single.copy_splits); have_single = true; }
     else if (a == "--pad") { next(single.pad); have_single = true; }
   }
 
+  if (have_single && !all && single.copy) {
+    if (const char* error = gqaCopyInputError(single.B, single.H, single.G,
+        single.D, single.max_seq, single.total, single.window,
+        single.copy_splits, MAX_SPLITS)) {
+      std::fprintf(stderr, "Invalid COPY input: %s\n", error);
+      return 2;
+    }
+  }
   int dev = 0;
   HIP_CHECK(hipGetDevice(&dev));
   hipDeviceProp_t prop;
@@ -1115,15 +1282,30 @@ int main(int argc, char** argv) {
       full_cases.push_back({"GQA hpg4 D96 pad -3.4e38",  2, 32, 8,  96, L, L,   0, 0, 0, L / 4, -3.4e38f});
     }
 
-    printf("coverage=%d -> running %zu typical length(s) x %zu categorical "
-           "case(s) = %zu gqa_decode cases\n",
-           coverage_tier, n_lens, full_cases.size() / n_lens,
-           full_cases.size());
+    full_cases.push_back({"scalar-hpg3", 1, 12, 4, 64, 544, 513, 127, 0, 0, 0});
+    for (int hpg : {4, 5, 6, 8}) {
+      Case copy_case{"copy-history-append", 1, 2 * hpg, 2, 128, 528, 514, 0, 0, 0, 0};
+      copy_case.copy = 1; copy_case.copy_splits = hpg == 4 ? 0 : 8;
+      copy_case.sink = hpg == 6; copy_case.smooth = hpg == 6 || hpg == 8;
+      full_cases.push_back(copy_case);
+    }
+    Case short_copy{"copy-short-history", 1, 8, 2, 128, 16, 2, 0, 0, 0, 0};
+    short_copy.copy = 1; short_copy.copy_splits = 8; full_cases.push_back(short_copy);
+
+    printf("coverage=%d -> running %zu gqa_decode cases; %zu length representatives plus fixed property representatives\n",
+           coverage_tier, full_cases.size(), n_lens);
+    size_t selected = 0;
     for (const Case& c : full_cases) {
+      if (!only_shape.empty() && case_shape(c) != only_shape) continue;
       if (!g_only.empty() &&
           std::string(c.name).find(g_only) == std::string::npos)
         continue;
+      ++selected;
       fails += run_case(c, iters, seed, verbose);
+    }
+    if (!only_shape.empty() && selected != 1) {
+      std::fprintf(stderr, "--only-shape matched %zu cases at coverage=%d\n", selected, coverage_tier);
+      return 1;
     }
   } else {
     fails += run_case(single, iters, seed, verbose);

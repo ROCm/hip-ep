@@ -7,7 +7,8 @@ MatMulNBits, GQA decode/prefill and ragged W4 MatMul use the shared
 [adaptive timing policy](common/README.md). `--timing standard` (default)
 ends a measurement at 1,000 calls or one second of GPU time, whichever comes
 first, when its five groups agree within 3%, and otherwise at one second and ten
-calls; `--timing confirm` (10,000 calls / ten seconds, 1%) is for formal
+calls; `--timing confirm` (at least ten valid GPU seconds and two calls in
+each of five groups; 1% spread diagnostic) is for formal
 performance numbers; `--timing screen` (100 calls / 0.1 s) is the short
 LUT-ranking mode. Correctness checks are identical in all three. Policy, actual iterations, runtime identity
 and dispersion are emitted as `UT_TIMING` JSON records.
@@ -620,3 +621,13 @@ model shape via `make test_custom ARGS="--tokens 1 --hidden 128 --inter 128
 The existing `qmoe_ragged_mm` leaf remains a separate primitive test; its
 timing does not stand for an entire QMoE model node. See the full-wrapper
 leaf README for supported attributes, coverage tiers and timing presets.
+
+PagedAttention FP16 decode/prefill leaves cover the complete entry (RoPE,
+paged append and causal attention). `MODE=lookup` uses a compatible LUT;
+misses and `MODE=autotune` use real production preparation. The
+`Xfp32_Wfp16_Yfp16_mrope` leaves additionally cover fused FP32 MRoPE,
+conversion and append, with explicit three-stream positions and partial/full
+rotation. `COMPARE=1` measures the complete standalone MRoPE + Cast + Page
+chain with the same selected attention configuration. Custom parameters,
+coverage, timing presets and LUT ranking follow `ut_interface.json` and the
+corresponding decode/prefill leaf READMEs.

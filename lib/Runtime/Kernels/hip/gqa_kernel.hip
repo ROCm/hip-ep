@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "hip_custom_kernels.h"
+#include "gqa_paged_attention.h"
 #include "hip_arch_compat.h"
 #include "debug_log.h"
 
@@ -1743,7 +1744,7 @@ struct FlashDecodeCopyArgs {
 };
 
 template <int D, int HPG, KvDtype FMT = KvDtype::kF16, bool HAS_KB = false,
-          bool COPY = false>
+          bool COPY = false, bool PAGED = false>
 __global__ void __launch_bounds__(HPG * WAVE_SIZE)
 gqa_flash_decode_kernel(
     const __half* __restrict__ Q_roped,    // [B, 1, H, D] (BSHD with sq=1)
@@ -1759,7 +1760,17 @@ gqa_flash_decode_kernel(
     int K_SPLITS,  // runtime split-K count (was a template param)
     const __half* __restrict__ key_bias,  // [B, key_bias_stride] or null
     int key_bias_stride,
-    FlashDecodeCopyArgs cp) {
+    std::conditional_t<PAGED, GqaPagedArgs, FlashDecodeCopyArgs> args) {
+  // Keep one scalar definition directly in the global template. The last
+  // argument keeps the dense COPY ABI and becomes page metadata only for Page.
+  const FlashDecodeCopyArgs cp = [&] {
+    if constexpr (PAGED) return FlashDecodeCopyArgs{};
+    else return args;
+  }();
+  const GqaPagedArgs pg = [&] {
+    if constexpr (PAGED) return args;
+    else return GqaPagedArgs{};
+  }();
   constexpr bool KV_I8 = (FMT == KvDtype::kI8);
   using KVt = std::conditional_t<KV_I8, int8_t, __half>;
   static_assert(!COPY || (!KV_I8 && HPG > 1),
@@ -1805,13 +1816,14 @@ gqa_flash_decode_kernel(
   const int wave_id   = tid / WAVE_SIZE;       // [0, HPG)
   const int lane_id   = tid % WAVE_SIZE;
   const int head_q    = head_kv * HPG + wave_id;
+  if constexpr (PAGED) { if (!pg.active(batch)) return; }
 
   // total_seq = seqlens_k[batch] + 1, clamped to [0, max_seq].
-  const int raw_skv = COPY ? cp.past_len + 1
+  const int raw_skv = PAGED ? __builtin_amdgcn_readfirstlane(pg.post[batch]) : COPY ? cp.past_len + 1
       : seqlens_k
       ? __builtin_amdgcn_readfirstlane(seqlens_k[batch] + 1)
       : max_seq;
-  const int eff_skv = (raw_skv > 0)
+  const int eff_skv = PAGED ? raw_skv : (raw_skv > 0)
       ? (raw_skv < max_seq ? raw_skv : max_seq) : 0;
 
   // Sliding-window: at decode (sq==1) the query position is total_seq-1, so
@@ -1825,16 +1837,26 @@ gqa_flash_decode_kernel(
   }
   const int kv_range = eff_skv - kv_lo;
 
+  // Adaptive Page partitioning keeps the allocated/launch stride independent
+  // of each request's active length. Unused split blocks write no partials.
+  const int partial_stride=K_SPLITS;
+  if constexpr (PAGED) {
+    if(pg.adaptive_decode) {
+      K_SPLITS=GqaPagedArgs::effective_splits(kv_range,0,partial_stride,pg.decode_min_splits);
+      if(split_idx>=K_SPLITS)return;
+    }
+  }
   // Partition KV range into K_SPLITS roughly-equal chunks.
-  const int chunk    = (kv_range + K_SPLITS - 1) / K_SPLITS;
-  const int kv_start = kv_lo + chunk * split_idx;
-  int kv_end_tmp     = kv_start + chunk;
+  using Position = std::conditional_t<PAGED, int64_t, int>;
+  const Position chunk = (Position(kv_range) + K_SPLITS - 1) / K_SPLITS;
+  const Position kv_start = kv_lo + chunk * split_idx;
+  Position kv_end_tmp = kv_start + chunk;
   if (kv_end_tmp > eff_skv) kv_end_tmp = eff_skv;
-  const int kv_end   = kv_end_tmp;
+  const Position kv_end = kv_end_tmp;
 
   // Output partials destination for THIS wave's query head.
   float* partial_dst = partials +
-      flash_decode_partial_offset(batch, head_q, split_idx, H, K_SPLITS, D);
+      flash_decode_partial_offset(batch, head_q, split_idx, H, partial_stride, D);
 
   // Lane-to-element mapping. Even EPT gives each lane one contiguous run of
   // EPT elements, read as __half2 / char2 pairs. An odd EPT (D=96 -> 3) cannot
@@ -1875,7 +1897,7 @@ gqa_flash_decode_kernel(
   // arrays shrink to 1 elem and the inner loop reads the global tile directly.
   // GQA (HpG>1) keeps the shared tile so HpG query heads load K/V once. The
   // per-lane inner math is byte-identical either way (OPTIMIZATION.md §3.1).
-  constexpr bool kStage = (HPG > 1);
+  constexpr bool kStage = (HPG > 1 || PAGED);
   constexpr int kShElems = kStage ? (BKV * D) : 1;
   __shared__ __align__(16) KVt K_lds[kShElems];
   __shared__ __align__(16) KVt V_lds[kShElems];
@@ -1888,7 +1910,7 @@ gqa_flash_decode_kernel(
   // epilogue (loaded once there instead of held live across the KV loop).
   float Q_f[EPT];
   {
-    const __half* Q_ptr = Q_roped + (size_t)(batch * H + head_q) * D;
+    const __half* Q_ptr = Q_roped + (PAGED ? (size_t(pg.cum[batch]) * H + head_q) * D : (size_t)(batch * H + head_q) * D);
     if constexpr (KV_I8) {
       const float* ks = k_scale + (size_t)head_kv * D;
       #pragma unroll
@@ -1908,7 +1930,7 @@ gqa_flash_decode_kernel(
   }
 
   // KV cache base offset for this (batch, head_kv).
-  const size_t kv_base = (size_t)__builtin_amdgcn_readfirstlane(
+  const size_t kv_base = PAGED ? 0 : (size_t)__builtin_amdgcn_readfirstlane(
       (unsigned)((batch * G + head_kv) * max_seq)) * (size_t)D;
 
   const float scale_log2e = scale * LOG2E;
@@ -1930,9 +1952,9 @@ gqa_flash_decode_kernel(
   for (int e = 0; e < EPT; ++e) O_acc[e] = 0.0f;
 
   // Iterate KV tiles within this block's split.
-  for (int tile_start = kv_start; tile_start < kv_end; tile_start += BKV) {
+  for (Position tile_start = kv_start; tile_start < kv_end; tile_start += BKV) {
     const int tile_n = (tile_start + BKV <= kv_end)
-        ? BKV : (kv_end - tile_start);
+        ? BKV : int(kv_end - tile_start);
     if constexpr (HAS_KB) {
       #pragma unroll
       for (int j = 0; j < KB_REGS; ++j) {
@@ -1961,6 +1983,17 @@ gqa_flash_decode_kernel(
         for (int i = tid; i < total_vec; i += THREADS) {
           Ksv[i] = Kv[i];
           Vsv[i] = Vv[i];
+        }
+      } else if constexpr (PAGED) {
+        constexpr int kRowVec = D / 8;
+        const int total_vec = (tile_n * D) / 8;
+        const auto tile=pg.tile(batch,head_kv,tile_start,tile_n,D,eff_skv);
+        auto* ks = reinterpret_cast<float4*>(K_lds);
+        auto* vs = reinterpret_cast<float4*>(V_lds);
+        for (int i = tid; i < total_vec; i += THREADS) {
+          const size_t src = (tile.continuous?tile.base+size_t(i/kRowVec)*pg.kv_heads*D:pg.offset(batch, tile_start + i / kRowVec, head_kv, D)) + (i % kRowVec) * 8;
+          ks[i] = *reinterpret_cast<const float4*>(Kcache + src);
+          vs[i] = *reinterpret_cast<const float4*>(Vcache + src);
         }
       } else if constexpr (COPY) {
         constexpr int kRowVec = D / 8;
@@ -2145,6 +2178,7 @@ gqa_flash_decode_kernel(
       partial_dst[2 + kTailBase + lane_id] = O_acc[EPT - 1];
   }
 }
+
 
 //===----------------------------------------------------------------------===//
 // D=96 Split-K Decode Kernel (scalar, fp16 KV)
@@ -2774,26 +2808,33 @@ gqa_flash_decode_wmma_kernel(
 // Block: D threads. Each thread reduces one element of the d-dimension.
 //===----------------------------------------------------------------------===//
 
-template <int D>
-__global__ void __launch_bounds__(D)
-gqa_flash_decode_reduce_kernel(
+template <int D, bool PAGED = false>
+__device__ __forceinline__ void gqa_flash_decode_reduce_body(
     const float* __restrict__ partials,    // [B, H, K_SPLITS, D+2]
     __half* __restrict__ O,                // [B, 1, H, D] (BSHD with sq=1)
     int H,
     const __half* __restrict__ head_sink,  // [num_heads] or null
     int num_heads,
     int use_smooth_softmax,
-    int K_SPLITS) {  // runtime split-K count (was a template param)
+    int K_SPLITS, GqaPagedArgs pg = {}) {  // runtime split-K count (was a template param)
   const int linear = __builtin_amdgcn_readfirstlane(blockIdx.x);
   const int batch  = __builtin_amdgcn_readfirstlane(linear / H);
   const int head_q = __builtin_amdgcn_readfirstlane(linear % H);
   const int tid    = threadIdx.x;
+  if constexpr (PAGED) { if (!pg.active(batch)) return; }
+  // Preserve dense int arithmetic; packed paged output needs wide offsets.
+  using OutputIndex = std::conditional_t<PAGED, size_t, int>;
+  const OutputIndex output_row = PAGED ? OutputIndex(pg.cum[batch]) : batch;
 
+  const int partial_stride=K_SPLITS;
+  if constexpr (PAGED) {
+    if(pg.adaptive_decode)K_SPLITS=GqaPagedArgs::effective_splits(__builtin_amdgcn_readfirstlane(pg.post[batch]),pg.decode_window,partial_stride,pg.decode_min_splits);
+  }
   // Pass 1: find global_m. K_SPLITS is small (8..64) - serial per thread is fine.
   float global_m = -INFINITY;
   for (int k = 0; k < K_SPLITS; ++k) {
     const float* p = partials +
-        flash_decode_partial_offset(batch, head_q, k, H, K_SPLITS, D);
+        flash_decode_partial_offset(batch, head_q, k, H, partial_stride, D);
     const float m_k = p[0];
     global_m = fmaxf(global_m, m_k);
   }
@@ -2803,7 +2844,7 @@ gqa_flash_decode_reduce_kernel(
   // sink ⇒ all weight on the sink, which contributes 0 to V. We therefore
   // write a zero output here either way.
   if (!isfinite(global_m)) {
-    O[(batch * H + head_q) * D + tid] = __float2half(0.0f);
+    O[(output_row * H + head_q) * D + tid] = __float2half(0.0f);
     return;
   }
 
@@ -2812,7 +2853,7 @@ gqa_flash_decode_reduce_kernel(
   float O_sum = 0.0f;
   for (int k = 0; k < K_SPLITS; ++k) {
     const float* p = partials +
-        flash_decode_partial_offset(batch, head_q, k, H, K_SPLITS, D);
+        flash_decode_partial_offset(batch, head_q, k, H, partial_stride, D);
     const float m_k = p[0];
     const float l_k = p[1];
     const float scale_k = exp2f(m_k - global_m);
@@ -2833,7 +2874,22 @@ gqa_flash_decode_reduce_kernel(
   }
 
   const float inv_l = 1.0f / fmaxf(l_sum, 1e-6f);
-  O[(batch * H + head_q) * D + tid] = __float2half(O_sum * inv_l);
+  O[(output_row * H + head_q) * D + tid] = __float2half(O_sum * inv_l);
+}
+
+
+template <int D>
+__global__ void __launch_bounds__(D)
+gqa_flash_decode_reduce_kernel(
+    const float* __restrict__ partials,    // [B, H, K_SPLITS, D+2]
+    __half* __restrict__ O,                // [B, 1, H, D] (BSHD with sq=1)
+    int H,
+    const __half* __restrict__ head_sink,  // [num_heads] or null
+    int num_heads,
+    int use_smooth_softmax,
+    int K_SPLITS) {
+  gqa_flash_decode_reduce_body<D>(partials, O, H, head_sink, num_heads,
+                                  use_smooth_softmax, K_SPLITS);
 }
 
 //===----------------------------------------------------------------------===//
@@ -2927,7 +2983,7 @@ static inline void launchFlashDecodeConfig(
   const bool use_wmma = cfg.use_wmma && flash_decode_wmma_supported(d, hpg);
   // Diagnostic: print the config actually launched (works in both lookup and
   // online/autotune modes) so a run can be diffed against the other mode.
-  static const bool s_log_cfg = gqa_autotune_log_enabled() || custom_kernels_debug_enabled();
+  const bool s_log_cfg = gqa_autotune_log_enabled() || custom_kernels_debug_enabled();
   if (s_log_cfg)
     fprintf(stderr,
             "[gqa-cfg] decode B=%d H=%d G=%d d=%d hpg=%d maxseq=%d -> "
@@ -3846,6 +3902,25 @@ struct KvStage {
         return HALF16_RAW_LOAD(Vt + r * (NT / BKV) * 16 + v_off);
     }
 
+    __device__ half16_raw_t loadPagedK(const _Float16* pool, GqaPagedArgs pg,
+        int b, int h, int kv0, int len, int r, GqaPagedTile tile = {}) const {
+        if (!has(r)) return half16_raw_t{};
+        const int i = tid + r * NT;
+        if(tile.continuous) return HALF16_RAW_LOAD(pool+tile.base+size_t(i/D_TILES)*pg.kv_heads*D+(i%D_TILES)*16);
+        const int64_t pos = int64_t(kv0) + i / D_TILES;
+        return pos < len ? HALF16_RAW_LOAD(pool + pg.offset(b,pos,h,D) + (i % D_TILES)*16)
+                         : half16_raw_t{};
+    }
+    __device__ half16_raw_t loadPagedV(const _Float16* pool, GqaPagedArgs pg,
+        int b, int h, int kv0, int len, int r, GqaPagedTile tile = {}) const {
+        if (!hasV(r)) return half16_raw_t{};
+        if(tile.continuous) return HALF16_RAW_LOAD(pool+tile.base+size_t(vtid%BKV)*pg.kv_heads*D+(vtid/BKV+r*(NT/BKV))*16);
+        const int64_t pos = int64_t(kv0) + vtid % BKV;
+        return pos < len ? HALF16_RAW_LOAD(pool + pg.offset(b,pos,h,D) +
+                              (vtid / BKV + r * (NT/BKV))*16)
+                         : half16_raw_t{};
+    }
+
     __device__ void storeK(_Float16* K_lds, int r, const half16_raw_t& v) const {
         if (!has(r)) return;
         int off;
@@ -3930,7 +4005,7 @@ constexpr int  kGqaFragRing = 2;
 // single-wave block (HB == QW == 1) has nothing to share: it reads K straight
 // from global and stages only V.
 // ---------------------------------------------------------------------
-template <int M_TILES, int BKV, int D, bool HAS_WINDOW, int HB, int QW, bool HAS_KB>
+template <int M_TILES, int BKV, int D, bool HAS_WINDOW, int HB, int QW, bool HAS_KB, bool PAGED = false>
 __device__ __forceinline__ void gqa_flash_prefill_v6x_body(
     const _Float16* __restrict__ Q,       // [B, sq, Hq, D]
     const _Float16* __restrict__ Kcache,  // [B, G, max_seq, D]
@@ -3942,7 +4017,7 @@ __device__ __forceinline__ void gqa_flash_prefill_v6x_body(
     int num_heads, int smooth_softmax,
     int local_window_size,                   // <= 0 for full attention
     const _Float16* __restrict__ key_bias,   // [B, key_bias_stride] or null
-    int key_bias_stride)
+    int key_bias_stride, GqaPagedArgs pg = {})
 {
     static_assert(D <= 128, "v6x keeps Q in registers; d256 runs v8x");
     constexpr int NW        = HB * QW;
@@ -3965,8 +4040,9 @@ __device__ __forceinline__ void gqa_flash_prefill_v6x_body(
     // (all heads together measured 9% slower at 16k). Q tiles run last-first:
     // under the causal mask they walk the most keys and should not form the
     // tail.
-    const int num_q_tiles = (sq + BROWS - 1) / BROWS;
-    const int nqb = num_q_tiles * B_count;
+    using Position = std::conditional_t<PAGED, int64_t, int>;
+    const int num_q_tiles = int((Position(sq) + BROWS - 1) / BROWS);
+    const int nqb = PAGED ? num_q_tiles + B_count - 1 : num_q_tiles * B_count;
     const int hpg = Hq / G;
     const int cpg = hpg / HB;                    // head chunks per KV group
     const int bid = static_cast<int>(blockIdx.x);
@@ -3983,9 +4059,28 @@ __device__ __forceinline__ void gqa_flash_prefill_v6x_body(
     // see that bound and would keep the split.
     const int hb          = QW == 1 ? wave_id : wave_id % HB;
     const int qw          = QW == 1 ? 0 : wave_id / HB;
-    const int q_tile_idx  = __builtin_amdgcn_readfirstlane(
+    int q_tile_idx  = __builtin_amdgcn_readfirstlane(
         num_q_tiles - 1 - qb % num_q_tiles);
-    const int batch       = __builtin_amdgcn_readfirstlane(qb / num_q_tiles);
+    int batch       = __builtin_amdgcn_readfirstlane(qb / num_q_tiles);
+    if constexpr (PAGED) {
+        if (*pg.status) return;
+        int slot=qb;batch=-1;
+        // Sum ceil(q_len/rows) <= ceil(T/rows)+B-1. The host launches
+        // that bound; only its few unused tail slots return without work.
+        for(int request=0;request<B_count;++request) {
+            const int length=pg.cum[request+1]-pg.cum[request];
+            const int count=int((int64_t(length)+BROWS-1)/BROWS);
+            if(slot<count){batch=request;q_tile_idx=count-1-slot;break;}
+            slot-=count;
+        }
+        if(batch<0)return;
+        batch=__builtin_amdgcn_readfirstlane(batch);
+        q_tile_idx=__builtin_amdgcn_readfirstlane(q_tile_idx);
+        sq = __builtin_amdgcn_readfirstlane(pg.cum[batch+1] - pg.cum[batch]);
+        skv = __builtin_amdgcn_readfirstlane(pg.post[batch]);
+        past_len = __builtin_amdgcn_readfirstlane(pg.past[batch]);
+        if (q_tile_idx * BROWS >= sq) return;
+    }
     const int head_q      = __builtin_amdgcn_readfirstlane(chunk * HB + hb);
     const int head_kv     = __builtin_amdgcn_readfirstlane(chunk / cpg);
     const int blk_q_start = q_tile_idx * BROWS;
@@ -4003,7 +4098,7 @@ __device__ __forceinline__ void gqa_flash_prefill_v6x_body(
     float* KB_lds = reinterpret_cast<float*>(K_lds + BKV * K_STR);
 
     const size_t kv_base =
-        (static_cast<size_t>(batch) * G + head_kv) * max_seq * D;
+        PAGED ? 0 : (static_cast<size_t>(batch) * G + head_kv) * max_seq * D;
     const _Float16* kb_row =
         HAS_KB ? key_bias + static_cast<size_t>(batch) * key_bias_stride : nullptr;
     const float inv_scale = 1.0f / scale;
@@ -4014,7 +4109,7 @@ __device__ __forceinline__ void gqa_flash_prefill_v6x_body(
         const int q_pos = q_start + mi * 16 + wmma_lane;
         const bool valid = q_pos < sq;
         const size_t q_row_base =
-            (static_cast<size_t>(batch * sq + (valid ? q_pos : 0)) * Hq + head_q) * D;
+            ((PAGED ? size_t(pg.cum[batch]) + (valid ? q_pos : 0) : static_cast<size_t>(batch * sq + (valid ? q_pos : 0))) * Hq + head_q) * D;
         #pragma unroll
         for (int tk = 0; tk < D_TILES; ++tk)
             Q_reg[mi][tk] = valid ? HALF16_LOAD(&Q[q_row_base + tk * 16], pair) : half16_t{};
@@ -4024,28 +4119,28 @@ __device__ __forceinline__ void gqa_flash_prefill_v6x_body(
     // head-dim row tj*16 + acc_row(pair, e).
     float8_t O_frag[M_TILES][D_TILES] = {};
     float m_reg[M_TILES], l_reg[M_TILES];
-    int   abs_q[M_TILES];
+    Position abs_q[M_TILES];
     #pragma unroll
     for (int mi = 0; mi < M_TILES; ++mi) {
         m_reg[mi] = -INFINITY;
         l_reg[mi] = 0.0f;
-        abs_q[mi] = past_len + q_start + mi * 16 + wmma_lane;
+        abs_q[mi] = Position(past_len) + q_start + mi * 16 + wmma_lane;
     }
 
     // The block walks every tile any of its waves needs; each wave computes
     // only the tiles inside its own range.
-    const int kv_max    = (skv - 1 < past_len + blk_q_start + BROWS - 1)
-                              ? (skv - 1) : (past_len + blk_q_start + BROWS - 1);
+    const Position kv_max    = (skv - 1 < Position(past_len) + blk_q_start + BROWS - 1)
+                              ? (skv - 1) : (Position(past_len) + blk_q_start + BROWS - 1);
     const int num_tiles = kv_max / BKV + 1;
-    const int wave_kv_max = (skv - 1 < past_len + q_start + ROWS - 1)
-                                ? (skv - 1) : (past_len + q_start + ROWS - 1);
+    const Position wave_kv_max = (skv - 1 < Position(past_len) + q_start + ROWS - 1)
+                                ? (skv - 1) : (Position(past_len) + q_start + ROWS - 1);
     const bool wave_rows  = q_start < sq;
     int t_start = 0;
     int wave_kv_lo = 0;
     if constexpr (HAS_WINDOW) {
-        const int kv_lo_tile = past_len + blk_q_start - local_window_size + 1;
+        const Position kv_lo_tile = Position(past_len) + blk_q_start - local_window_size + 1;
         t_start = (kv_lo_tile > 0) ? (kv_lo_tile / BKV) : 0;
-        wave_kv_lo = past_len + q_start - local_window_size + 1;
+        wave_kv_lo = Position(past_len) + q_start - local_window_size + 1;
     }
 
     // Group staging (KvStage): the K and V tiles are copied in 16-element
@@ -4063,7 +4158,11 @@ __device__ __forceinline__ void gqa_flash_prefill_v6x_body(
     typedef half16_raw_t Chunks[kPerThr];
     auto load_k = [&](Chunks& dst, int kv0) {
         const _Float16* Kt = Kcache + kv_base + static_cast<size_t>(kv0) * D;
-        if (kv0 + BKV <= skv) {
+        if constexpr (PAGED) {
+            const auto tile=pg.tile(batch,head_kv,kv0,BKV,D,skv);
+            #pragma unroll
+            for (int r=0;r<kPerThr;++r) dst[r]=st.loadPagedK(Kcache,pg,batch,head_kv,kv0,skv,r,tile);
+        } else if (kv0 + BKV <= skv) {
             #pragma unroll
             for (int r = 0; r < kPerThr; ++r) dst[r] = st.template loadK<false>(Kt, r, 0);
         } else {
@@ -4074,7 +4173,11 @@ __device__ __forceinline__ void gqa_flash_prefill_v6x_body(
     };
     auto load_v = [&](Chunks& dst, int kv0) {
         const _Float16* Vt = Vcache + kv_base + static_cast<size_t>(kv0) * D;
-        if (kv0 + BKV <= skv) {
+        if constexpr (PAGED) {
+            const auto tile=pg.tile(batch,head_kv,kv0,BKV,D,skv);
+            #pragma unroll
+            for (int r=0;r<kPerThr;++r) dst[r]=st.loadPagedV(Vcache,pg,batch,head_kv,kv0,skv,r,tile);
+        } else if (kv0 + BKV <= skv) {
             #pragma unroll
             for (int r = 0; r < kPerThr; ++r) dst[r] = st.template loadV<false>(Vt, r, 0);
         } else {
@@ -4147,8 +4250,10 @@ __device__ __forceinline__ void gqa_flash_prefill_v6x_body(
             #pragma unroll
             for (int m = 0; m < BKV * D_TILES / 32; ++m) {
                 const int key = min(lane_id, v_last - 32 * (m % KB)) + 32 * (m % KB);
-                half16_raw_t vv = HALF16_RAW_LOAD(
-                    Vt + static_cast<unsigned>(key) * static_cast<unsigned>(D) + (m / KB) * 16);
+                const _Float16* vp;
+                if constexpr (PAGED) vp = Vcache + pg.offset(batch, kv0 + key, head_kv, D) + (m / KB) * 16;
+                else vp = Vt + static_cast<unsigned>(key) * static_cast<unsigned>(D) + (m / KB) * 16;
+                half16_raw_t vv = HALF16_RAW_LOAD(vp);
                 if (lane_id + 32 * (m % KB) > v_last) vv = half16_raw_t{};
                 const int o = (m / KB) * 16 * VT_STR + 32 * (m % KB);
                 #pragma unroll
@@ -4167,7 +4272,7 @@ __device__ __forceinline__ void gqa_flash_prefill_v6x_body(
         bool active = true;
         if constexpr (QW > 1) {
             active = wave_rows && kv0 <= wave_kv_max;
-            if constexpr (HAS_WINDOW) active = active && (kv0 + BKV - 1 >= wave_kv_lo);
+            if constexpr (HAS_WINDOW) active = active && (Position(kv0) + BKV - 1 >= wave_kv_lo);
         }
         // S^T[mi][sj]: rows are keys kv0+sj*16+acc_row(pair,e), column query.
         // Set outside the branch: left undefined on the inactive path, the
@@ -4224,8 +4329,11 @@ __device__ __forceinline__ void gqa_flash_prefill_v6x_body(
                     [&](int f) {
                         const int sj = f % S_TILES_J;
                         const int key = min(wmma_lane, skv - 1 - kv0 - sj * 16) + sj * 16;
-                        return HALF16_LOAD(&Kt[static_cast<unsigned>(key) * static_cast<unsigned>(D) +
-                                               (f / S_TILES_J) * 16], pair);
+                        if constexpr (PAGED)
+                            return HALF16_LOAD(Kcache + pg.offset(batch, kv0 + key, head_kv, D) + (f / S_TILES_J) * 16, pair);
+                        else
+                            return HALF16_LOAD(&Kt[static_cast<unsigned>(key) * static_cast<unsigned>(D) +
+                                                   (f / S_TILES_J) * 16], pair);
                     },
                     [&](int f, const half16_t& k_frag) {
                         #pragma unroll
@@ -4250,10 +4358,10 @@ __device__ __forceinline__ void gqa_flash_prefill_v6x_body(
             // Only tiles crossing the causal diagonal, the window's lower edge
             // or skv need a mask; every key of an interior tile is visible to
             // every query of this wave's rows.
-            bool need_mask = (kv0 + BKV > skv) || (kv0 + BKV - 1 > past_len + q_start);
+            bool need_mask = (Position(kv0) + BKV > skv) || (Position(kv0) + BKV - 1 > Position(past_len) + q_start);
             if constexpr (HAS_WINDOW)
                 need_mask = need_mask ||
-                            (kv0 < past_len + q_start + ROWS - local_window_size);
+                            (kv0 < Position(past_len) + q_start + ROWS - local_window_size);
             if (need_mask) {
                 #pragma unroll
                 for (int mi = 0; mi < M_TILES; ++mi) {
@@ -4423,7 +4531,7 @@ __device__ __forceinline__ void gqa_flash_prefill_v6x_body(
         const float inv_l = 1.0f / fmaxf(l, 1e-6f);
         const int q_pos = q_start + mi * 16 + wmma_lane;
         if (q_pos < sq) {
-            _Float16* o_row = &O[(static_cast<size_t>(batch * sq + q_pos) * Hq + head_q) * D];
+            _Float16* o_row = &O[((PAGED ? size_t(pg.cum[batch]) + q_pos : static_cast<size_t>(batch * sq + q_pos)) * Hq + head_q) * D];
             #pragma unroll
             for (int tj = 0; tj < D_TILES; ++tj)
                 #pragma unroll
@@ -4437,7 +4545,7 @@ __device__ __forceinline__ void gqa_flash_prefill_v6x_body(
 // M_TILES=2 with BKV=64 is built only for the gfx1170 WMMA encoding and not
 // as a 2-wave block (prefillV6xMt2Bkv64Built). Elsewhere no launcher picks it,
 // and the stub keeps its spilling body out of the code object.
-template <int M_TILES, int BKV, int D, bool HAS_WINDOW, int HB, int QW, bool HAS_KB>
+template <int M_TILES, int BKV, int D, bool HAS_WINDOW, int HB, int QW, bool HAS_KB, bool PAGED = false>
 __global__ void __launch_bounds__(32 * HB * QW)
 gqa_flash_prefill_v6x_kernel(
     const _Float16* __restrict__ Q, const _Float16* __restrict__ Kcache,
@@ -4445,15 +4553,15 @@ gqa_flash_prefill_v6x_kernel(
     int B_count, int Hq, int G, int sq, int skv, int max_seq, int past_len,
     float scale, const _Float16* __restrict__ head_sink, int num_heads,
     int smooth_softmax, int local_window_size,
-    const _Float16* __restrict__ key_bias, int key_bias_stride)
+    const _Float16* __restrict__ key_bias, int key_bias_stride, GqaPagedArgs pg = {})
 {
     if constexpr (M_TILES == 2 && BKV == 64 && (HIPDNN_WMMA_FRAG_ELEMS != 8 || HB * QW == 2))
         __builtin_trap();
     else
-        gqa_flash_prefill_v6x_body<M_TILES, BKV, D, HAS_WINDOW, HB, QW, HAS_KB>(
+        gqa_flash_prefill_v6x_body<M_TILES, BKV, D, HAS_WINDOW, HB, QW, HAS_KB, PAGED>(
             Q, Kcache, Vcache, O, B_count, Hq, G, sq, skv, max_seq, past_len,
             scale, head_sink, num_heads, smooth_softmax, local_window_size,
-            key_bias, key_bias_stride);
+            key_bias, key_bias_stride, pg);
 }
 
 // ---------------------------------------------------------------------
@@ -4466,9 +4574,8 @@ gqa_flash_prefill_v6x_kernel(
 // softmax itself and keeps P^T in registers for O^T = V^T P^T over its own D
 // rows. K and V tiles are staged once per block for all HB heads.
 // ---------------------------------------------------------------------
-template <int BKV, int ND, int HB, int D = 256>
-__global__ void __launch_bounds__(32 * ND * HB)
-gqa_flash_prefill_v8x_kernel(
+template <int BKV, int ND, int HB, int D = 256, bool PAGED = false>
+__device__ __forceinline__ void gqa_flash_prefill_v8x_body(
     const _Float16* __restrict__ Q,       // [B, sq, Hq, D]
     const _Float16* __restrict__ Kcache,  // [B, G, max_seq, D]
     const _Float16* __restrict__ Vcache,  // [B, G, max_seq, D]
@@ -4476,7 +4583,7 @@ gqa_flash_prefill_v8x_kernel(
     int B_count, int Hq, int G, int sq, int skv, int max_seq, int past_len,
     float scale,
     const _Float16* __restrict__ head_sink,  // [num_heads] or null
-    int num_heads, int smooth_softmax)
+    int num_heads, int smooth_softmax, GqaPagedArgs pg = {})
 {
     constexpr int NW        = ND * HB;
     constexpr int kWmmaTile = 16;
@@ -4492,8 +4599,9 @@ gqa_flash_prefill_v8x_kernel(
 
     // Same dispatch order as v6x without a window: the heads of one KV group
     // adjacent, one KV group at a time, Q tiles last-first.
-    const int num_q_tiles = (sq + ROWS - 1) / ROWS;
-    const int nqb   = num_q_tiles * B_count;
+    using Position = std::conditional_t<PAGED, int64_t, int>;
+    const int num_q_tiles = int((Position(sq) + ROWS - 1) / ROWS);
+    const int nqb   = PAGED ? num_q_tiles + B_count - 1 : num_q_tiles * B_count;
     const int cpg   = (Hq / G) / HB;
     const int bid   = static_cast<int>(blockIdx.x);
     const int qb    = (bid / cpg) % nqb;
@@ -4501,8 +4609,27 @@ gqa_flash_prefill_v8x_kernel(
     const int wave_id    = __builtin_amdgcn_readfirstlane(threadIdx.x / 32);
     const int g          = wave_id % ND;
     const int hb         = wave_id / ND;
-    const int q_tile_idx = __builtin_amdgcn_readfirstlane(num_q_tiles - 1 - qb % num_q_tiles);
-    const int batch      = __builtin_amdgcn_readfirstlane(qb / num_q_tiles);
+    int q_tile_idx = __builtin_amdgcn_readfirstlane(num_q_tiles - 1 - qb % num_q_tiles);
+    int batch      = __builtin_amdgcn_readfirstlane(qb / num_q_tiles);
+    if constexpr (PAGED) {
+        if (*pg.status) return;
+        int slot=qb;batch=-1;
+        // Sum ceil(q_len/rows) <= ceil(T/rows)+B-1. The host launches
+        // that bound; only its few unused tail slots return without work.
+        for(int request=0;request<B_count;++request) {
+            const int length=pg.cum[request+1]-pg.cum[request];
+            const int count=int((int64_t(length)+ROWS-1)/ROWS);
+            if(slot<count){batch=request;q_tile_idx=count-1-slot;break;}
+            slot-=count;
+        }
+        if(batch<0)return;
+        batch=__builtin_amdgcn_readfirstlane(batch);
+        q_tile_idx=__builtin_amdgcn_readfirstlane(q_tile_idx);
+        sq = __builtin_amdgcn_readfirstlane(pg.cum[batch+1] - pg.cum[batch]);
+        skv = __builtin_amdgcn_readfirstlane(pg.post[batch]);
+        past_len = __builtin_amdgcn_readfirstlane(pg.past[batch]);
+        if (q_tile_idx * ROWS >= sq) return;
+    }
     const int head_q     = __builtin_amdgcn_readfirstlane(chunk * HB + hb);
     const int head_kv    = __builtin_amdgcn_readfirstlane(chunk / cpg);
     const int q_start    = q_tile_idx * ROWS;
@@ -4519,14 +4646,14 @@ gqa_flash_prefill_v8x_kernel(
     float*    Sp    = reinterpret_cast<float*>(K_lds + BKV * K_STR);   // ND > 1
 
     const size_t kv_base =
-        (static_cast<size_t>(batch) * G + head_kv) * max_seq * D;
+        PAGED ? 0 : (static_cast<size_t>(batch) * G + head_kv) * max_seq * D;
 
     half16_t Q_reg[DT];
     {
         const int q_pos = q_start + wmma_lane;
         const bool valid = q_pos < sq;
         const size_t q_row_base =
-            (static_cast<size_t>(batch * sq + (valid ? q_pos : 0)) * Hq + head_q) * D;
+            ((PAGED ? size_t(pg.cum[batch]) + (valid ? q_pos : 0) : static_cast<size_t>(batch * sq + (valid ? q_pos : 0))) * Hq + head_q) * D;
         #pragma unroll
         for (int tk = 0; tk < DT; ++tk)
             Q_reg[tk] = valid ? HALF16_LOAD(&Q[q_row_base + (dt0 + tk) * 16], pair) : half16_t{};
@@ -4534,10 +4661,10 @@ gqa_flash_prefill_v8x_kernel(
 
     float8_t O_frag[DT] = {};
     float m_reg = -INFINITY, l_reg = 0.0f;
-    const int abs_q = past_len + q_start + wmma_lane;
+    const Position abs_q = Position(past_len) + q_start + wmma_lane;
 
-    const int kv_max    = (skv - 1 < past_len + q_start + ROWS - 1)
-                              ? (skv - 1) : (past_len + q_start + ROWS - 1);
+    const Position kv_max    = (skv - 1 < Position(past_len) + q_start + ROWS - 1)
+                              ? (skv - 1) : (Position(past_len) + q_start + ROWS - 1);
     const int num_tiles = kv_max / BKV + 1;
 
     // K/V staging (KvStage) as in v6x (kGqaSplitKv: the next tile's K in
@@ -4553,7 +4680,11 @@ gqa_flash_prefill_v8x_kernel(
     auto tile_k = [&](int kv0) { return Kcache + kv_base + static_cast<size_t>(kv0) * D; };
     auto tile_v = [&](int kv0) { return Vcache + kv_base + static_cast<size_t>(kv0) * D; };
     auto load_k = [&](Chunks& dst, int kv0) {
-        if (kv0 + BKV <= skv) {
+        if constexpr (PAGED) {
+            const auto tile=pg.tile(batch,head_kv,kv0,BKV,D,skv);
+            #pragma unroll
+            for (int r=0;r<kPf;++r) dst[r]=st.loadPagedK(Kcache,pg,batch,head_kv,kv0,skv,r,tile);
+        } else if (kv0 + BKV <= skv) {
             #pragma unroll
             for (int r = 0; r < kPf; ++r) dst[r] = st.template loadK<false>(tile_k(kv0), r, 0);
         } else {
@@ -4563,7 +4694,11 @@ gqa_flash_prefill_v8x_kernel(
         }
     };
     auto load_v = [&](Chunks& dst, int kv0) {
-        if (kv0 + BKV <= skv) {
+        if constexpr (PAGED) {
+            const auto tile=pg.tile(batch,head_kv,kv0,BKV,D,skv);
+            #pragma unroll
+            for (int r=0;r<kPf;++r) dst[r]=st.loadPagedV(Vcache,pg,batch,head_kv,kv0,skv,r,tile);
+        } else if (kv0 + BKV <= skv) {
             #pragma unroll
             for (int r = 0; r < kPf; ++r) dst[r] = st.template loadV<false>(tile_v(kv0), r, 0);
         } else {
@@ -4576,23 +4711,27 @@ gqa_flash_prefill_v8x_kernel(
         #pragma unroll
         for (int r = 0; r < kPf; ++r) st.storeK(K_lds, r, src[r]);
         if constexpr (kPerThr > kPf) {
-            const bool tail = kv0 + BKV > skv;
+            const bool tail = Position(kv0) + BKV > skv;
             const int k_last = (skv - kv0) * D_TILES - 1;
             #pragma unroll
-            for (int r = kPf; r < kPerThr; ++r)
-                st.storeK(K_lds, r, tail ? st.template loadK<true>(tile_k(kv0), r, k_last)
-                                         : st.template loadK<false>(tile_k(kv0), r, 0));
+            for (int r = kPf; r < kPerThr; ++r) {
+                if constexpr (PAGED) st.storeK(K_lds, r, st.loadPagedK(Kcache, pg, batch, head_kv, kv0, skv, r));
+                else st.storeK(K_lds, r, tail ? st.template loadK<true>(tile_k(kv0), r, k_last)
+                                             : st.template loadK<false>(tile_k(kv0), r, 0));
+            }
         }
     };
     auto commit_v = [&](const Chunks& src, int kv0) {
         #pragma unroll
         for (int r = 0; r < kPf; ++r) st.storeV(V_lds, r, src[r]);
         if constexpr (kPerThr > kPf) {
-            const bool tail = kv0 + BKV > skv;
+            const bool tail = Position(kv0) + BKV > skv;
             #pragma unroll
-            for (int r = kPf; r < kPerThr; ++r)
-                st.storeV(V_lds, r, tail ? st.template loadV<true>(tile_v(kv0), r, skv - kv0 - 1)
-                                         : st.template loadV<false>(tile_v(kv0), r, 0));
+            for (int r = kPf; r < kPerThr; ++r) {
+                if constexpr (PAGED) st.storeV(V_lds, r, st.loadPagedV(Vcache, pg, batch, head_kv, kv0, skv, r));
+                else st.storeV(V_lds, r, tail ? st.template loadV<true>(tile_v(kv0), r, skv - kv0 - 1)
+                                             : st.template loadV<false>(tile_v(kv0), r, 0));
+            }
         }
     };
     // This wave's fragment rows start at a runtime column (dt0); taking its
@@ -4659,7 +4798,7 @@ gqa_flash_prefill_v8x_kernel(
             }
         }
 
-        const bool need_mask = (kv0 + BKV > skv) || (kv0 + BKV - 1 > past_len + q_start);
+        const bool need_mask = (Position(kv0) + BKV > skv) || (Position(kv0) + BKV - 1 > Position(past_len) + q_start);
         if (need_mask) {
             #pragma unroll
             for (int sj = 0; sj < S_TILES_J; ++sj)
@@ -4754,7 +4893,7 @@ gqa_flash_prefill_v8x_kernel(
     const float inv_l = 1.0f / fmaxf(l, 1e-6f);
     const int q_pos = q_start + wmma_lane;
     if (q_pos < sq) {
-        _Float16* o_row = &O[(static_cast<size_t>(batch * sq + q_pos) * Hq + head_q) * D];
+        _Float16* o_row = &O[((PAGED ? size_t(pg.cum[batch]) + q_pos : static_cast<size_t>(batch * sq + q_pos)) * Hq + head_q) * D];
         #pragma unroll
         for (int tj = 0; tj < DT; ++tj)
             #pragma unroll
@@ -4762,6 +4901,23 @@ gqa_flash_prefill_v8x_kernel(
                 o_row[(dt0 + tj) * 16 + hipdnn_wmma_acc_row(pair, e)] =
                     static_cast<_Float16>(O_frag[tj][e] * inv_l);
     }
+}
+
+
+template <int BKV, int ND, int HB, int D = 256, bool PAGED = false>
+__global__ void __launch_bounds__(32 * ND * HB)
+gqa_flash_prefill_v8x_kernel(
+    const _Float16* __restrict__ Q,       // [B, sq, Hq, D]
+    const _Float16* __restrict__ Kcache,  // [B, G, max_seq, D]
+    const _Float16* __restrict__ Vcache,  // [B, G, max_seq, D]
+    _Float16* __restrict__ O,             // [B, sq, Hq, D]
+    int B_count, int Hq, int G, int sq, int skv, int max_seq, int past_len,
+    float scale,
+    const _Float16* __restrict__ head_sink,  // [num_heads] or null
+    int num_heads, int smooth_softmax, GqaPagedArgs pg = {})
+{
+  gqa_flash_prefill_v8x_body<BKV, ND, HB, D, PAGED>(Q,Kcache,Vcache,O,B_count,Hq,G,
+      sq,skv,max_seq,past_len,scale,head_sink,num_heads,smooth_softmax,pg);
 }
 
 // ---------------------------------------------------------------------
@@ -4806,7 +4962,7 @@ static inline bool prefillV6xMt2Bkv64Built(int nw) {
 }
 
 static inline int prefillV6xCandidates(int d, int Hq, int G, int local_window_size,
-                                       PrefillV6xCfg* out) {
+                                       PrefillV6xCfg* out, bool paged = false) {
     if ((d != 64 && d != 96 && d != 128) || G <= 0 || Hq % G != 0) return 0;
     static const int kLayouts[][2] = {{1, 1}, {2, 1}, {1, 4}, {2, 2}, {4, 1},
                                       {1, 8}, {2, 4}, {4, 2}, {8, 1}};
@@ -4819,7 +4975,7 @@ static inline int prefillV6xCandidates(int d, int Hq, int G, int local_window_si
         for (int mt = 1; mt <= (d == 64 ? 2 : 1); ++mt)
             for (int bkv : {32, 64}) {
                 if (d == 128 && bkv == 64 && nw != 8) continue;
-                if (mt == 2 && bkv == 64 && !prefillV6xMt2Bkv64Built(nw)) continue;
+                if (mt == 2 && bkv == 64 && (paged || !prefillV6xMt2Bkv64Built(nw))) continue;
                 out[n++] = {hb, qw, mt, bkv};
             }
     }
@@ -4838,16 +4994,20 @@ static inline bool prefillV6xBuilt(int d, int Hq, int G, int local_window_size,
     return false;
 }
 
-// Callers pass a config prefillV6xBuilt accepts for this shape.
+// Callers pass a config prefillV6xBuilt accepts for this shape. Candidate
+// probes disable config output so host I/O cannot enter their event intervals.
+template <bool PAGED = false>
 static inline void dispatchPrefillV6x(
     const PrefillV6xCfg& cfg, int d, hipStream_t stream,
     const _Float16* Q, const _Float16* Kcache, const _Float16* Vcache,
     _Float16* O, int B, int Hq, int G, int sq, int skv, int max_seq,
     int past_len, float scale,
     const _Float16* head_sink, int num_heads, int smooth_softmax,
-    int local_window_size, const _Float16* key_bias, int key_bias_stride)
+    int local_window_size, const _Float16* key_bias, int key_bias_stride,
+    bool log_config = true, GqaPagedArgs pg = {})
 {
-    static const bool s_log_cfg = gqa_autotune_log_enabled() || custom_kernels_debug_enabled();
+    const bool s_log_cfg = log_config &&
+        (gqa_autotune_log_enabled() || custom_kernels_debug_enabled());
     if (s_log_cfg)
         fprintf(stderr,
                 "[gqa-cfg] prefill v6x B=%d H=%d G=%d d=%d sq=%d skv=%d -> "
@@ -4857,17 +5017,17 @@ static inline void dispatchPrefillV6x(
     const int hb = cfg.hb, nw = cfg.hb * cfg.qw;
     const int brows = 16 * cfg.mt * cfg.qw;
     const int num_q_tiles = (sq + brows - 1) / brows;
-    dim3 grid((Hq / hb) * num_q_tiles * B);
+    dim3 grid((Hq / hb) * (PAGED ? num_q_tiles+B-1 : num_q_tiles*B));
     const size_t smem = (size_t)d * (cfg.bkv + 8) * sizeof(_Float16) +
                         (nw > 1 ? (size_t)cfg.bkv * (d + 8) * sizeof(_Float16) : 0) +
                         (nw > 1 && key_bias ? (size_t)cfg.bkv * sizeof(float) : 0);
     // Only d128 builds a key-bias variant; the entries decline the others.
     #define LAUNCH_V6X_KB(MT_, BKV_, D_, HW_, HB_, QW_, KB_)                   \
-        gqa_flash_prefill_v6x_kernel<MT_, BKV_, D_, HW_, HB_, QW_, KB_>         \
+        gqa_flash_prefill_v6x_kernel<MT_, BKV_, D_, HW_, HB_, QW_, KB_, PAGED>         \
             <<<grid, 32 * HB_ * QW_, smem, stream>>>(                           \
                 Q, Kcache, Vcache, O, B, Hq, G, sq, skv, max_seq, past_len,     \
                 scale, head_sink, num_heads, smooth_softmax, local_window_size, \
-                key_bias, key_bias_stride)
+                key_bias, key_bias_stride, pg)
     #define LAUNCH_V6X(MT_, BKV_, D_, HW_, HB_, QW_)                           \
         do {                                                                    \
             if (key_bias) LAUNCH_V6X_KB(MT_, BKV_, D_, HW_, HB_, QW_, (D_ == 128)); \
@@ -4970,29 +5130,33 @@ static inline bool prefillV8xBuilt(int d, int Hq, int G, const PrefillV8xCfg& c)
     return false;
 }
 
-// Callers pass a config prefillV8xBuilt accepts for this shape.
+// Callers pass a config prefillV8xBuilt accepts for this shape. Candidate
+// probes disable config output; the selected dispatch retains diagnostics.
+template <bool PAGED = false, int D = 256>
 static inline void dispatchPrefillV8x(
     const PrefillV8xCfg& cfg, hipStream_t stream,
     const _Float16* Q, const _Float16* Kcache, const _Float16* Vcache,
     _Float16* O, int B, int Hq, int G, int sq, int skv, int max_seq,
     int past_len, float scale,
-    const _Float16* head_sink, int num_heads, int smooth_softmax)
+    const _Float16* head_sink, int num_heads, int smooth_softmax,
+    bool log_config = true, GqaPagedArgs pg = {})
 {
-    static const bool s_log_cfg = gqa_autotune_log_enabled() || custom_kernels_debug_enabled();
+    const bool s_log_cfg = log_config &&
+        (gqa_autotune_log_enabled() || custom_kernels_debug_enabled());
     if (s_log_cfg)
         fprintf(stderr,
                 "[gqa-cfg] prefill v8x B=%d H=%d G=%d d=256 sq=%d skv=%d -> "
                 "nd=%d hb=%d bkv=%d\n",
                 B, Hq, G, sq, skv, cfg.nd, cfg.hb, cfg.bkv);
     const int num_q_tiles = (sq + 15) / 16;
-    dim3 grid((Hq / cfg.hb) * num_q_tiles * B);
-    const size_t smem = prefillV8xSmemBytes(cfg);
+    dim3 grid((Hq / cfg.hb) * (PAGED ? num_q_tiles+B-1 : num_q_tiles*B));
+    const size_t smem = size_t(D)*(cfg.bkv+8)*sizeof(_Float16)+size_t(cfg.bkv)*(D+8)*sizeof(_Float16)+size_t(cfg.hb)*cfg.nd*cfg.bkv*16*sizeof(float);
     const int layout = cfg.nd * 10 + cfg.hb;
     #define LAUNCH_V8X(BKV_, ND_, HB_)                                          \
-        gqa_flash_prefill_v8x_kernel<BKV_, ND_, HB_>                            \
+        gqa_flash_prefill_v8x_kernel<BKV_, ND_, HB_, D, PAGED>                            \
             <<<grid, 32 * ND_ * HB_, smem, stream>>>(                           \
                 Q, Kcache, Vcache, O, B, Hq, G, sq, skv, max_seq, past_len,     \
-                scale, head_sink, num_heads, smooth_softmax)
+                scale, head_sink, num_heads, smooth_softmax, pg)
     #define V8X_LAYOUT(BKV_)                                                    \
         do {                                                                    \
             if      (layout == 22) LAUNCH_V8X(BKV_, 2, 2);                      \
@@ -5128,7 +5292,7 @@ static int prefillTunedRun(
                     [&](int i) {
                         dispatchPrefillV8x(cands[i], stream, Q, Kcache, Vcache, O, B, Hq,
                                            G, sq, skv, max_seq, past_len, scale,
-                                           nullptr, Hq, 0);
+                                           nullptr, Hq, 0, false);
                     },
                     [&](int i) { return prefillV8xName(cands[i]); }, d, sq, skv);
                 cfg = cands[best];
@@ -5154,7 +5318,7 @@ static int prefillTunedRun(
                 [&](int i) {
                     dispatchPrefillV6x(cands[i], d, stream, Q, Kcache, Vcache, O, B, Hq, G,
                                        sq, skv, max_seq, past_len, scale, nullptr, Hq, 0,
-                                       local_window_size, key_bias, key_bias_stride);
+                                       local_window_size, key_bias, key_bias_stride, false);
                 },
                 [&](int i) { return prefillV6xName(cands[i]); }, d, sq, skv);
             cfg = cands[best];
@@ -5415,4 +5579,162 @@ extern "C" int hip_gqa_fused_decode(
       return -1;
   }
   GQA_RETURN_LAUNCH_STATUS();
+}
+
+// Paged launch adapters instantiate the same bodies as the dense kernels.
+// The public entry has already validated metadata and appended K/V on stream.
+template <int D>
+__global__ void __launch_bounds__(D) paged_decode_reduce(
+    const float* partial, __half* o, int H, int splits, GqaPagedArgs pg) {
+  gqa_flash_decode_reduce_body<D,true>(partial,o,H,nullptr,0,0,splits,pg);
+}
+template <int D, int HPG>
+static void launchPagedDecode(hipStream_t stream, const hip_paged_attention_f16_desc& d,
+    const void* q, float* partial, float scale, GqaPagedArgs pg, int splits) {
+  gqa_flash_decode_kernel<D,HPG,KvDtype::kF16,false,false,true><<<dim3(d.batch*d.kv_num_heads,splits),HPG*WAVE_SIZE,0,stream>>>(
+      static_cast<const __half*>(q),static_cast<const __half*>(d.k_pool),
+      static_cast<const __half*>(d.v_pool),nullptr,nullptr,partial,d.num_heads,
+      d.kv_num_heads,1,scale,nullptr,d.local_window_size,splits,nullptr,0,pg);
+}
+template <int D>
+static void dispatchPagedDecode(hipStream_t stream, const hip_paged_attention_f16_desc& d,
+    const void* q, float* partial, float scale, GqaPagedArgs pg, int splits) {
+#define PAGED_HPG(N) case N: launchPagedDecode<D,N>(stream,d,q,partial,scale,pg,splits); break
+  switch (d.num_heads/d.kv_num_heads) {
+    PAGED_HPG(1); PAGED_HPG(2); PAGED_HPG(3); PAGED_HPG(4); PAGED_HPG(5);
+    PAGED_HPG(6); PAGED_HPG(8); PAGED_HPG(16);
+    case 9: if constexpr (D==128) launchPagedDecode<D,9>(stream,d,q,partial,scale,pg,splits); break;
+  }
+#undef PAGED_HPG
+  paged_decode_reduce<D><<<d.batch*d.num_heads,D,0,stream>>>(partial,static_cast<__half*>(d.o),d.num_heads,splits,pg);
+}
+template <int D, int BKV, bool WINDOW>
+__global__ void __launch_bounds__(64) paged_prefill_legacy(
+    const _Float16* q, const _Float16* k, const _Float16* v, _Float16* o,
+    int B, int H, int G, int T, float scale, int window, GqaPagedArgs pg) {
+  gqa_flash_prefill_v6x_body<1,BKV,D,WINDOW,1,2,false,true>(q,k,v,o,B,H,G,T,1,1,0,
+      scale,nullptr,0,0,window,nullptr,0,pg);
+}
+template <int D, int BKV>
+static void launchPagedLegacy(hipStream_t stream, const hip_paged_attention_f16_desc& d,
+    const void* q, float scale, GqaPagedArgs pg) {
+  const size_t lds=(D*(BKV+8)+BKV*(D+8))*sizeof(_Float16);
+  const unsigned grid=unsigned(((size_t(d.tokens)+31)/32+size_t(d.batch)-1)*d.num_heads);
+  const auto* Q=static_cast<const _Float16*>(q);
+  const auto* K=static_cast<const _Float16*>(d.k_pool);
+  const auto* V=static_cast<const _Float16*>(d.v_pool);
+  auto* O=static_cast<_Float16*>(d.o);
+  if(d.local_window_size>0) paged_prefill_legacy<D,BKV,true><<<grid,64,lds,stream>>>(Q,K,V,O,d.batch,d.num_heads,d.kv_num_heads,d.tokens,scale,d.local_window_size,pg);
+  else paged_prefill_legacy<D,BKV,false><<<grid,64,lds,stream>>>(Q,K,V,O,d.batch,d.num_heads,d.kv_num_heads,d.tokens,scale,0,pg);
+}
+
+static bool pagedEqual(GqaPagedConfig a,GqaPagedConfig b) {
+  return a.splits==b.splits&&a.bkv==b.bkv&&a.hb==b.hb&&a.qw==b.qw&&a.mt==b.mt&&a.nd==b.nd;
+}
+GqaPagedConfig gqa_paged_legacy(const hip_paged_attention_f16_desc& d, hip_paged_attention_f16_config c) {
+  if(d.phase==HIP_PAGED_ATTENTION_DECODE) return {c.splits,c.bkv,0,0,0,0};
+  return {c.splits,c.bkv,1,d.head_dim==256?0:2,1,d.head_dim==256?2:0};
+}
+static int pagedConfigs(const hip_paged_attention_f16_desc& d,GqaPagedConfig* out) {
+  int n=0;
+  if(d.phase==HIP_PAGED_ATTENTION_DECODE) {
+    for(int splits:{0,1,2,4,8,16,32,64}) out[n++]={splits,0,0,0,0,0};
+  } else if(d.head_dim==256) {
+    PrefillV8xCfg configs[kPrefillV8xMaxCandidates];
+    const int count=prefillV8xCandidates(d.head_dim,d.num_heads,d.kv_num_heads,configs);
+    for(int i=0;i<count;++i){auto c=configs[i];out[n++]={0,c.bkv,c.hb,0,1,c.nd};}
+  } else {
+    PrefillV6xCfg configs[kPrefillV6xMaxCandidates];
+    const int count=prefillV6xCandidates(d.head_dim,d.num_heads,d.kv_num_heads,d.local_window_size,configs,true);
+    for(int i=0;i<count;++i){auto c=configs[i];out[n++]={0,c.bkv,c.hb,c.qw,c.mt,0};}
+    for(int bkv:{16,32,64}) out[n++]=gqa_paged_legacy(d,{0,bkv});
+    if(d.head_dim==128&&d.local_window_size<=0){
+      // The existing ND math is templated in D. Reuse its legal head/wave
+      // layouts; at D128 its K/V footprint is smaller than at D256.
+      PrefillV8xCfg nd_configs[kPrefillV8xMaxCandidates];
+      const int nd_count=prefillV8xCandidates(256,d.num_heads,d.kv_num_heads,nd_configs);
+      for(int i=0;i<nd_count;++i){const auto c=nd_configs[i];out[n++]={0,c.bkv,c.hb,0,1,c.nd};}
+    }
+  }
+  return n;
+}
+GqaPagedConfig gqa_paged_default(const hip_paged_attention_f16_desc& d) {
+  if(d.phase==HIP_PAGED_ATTENTION_DECODE) return {0,0,0,0,0,0};
+  const int hpg=d.kv_num_heads>0?d.num_heads/d.kv_num_heads:1;
+  int hb=hpg%4==0?4:hpg%2==0?2:1;
+  if(d.head_dim==256) return {0,32,hb,0,1,2};
+  const bool long_query=d.tokens/std::max(1,d.batch)>=512;
+  if(d.head_dim==128&&long_query&&d.local_window_size<=0) return {0,64,hb,8/hb,1,0};
+  return {0,d.head_dim==96?64:32,hb,4/hb,d.head_dim==64&&long_query?2:1,0};
+}
+bool gqa_paged_config_valid(const hip_paged_attention_f16_desc& d,GqaPagedConfig c) {
+  if(d.phase==HIP_PAGED_ATTENTION_PREFILL&&d.head_dim==256&&d.local_window_size>0) return false;
+  GqaPagedConfig configs[48];const int n=pagedConfigs(d,configs);
+  for(int i=0;i<n;++i) if(pagedEqual(c,configs[i])) return true;
+  return false;
+}
+int gqa_paged_candidate_count(const hip_paged_attention_f16_desc& d) {
+  GqaPagedConfig configs[48];return pagedConfigs(d,configs);
+}
+GqaPagedConfig gqa_paged_candidate(const hip_paged_attention_f16_desc& d,int id) {
+  GqaPagedConfig configs[48];const int n=pagedConfigs(d,configs);
+  const auto def=gqa_paged_default(d);if(id==0)return def;
+  int at=1;
+  for(int i=0;i<n;++i)if(!pagedEqual(configs[i],def)){if(at++==id)return configs[i];}
+  return {};
+}
+int gqa_paged_attention_f16_launch(void* stream_ptr, const hip_paged_attention_f16_desc& d,
+    const void* q, float* partial, GqaPagedArgs pg, GqaPagedConfig config) {
+  const auto stream=static_cast<hipStream_t>(stream_ptr);
+  const float scale=d.scale==0 ? 1.0f/std::sqrt(float(d.head_dim)) : d.scale;
+  if (d.phase==HIP_PAGED_ATTENTION_DECODE) {
+    pg.adaptive_decode=config.splits==0;
+    pg.decode_window=d.local_window_size;
+    if(pg.adaptive_decode) {
+      // Reuse the production device wave-slot target. Effective lengths are
+      // read on device; physical pool/table capacity never sets useful work.
+      const int64_t waves_per_split=int64_t(d.batch)*d.num_heads;
+      const int target=flashDecodeTargetWaves();
+      int floor=1;
+      while(floor<64 && waves_per_split*floor<target)floor*=2;
+      pg.decode_min_splits=floor;
+      config.splits=GqaPagedArgs::effective_splits(INT32_MAX,d.local_window_size,64,floor);
+    }
+    switch (d.head_dim) {
+      case 64: dispatchPagedDecode<64>(stream,d,q,partial,scale,pg,config.splits); break;
+      case 96: dispatchPagedDecode<96>(stream,d,q,partial,scale,pg,config.splits); break;
+      case 128: dispatchPagedDecode<128>(stream,d,q,partial,scale,pg,config.splits); break;
+      case 256: dispatchPagedDecode<256>(stream,d,q,partial,scale,pg,config.splits); break;
+    }
+  } else {
+    const auto* Q=static_cast<const _Float16*>(q);const auto* K=static_cast<const _Float16*>(d.k_pool);
+    const auto* V=static_cast<const _Float16*>(d.v_pool);auto* O=static_cast<_Float16*>(d.o);
+    if(d.head_dim==256)
+      dispatchPrefillV8x<true>({config.nd,config.hb,config.bkv},stream,Q,K,V,O,d.batch,d.num_heads,d.kv_num_heads,d.tokens,1,1,0,scale,nullptr,0,0,false,pg);
+    else if(d.head_dim==128&&config.nd>0)
+      dispatchPrefillV8x<true,128>({config.nd,config.hb,config.bkv},stream,Q,K,V,O,d.batch,d.num_heads,d.kv_num_heads,d.tokens,1,1,0,scale,nullptr,0,0,false,pg);
+    else if(config.hb==1&&config.qw==2&&config.mt==1) {
+#define LEGACY_D(D_) case D_: if(config.bkv==16)launchPagedLegacy<D_,16>(stream,d,q,scale,pg);else if(config.bkv==32)launchPagedLegacy<D_,32>(stream,d,q,scale,pg);else launchPagedLegacy<D_,64>(stream,d,q,scale,pg);break
+      switch(d.head_dim){LEGACY_D(64);LEGACY_D(96);LEGACY_D(128);}
+#undef LEGACY_D
+    } else
+      dispatchPrefillV6x<true>({config.hb,config.qw,config.mt,config.bkv},d.head_dim,stream,Q,K,V,O,d.batch,d.num_heads,d.kv_num_heads,d.tokens,1,1,0,scale,nullptr,0,0,d.local_window_size,nullptr,0,false,pg);
+  }
+  return hipGetLastError();
+}
+
+int gqa_paged_attention_f16_tune(void* stream_ptr,const hip_paged_attention_f16_desc& d,
+    const void* q,float* partial,GqaPagedArgs pg,GqaPagedConfig* selected) {
+  int launch_error=0;
+  const auto launch=[&](int id){
+    const int rc=gqa_paged_attention_f16_launch(stream_ptr,d,q,partial,pg,gqa_paged_candidate(d,id));
+    if(rc)launch_error=rc;
+  };
+  const auto name=[&](int id){const auto c=gqa_paged_candidate(d,id);
+    return std::to_string(c.splits)+"/"+std::to_string(c.bkv)+"/"+std::to_string(c.hb)+"/"+
+      std::to_string(c.qw)+"/"+std::to_string(c.mt)+"/"+std::to_string(c.nd);};
+  const int id=tunePrefillCandidates(static_cast<hipStream_t>(stream_ptr),gqa_paged_candidate_count(d),launch,name,d.head_dim,d.tokens,0);
+  if(launch_error||hipStreamSynchronize(static_cast<hipStream_t>(stream_ptr))!=hipSuccess)return HIP_PAGED_ATTENTION_HIP_ERROR;
+  *selected=gqa_paged_candidate(d,id);
+  return HIP_PAGED_ATTENTION_SUCCESS;
 }

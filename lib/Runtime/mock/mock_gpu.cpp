@@ -402,6 +402,28 @@ int wrap_causal_conv_with_state(
   return 0;
 }
 
+int wrap_varlen_causal_conv_with_state(
+    RuntimeState *state, const void *input, const void *weight,
+    const void *cumulative_sequence_length, const void *bias,
+    const void *initial_state, void *output, void *present_state,
+    int64_t total_tokens, int64_t channels, int64_t batch, int64_t kernel_size,
+    int64_t dilation, int64_t state_len, int64_t activation,
+    int64_t element_size_bytes) {
+  if (!state || !input || !weight || !cumulative_sequence_length ||
+      !initial_state || !output || !present_state)
+    return -1;
+  (void)bias;
+  (void)total_tokens;
+  (void)channels;
+  (void)batch;
+  (void)kernel_size;
+  (void)dilation;
+  (void)state_len;
+  (void)activation;
+  (void)element_size_bytes;
+  return 0;
+}
+
 int wrap_hipblasLtGemm(void *handle, void *stream, int64_t m, int64_t n,
                        int64_t k, const void *alpha, const void *A,
                        const void *B, const void *beta, void *C) {
@@ -727,6 +749,27 @@ int wrap_multi_head_attention(
   return 0;
 }
 
+int wrap_paged_attention_v2(
+    RuntimeState *state, int32_t op_state_slot, const void *q, const void *k,
+    const void *v, void *k_pool, void *v_pool, const int32_t *cum,
+    const int32_t *past, const int32_t *table, const void *cos_cache,
+    const void *sin_cache, const int32_t *metadata, void *output,
+    int64_t tokens, int64_t key_tokens, int64_t value_tokens,
+    int64_t output_tokens, int64_t batch, int64_t pages, int64_t value_pages,
+    int64_t page_size, int64_t value_page_size, int64_t head_dim,
+    int64_t table_batch, int64_t table_columns, int64_t cum_count,
+    int64_t metadata_count, int64_t cos_rows, int64_t sin_rows,
+    int64_t num_heads, int64_t kv_heads, int64_t window, int64_t do_rotary,
+    int64_t rotary_interleaved, float scale) {
+  MOCK_PRINT("[MOCK] wrap_paged_attention_v2\n");
+  return -1; // A mock cannot certify Page/cache execution.
+}
+
+extern "C" int8_t hipdnn_ep_op_state_construct_paged_attention(RuntimeState *,
+                                                               int32_t) {
+  return 0;
+}
+
 int wrap_linear_attention(RuntimeState *state, const void *query,
                           const void *key, const void *value,
                           const void *past_state, const void *decay,
@@ -775,6 +818,28 @@ int wrap_linear_attention(RuntimeState *state, const void *query,
              past_state ? "yes" : "null", decay ? "yes" : "null",
              beta ? "yes" : "null");
 
+  return 0;
+}
+
+int wrap_varlen_gated_delta_net(
+    RuntimeState *state, const void *qkv, const float *decay, const float *beta,
+    const void *cumulative_sequence_length, const float *initial_state,
+    const float *a_log, const float *dt_bias, void *output, float *final_state,
+    int64_t total_tokens, int64_t batch, int64_t num_heads_qk,
+    int64_t num_heads_v, int64_t head_size_qk, int64_t head_size_v, float scale,
+    int64_t element_size_bytes) {
+  if (!state || !qkv || !decay || !beta || !cumulative_sequence_length ||
+      !initial_state || !a_log || !dt_bias || !output || !final_state) {
+    fprintf(stderr,
+            "Invalid required argument in wrap_varlen_gated_delta_net\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_varlen_gated_delta_net(T=%lld, B=%lld, Hqk=%lld, "
+             "Hv=%lld, dk=%lld, dv=%lld, scale=%f, elem=%lld)\n",
+             (long long)total_tokens, (long long)batch, (long long)num_heads_qk,
+             (long long)num_heads_v, (long long)head_size_qk,
+             (long long)head_size_v, (double)scale,
+             (long long)element_size_bytes);
   return 0;
 }
 
@@ -3329,4 +3394,23 @@ int wrap_swiglu_clamped(RuntimeState *state, void *gate, void *up, void *output,
              "alpha=%g, beta=%g, limit=%g)\n",
              (long long)num_elements, (long long)data_type, alpha, beta, limit);
   return 0;
+}
+
+int wrap_paged_attention_mrope_v2(
+    RuntimeState *state, int32_t op_state_slot, const void *q, const void *k,
+    const void *v, void *k_pool, void *v_pool, const int32_t *cum,
+    const int32_t *past, const int32_t *table, const void *cos_cache,
+    const void *sin_cache, const int32_t *metadata, void *output,
+    int64_t tokens, int64_t key_tokens, int64_t value_tokens,
+    int64_t output_tokens, int64_t batch, int64_t pages, int64_t value_pages,
+    int64_t page_size, int64_t value_page_size, int64_t head_dim,
+    int64_t table_batch, int64_t table_columns, int64_t cum_count,
+    int64_t metadata_count, int64_t cos_rows, int64_t sin_rows,
+    int64_t num_heads, int64_t kv_heads, int64_t window, int64_t do_rotary,
+    int64_t rotary_interleaved, float scale, const int64_t *position_ids,
+    int64_t position_tokens, int64_t rotary_dim, int64_t section_t,
+    int64_t section_h, int64_t section_w, int64_t mrope_layout,
+    float mrope_scale) {
+  MOCK_PRINT("[MOCK] wrap_paged_attention_mrope_v2\n");
+  return -1; // A mock cannot certify fused rotary/cache/attention execution.
 }

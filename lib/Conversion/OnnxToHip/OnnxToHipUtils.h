@@ -454,6 +454,8 @@ void populateAttentionConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
 void populateOnnxAttentionConversionPatterns(RewritePatternSet &patterns,
                                              MLIRContext *ctx);
+void populatePagedAttentionConversionPatterns(RewritePatternSet &patterns,
+                                              MLIRContext *ctx);
 void populateGatherConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
 void populateCompressConversionPatterns(RewritePatternSet &patterns,
@@ -742,6 +744,8 @@ inline constexpr int64_t kMaxRotarySections = 256;
 /// tables sized by the bound rotary history. Must run BEFORE
 /// `lowerOnnxConstants` (it reads the section masks and section indices) and
 /// `convertComputeOps`. See IndexerRotaryFold.cpp.
+void populatePagedMropeFusionPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx);
 void populateIndexerRotaryFoldPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
 

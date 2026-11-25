@@ -17,7 +17,8 @@
 #ifndef HIPDNN_EP_RUNTIME_STATE_INTERNAL_H
 #define HIPDNN_EP_RUNTIME_STATE_INTERNAL_H
 
-#include "runtime_types.h"
+// The configured include paths select the real or mock runtime types.
+#include <runtime_types.h>
 // For hipdnn_output_allocator_t (the output_allocator field below). Acyclic:
 // hipdnn_ep_runtime.h only forward-declares RuntimeState; it does not include
 // this internal header.
@@ -379,6 +380,13 @@ struct RuntimeState {
   // constants blob so the weights keep placement priority over it; null when
   // the session runs without an arena.
   void *transient_arena;
+
+  // Per-session workspace for native Page validation, optional rotated Q and
+  // split-attention partials. Same grow-on-demand /
+  // never-shrink policy as la_scratch; freed in hipdnn_ep_state_cleanup. One
+  // buffer serves every attention layer because the HIP stream is serialised.
+  void *paged_attention_scratch;
+  size_t paged_attention_scratch_size;
 };
 
 // Every session-owned device transient (pools, workspace, op scratch) must be

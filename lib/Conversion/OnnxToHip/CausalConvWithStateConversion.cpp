@@ -426,10 +426,125 @@ mlir::LogicalResult DepthwiseCausalConvToHip::matchAndRewrite(
 
 } // namespace
 
+/// com.microsoft.VarlenCausalConvWithState -> hip.varlen_causal_conv_with_state
+struct VarlenCausalConvWithStateToHip : public mlir::RewritePattern {
+  VarlenCausalConvWithStateToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult VarlenCausalConvWithStateToHip::matchAndRewrite(
+    mlir::Operation *op, mlir::PatternRewriter &rewriter) const {
+  auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
+  if (!funcNameAttr || funcNameAttr.getValue() != "VarlenCausalConvWithState")
+    return rewriter.notifyMatchFailure(
+        op, "not a VarlenCausalConvWithState operation");
+
+  auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
+  if (!domainAttr || domainAttr.getValue() != "com.microsoft")
+    return rewriter.notifyMatchFailure(
+        op, "domain must be com.microsoft for VarlenCausalConvWithState");
+
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return rewriter.notifyMatchFailure(op, "missing context argument");
+  mlir::Value context = *ctxOrFailure;
+  mlir::Location loc = op->getLoc();
+
+  // input, weight, cumulative, bias (placeholder), initial_state.
+  // capture_count and state_update are a rollback side channel this path
+  // does not implement.
+  if (op->getNumOperands() != 5 || op->getNumResults() != 2)
+    return rewriter.notifyMatchFailure(
+        op, "VarlenCausalConvWithState expects 5 operands and 2 results");
+
+  auto optionalOrNull = [&](size_t idx) -> mlir::Value {
+    mlir::Value val = op->getOperand(idx);
+    if (mlir::isa<mlir::NoneType>(val.getType()))
+      return nullptr;
+    return val;
+  };
+
+  mlir::Value input = op->getOperand(0);
+  mlir::Value weight = op->getOperand(1);
+  mlir::Value cumulative = op->getOperand(2);
+  mlir::Value bias = optionalOrNull(3);
+  mlir::Value initialState = optionalOrNull(4);
+  if (!initialState)
+    return rewriter.notifyMatchFailure(op, "initial_state is required");
+
+  auto activationAttr = op->getAttrOfType<mlir::StringAttr>("activation");
+  if (!activationAttr)
+    activationAttr = rewriter.getStringAttr("none");
+  auto activation = activationAttr.getValue();
+  if (activation != "none" && activation != "silu" && activation != "swish")
+    return rewriter.notifyMatchFailure(op, "unsupported activation");
+
+  auto dilationAttrOnnx = op->getAttrOfType<mlir::IntegerAttr>("dilation");
+  int64_t dilation =
+      dilationAttrOnnx ? dilationAttrOnnx.getValue().getSExtValue() : 1;
+  if (dilation < 1)
+    return rewriter.notifyMatchFailure(op, "dilation must be at least 1");
+
+  auto capacityAttr =
+      op->getAttrOfType<mlir::IntegerAttr>("state_update_capacity");
+  if (capacityAttr && capacityAttr.getValue().getSExtValue() != 0)
+    return rewriter.notifyMatchFailure(
+        op, "state_update_capacity > 0 is unsupported");
+
+  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+  auto weightType = mlir::dyn_cast<mlir::RankedTensorType>(weight.getType());
+  auto cuType = mlir::dyn_cast<mlir::RankedTensorType>(cumulative.getType());
+  auto stateType =
+      mlir::dyn_cast<mlir::RankedTensorType>(initialState.getType());
+  if (!inputType || !weightType || !cuType || !stateType)
+    return rewriter.notifyMatchFailure(op, "operands must be ranked");
+  mlir::Type elemType = inputType.getElementType();
+  if (!elemType.isF16() && !elemType.isF32())
+    return rewriter.notifyMatchFailure(op, "only f16 and f32 are supported");
+  if (!cuType.getElementType().isInteger(32))
+    return rewriter.notifyMatchFailure(
+        op, "cumulative_sequence_length must be i32");
+
+  auto outputType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  auto presentType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(1).getType());
+
+  mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, input);
+  // present aliases the incoming carry when the caller shares the buffer.
+  mlir::Value presentInit = initialState;
+
+  mlir::SmallVector<mlir::Value> operands = {context, input, weight,
+                                             cumulative};
+  if (bias)
+    operands.push_back(bias);
+  operands.push_back(initialState);
+  operands.push_back(outputInit);
+  operands.push_back(presentInit);
+
+  auto state = mlir::OperationState(loc, "hip.varlen_causal_conv_with_state");
+  state.addOperands(operands);
+  state.addAttribute("activation", activationAttr);
+  state.addAttribute("dilation", rewriter.getI64IntegerAttr(dilation));
+  llvm::SmallVector<int32_t> segmentSizes = {1, 1, 1, 1, bias ? 1 : 0, 1, 1, 1};
+  state.addAttribute("operand_segment_sizes",
+                     rewriter.getDenseI32ArrayAttr(segmentSizes));
+  state.addTypes({outputType, presentType});
+
+  auto hipOp = rewriter.create(state);
+  rewriter.replaceOp(op, hipOp->getResults());
+  return mlir::success();
+}
+
 void populateCausalConvWithStateConversionPatterns(RewritePatternSet &patterns,
                                                    MLIRContext *ctx) {
   patterns.add<CausalConvWithStateToHip>(ctx);
   patterns.add<DepthwiseCausalConvToHip>(ctx);
+  patterns.add<VarlenCausalConvWithStateToHip>(ctx);
 }
 
 } // namespace hip

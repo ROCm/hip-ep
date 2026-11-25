@@ -9,6 +9,7 @@
 #include "ut_rank_input.h"
 #include "ut_gpu_frequency.h"
 #include "ut_case_input.h"
+#include "ut_gqa_input_binding.h"
 
 #include <cassert>
 #include <iostream>
@@ -33,6 +34,21 @@ void checkTotals(const Result& r) {
 }  // namespace
 
 int main() {
+  // COPY custom inputs must be rejected before any host KV indexing.
+  for (int hpg : {4, 5, 6, 8})
+    assert(!gqaCopyInputError(1, hpg * 2, 2, 128, 16, 2, 0, 0, 64));
+  assert(!gqaCopyInputError(1, 8, 2, 128, 16, 16, 0, 64, 64));
+  for (int total : {-1, 0, 1, 17})
+    assert(gqaCopyInputError(1, 8, 2, 128, 16, total, 0, 0, 64));
+  assert(gqaCopyInputError(2, 8, 2, 128, 16, 2, 0, 0, 64));
+  assert(gqaCopyInputError(1, 8, 0, 128, 16, 2, 0, 0, 64));
+  assert(gqaCopyInputError(1, 0, 2, 128, 16, 2, 0, 0, 64));
+  assert(gqaCopyInputError(1, 9, 2, 128, 16, 2, 0, 0, 64));
+  assert(gqaCopyInputError(1, 6, 2, 128, 16, 2, 0, 0, 64));
+  assert(gqaCopyInputError(1, 8, 2, 64, 16, 2, 0, 0, 64));
+  assert(gqaCopyInputError(1, 8, 2, 128, 16, 2, 1, 0, 64));
+  for (int splits : {-1, 65})
+    assert(gqaCopyInputError(1, 8, 2, 128, 16, 2, 0, splits, 64));
   {
     using namespace hipdnn_ep_test::input;
     int m = 0, k = 0, n = 0;
@@ -72,12 +88,12 @@ int main() {
   assert(std::string(Policy::standard().name()) == "standard");
   assert(std::string(Policy{}.name()) == "confirm");
 
-  // Stable calls stop at whichever of the call goal (after the GPU-time
-  // floor) or the GPU-time goal comes first; no global iteration cap.
+  // Confirm requires the full GPU-time goal and at least two complete calls
+  // per group. Shorter named presets keep the original v3 behavior below.
   struct Case { double call_ms; double gpu_ms; uint64_t calls; };
-  for (const Case c : {Case{0.001, 100.0, 100000}, Case{0.1, 1000.0, 10000},
-                       Case{10.0, 10000.0, 1000}, Case{3000.0, 15000.0, 5},
-                       Case{25000.0, 125000.0, 5}}) {
+  for (const Case c : {Case{0.001, 10000.0, 10000000}, Case{0.1, 10000.0, 100000},
+                       Case{10.0, 10000.0, 1000}, Case{3000.0, 30000.0, 10},
+                       Case{25000.0, 250000.0, 10}}) {
     uint64_t actual_calls = 0;
     auto r = measure(Policy{}, [&](uint32_t n) {
       assert(n >= 1 && n <= 64);

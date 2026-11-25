@@ -12310,7 +12310,7 @@
             "since_version": 1,
             "support_level": "SupportType.COMMON",
             "min_input": 8,
-            "max_input": 10,
+            "max_input": 17,
             "min_output": 1,
             "max_output": 3,
             "inputs": [
@@ -12336,13 +12336,13 @@
                     "name": "key_cache",
                     "isHomogeneous": true,
                     "option": "FormalParameterOption.Single",
-                    "typeStr": "T"
+                    "typeStr": "T_CACHE"
                 },
                 {
                     "name": "value_cache",
                     "isHomogeneous": true,
                     "option": "FormalParameterOption.Single",
-                    "typeStr": "T"
+                    "typeStr": "T_CACHE"
                 },
                 {
                     "name": "cumulative_sequence_length",
@@ -12373,6 +12373,55 @@
                     "isHomogeneous": true,
                     "option": "FormalParameterOption.Optional",
                     "typeStr": "T"
+                },
+                {
+                    "name": "slot_mapping",
+                    "isHomogeneous": true,
+                    "option": "FormalParameterOption.Optional",
+                    "typeStr": "S",
+                    "description": "Optional explicit append slots; not implemented by HIP."
+                },
+                {
+                    "name": "head_sink",
+                    "isHomogeneous": true,
+                    "option": "FormalParameterOption.Optional",
+                    "typeStr": "T",
+                    "description": "Optional per-query-head attention sinks."
+                },
+                {
+                    "name": "q_norm_weight",
+                    "isHomogeneous": true,
+                    "option": "FormalParameterOption.Optional",
+                    "typeStr": "T",
+                    "description": "Optional query RMS norm weights."
+                },
+                {
+                    "name": "k_norm_weight",
+                    "isHomogeneous": true,
+                    "option": "FormalParameterOption.Optional",
+                    "typeStr": "T",
+                    "description": "Optional key RMS norm weights."
+                },
+                {
+                    "name": "k_scale",
+                    "isHomogeneous": true,
+                    "option": "FormalParameterOption.Optional",
+                    "typeStr": "T_KV_SCALE",
+                    "description": "Optional scalar FP32 key cache quantization scale."
+                },
+                {
+                    "name": "v_scale",
+                    "isHomogeneous": true,
+                    "option": "FormalParameterOption.Optional",
+                    "typeStr": "T_KV_SCALE",
+                    "description": "Optional scalar FP32 value cache quantization scale."
+                },
+                {
+                    "name": "attention_metadata",
+                    "isHomogeneous": true,
+                    "option": "FormalParameterOption.Optional",
+                    "typeStr": "S",
+                    "description": "CPU int32[2 or 3]: query/KV upper bounds, optional KV lower bound; zero means unknown."
                 }
             ],
             "outputs": [
@@ -12386,13 +12435,13 @@
                     "name": "key_cache_out",
                     "isHomogeneous": true,
                     "option": "FormalParameterOption.Optional",
-                    "typeStr": "T"
+                    "typeStr": "T_CACHE"
                 },
                 {
                     "name": "value_cache_out",
                     "isHomogeneous": true,
                     "option": "FormalParameterOption.Optional",
-                    "typeStr": "T"
+                    "typeStr": "T_CACHE"
                 }
             ],
             "type_constraints": [
@@ -12407,6 +12456,22 @@
                     "type_param_str": "S",
                     "allowed_type_strs": [
                         "tensor(int32)"
+                    ]
+                },
+                {
+                    "type_param_str": "T_CACHE",
+                    "allowed_type_strs": [
+                        "tensor(float16)",
+                        "tensor(bfloat16)",
+                        "tensor(int8)",
+                        "tensor(float8e4m3fn)",
+                        "tensor(uint8)"
+                    ]
+                },
+                {
+                    "type_param_str": "T_KV_SCALE",
+                    "allowed_type_strs": [
+                        "tensor(float)"
                     ]
                 }
             ],
@@ -12443,6 +12508,51 @@
                 },
                 {
                     "name": "rotary_interleaved",
+                    "required": false,
+                    "type": "AttrType.INT"
+                },
+                {
+                    "name": "is_causal",
+                    "required": false,
+                    "type": "AttrType.INT"
+                },
+                {
+                    "name": "qk_norm_epsilon",
+                    "required": false,
+                    "type": "AttrType.FLOAT"
+                },
+                {
+                    "name": "k_quant_type",
+                    "required": false,
+                    "type": "AttrType.STRING"
+                },
+                {
+                    "name": "v_quant_type",
+                    "required": false,
+                    "type": "AttrType.STRING"
+                },
+                {
+                    "name": "k_cache_dtype",
+                    "required": false,
+                    "type": "AttrType.STRING"
+                },
+                {
+                    "name": "v_cache_dtype",
+                    "required": false,
+                    "type": "AttrType.STRING"
+                },
+                {
+                    "name": "kv_cache_layout",
+                    "required": false,
+                    "type": "AttrType.STRING"
+                },
+                {
+                    "name": "v_head_size",
+                    "required": false,
+                    "type": "AttrType.INT"
+                },
+                {
+                    "name": "rotary_offset",
                     "required": false,
                     "type": "AttrType.INT"
                 }

@@ -326,19 +326,87 @@ static Value skipViews(Value value) {
   return value;
 }
 
+// A memref cast preserves the pool pointer and all runtime extents. Other
+// views may change the offset or shape even when their result types agree.
+static Value skipPoolCasts(Value value) {
+  while (auto cast = value.getDefiningOp<memref::CastOp>())
+    value = cast.getSource();
+  return value;
+}
+
 /// Copy a returned buffer that is not rooted at `hip.alloc_output` into a new
 /// one and return the copy. The source is typically a graph input returned
 /// directly or through a view. The copy is what makes the output allocator run
 /// for this output index.
-static void materializePassthroughOutput(func::ReturnOp returnOp, Value ctx,
-                                         int64_t outIdx, OpBuilder &builder) {
+static LogicalResult materializePassthroughOutput(func::ReturnOp returnOp,
+                                                  Value ctx, int64_t outIdx,
+                                                  OpBuilder &builder) {
   Value source = returnOp.getOperand(outIdx);
-  if (skipViews(source).getDefiningOp<AllocOutputOp>())
-    return;
+  if (skipViews(source).getDefiningOp<AllocOutputOp>() ||
+      skipViews(source).getDefiningOp<BindOutputOp>())
+    return success();
 
   auto type = dyn_cast<MemRefType>(source.getType());
   if (!type)
-    return;
+    return success();
+
+  SmallVector<OpOperand *> pagePools;
+  Operation *firstWriter = nullptr;
+  bool incompatiblePageView = false;
+  returnOp->getParentOfType<func::FuncOp>().walk([&](Operation *operation) {
+    SmallVector<OpOperand *> pools;
+    if (auto page = dyn_cast<PagedAttentionOp>(operation))
+      pools = {&page.getKeyPoolMutable(), &page.getValuePoolMutable()};
+    else if (auto page = dyn_cast<PagedMropeAttentionOp>(operation))
+      pools = {&page.getKeyPoolMutable(), &page.getValuePoolMutable()};
+    else
+      return;
+    for (OpOperand *pool : pools) {
+      if (skipViews(pool->get()) != skipViews(source))
+        continue;
+      if (pool->get().getType() != source.getType() ||
+          skipPoolCasts(pool->get()) != skipPoolCasts(source)) {
+        incompatiblePageView = true;
+        continue;
+      }
+      pagePools.push_back(pool);
+      Operation *writer = operation;
+      while (writer->getBlock() != returnOp->getBlock() &&
+             writer->getParentOp())
+        writer = writer->getParentOp();
+      if (writer->getBlock() != returnOp->getBlock()) {
+        incompatiblePageView = true;
+        continue;
+      }
+      if (!firstWriter || writer->isBeforeInBlock(firstWriter))
+        firstWriter = writer;
+    }
+  });
+  if (incompatiblePageView)
+    return returnOp.emitError("Page cache output views require identical pool "
+                              "descriptors; refusing a full-pool copy");
+  if (!pagePools.empty()) {
+    // A returned cast may be defined after the writer. Bind its underlying
+    // pool before the writer, recreating only a pointer-preserving cast here.
+    Value pool = skipPoolCasts(source);
+    DominanceInfo dominance(returnOp->getParentOfType<func::FuncOp>());
+    if (!dominance.dominates(pool, firstWriter))
+      return returnOp.emitError(
+          "Page cache binding source must dominate its first writer");
+    builder.setInsertionPoint(firstWriter);
+    if (pool.getType() != type) {
+      if (!memref::CastOp::areCastCompatible(pool.getType(), type))
+        return returnOp.emitError(
+            "Page cache binding requires a pointer-preserving cast");
+      pool = memref::CastOp::create(builder, returnOp.getLoc(), type, pool);
+    }
+    auto bound = BindOutputOp::create(builder, returnOp.getLoc(), type, ctx,
+                                      pool, builder.getI64IntegerAttr(outIdx));
+    for (OpOperand *pool : pagePools)
+      pool->set(bound.getMemref());
+    returnOp.setOperand(outIdx, bound.getMemref());
+    return success();
+  }
 
   builder.setInsertionPoint(returnOp);
   Location loc = returnOp.getLoc();
@@ -351,6 +419,7 @@ static void materializePassthroughOutput(func::ReturnOp returnOp, Value ctx,
       builder, loc, type, ctx, dynamicSizes, builder.getI64IntegerAttr(outIdx));
   memref::CopyOp::create(builder, loc, source, allocOutput.getResult());
   returnOp.setOperand(outIdx, allocOutput.getResult());
+  return success();
 }
 
 struct UseOutputAllocatorPass
@@ -477,10 +546,15 @@ struct UseOutputAllocatorPass
     // Phase 3 -- pass-through outputs. A returned input (or a view of one)
     // never went through memref.alloc, so phase 2 did not allocate it. Copy it
     // into an EP-owned buffer so the output-allocator callback still runs.
+    // Shared Page pools instead bind their output before the first writer.
     if (returnOp)
       for (int64_t outIdx = 0;
            outIdx < static_cast<int64_t>(returnOp.getNumOperands()); ++outIdx)
-        materializePassthroughOutput(returnOp, ctx, outIdx, builder);
+        if (failed(
+                materializePassthroughOutput(returnOp, ctx, outIdx, builder))) {
+          signalPassFailure();
+          return;
+        }
   }
 };
 

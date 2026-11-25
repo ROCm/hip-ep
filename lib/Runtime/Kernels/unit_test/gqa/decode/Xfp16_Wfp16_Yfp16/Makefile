@@ -104,6 +104,9 @@ D       ?= 128
 MAX_SEQ ?= 4096
 TOTAL   ?= 2048
 
+COPY ?= 0
+SPLITS ?= 0
+
 # ---- OS-specific: run command + clean ----
 
 ifeq ($(DETECTED_OS),Windows)
@@ -252,7 +255,7 @@ test_custom: $(TARGET)
 ifeq ($(CSV_FRESH),1)
 	@$(RESET_RESULTS_CSV)
 endif
-	$(call RUN_CMD,$(TARGET)) --b $(B) --h $(H) --g $(G) --d $(D) --max-seq $(MAX_SEQ) --total $(TOTAL) --iters $(ITERS)
+	$(call RUN_CMD,$(TARGET)) --b $(B) --h $(H) --g $(G) --d $(D) --max-seq $(MAX_SEQ) --total $(TOTAL) --iters $(ITERS) --copy $(COPY) --splits $(SPLITS)
 
 # Build only. The unit_test/ aggregator passes PKG_DIR and PKG_NAME to collect the
 # exe into its hipdnn-kernel-ut package layout.

@@ -546,6 +546,8 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->matmul_dp4a_scratch_size = 0;
   state->la_scratch = nullptr;
   state->la_scratch_size = 0;
+  state->paged_attention_scratch = nullptr;
+  state->paged_attention_scratch_size = 0;
   state->gqa_fp32_adapter_scratch = nullptr;
   state->gqa_fp32_adapter_scratch_size = 0;
   state->zp_unpack_cache = nullptr;
@@ -1164,6 +1166,11 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   // The stream sync above has drained any in-flight prefill still reading it.
   if (state->la_scratch) {
     HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->la_scratch));
+  }
+
+  if (state->paged_attention_scratch) {
+    HIP_CLEANUP(
+        hipdnn_ep_state_device_free(state, state->paged_attention_scratch));
   }
 
   if (state->gqa_fp32_adapter_scratch) {
@@ -2214,6 +2221,50 @@ int hipdnn_ep_state_ensure_la_scratch(RuntimeState *state, size_t needed_size) {
   return 0;
 }
 
+void *hipdnn_ep_state_get_paged_attention_scratch(RuntimeState *state) {
+  return state ? state->paged_attention_scratch : nullptr;
+}
+
+int hipdnn_ep_state_ensure_paged_attention_scratch(RuntimeState *state,
+                                                   size_t needed_size) {
+  if (!state)
+    return -1;
+  if (needed_size == 0)
+    return 0;
+  if (state->paged_attention_scratch_size >= needed_size)
+    return 0;
+
+  size_t alloc_size = needed_size;
+  if (state->paged_attention_scratch_size > 0) {
+    size_t grown = state->paged_attention_scratch_size +
+                   state->paged_attention_scratch_size / 2;
+    if (grown > alloc_size)
+      alloc_size = grown;
+  }
+
+  if (state->paged_attention_scratch) {
+    // An earlier launch may still be reading the old buffer.
+    if (state->stream) {
+      hipStreamSynchronize(state->stream);
+    }
+    HIP_CLEANUP(
+        hipdnn_ep_state_device_free(state, state->paged_attention_scratch));
+    state->paged_attention_scratch = nullptr;
+    state->paged_attention_scratch_size = 0;
+  }
+
+  if (hipdnn_ep_state_device_alloc(state, &state->paged_attention_scratch,
+                                   alloc_size) != hipSuccess) {
+    fprintf(stderr,
+            "hipdnn_ep_state_ensure_paged_attention_scratch: allocation failed "
+            "for %zu bytes\n",
+            alloc_size);
+    return -1;
+  }
+  state->paged_attention_scratch_size = alloc_size;
+  return 0;
+}
+
 void *hipdnn_ep_state_get_error_flag_device_ptr(RuntimeState *state) {
   return state ? static_cast<void *>(state->device_error_flag) : nullptr;
 }
@@ -2235,11 +2286,20 @@ int hipdnn_ep_state_set_error_flag(RuntimeState *state, int code) {
     fprintf(stderr, "hipdnn_ep_state_set_error_flag: invalid state\n");
     return -1;
   }
-  // Same stream as the post-graph read. Synchronize before returning so the
-  // stack source is not read after this call, and so the flag is visible even
-  // if the caller returns without launching another kernel.
-  hipError_t err = hipMemcpyAsync(state->device_error_flag, &code, sizeof(code),
-                                  hipMemcpyHostToDevice, state->stream);
+  // Observe previous device validation on the graph stream first. A later
+  // wrapper failure must not overwrite the original error attribution.
+  int previous = 0;
+  hipError_t err =
+      hipMemcpyAsync(&previous, state->device_error_flag, sizeof(previous),
+                     hipMemcpyDeviceToHost, state->stream);
+  if (err != hipSuccess || hipStreamSynchronize(state->stream) != hipSuccess)
+    return -1;
+  if (previous != 0)
+    return 0;
+  // Synchronize before the stack source expires and before returning to a
+  // caller that may launch no more kernels.
+  err = hipMemcpyAsync(state->device_error_flag, &code, sizeof(code),
+                       hipMemcpyHostToDevice, state->stream);
   if (err != hipSuccess)
     return -1;
   err = hipStreamSynchronize(state->stream);

@@ -54,6 +54,8 @@ extern "C" const std::size_t runtime_bc_data_size;
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
+#include <algorithm>
+#include <locale>
 #include <windows.h>
 #else
 #include <dlfcn.h>
@@ -208,6 +210,15 @@ llvm::Error installPlatformSymbolShims(llvm::orc::LLJIT &jit) {
   add("??2@YAPEAX_K@Z", op_new_sz);     // operator new(size_t)
   add("??3@YAXPEAX@Z", op_delete);      // operator delete(void*)
   add("??3@YAXPEAX_K@Z", op_delete_sz); // operator delete(void*, size_t)
+
+  // These STL helpers are linked into the host image but are not DLL exports.
+  // Bind the host CRT functions for bitcode's search and lazy locale facets.
+  add("?_Facet_Register@std@@YAXPEAV_Facet_base@1@@Z",
+      reinterpret_cast<void *>(&std::_Facet_Register));
+#if _USE_STD_VECTOR_ALGORITHMS && _MSVC_STL_UPDATE >= 202411L
+  // Older STL releases do not provide the vectorized find_end helper.
+  add("__std_find_end_1", reinterpret_cast<void *>(&::__std_find_end_1));
+#endif
 
   // Read the `std::type_info` vtable pointer out of a live polymorphic
   // instance; `typeid(int)` shares the vtable with every other

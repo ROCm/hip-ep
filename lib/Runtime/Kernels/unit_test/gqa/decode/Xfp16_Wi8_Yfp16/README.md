@@ -2,8 +2,8 @@
 
 Standalone `hipcc`-only test for `hip_gqa_flash_decode()` against a symmetric
 per-channel INT8 KV cache. No CMake, no EP build. Entirely self-contained:
-inputs are generated in-process, no python, no data files, no
-`unit_test/common/`.
+inputs are generated in-process, no Python input generator or data files. Timing and input utilities
+come from `unit_test/common/`.
 
 ```
 make test        OFFLOAD=--offload-arch=%GFX% HIP_SDK=%HIP_SDK% [COVERAGE=1|2|3]
@@ -28,14 +28,12 @@ at **every** `COVERAGE` tier. Crossed with that is a typical context-length
 list widened to also cover a short/interactive decode length: tier3
 (default) = `{128, 512, 2048, 8192}`, tier2 = `{128, 2048, 8192}`, tier1 =
 `{2048}` alone. `COVERAGE=1|2|3` (`make test COVERAGE=N` or env
-`HIPDNN_UT_COVERAGE`) only picks which of those lengths run. At startup the
-exe prints `coverage=N -> running <n> typical length(s) x 13 categorical
-case(s) = <n*13> gqa_decode_i8 cases`. No human edits a shape list -- there
+`HIPDNN_UT_COVERAGE`) only picks which of those lengths run. Fixed D256 and attribute representatives also run at every tier.
+Startup reports the total case count. No human edits a shape list -- there
 is no `shapes.csv` or `gen_data.py` in this leaf.
 
-There is no head_dim 256 geometry: production `real/gqa.cpp` accepts an INT8
-KV cache only at head_dim 64, 96 and 128 and rejects d256 before any kernel
-launch, so the leaf stays inside that range.
+The native API additionally exercises D256. The EP wrapper in
+`real/gqa.cpp` still rejects INT8 D256 before kernel dispatch.
 
 `MODE=lookup` (default): resolves from `hip/autotune/gqa/lut/<arch>.fb` if it
 exists for the arch in `OFFLOAD`, else falls back to `autotune` with a
@@ -48,3 +46,11 @@ its `include/` (a build tool, not part of this repo):
 `unit_test/README.md`.
 
 CI passes `OFFLOAD`/`HIP_SDK` explicitly; there is no personal default.
+
+Regression property support uses the existing shared timer and public APIs.
+`test_custom` also accepts `WINDOW=0`, `SINK=0`, `SMOOTH=0`, `PAD=0`. The matching executable flags are `--window`, `--sink`, `--smooth`, `--pad`.
+The native low-level API also supports D256; the model EP wrapper rejects INT8 D256 before dispatch. These scopes are reported separately. Window/sink/smooth representatives retain the original quantization references and tolerances. Unsupported prefill attribute combinations must be declined.
+
+Online configuration logging is disabled by default (`unlogged` in CSV).
+Use `HIPDNN_UT_GQA_DIAGNOSTIC=1` only for a separate diagnostic run.
+Lookup/rank retain explicit configurations; use rank output for LUT refresh.

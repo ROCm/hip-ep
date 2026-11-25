@@ -54,6 +54,30 @@ module {
   // CHECK: hip.mrotary_embedding
   // CHECK-SAME: {mrope_section = [8, 4, 4], num_heads = 2 : i64, rotary_embedding_dim = 32 : i64, scale = 5.000000e-01 : f32}
 
+  func.func @mrope_packed_batching(
+      %x: tensor<1x?x6144xf32>,
+      %pos: tensor<3x1x?xi64>,
+      %cos: tensor<262144x32xf32>,
+      %sin: tensor<262144x32xf32>
+  ) -> tensor<1x?x6144xf32> {
+    %0 = "onnx.Custom"(%x, %pos, %cos, %sin) {
+      function_name = "MRotaryEmbedding",
+      domain_name = "com.microsoft",
+      interleaved = 0 : si64,
+      is_packed_batching = 1 : si64,
+      mrope_layout = 1 : si64,
+      mrope_section = [11 : si64, 11 : si64, 10 : si64],
+      num_heads = 24 : si64,
+      rotary_embedding_dim = 64 : si64
+    } : (tensor<1x?x6144xf32>, tensor<3x1x?xi64>, tensor<262144x32xf32>, tensor<262144x32xf32>) -> tensor<1x?x6144xf32>
+    return %0 : tensor<1x?x6144xf32>
+  }
+
+  // CHECK-LABEL: func.func @mrope_packed_batching
+  // CHECK-NOT: onnx.Custom
+  // CHECK: hip.mrotary_embedding
+  // CHECK-SAME: {mrope_layout = 1 : i64, mrope_section = [11, 11, 10], num_heads = 24 : i64, rotary_embedding_dim = 64 : i64}
+
   func.func @mrope_interleaved_attr(
       %x: tensor<1x1x512xf16>,
       %pos: tensor<3x1x1xi64>,

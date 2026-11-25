@@ -41,11 +41,17 @@ env:
   # external/llvm-project is not built.
   ONNXRUNTIME_VERSION: "1.31.0"
   ONNXRUNTIME_PR_PATCHES: ""
-  OGA_VERSION: "0.19.0"
+  # onnxruntime-genai source: a fork branch that carries the AMDGPU paged
+  # Engine path and engine_benchmark support. Pinned by commit so the OGA
+  # cache key tracks the exact source.
+  OGA_REPOSITORY: "AMDmoore/onnxruntime-genai"
+  OGA_REF: "580ee41dd317ea52d326d94e1aaacf320b389e4e"
   # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
-  # pull/<n>.diff and applied on top of v<OGA_VERSION>. Part of the OGA cache
-  # key. Remove a PR once it lands in the pinned OGA release.
-  OGA_PR_PATCHES: "2875"
+  # pull/<n>.diff and applied on top of OGA_REF. Part of the OGA cache key.
+  # Empty: the fork branch already carries everything the build needs.
+  OGA_PR_PATCHES: ""
+  # Local ABI repair for the pinned fork; the hash also binds its cache key.
+  OGA_COMPAT_PATCH_SHA256: "7e0cddb2ab069ad46d49d03955fc4646b743baa0e664e0f9a7adeef69fcccc89"
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
   AMDGPU_EP_REF: "f3dccce2a142567da050da1032617fb39db4086a"
   # Space-separated onnxruntime/onnxruntime-ep-amdgpu PR numbers applied on top
@@ -573,7 +579,7 @@ jobs:
       - name: Compute cache key
         id: key
         shell: bash
-        run: echo "value=windows-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
+        run: echo "value=windows-oga-${{ env.OGA_REF }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}-local${{ env.OGA_COMPAT_PATCH_SHA256 }}" >> "$GITHUB_OUTPUT"
 
       # Same as amdgpu: materialize a cache hit so the upload below always
       # publishes this run's copy. A later eviction must not strand the build.
@@ -636,12 +642,21 @@ jobs:
         if: steps.cache-oga.outputs.cache-hit != 'true'
         uses: mozilla-actions/sccache-action@v0.0.9
 
+      - name: Checkout OGA compatibility patch
+        if: steps.cache-oga.outputs.cache-hit != 'true'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: false
+          sparse-checkout: cmake/oga-wordpiece-types.patch
+          sparse-checkout-cone-mode: false
+          show-progress: false
+
       - name: Checkout OGA
         if: steps.cache-oga.outputs.cache-hit != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: microsoft/onnxruntime-genai
-          ref: v${{ env.OGA_VERSION }}
+          repository: ${{ env.OGA_REPOSITORY }}
+          ref: ${{ env.OGA_REF }}
           path: source-oga
           submodules: true
           # Full history: `git apply --3way` below resolves each hunk against the
@@ -688,6 +703,20 @@ jobs:
             }
           }
 
+      - name: Apply pinned OGA word-piece ABI repair
+        if: steps.cache-oga.outputs.cache-hit != 'true'
+        shell: bash
+        working-directory: source-oga
+        run: |
+          set -euo pipefail
+          # Hash canonical Git bytes; a Windows checkout may convert to CRLF.
+          PATCH_FILE="$(mktemp)"
+          trap 'rm -f "$PATCH_FILE"' EXIT
+          git -C .. show HEAD:cmake/oga-wordpiece-types.patch > "$PATCH_FILE"
+          printf '%s  %s\n' "$OGA_COMPAT_PATCH_SHA256" "$PATCH_FILE" | sha256sum --check --strict
+          git -c core.autocrlf=input apply --check "$PATCH_FILE"
+          git -c core.autocrlf=input apply "$PATCH_FILE"
+
       - name: Prepare ORT_HOME for OGA
         if: steps.cache-oga.outputs.cache-hit != 'true'
         shell: bash
@@ -703,6 +732,13 @@ jobs:
 
       - name: Build OGA
         if: steps.cache-oga.outputs.cache-hit != 'true'
+        # The original extensions repository returns 404. This mirror retains
+        # OGA's exact e2e119c08b4379d038bcb5c75d9111328a9b86c1 commit. Scope
+        # the transport mapping to this step; keep OGA's deps.txt pins intact.
+        env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: "url.https://github.com/Liquid4All/onnxruntime-extensions.git.insteadOf"
+          GIT_CONFIG_VALUE_0: "https://github.com/microsoft/onnxruntime-extensions.git"
         shell: bash
         run: |
           # OGA build.py's util.dependency_resolver imports requests at module
@@ -713,11 +749,12 @@ jobs:
           # ENABLE_TESTS=OFF is not redundant with --skip_tests: build.py only
           # turns the option off for mobile targets, so on desktop --skip_tests
           # skips *running* the tests while still building them. This job needs
-          # only the DLL, model_benchmark and the wheel.
+          # only the DLL, model_benchmark, engine_benchmark and the wheel.
           python "${{ github.workspace }}/source-oga/build.py" \
             --config Release \
             --cmake_generator Ninja \
             --use_dml \
+            --build_engine_benchmark \
             --no_telemetry \
             --ort_home "$ORT_HOME" \
             --skip_tests --skip_examples \
@@ -732,6 +769,16 @@ jobs:
           OGA_OUT="${{ runner.workspace }}/build-oga/Release"
           cp "$OGA_OUT/benchmark/c/model_benchmark.exe" "${{ runner.workspace }}/oga-artifacts/"
           cp "$OGA_OUT/onnxruntime-genai.dll" "${{ runner.workspace }}/oga-artifacts/"
+          ENGINE_BENCH=$(find "$OGA_OUT" -name engine_benchmark.exe -type f | head -1)
+          if [ -z "$ENGINE_BENCH" ]; then
+            echo "ERROR: engine_benchmark.exe not found under $OGA_OUT"
+            exit 1
+          fi
+          cp "$ENGINE_BENCH" "${{ runner.workspace }}/oga-artifacts/"
+          # engine_benchmark refuses to start without versions.json beside it.
+          printf '{"ort_version": "%s", "cuda_plugin_ep_version": "n/a"}\n' \
+            "${{ env.ONNXRUNTIME_VERSION }}" \
+            > "${{ runner.workspace }}/oga-artifacts/versions.json"
           # Cache the cp314 OGA Python wheel alongside the other OGA artifacts.
           # Output path: build-oga/Release/wheel/onnxruntime_genai_directml-0.13.0.dev0-cp314-cp314-win_amd64.whl
           OGA_WHEEL=$(find "${{ runner.workspace }}/build-oga" \

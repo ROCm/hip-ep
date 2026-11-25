@@ -47,6 +47,163 @@
 extern "C" {
 #endif
 
+/* FP16 paged causal self-attention. The descriptor is host resident; every
+ * tensor, metadata and workspace pointer is device accessible on stream.
+ * Q/O: [T,Hq,D], new K/V: [T,Hkv,D], pools: [P,S,Hkv,D], table: [B,M].
+ * cum[B+1] starts at zero and ends at T; past[B] is the length BEFORE append.
+ * All inputs and metadata are readonly. K/V pools are updated in place.
+ * Prefill and decode are separate calls selected explicitly by phase. Decode
+ * accepts zero or one new token per request; empty requests produce no rows.
+ *
+ * Caller owns page allocation/COW: each appended physical slot has one writer
+ * and cannot alias another request's historical read region. Readonly prefix
+ * sharing is allowed. No allocator, reference counts or full-history gather.
+ * O/workspace/pools are mutually disjoint and cannot overlap readonly inputs.
+ * Readonly inputs may alias each other. Keep all storage and metadata stable
+ * until stream completion; workspace reuse requires completion of its last call.
+ *
+ * Rotary is optional split-half full-D only (rotary_dim == D, interleaved=0).
+ * cos/sin: [max_position,D/2], FP16, indexed by past[b]+local query position.
+ * Only Q and NEW K rotate, with FP16 storage rounding; V and old K do not.
+ * local_window_size <= 0 means full causal history, W>0 includes current token.
+ * scale=0 selects 1/sqrt(D); finite positive scale is used unchanged.
+ * softcap=0 only. Prefill D256 with positive window is unsupported.
+ * D: 64/96/128/256. Decode Hq/Hkv: 1/2/3/4/5/6/8/16, plus 9 at D128.
+ * Prefill accepts positive integer Hq/Hkv. The public entry uses a geometry
+ * heuristic; decode adapts splits on device to the effective length/window (up to 64).
+ * Explicit preparation below permits online tuning outside hot submissions.
+ *
+ * Workspace query is CPU-only, independent of metadata values/pointers. Align
+ * Q/new K/new V/pools/O need 16-byte alignment, int32 metadata needs 4-byte
+ * alignment, and cos/sin need 2-byte alignment. Sizes and launch-grid products
+ * must fit size_t and the internal signed 32-bit grid index. Align
+ * workspace to 256 bytes. On a successful nonempty submission its first int32
+ * is device status (hip_paged_attention_device_status_t). Read it by D2H AFTER
+ * stream completion. Zero host return means launches submitted, not valid O.
+ * Metadata is validated on device before append; error suppresses all writes
+ * to O/pools. HIP execution failures still require the usual stream error check.
+ * T=0 is a no-launch no-op after geometry/options validation; null storage is
+ * permitted, required workspace=0, and no device-status word is written.
+ */
+typedef enum hip_paged_attention_phase_t {
+  HIP_PAGED_ATTENTION_PREFILL = 0,
+  HIP_PAGED_ATTENTION_DECODE = 1
+} hip_paged_attention_phase_t;
+
+typedef enum hip_paged_attention_status_t {
+  HIP_PAGED_ATTENTION_SUCCESS = 0,
+  HIP_PAGED_ATTENTION_INVALID_ARGUMENT = -1,
+  HIP_PAGED_ATTENTION_UNSUPPORTED = -2,
+  HIP_PAGED_ATTENTION_WORKSPACE_TOO_SMALL = -3,
+  HIP_PAGED_ATTENTION_HIP_ERROR = -4
+} hip_paged_attention_status_t;
+
+typedef enum hip_paged_attention_device_status_t {
+  HIP_PAGED_ATTENTION_DEVICE_SUCCESS = 0,
+  HIP_PAGED_ATTENTION_BAD_CUM = 1,
+  HIP_PAGED_ATTENTION_BAD_PAST = 2,
+  HIP_PAGED_ATTENTION_BAD_DECODE_LENGTH = 3,
+  HIP_PAGED_ATTENTION_POST_OVERFLOW = 4,
+  HIP_PAGED_ATTENTION_TABLE_TOO_SMALL = 5,
+  HIP_PAGED_ATTENTION_BAD_PAGE = 6,
+  HIP_PAGED_ATTENTION_BAD_POSITION = 7,
+  HIP_PAGED_ATTENTION_WRITE_CONFLICT = 8
+} hip_paged_attention_device_status_t;
+
+typedef struct hip_paged_attention_f16_desc {
+  const void *q, *k_new, *v_new;
+  void *k_pool, *v_pool, *o;
+  const int32_t *block_table, *cum, *past_seqlens;
+  const void *cos_cache, *sin_cache;
+  int32_t batch, tokens, num_heads, kv_num_heads, head_dim;
+  int32_t num_pages, page_size, table_columns, max_position;
+  hip_paged_attention_phase_t phase;
+  int32_t do_rotary, rotary_interleaved, rotary_dim;
+  int32_t local_window_size;
+  float scale, softcap;
+} hip_paged_attention_f16_desc;
+
+/* Legacy Page geometry. Decode: bkv=0, explicit power-of-two splits 1..64. Prefill:
+ * splits=0, bkv=16/32/64 (D<=128), 16/32 (D256 without window).
+ * Table/native IDs are never passed to the configured entry. */
+typedef struct hip_paged_attention_f16_config {
+    int splits;
+    int bkv;
+} hip_paged_attention_f16_config;
+HIP_KERNEL_API int hip_paged_attention_f16_configured(
+    void* stream, const hip_paged_attention_f16_desc* desc,
+    void* workspace, size_t workspace_bytes,
+    const hip_paged_attention_f16_config* config);
+
+/* Versioned geometry. Decode splits=0 selects device-length adaptive dispatch;
+ * positive splits retain explicit power-of-two geometry. D128 full-history Page uses the
+ * shared ND2/ND4 geometry (qw=0, mt=1, bkv=16/32); D256 keeps that layout.
+ * The original two-int configured ABI above
+ * keeps its fixed legacy layout. Size is checked before reading this config. */
+typedef struct hip_paged_attention_f16_config_v2 {
+    int splits, bkv, hb, qw, mt, nd;
+} hip_paged_attention_f16_config_v2;
+HIP_KERNEL_API int hip_paged_attention_f16_configured_v2(
+    void* stream, const hip_paged_attention_f16_desc* desc,
+    void* workspace, size_t workspace_bytes,
+    const hip_paged_attention_f16_config_v2* config, size_t config_size);
+
+/* Explicit online preparation. Size-checks config before reading/writing it.
+ * Runs the validated append once, then tunes shared GQA attention launches on
+ * these actual buffers. This call synchronizes and must stay outside hot calls
+ * and graph capture. It may write valid O/pools; invalid metadata retains the
+ * usual device-status/no-visible-writes contract and returns a safe default.
+ * No implicit cache, metadata readback, or tuning occurs in configured_v2.
+ * Caller owns the returned config and its shape/device applicability. */
+HIP_KERNEL_API int hip_paged_attention_f16_prepare_v2(
+    void* stream,const hip_paged_attention_f16_desc* desc,
+    void* workspace,size_t workspace_bytes,
+    hip_paged_attention_f16_config_v2* config,size_t config_size);
+
+/* Read back the last successfully selected launch on this host thread. */
+HIP_KERNEL_API int hip_paged_attention_f16_last_config_v2(
+    hip_paged_attention_f16_config_v2* config, size_t config_size);
+
+HIP_KERNEL_API int hip_paged_attention_f16_workspace_size(
+    const hip_paged_attention_f16_desc *desc, size_t *bytes);
+HIP_KERNEL_API int hip_paged_attention_f16(
+    void *stream, const hip_paged_attention_f16_desc *desc,
+    void *workspace, size_t workspace_bytes);
+
+/* Fused packed MRoPE -> FP16 Page. The attention math/config ABI is unchanged.
+ * page supplies V, pools, output, request/page metadata and attention options;
+ * page.do_rotary must be 0. Its q/k_new/cos_cache/sin_cache are unused.
+ * q/k_new: FP32 [T,Hq*D]/[T,Hkv*D]; cos/sin: FP32 [max_position,R/2].
+ * position_ids is contiguous i64 [3,1,T] (or the same flattened [3,T]).
+ * It is independent of past_seqlens: cache append uses past+local token,
+ * whereas each rotary frequency uses its explicit temporal/height/width id.
+ * R=rotary_dim is positive/even and <=D; sections sum to R/2. Layout 0/1
+ * matches hip_mrope_forward. Out-of-cache positions retain its unrotated-copy
+ * semantics. FP32 rotation completes before a single FP16 rounding boundary.
+ * Only new K is rotated; history and V are never rotated. Q preparation and
+ * rotary/cast/paged-KV append share one kernel before the existing attention.
+ * All ordinary Page storage/status/window restrictions still apply. */
+typedef struct hip_paged_attention_mrope_f16_desc {
+  hip_paged_attention_f16_desc page;
+  const float *q, *k_new, *cos_cache, *sin_cache;
+  const int64_t *position_ids;
+  int32_t rotary_dim, max_position;
+  int32_t section_t, section_h, section_w, mrope_layout;
+  float rotary_scale;
+} hip_paged_attention_mrope_f16_desc;
+HIP_KERNEL_API int hip_paged_attention_mrope_f16_workspace_size(
+    const hip_paged_attention_mrope_f16_desc *desc, size_t *bytes);
+HIP_KERNEL_API int hip_paged_attention_mrope_f16_configured_v1(
+    void *stream, const hip_paged_attention_mrope_f16_desc *desc,
+    void *workspace, size_t workspace_bytes,
+    const hip_paged_attention_f16_config_v2 *config, size_t config_size);
+/* Explicit untimed preparation; the same ownership/synchronization contract
+ * as hip_paged_attention_f16_prepare_v2. No tuning in configured_v1. */
+HIP_KERNEL_API int hip_paged_attention_mrope_f16_prepare_v1(
+    void *stream, const hip_paged_attention_mrope_f16_desc *desc,
+    void *workspace, size_t workspace_bytes,
+    hip_paged_attention_f16_config_v2 *config, size_t config_size);
+
 // tq4_mse_qr_v1: B1/Hq24/G4/D256, BSHD FP16 inputs, packed BNSD cache.
 // Each row is 33 u32 words: FP32 norm then 32 words of centroid indices.
 HIP_KERNEL_API size_t hip_tq4_decode_workspace(int valid_length);
@@ -4041,6 +4198,19 @@ HIP_KERNEL_API int hip_causal_conv_nlc_state(
     int64_t activation,
     int64_t element_size_bytes);
 
+// Packed token-major causal depthwise conv. input/output are
+// [total_tokens, channels]; weight is [channels, 1, kernel_size];
+// cumulative_sequence_length is device int32 [batch + 1]; both states are
+// [batch, channels, (kernel_size - 1) * dilation] and may alias. activation
+// 0/1, element_size 2/4. state_len must be at most 32. Returns 0 on success.
+HIP_KERNEL_API int hip_varlen_causal_conv(
+    void *stream, const void *input, const void *weight,
+    const void *cumulative_sequence_length, const void *bias,
+    const void *initial_state, void *output, void *present_state,
+    int64_t total_tokens, int64_t channels, int64_t batch, int64_t kernel_size,
+    int64_t dilation, int64_t state_len, int64_t activation,
+    int64_t element_size_bytes);
+
 // com.microsoft GatedDeltaNet with packed QKV, gate_activation=qwen,
 // beta_activation=sigmoid, qk_l2_norm=1, update_rule=gated_delta.
 //   qkv           [B, L, 2*Hqk*dk + Hv*dv]   T = fp16 / fp32 (element_size_bytes)
@@ -4062,6 +4232,30 @@ HIP_KERNEL_API int hip_gated_delta_net(
     float* final_state,
     int64_t batch,
     int64_t seq_len,
+    int64_t num_heads_qk,
+    int64_t num_heads_v,
+    int64_t head_size_qk,
+    int64_t head_size_v,
+    float scale,
+    int element_size_bytes);
+
+// Ragged variant of hip_gated_delta_net. qkv is [T, P], decay and beta are
+// [T, Hv], output is [T, Hv, dv]; cumulative_sequence_length is int32 device
+// memory of length batch + 1 with cu[0] == 0 and cu[batch] == total_tokens.
+// A request whose range is empty or out of bounds leaves its state unchanged.
+HIP_KERNEL_API int hip_varlen_gated_delta_net(
+    void* stream,
+    const void* qkv,
+    const float* decay,
+    const float* beta,
+    const void* cumulative_sequence_length,
+    const float* initial_state,
+    const float* a_log,
+    const float* dt_bias,
+    void* output,
+    float* final_state,
+    int64_t total_tokens,
+    int64_t batch,
     int64_t num_heads_qk,
     int64_t num_heads_v,
     int64_t head_size_qk,
