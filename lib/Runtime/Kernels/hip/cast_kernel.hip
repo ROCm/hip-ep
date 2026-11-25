@@ -183,10 +183,71 @@ __global__ void cast_f16_to_i32_kernel(
   }
 }
 
-// Generic integer<->integer cast (used for the uint8 paths that the per-pair
-// kernels above don't cover). static_cast handles narrowing/widening per C++
-// rules; the kernels above stay as-is so existing FP paths keep their bespoke
-// __float2half / __half2float intrinsics.
+// double -> binary16 with one rounding (round to nearest even). Going through
+// float first rounds twice and can land on the wrong side of an f16 tie. HIP
+// has no double -> half intrinsic, so the IEEE bits are rounded directly.
+// NaN returns the canonical quiet NaN 0x7e00.
+__device__ static inline uint16_t f64_to_f16_bits_rn(double value) {
+  const uint64_t bits = __builtin_bit_cast(uint64_t, value);
+  const uint16_t sign = static_cast<uint16_t>((bits >> 48) & 0x8000u);
+  const int exp_field = static_cast<int>((bits >> 52) & 0x7ffu);
+  const uint64_t frac = bits & ((1ull << 52) - 1);
+  if (exp_field == 0x7ff) {
+    return frac != 0 ? static_cast<uint16_t>(0x7e00)
+                     : static_cast<uint16_t>(sign | 0x7c00);
+  }
+  // Zero, and double subnormals (far below the smallest half subnormal).
+  if (exp_field == 0) {
+    return sign;
+  }
+  const int e = exp_field - 1023;  // value = m * 2^(e - 52), m in [2^52, 2^53)
+  if (e > 15) {                    // at least 2^16: overflows to infinity
+    return static_cast<uint16_t>(sign | 0x7c00);
+  }
+  const uint64_t m = frac | (1ull << 52);
+  // Bits dropped from m: 42 for a normal half (10 fraction bits). A subnormal
+  // half has quantum 2^-24, which drops more bits.
+  const int shift = 42 + (e < -14 ? -14 - e : 0);
+  if (shift >= 54) {  // m < 2^53 is below half of the quantum: rounds to zero
+    return sign;
+  }
+  uint64_t q = m >> shift;
+  const uint64_t rem = m & ((1ull << shift) - 1);
+  const uint64_t half = 1ull << (shift - 1);
+  if (rem > half || (rem == half && (q & 1))) {
+    ++q;
+  }
+  if (e >= -14) {
+    // q is in [1024, 2048]; 2048 carries into the next binade.
+    int biased = e + 15;
+    if (q == 2048) {
+      q = 1024;
+      ++biased;
+    }
+    if (biased >= 31) {
+      return static_cast<uint16_t>(sign | 0x7c00);
+    }
+    return static_cast<uint16_t>(sign | (biased << 10) | (q - 1024));
+  }
+  // Subnormal half: q is the bit pattern. q == 1024 is the smallest normal.
+  return static_cast<uint16_t>(sign | q);
+}
+
+__global__ void cast_f64_to_f16_kernel(
+    const double* __restrict__ input,
+    __half* __restrict__ output,
+    int64_t num_elements) {
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    output[idx] = __ushort_as_half(f64_to_f16_bits_rn(input[idx]));
+  }
+}
+
+// Generic static_cast. Integer pairs use it directly, and so does f64 <->
+// integer: routing those through fp32 would drop every integer wider than
+// 24 bits. Float -> integer truncates toward zero. The kernels above stay
+// as-is so existing FP paths keep their __float2half / __half2float
+// intrinsics.
 template <typename Src, typename Dst>
 __global__ void cast_int_to_int_kernel(
     const Src* __restrict__ input,
@@ -270,6 +331,17 @@ __global__ void cast_f16_to_ui8_kernel(
 }
 
 template <typename Src, typename Dst>
+static int launch_cast_direct(hipStream_t stream, const void* input,
+                              void* output, int64_t num_elements,
+                              int grid_size, int block_size) {
+  hipLaunchKernelGGL(HIP_KERNEL_NAME(cast_int_to_int_kernel<Src, Dst>),
+                     dim3(grid_size), dim3(block_size), 0, stream,
+                     static_cast<const Src*>(input),
+                     static_cast<Dst*>(output), num_elements);
+  return 0;
+}
+
+template <typename Src, typename Dst>
 static int launch_cast_via_float(hipStream_t stream, const void* input,
                                  void* output, int64_t num_elements,
                                  int grid_size, int block_size) {
@@ -298,6 +370,61 @@ static int launch_cast_bf16(hipStream_t stream, const void* input,
     return dispatch_dtype(input_dtype, [&](auto src) {
       using Src = typename decltype(src)::type;
       return launch_cast_via_float<Src, __hip_bfloat16>(
+          stream, input, output, num_elements, grid_size, block_size);
+    });
+  }
+  return -1;
+}
+
+// f64 <-> f32 uses the float conversion path. f64 -> f16 is rounded once
+// directly from the double (cast_f64_to_f16_kernel), not through fp32. f64 <->
+// integer is a direct static_cast: routing i64 through fp32 would drop every
+// integer wider than 24 bits. bf16 <-> f64 stays on launch_cast_bf16, which
+// rounds twice (through fp32).
+static int launch_cast_f64(hipStream_t stream, const void* input,
+                           void* output, int64_t num_elements,
+                           int input_dtype, int output_dtype,
+                           int grid_size, int block_size) {
+  auto isF16OrF32 = [](int dtype) {
+    return dtype == HIP_DTYPE_FLOAT16 || dtype == HIP_DTYPE_FLOAT32;
+  };
+  auto isInt = [](int dtype) {
+    return dtype == HIP_DTYPE_INT64 || dtype == HIP_DTYPE_INT32 ||
+           dtype == HIP_DTYPE_INT16 || dtype == HIP_DTYPE_INT8 ||
+           dtype == HIP_DTYPE_UINT8;
+  };
+  if (input_dtype == HIP_DTYPE_FLOAT64 && output_dtype == HIP_DTYPE_FLOAT16) {
+    hipLaunchKernelGGL(cast_f64_to_f16_kernel, dim3(grid_size),
+                       dim3(block_size), 0, stream,
+                       static_cast<const double*>(input),
+                       static_cast<__half*>(output), num_elements);
+    return 0;
+  }
+  if (input_dtype == HIP_DTYPE_FLOAT64 && isF16OrF32(output_dtype)) {
+    return dispatch_dtype(output_dtype, [&](auto dst) {
+      using Dst = typename decltype(dst)::type;
+      return launch_cast_via_float<double, Dst>(
+          stream, input, output, num_elements, grid_size, block_size);
+    });
+  }
+  if (output_dtype == HIP_DTYPE_FLOAT64 && isF16OrF32(input_dtype)) {
+    return dispatch_dtype(input_dtype, [&](auto src) {
+      using Src = typename decltype(src)::type;
+      return launch_cast_via_float<Src, double>(
+          stream, input, output, num_elements, grid_size, block_size);
+    });
+  }
+  if (input_dtype == HIP_DTYPE_FLOAT64 && isInt(output_dtype)) {
+    return dispatch_dtype(output_dtype, [&](auto dst) {
+      using Dst = typename decltype(dst)::type;
+      return launch_cast_direct<double, Dst>(
+          stream, input, output, num_elements, grid_size, block_size);
+    });
+  }
+  if (output_dtype == HIP_DTYPE_FLOAT64 && isInt(input_dtype)) {
+    return dispatch_dtype(input_dtype, [&](auto src) {
+      using Src = typename decltype(src)::type;
+      return launch_cast_direct<Src, double>(
           stream, input, output, num_elements, grid_size, block_size);
     });
   }
@@ -462,6 +589,10 @@ extern "C" int hip_cast(
                        dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
                        static_cast<const int16_t*>(input),
                        static_cast<uint8_t*>(output), num_elements);
+  } else if (launch_cast_f64(hip_stream, input, output, num_elements,
+                             input_dtype, output_dtype, grid_size,
+                             kBlockSize) == 0) {
+    // f64 <-> {f32, f16} launched.
   } else if (launch_cast_bf16(hip_stream, input, output, num_elements,
                               input_dtype, output_dtype, grid_size,
                               kBlockSize) == 0) {

@@ -4,16 +4,19 @@
  *
  * Standalone unit test for hip_cast with bf16 on one side of the cast.
  *
- * Covers bf16 <-> {f32, f16, f64, i64, i32, i16, i8, u8} (16 pairs) and the
- * three "unsupported" exits of the bf16 dispatch. Every output is compared
- * bit-exactly with a CPU reference computed in this file with plain integer
- * bit operations; it does not use the HIP conversion intrinsics the kernel
- * uses.
+ * Covers bf16 <-> {f32, f16, f64, i64, i32, i16, i8, u8} (16 pairs),
+ * f64 <-> {f32, f16, i64, i32, i16, i8, u8} (14 pairs), and the conversions
+ * the dispatch still rejects. Every output is compared bit-exactly with a CPU
+ * reference computed in this file with plain integer bit operations; it does
+ * not use the HIP conversion intrinsics the kernel uses.
  *
- * Reference semantics (same as the kernel and PyTorch): every bf16 cast goes
- * through fp32. fp32 -> bf16 and fp32 -> fp16 round to nearest even, so f64
- * and i64 sources round twice (first to fp32). float -> integer truncates
- * toward zero. A NaN result matches any NaN (payloads may differ).
+ * Reference semantics (same as the kernel and PyTorch): f32 and f16 sides go
+ * through fp32. fp32 -> bf16 and fp32 -> fp16 round to nearest even, so an
+ * f64 -> bf16 or i64 source rounds twice (first to fp32). f64 -> f16 is the
+ * exception: one correct rounding. float -> integer truncates toward zero. A NaN result matches any
+ * NaN (payloads may differ). f64 <-> integer is a direct static_cast of the
+ * double (f64 -> integer, and integer -> f64), so a value wider than the fp32
+ * mantissa is not rounded through fp32 first.
  *
  * Each case runs twice with two different fill bytes in the output buffer,
  * which has guard elements on both sides: an element the kernel did not write
@@ -231,11 +234,101 @@ void store_from_float(int dtype, std::vector<uint8_t>& out, int64_t i,
   }
 }
 
+// f64 -> integer truncates the double toward zero. Routing it through fp32
+// would change every value the fp32 mantissa cannot hold.
+bool is_direct_f64_to_int(int src, int dst) {
+  return src == kF64 && (dst == kI64 || dst == kI32 || dst == kI16 ||
+                         dst == kI8 || dst == kU8);
+}
+
+// f64 -> f16 with one correct rounding (round to nearest even), computed with
+// exact double arithmetic. The device kernel is checked against this, not
+// against a two-step f64 -> f32 -> f16 path, which can differ by one f16 ulp
+// when the double lies just off an f16 tie.
+uint16_t f64_to_f16_direct(double d) {
+  if (std::isnan(d)) {
+    return 0x7e00;
+  }
+  const uint16_t sign = std::signbit(d) ? 0x8000 : 0;
+  const double a = std::fabs(d);
+  if (a == 0.0) {
+    return sign;
+  }
+  if (std::isinf(a)) {
+    return static_cast<uint16_t>(sign | 0x7c00);
+  }
+  int e = 0;
+  std::frexp(a, &e);  // a = m * 2^e with m in [0.5, 1)
+  // Quantum of the result: 2^(E-10) for a normal half (E = floor(log2 a)),
+  // 2^-24 for a subnormal one.
+  const int E = e - 1;
+  const double q = std::ldexp(1.0, (E >= -14 ? E : -14) - 10);
+  // a / q and the product are exact; nearbyint rounds to nearest even.
+  const double r = std::nearbyint(a / q) * q;
+  if (r == 0.0) {
+    return sign;
+  }
+  if (r > 65504.0) {  // 65520 and up round to infinity
+    return static_cast<uint16_t>(sign | 0x7c00);
+  }
+  int re = 0;
+  std::frexp(r, &re);
+  const int R = re - 1;  // r = 1.f * 2^R
+  if (R < -14) {         // subnormal: bits = r / 2^-24
+    const auto bits = static_cast<uint16_t>(std::ldexp(r, 24));
+    return static_cast<uint16_t>(sign | bits);
+  }
+  const uint16_t exp_bits = static_cast<uint16_t>(R + 15);
+  const uint16_t mant = static_cast<uint16_t>(std::ldexp(r, 10 - R) - 1024.0);
+  return static_cast<uint16_t>(sign | (exp_bits << 10) | mant);
+}
+
+// integer -> f64 is a direct static_cast (one rounding to double). Routing it
+// through fp32 would round every integer wider than 24 bits twice.
+bool is_direct_int_to_f64(int src, int dst) {
+  return dst == kF64 && (src == kI64 || src == kI32 || src == kI16 ||
+                         src == kI8 || src == kU8);
+}
+
+void store_direct_int_to_f64(int src, std::vector<uint8_t>& out, int64_t i,
+                             const std::vector<uint8_t>& in) {
+  double value = 0.0;
+  switch (src) {
+  case kI64: value = static_cast<double>(get<int64_t>(in, i)); break;
+  case kI32: value = static_cast<double>(get<int32_t>(in, i)); break;
+  case kI16: value = static_cast<double>(get<int16_t>(in, i)); break;
+  case kI8: value = static_cast<double>(get<int8_t>(in, i)); break;
+  case kU8: value = static_cast<double>(get<uint8_t>(in, i)); break;
+  default: std::abort();
+  }
+  put<double>(out, i, value);
+}
+
+void store_direct_from_f64(int dst, std::vector<uint8_t>& out, int64_t i,
+                           double value) {
+  switch (dst) {
+  case kI64: put<int64_t>(out, i, static_cast<int64_t>(value)); break;
+  case kI32: put<int32_t>(out, i, static_cast<int32_t>(value)); break;
+  case kI16: put<int16_t>(out, i, static_cast<int16_t>(value)); break;
+  case kI8: put<int8_t>(out, i, static_cast<int8_t>(value)); break;
+  case kU8: put<uint8_t>(out, i, static_cast<uint8_t>(value)); break;
+  default: std::abort();
+  }
+}
+
 std::vector<uint8_t> reference(int src, int dst, const std::vector<uint8_t>& in,
                                int64_t n) {
   std::vector<uint8_t> out(static_cast<size_t>(n * dtype_size(dst)));
   for (int64_t i = 0; i < n; ++i) {
-    store_from_float(dst, out, i, load_as_float(src, in, i));
+    if (is_direct_f64_to_int(src, dst)) {
+      store_direct_from_f64(dst, out, i, get<double>(in, i));
+    } else if (src == kF64 && dst == kF16) {
+      put<uint16_t>(out, i, f64_to_f16_direct(get<double>(in, i)));
+    } else if (is_direct_int_to_f64(src, dst)) {
+      store_direct_int_to_f64(src, out, i, in);
+    } else {
+      store_from_float(dst, out, i, load_as_float(src, in, i));
+    }
   }
   return out;
 }
@@ -342,6 +435,11 @@ std::vector<uint8_t> make_f64(int64_t n, Rng& rng) {
       1e-40,   // f32 subnormal after the first step (no flush to zero)
       1.0 + 0x1p-8,           // exact in fp32, bf16 tie -> 1.0
       1.0 + 0x1p-8 + 0x1p-40, // rounds to the tie in fp32 first -> 1.0
+      // Just off an f16 tie. The correctly rounded result is 0x3c01 for both.
+      // Rounding through fp32 first would land them on the ties (0x3c00 and
+      // 0x3c02 after round-to-even), so this input checks the single rounding.
+      1.0 + 0x1p-11 + 0x1p-30,
+      1.0 + 0x1p-10 + 0x1p-11 - 0x1p-30,
   };
   const int64_t ns = static_cast<int64_t>(sizeof(specials) / sizeof(double));
   std::vector<uint8_t> v(static_cast<size_t>(n * 8));
@@ -445,11 +543,49 @@ std::vector<uint8_t> make_bf16_in_range(int64_t n, int dst, Rng& rng) {
   return v;
 }
 
+// f64 -> integer is a direct static_cast. Stay inside the destination so
+// the truncation result is representable; an out-of-range cast is undefined.
+std::vector<uint8_t> make_f64_in_range(int64_t n, int dst, Rng& rng) {
+  const bool is_signed = dst != kU8;
+  const int bits = dtype_size(dst) * 8;
+  const double lowest = is_signed ? -std::ldexp(1.0, bits - 1) : 0.0;
+  const double limit = is_signed ? std::ldexp(1.0, bits - 1)
+                                 : std::ldexp(1.0, bits);
+  // The largest double below limit. limit - 1.0 is not usable for 64-bit
+  // integers: 2^63 - 1 is not a double, so it rounds back to 2^63.
+  const double largest = std::nextafter(limit, 0.0);
+  const double specials_signed[] = {
+      0.0, -0.0, 1.0, -1.0, 1.9, -1.9, 0.5, -0.5, lowest, largest,
+  };
+  const double specials_unsigned[] = {0.0, 1.0, 1.9, 0.5, largest};
+  const double* specials = is_signed ? specials_signed : specials_unsigned;
+  const int64_t ns = is_signed ? 10 : 5;
+  std::vector<uint8_t> v(static_cast<size_t>(n * 8));
+  for (int64_t i = 0; i < n; ++i) {
+    if (i < ns) {
+      put<double>(v, i, specials[i]);
+      continue;
+    }
+    const uint64_t r = rng.next();
+    const double unit = static_cast<double>(r >> 11) * 0x1p-53;
+    double value = lowest + unit * (limit - lowest);
+    if (value >= limit) {  // rounding can reach limit at the top
+      value = largest;
+    }
+    put<double>(v, i, value);
+  }
+  return v;
+}
+
 std::vector<uint8_t> make_input(int src, int dst, int64_t n, uint64_t seed) {
   Rng rng(seed);
   switch (src) {
   case kF32: return make_f32(n, rng);
-  case kF64: return make_f64(n, rng);
+  case kF64:
+    if (is_direct_f64_to_int(src, dst)) {
+      return make_f64_in_range(n, dst, rng);
+    }
+    return make_f64(n, rng);
   case kI64: return make_i64(n, rng);
   case kI32: return make_i32(n, rng);
   case kF16:
@@ -725,11 +861,17 @@ int main(int argc, char** argv) {
     pairs.push_back({kBF16, other});
     pairs.push_back({other, kBF16});
   }
+  // f64 <-> the dtypes above that are not bf16. f64 <-> integer is a direct
+  // static_cast (launch_cast_direct); f64 <-> f32/f16 goes through fp32.
+  for (int other : {kF32, kF16, kI64, kI32, kI16, kI8, kU8}) {
+    pairs.push_back({kF64, other});
+    pairs.push_back({other, kF64});
+  }
 
-  // The three -1 exits of launch_cast_bf16: unsupported output dtype,
-  // unsupported input dtype, and neither side bf16.
+  // Still rejected: bf16 <-> u16, and f64 <-> u16 (u16 is not an f64
+  // integer endpoint, and neither side is bf16).
   const std::pair<int, int> unsupported[] = {
-      {kBF16, kU16}, {kU16, kBF16}, {kF64, kI8}};
+      {kBF16, kU16}, {kU16, kBF16}, {kF64, kU16}, {kU16, kF64}};
 
   int size_count = 0;
   for (const Size& size : kSizes) {
