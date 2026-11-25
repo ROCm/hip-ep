@@ -189,10 +189,8 @@ inline int64_t getHipdnnInputDataType(mlir::Type elemType) {
 // Both import as an 8-bit MLIR type at the LOGICAL element count, so the
 // element type keeps the signedness but cannot express the width, and the
 // buffer holds only ceil(numel/2) bytes -- two values per byte, low nibble
-// first, over the flattened row-major sequence. `packed_bits` is how that
-// width travels from wherever it is still observable to the QDQ converters,
-// and it names the width rather than asserting one so that a narrower packing
-// -- which the type cannot distinguish from a 4-bit one -- can say so too.
+// first, over the flattened row-major sequence. `packed_int4` is how that
+// width travels from wherever it is still observable to the QDQ converters.
 //
 // Constant lowering is the only producer of the marker, and it can only reach
 // DequantizeLinear: a packed buffer is observable there as a halved backing
@@ -201,10 +199,8 @@ inline int64_t getHipdnnInputDataType(mlir::Type elemType) {
 // to end but nothing stamps it yet.
 //===----------------------------------------------------------------------===//
 
-/// Names the sub-byte width of a QuantizeLinear / DequantizeLinear's quantized
-/// side: 4 for ONNX INT4 / UINT4, 2 for a 2-bit payload, absent or 0 for whole
-/// bytes.
-constexpr llvm::StringLiteral kPackedBitsAttr = "packed_bits";
+/// Marks a QuantizeLinear / DequantizeLinear whose quantized side is packed.
+constexpr llvm::StringLiteral kPackedInt4Attr = "packed_int4";
 
 /// Lower a variadic ONNX operation to a chain of binary HIP operations.
 /// Use each pair's broadcast shape for its intermediate result type.
@@ -834,6 +830,13 @@ void populatePowDecompositionPatterns(RewritePatternSet &patterns,
 void populateErfGeluFusionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 
+/// Pre-lowering pattern set: fuse Reshape(x, [0, G, -1]) ->
+/// InstanceNormalization(1, 0) -> Reshape(_, Shape(x)) -> [Mul gamma] ->
+/// [Add beta] -> [x * Sigmoid(x)] into com.microsoft GroupNorm (NCHW).
+/// See GroupNormDecompositionFusion.cpp.
+void populateGroupNormDecompositionFusionPatterns(RewritePatternSet &patterns,
+                                                  MLIRContext *ctx);
+
 /// Pre-lowering pattern set: decompose vision/projector ops that have no
 /// direct MorphiZen converter into supported primitives —
 /// AveragePool(kernel==stride) → Reshape/Transpose/ReduceMean, Pow(x, c) →
@@ -863,6 +866,13 @@ void populateHardSigmoidConversionPatterns(RewritePatternSet &patterns,
 /// "existing" ops by the next round and reach `convertComputeOps`'s
 /// converters as ordinary onnx.* ops. See LpNormalizationConversion.cpp.
 void populateLpNormalizationConversionPatterns(RewritePatternSet &patterns,
+                                               MLIRContext *ctx);
+
+/// Pre-lowering pattern set: decompose `onnx.ReduceSumSquare` into
+/// onnx.Mul + onnx.ReduceSum, its ONNX function body. Lives in the
+/// pre-lowering loop for the same reason as LpNormalization. See
+/// ReduceSumSquareConversion.cpp.
+void populateReduceSumSquareConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx);
 
 } // namespace hip
