@@ -1,0 +1,808 @@
+#
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the MIT License.
+#
+"""Export portable paper evidence without running inference or modifying sources.
+
+Use --verify to check a previously exported packet without the model or ROCm.
+Large raw traces live in a local ZIP; small raw timing/quality rows are also
+included in the versioned packet. Missing matrix cells remain explicit.
+"""
+
+import argparse
+import csv
+import gzip
+import hashlib
+import json
+import math
+import subprocess
+import zipfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def load(path):
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def git(root, *args):
+    return subprocess.check_output(["git", "-C", str(root), *args]).decode().strip()
+
+
+def put(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(value, indent=2, allow_nan=False) + "\n", encoding="utf-8"
+    )
+
+
+def table(path, rows):
+    assert rows
+    fields = list(dict.fromkeys(key for row in rows for key in row))
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def export_bfcl_rows(folder, raw):
+    """Keep every portable file below the repository's 500 KiB file bound."""
+    base = folder / "raw/native/bfcl-v4-50"
+    parts = []
+    for index, offset in enumerate(range(0, len(raw), 256 * 1024)):
+        data = raw[offset : offset + 256 * 1024]
+        compressed = gzip.compress(data, mtime=0)
+        name = f"row-parts/{index:05d}.bin.gz"
+        path = base / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(compressed)
+        parts.append(
+            dict(
+                file=name,
+                bytes=len(compressed),
+                sha256=digest(compressed),
+                uncompressed_bytes=len(data),
+                uncompressed_sha256=digest(data),
+            )
+        )
+    put(
+        base / "rows-parts.json",
+        dict(
+            format="Decompress the gzip byte chunks and concatenate them in listed order to restore the exact UTF-8 rows.jsonl. Individual chunks can split JSON records or UTF-8 sequences.",
+            uncompressed_bytes=len(raw),
+            uncompressed_sha256=digest(raw),
+            parts=parts,
+        ),
+    )
+
+
+def audit_memory_case(folder, row):
+    protocol = (folder / "protocol.json").read_bytes()
+    samples = (folder / "samples.jsonl").read_bytes()
+    assert digest(protocol) == row["protocol_sha256"]
+    assert digest(samples) == row["samples_sha256"]
+    for name, expected in row["source_sha256"].items():
+        assert digest((folder / "source" / name).read_bytes()) == expected
+    frames = [json.loads(line) for line in samples.splitlines()]
+    assert frames
+    mapping = {
+        "peak_rss_bytes": "rss_bytes",
+        "peak_private_commit_bytes": "private_commit_bytes",
+        "worker_lifetime_peak_rss_bytes": "worker_lifetime_peak_rss_bytes",
+        "worker_lifetime_peak_private_commit_bytes": "worker_lifetime_peak_private_commit_bytes",
+        "peak_gpu_dedicated_bytes": "gpu_dedicated_bytes",
+        "peak_gpu_shared_bytes": "gpu_shared_bytes",
+        "peak_gpu_committed_bytes": "gpu_committed_bytes",
+    }
+    for phase, reported in row["memory"].items():
+        selected = (
+            frames
+            if phase == "overall"
+            else [frame for frame in frames if frame["phase"] == phase]
+        )
+        assert len(selected) == reported["samples"]
+        for metric, field in mapping.items():
+            values = [
+                frame[field] for frame in selected if frame.get(field) is not None
+            ]
+            assert reported[metric] == (max(values) if values else None), (
+                folder,
+                phase,
+                metric,
+            )
+        assert reported["minimum_system_ram_available_bytes"] == min(
+            frame["system_ram_available_bytes"] for frame in selected
+        )
+    if row["status"] == "complete":
+        worker = row["worker_result"]
+        assert (
+            worker["status"] == "complete"
+            and worker["finite"]
+            and worker["cache_pointers_unchanged"]
+        )
+        assert worker["prefill_calls"] == 1 and worker["decode_calls"] == 8
+        assert worker["context"] == row["context"] and worker["batch"] == row["batch"]
+        assert worker["capacity"] == row["context"] + 64
+
+
+def verify(folder):
+    manifest = load(folder / "manifest.json")
+    for name, expected in manifest["files"].items():
+        data = (folder / name).read_bytes()
+        assert len(data) == expected["bytes"] and digest(data) == expected["sha256"], (
+            name
+        )
+    for variant in ["Original", "Changed"]:
+        base = folder / "raw/native/quality" / variant
+        audit = load(base / "audit.json")
+        for task in ["ppl", "gsm8k"]:
+            data = gzip.decompress((base / (task + ".jsonl.gz")).read_bytes())
+            assert digest(data) == audit["row_files_sha256"][task]
+            rows = [json.loads(line) for line in data.splitlines()]
+            assert len(rows) == (64 if task == "ppl" else 128)
+            if task == "ppl":
+                targets = sum(row["targets"] for row in rows)
+                ppl = math.exp(sum(row["nll_sum"] for row in rows) / targets)
+                assert targets == audit["targets"] and math.isclose(
+                    ppl, audit["ppl"], rel_tol=1e-12
+                )
+            else:
+                assert sum(row["correct"] for row in rows) == audit["gsm_correct"]
+    for case in load(folder / "performance.json")["native"]:
+        base = folder / "raw/native/performance" / f"{case['context']}-b{case['batch']}"
+        summary, protocol = load(base / "summary.json"), load(base / "protocol.json")
+        raw = (base / "rows.jsonl").read_bytes()
+        assert digest(raw) == summary["rows_sha256"]
+        assert (
+            digest((base / "protocol.json").read_bytes()) == summary["protocol_sha256"]
+        )
+        rows = [json.loads(line) for line in raw.splitlines()]
+        measured = [row for row in rows if not row.get("warmup", False)]
+        for phase in ["prefill", "decode"]:
+            means = {}
+            for variant in ["Original", "Changed"]:
+                selected = [row for row in measured if row["variant"] == variant]
+                assert len(selected) == 6
+                means[variant] = sum(row[phase + "_seconds"] for row in selected) / 6
+                tokens = protocol["batch"] * (
+                    protocol["context"] if phase == "prefill" else 64
+                )
+                assert math.isclose(
+                    tokens / means[variant],
+                    summary["phases"][phase][variant]["tokens_s"],
+                    rel_tol=1e-12,
+                )
+            gain = 100 * (means["Original"] / means["Changed"] - 1)
+            assert math.isclose(
+                gain,
+                summary["phases"][phase]["throughput_change_percent"],
+                abs_tol=1e-10,
+            )
+    memory = load(folder / "memory.json")
+    assert len(memory["cases"]) == 18
+    assert (
+        len({(x["batch"], x["context"], x["variant"]) for x in memory["cases"]}) == 18
+    )
+    bfcl = load(folder / "quality.json").get("native_bfcl_v4_pilot")
+    if bfcl:
+        assert bfcl["status"] == "complete" and bfcl["cases"] == 50
+        base = folder / "raw/native/bfcl-v4-50"
+        descriptor = load(base / "rows-parts.json")
+        chunks = []
+        for part in descriptor["parts"]:
+            compressed = (base / part["file"]).read_bytes()
+            assert (
+                digest(compressed) == part["sha256"]
+                and len(compressed) == part["bytes"]
+            )
+            data = gzip.decompress(compressed)
+            assert (
+                digest(data) == part["uncompressed_sha256"]
+                and len(data) == part["uncompressed_bytes"]
+            )
+            chunks.append(data)
+        raw = b"".join(chunks)
+        assert (
+            digest(raw) == descriptor["uncompressed_sha256"]
+            and len(raw) == descriptor["uncompressed_bytes"]
+        )
+        assert digest(raw) == bfcl["rows_sha256"]
+        rows = [json.loads(line) for line in raw.splitlines()]
+        assert len(rows) == 100 and len({(r["variant"], r["id"]) for r in rows}) == 100
+        for variant, values in bfcl["variants"].items():
+            selected = [r for r in rows if r["variant"] == variant]
+            assert len(selected) == values["cases"] == 50
+            assert sum(r["correct"] for r in selected) == values["correct"]
+        workload = load(folder / "quality.json")["native_bfcl_workload_audit"]
+        assert workload["status"] == "passed" and workload["complete"]
+        assert workload["rows_sha256"] == bfcl["rows_sha256"]
+        turns = list(
+            csv.DictReader(
+                (folder / "raw/native/bfcl-v4-50/turns.csv").open(
+                    newline="", encoding="utf-8"
+                )
+            )
+        )
+        assert len(turns) == workload["observed_turn_records"]
+        for variant, values in bfcl["variants"].items():
+            groups = workload["groups_by_frozen_initial_prompt"][variant].values()
+            assert sum(g["cases"] for g in groups) == 50
+            assert sum(g["correct"] for g in groups) == values["correct"]
+            assert (
+                sum(int(t["model_calls"]) for t in turns if t["variant"] == variant)
+                == values["generation_calls"]
+            )
+    descriptor = load(folder / "archive.json")
+    archive_path = Path(descriptor["path"])
+    if archive_path.exists():
+        data = archive_path.read_bytes()
+        assert len(data) == descriptor["bytes"] and digest(data) == descriptor["sha256"]
+        with zipfile.ZipFile(archive_path) as archive:
+            members = json.loads(archive.read("MANIFEST.json"))
+            assert set(archive.namelist()) == set(members) | {"MANIFEST.json"}
+            for name, expected in members.items():
+                raw = archive.read(name)
+                assert (
+                    len(raw) == expected["bytes"] and digest(raw) == expected["sha256"]
+                ), name
+            assert (
+                digest(archive.read("packet-tools/package_evidence.py"))
+                == load(folder / "provenance.json")["packet_script_sha256"]
+            )
+        print("Local raw archive and every member checksum verified.")
+    else:
+        print(
+            "Local raw archive unavailable on this machine; portable files checked, archive checksum retained in archive.json."
+        )
+    print(
+        "Packet hashes, raw quality totals, timing arithmetic and 18-cell memory coverage verified."
+    )
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--evidence-root", type=Path, default=ROOT)
+    parser.add_argument("--source-root", type=Path, default=ROOT.parent / "sparse-attn")
+    parser.add_argument(
+        "--output", type=Path, default=ROOT / "docs/reproducibility/qwen-hip-ep"
+    )
+    parser.add_argument(
+        "--archive",
+        type=Path,
+    )
+    parser.add_argument("--verify", action="store_true")
+    args = parser.parse_args()
+    if args.verify:
+        verify(args.output)
+        return
+    root, source, out = (
+        args.evidence_root.resolve(),
+        args.source_root.resolve(),
+        args.output.resolve(),
+    )
+    work = root / "_local/qwen-qsa"
+    if args.archive is None:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        args.archive = work / "paper-handoff-v1" / ("raw-evidence-" + stamp + ".zip")
+    assert not args.archive.exists(), (
+        "Preserve prior archives; choose a fresh --archive path"
+    )
+    assert not (root / "_local/qsa/gpu-stage.lock").exists(), (
+        "Pause probes at a case boundary before making an immutable evidence packet"
+    )
+    out.mkdir(parents=True, exist_ok=True)
+    args.archive.parent.mkdir(parents=True, exist_ok=True)
+    raw_files = {}
+    raw_files["packet-tools/package_evidence.py"] = Path(__file__).read_bytes()
+
+    def capture(path, name, portable=False, compressed=False):
+        if not path.exists():
+            return
+        data = path.read_bytes()
+        raw_files[name] = data
+        if portable:
+            destination = out / "raw" / (name + (".gz" if compressed else ""))
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(
+                gzip.compress(data, mtime=0) if compressed else data
+            )
+
+    for path in work.glob("*.json"):
+        capture(path, "native/receipts/" + path.name, portable=True)
+    for path in work.glob("*.log"):
+        capture(path, "native/logs/" + path.name)
+    for name in ["build-command.json", "build.cmd"]:
+        capture(
+            work / "pr-candidate/native-gqa" / name,
+            "native/candidate-build/" + name,
+            portable=name.endswith(".json"),
+        )
+    for variant in ["Original", "Changed"]:
+        capture(
+            work / "native-gqa/models" / variant / "default.onnx",
+            "native/measured-graphs/" + variant + "/default.onnx",
+        )
+    capture(
+        root.parent / "hip-ep-turboquant/models/qwen-original/text.onnx",
+        "native/template/text.onnx",
+    )
+    for path in [
+        source / "HIP_EP_QWEN_HANDOFF.md",
+        source / "QWEN_METHODS.md",
+        source / "QWEN_PERFORMANCE.md",
+        source / "docs/reproducibility/qwen-hip-ep-manifest.json",
+    ]:
+        capture(path, "mi355x/source-documents/" + path.name)
+    for pattern in [
+        "native-gqa/*validation.json",
+        "native-gqa/compiler-tests.log",
+        "native-gqa/build-command.json",
+        "native-gqa/build.cmd",
+        "native-gqa/models/*/export.json",
+        "native-gqa/ort-profiles/*.json",
+        "native-gqa/paired-performance/*/*",
+        "native-gqa/quality/*/*",
+        "timing-v1/*",
+        "long-quality-v1/*.json",
+        "long-quality-default/**/*",
+        "memory-v1/**/*",
+        "memory-only-v1/**/*",
+        "bfcl-v4-50/**/*",
+        "audit/**/*",
+    ]:
+        for path in sorted(work.glob(pattern)):
+            if not path.is_file() or path.suffix not in [
+                ".json",
+                ".jsonl",
+                ".py",
+                ".log",
+                ".txt",
+                ".cmd",
+                ".csv",
+                ".done",
+            ]:
+                continue
+            if "model-cache" in path.parts:
+                continue
+            name = "native/" + path.relative_to(work).as_posix()
+            name = name.replace(
+                "native/native-gqa/paired-performance/", "native/performance/"
+            )
+            name = name.replace("native/native-gqa/quality/", "native/quality/")
+            portable = (
+                "/performance/" in name
+                or "/quality/" in name
+                or path.name.endswith("validation.json")
+            )
+            if "/audit/" in name and path.suffix == ".json":
+                portable = (
+                    "ort-profiles" not in path.parts
+                    and path.stat().st_size < 450 * 1024
+                )
+            if "/quality/" in name and path.suffix not in [".json", ".jsonl"]:
+                portable = False
+            is_bfcl_rows = "/bfcl-v4-50/" in name and path.name == "rows.jsonl"
+            if "/bfcl-v4-50/" in name:
+                portable = path.parent == work / "bfcl-v4-50" and path.name in [
+                    "summary.json",
+                    "manifest.json",
+                    "protocol.json",
+                    "audit.json",
+                    "initial-profile.json",
+                    "checker-self-test.json",
+                    "token-audit.json",
+                    "finalization-tools.json",
+                    "rows.jsonl",
+                    "cases.csv",
+                    "generations.csv",
+                    "categories.csv",
+                    "turns.csv",
+                ]
+            if is_bfcl_rows:
+                export_bfcl_rows(out, path.read_bytes())
+                portable = False
+            capture(
+                path,
+                name,
+                portable,
+                compressed="/quality/" in name and path.suffix == ".jsonl",
+            )
+    # Preserve OLMo and shared-runtime evidence for the complete stacked PR.
+    olmo = root / "_local/qsa"
+    for path in sorted((olmo / "stages").glob("qwen-*/**/*")):
+        if path.is_file() and path.suffix in [".json", ".jsonl", ".py", ".log", ".txt"]:
+            capture(
+                path, "native/stages/" + path.relative_to(olmo / "stages").as_posix()
+            )
+    host_inventory = load(olmo / "environment.json")
+    capture(olmo / "environment.json", "olmo/environment.json", portable=True)
+    support = load(work / "default-4-support.json")
+    assert host_inventory["torch"] == support["torch"]
+    assert host_inventory["torch_hip"] == support["hip"]
+    put(
+        out / "environment.json",
+        {
+            "schema_version": 1,
+            "scope": "Historical host inventory captured for the preceding OLMo campaign on the same workstation; GPU, Torch and HIP agree with Qwen support receipts. Available RAM at receipt is not a workload peak.",
+            "inventory": host_inventory,
+            "qwen_support_receipt": "raw/native/receipts/default-4-support.json",
+            "transformers": load(work / "native-support.json")["transformers"],
+            "memory_warning": "Distinguish installed-memory inventory, OS-managed RAM, WDDM dedicated/shared gauges and driver commitment; do not infer physical residency or add overlapping gauges.",
+        },
+    )
+    for pattern in [
+        "native-gqa/*audit.json",
+        "native-gqa/*validation.json",
+        "native-gqa/build-receipt.json",
+        "native-gqa/paired-performance/**/*",
+        "native-gqa/paired-quality/**/*",
+        "native-gqa/gsm8k/**/*",
+        "native-gqa/bfcl-v4/**/*",
+    ]:
+        for path in sorted(olmo.glob(pattern)):
+            if path.is_file() and path.suffix in [".json", ".jsonl", ".txt", ".log"]:
+                capture(path, "olmo/" + path.relative_to(olmo).as_posix())
+    source_packet = source / "docs/reproducibility/qwen-trained-performance.json"
+    mi355 = load(source_packet)
+    capture(source_packet, "mi355x/qwen-trained-performance.json", portable=True)
+    source_memory = source / "docs/reproducibility/memory-summary.json"
+    mi355_memory = load(source_memory)
+    capture(source_memory, "mi355x/memory-summary.json", portable=True)
+    for relative, expected in {
+        **mi355_memory["raw_sha256"],
+        **mi355_memory["protocol_sha256"],
+    }.items():
+        path = source / "runs/303626" / relative
+        assert digest(path.read_bytes()) == expected
+        capture(path, "mi355x/runs/303626/" + relative, portable=True)
+    for job in ["303195", "303045", "303046", "303626"]:
+        for path in sorted((source / "runs" / job).glob("*")):
+            if path.is_file() and path.suffix in [".json", ".jsonl", ".txt", ".log"]:
+                capture(path, "mi355x/runs/" + job + "/" + path.name)
+    source_raw = source / "runs/303195/performance.jsonl"
+    assert digest(source_raw.read_bytes()) == mi355["raw_sha256"]
+    handoff = load(work / "handoff-verification.json")
+    selector_manifest = load(source / "docs/reproducibility/qwen-hip-ep-manifest.json")
+    payload = source / selector_manifest["portable_export"]["path"]
+    assert digest(payload.read_bytes()) == handoff["selector_sha256"]
+    capture(payload, "source-inputs/" + selector_manifest["portable_export"]["path"])
+    for name in ["test.json", "gsm8k.json"]:
+        path = source / "data/qwen-selector-v1" / name
+        assert digest(path.read_bytes()) == handoff["data_sha256"][name]
+        capture(path, "source-inputs/data/qwen-selector-v1/" + name)
+    snapshot = Path(handoff["backbone"]["snapshot"])
+    for name in [
+        "config.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+        "generation_config.json",
+    ]:
+        capture(snapshot / name, "native/model-metadata/" + name)
+    identity = {
+        key: handoff[key]
+        for key in [
+            "model",
+            "revision",
+            "selector_sha256",
+            "parameters",
+            "tensors",
+            "data_sha256",
+        ]
+    }
+    identity.update(
+        schema_version=1,
+        layers=[27, 31, 35, 39],
+        training_updates_in_hip_ep=0,
+        native_representation="Fresh RTN W4A16 group128; FP16 activation/KV; FP32 recurrent state; BF16 selector",
+        mi355x_representation="Source BF16 backbone; frozen BF16 selector",
+        selector_pt_sha256=mi355["selector_sha256"],
+    )
+    put(out / "identity.json", identity)
+    performance = [
+        load(path)
+        for path in sorted(
+            (work / "native-gqa/paired-performance").glob("*-b*/summary.json")
+        )
+    ]
+    put(
+        out / "performance.json",
+        {
+            "schema_version": 1,
+            "native": performance,
+            "mi355x": mi355,
+            "join_warning": "Join by model revision, raw selector tensors, dataset IDs, context and batch. Precision, runtime, greedy vs teacher-forced inputs and statistics differ; do not pool absolute TPS or paired gains.",
+        },
+    )
+    perf_rows = []
+    for case in performance:
+        for phase, values in case["phases"].items():
+            perf_rows.append(
+                {
+                    "platform": "Radeon 8060S gfx1151",
+                    "batch": case["batch"],
+                    "context": case["context"],
+                    "phase": phase,
+                    "original_tokens_per_second": values["Original"]["tokens_s"],
+                    "qsa_tokens_per_second": values["Changed"]["tokens_s"],
+                    "throughput_change_percent": values["throughput_change_percent"],
+                    "paired_95_low_percent": values["paired_95_interval_percent"][0],
+                    "paired_95_high_percent": values["paired_95_interval_percent"][1],
+                    "pairs": case["pairs"],
+                    "statistic": "ratio_of_mean_phase_times",
+                    "decode_inputs": "common_teacher_forced",
+                }
+            )
+    table(out / "performance.csv", perf_rows)
+    quality = {
+        variant: load(work / "native-gqa/quality" / variant / "audit.json")
+        for variant in ["Original", "Changed"]
+    }
+    source_quality = {
+        variant: {
+            task: load(source / "runs" / job / (task + "-summary.json"))
+            for task in ["ppl", "gsm8k"]
+        }
+        for variant, job in [("Original", "303046"), ("Changed", "303045")]
+    }
+    bfcl_path = work / "bfcl-v4-50/summary.json"
+    bfcl = load(bfcl_path) if bfcl_path.exists() else None
+    if bfcl:
+        bfcl_audit = load(work / "bfcl-v4-50/audit.json")
+        assert bfcl["status"] == "complete" and bfcl_audit["status"] == "passed"
+        assert (
+            digest((work / "bfcl-v4-50/rows.jsonl").read_bytes()) == bfcl["rows_sha256"]
+        )
+    put(
+        out / "quality.json",
+        {
+            "schema_version": 1,
+            "native": quality,
+            "mi355x_source_bf16": source_quality,
+            "native_bfcl_v4_pilot": bfcl,
+            "native_bfcl_workload_audit": load(work / "bfcl-v4-50/token-audit.json")
+            if bfcl
+            else None,
+            "scope": "64 x 4096 PPL windows; 128 GSM8K questions. GSM requests <=666 tokens never reach first pruning at position2052. BFCL is a separate 50-case component pilot when present, not an official overall score. QSA natural-long quality and Qwen SWE-bench remain unmeasured.",
+        },
+    )
+    table(
+        out / "quality.csv",
+        [
+            {
+                "platform": "Radeon 8060S gfx1151",
+                "variant": variant,
+                **{
+                    key: row[key]
+                    for key in [
+                        "state",
+                        "ppl_documents",
+                        "targets",
+                        "nll",
+                        "ppl",
+                        "gsm_questions",
+                        "gsm_correct",
+                        "gsm_caps",
+                    ]
+                },
+                "gsm_accuracy_percent": 100 * row["gsm_correct"] / row["gsm_questions"],
+                "bfcl_pilot_cases": bfcl["variants"][variant]["cases"] if bfcl else "",
+                "bfcl_pilot_correct": bfcl["variants"][variant]["correct"]
+                if bfcl
+                else "",
+                "bfcl_pilot_accuracy_percent": bfcl["variants"][variant][
+                    "accuracy_percent"
+                ]
+                if bfcl
+                else "",
+            }
+            for variant, row in quality.items()
+        ],
+    )
+    campaign_path = work / "memory-campaign.json"
+    memory_campaign = load(campaign_path) if campaign_path.exists() else {}
+    memory_cases, memory_rows = [], []
+    for context in [4096, 16384, 32768]:
+        for batch in [1, 4, 8]:
+            for variant in ["Original", "Changed"]:
+                case_path = (
+                    work
+                    / "memory-only-v1"
+                    / f"b{batch}-s{context}-{variant}"
+                    / "result.json"
+                )
+                row = (
+                    load(case_path)
+                    if case_path.exists()
+                    else {
+                        "variant": variant,
+                        "batch": batch,
+                        "context": context,
+                        "status": (
+                            "canceled_user"
+                            if memory_campaign.get("status") == "stopped_user"
+                            else "pending"
+                        ),
+                    }
+                )
+                if case_path.exists():
+                    audit_memory_case(case_path.parent, row)
+                memory_cases.append(row)
+                for phase, values in row.get("memory", {"overall": {}}).items():
+                    memory_rows.append(
+                        {
+                            "batch": batch,
+                            "context": context,
+                            "capacity": context + 64,
+                            "variant": variant,
+                            "status": row["status"],
+                            "phase": phase,
+                            "complete_peak": row["status"] == "complete",
+                            **values,
+                        }
+                    )
+    put(
+        out / "memory.json",
+        {
+            "schema_version": 1,
+            "cases": memory_cases,
+            "campaign": memory_campaign,
+            "status_counts": {
+                state: sum(case["status"] == state for case in memory_cases)
+                for state in sorted({case["status"] for case in memory_cases})
+            },
+            "mi355x_reference": "raw/mi355x/memory-summary.json",
+            "cross_platform_memory_warning": "MI355X job303626 uses one warmup and two64-decode requests, PyTorch allocation/reservation peaks and20ms device-HBM sampling. Native uses one cold8-decode request and100ms WDDM commitment. Do not compare these as the same memory metric.",
+            "unit": "bytes",
+            "scope": "One fresh session, one prefill, eight decode calls, 100ms target sampling. WDDM commitment is not physical residency; do not add it to process RSS or system RAM.",
+            "excluded_context": 65536,
+            "excluded_reason": "User canceled after co-resident performance attempt hit system RAM guard; no successful 64K timing.",
+        },
+    )
+    table(out / "memory.csv", memory_rows)
+    # Bind measured binaries to the source commit that introduced them, not to
+    # the documentation/merge commit being prepared now. This is a reconstruction,
+    # since the original build began with dirty HEAD 2a43690.
+    native_paths = [
+        name
+        for name in git(root, "diff", "--name-only", "1c9a454...7a71b72").splitlines()
+        if name.startswith(("lib/", "include/", "morphizen/", "backend-mlir-compiler/"))
+    ]
+    source_map = {}
+    for name in native_paths:
+        data = subprocess.check_output(
+            ["git", "-C", str(root), "show", "7a71b72:" + name]
+        )
+        source_map[name] = {
+            "git_blob": git(root, "rev-parse", "7a71b72:" + name),
+            "sha256": digest(data),
+        }
+        raw_files["measured-source/" + name] = data
+    script_commit = "efe78ea"
+    for name in git(
+        root, "diff", "--name-only", "1c9a454..." + script_commit
+    ).splitlines():
+        if name.startswith("scripts/"):
+            raw_files["historical-experiment-source/" + name] = subprocess.check_output(
+                ["git", "-C", str(root), "show", script_commit + ":" + name]
+            )
+    candidate_source = None
+    candidate_checkout = work / "pr-worktree"
+    if (candidate_checkout / ".git").exists():
+        candidate_source = {
+            "commit": git(candidate_checkout, "rev-parse", "HEAD"),
+            "base_commit": git(candidate_checkout, "rev-parse", "origin/main"),
+            "files": {},
+        }
+        for name in git(
+            candidate_checkout, "diff", "--name-only", "origin/main...HEAD"
+        ).splitlines():
+            path = candidate_checkout / name
+            if path.is_file() and name.startswith(
+                (
+                    "lib/",
+                    "include/",
+                    "morphizen/",
+                    "scripts/",
+                    "backend-mlir-compiler/",
+                    "test/",
+                )
+            ):
+                data = path.read_bytes()
+                raw_files["candidate-source/" + name] = data
+                candidate_source["files"][name] = digest(data)
+    put(
+        out / "provenance.json",
+        {
+            "schema_version": 1,
+            "created_utc": datetime.now(timezone.utc).isoformat(),
+            "evidence_checkout_commit": git(root, "rev-parse", "HEAD"),
+            "packet_tool_commit": git(ROOT, "rev-parse", "HEAD"),
+            "local_origin_main": git(ROOT, "rev-parse", "origin/main"),
+            "source_reference_commit": "3b0c30ea4976085798a36d22cefa4089bbef6543",
+            "source_checkout_commit": git(source, "rev-parse", "HEAD"),
+            "mi355x_memory_source_commit": mi355_memory["source_commit"],
+            "packet_script_sha256": digest(Path(__file__).read_bytes()),
+            "historical_experiment_script_commit": script_commit,
+            "candidate_source_overlay": candidate_source,
+            "source_line_endings": "Git source reconstructions use repository-normalized bytes; measured Windows source hashes can include CRLF. Original raw protocols and per-probe source snapshots preserve actual execution bytes.",
+            "measured_native_source_reconstruction": source_map,
+            "build_provenance_limit": "Measured build began at dirty HEAD2a43690; native implementation subsequently committed in7a71b72. Binary hashes and execution receipts are authoritative; final PR merge build is separate and has no inherited performance claims.",
+            "errata": [
+                "Historical generic run_stage.py receipts for Qwen hashed the OLMo selector and only snapshotted scripts/qsa. Use the Qwen execution protocols/export/tensor hashes as model identity; the stage selector fields are not Qwen identity. Future runner selects the Qwen payload and snapshots both script directories.",
+                "Historical native-support.json recorded unused gqa_back.cpp; compiled implementation is real/gqa.cpp. Inspector corrected without rewriting historical receipt.",
+                "32K paired timing memory sampler attached after four measured pairs; 4K/16K timing had no sampler.",
+                "Batch4/4K default memory probe completed after1551.55s. Stop attempt found parent already gone; retain as complete, not timing or failure.",
+            ],
+        },
+    )
+    with zipfile.ZipFile(
+        args.archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6
+    ) as archive:
+        for name, data in sorted(raw_files.items()):
+            archive.writestr(name, data)
+        archive.writestr(
+            "MANIFEST.json",
+            json.dumps(
+                {
+                    name: {"bytes": len(data), "sha256": digest(data)}
+                    for name, data in sorted(raw_files.items())
+                },
+                indent=2,
+            )
+            + "\n",
+        )
+    put(
+        out / "archive.json",
+        {
+            "path": str(args.archive.resolve()),
+            "bytes": args.archive.stat().st_size,
+            "sha256": digest(args.archive.read_bytes()),
+            "members": len(raw_files),
+            "scope": "Local immutable raw evidence with frozen selector, locked evaluation inputs and graph metadata; excludes backbone weights and cache binaries. Every member has SHA256 in MANIFEST.json. Not uploaded.",
+        },
+    )
+    names = [
+        "environment.json",
+        "identity.json",
+        "performance.json",
+        "performance.csv",
+        "quality.json",
+        "quality.csv",
+        "memory.json",
+        "memory.csv",
+        "provenance.json",
+        "archive.json",
+    ]
+    names.extend(
+        path.relative_to(out).as_posix()
+        for path in (out / "raw").rglob("*")
+        if path.is_file()
+    )
+    if (out / "candidate-validation.json").exists():
+        names.append("candidate-validation.json")
+    put(
+        out / "manifest.json",
+        {
+            "schema_version": 1,
+            "files": {
+                name: {
+                    "bytes": (out / name).stat().st_size,
+                    "sha256": digest((out / name).read_bytes()),
+                }
+                for name in sorted(names)
+            },
+        },
+    )
+    verify(out)
+    print(f"Archived {len(raw_files)} source/evidence files to {args.archive}")
+
+
+if __name__ == "__main__":
+    main()

@@ -899,6 +899,16 @@ int wrap_rocmlir_prefill(RuntimeState *state, void *buffer, int64_t count,
 // packed QKV paths, optional RoPE, KV cache management, local window
 // attention (local_window_size), and smooth softmax (head_sink /
 // smooth_softmax).
+// Frozen QSA specialization: core GQA Q/K/V/cache/length inputs followed by
+// hidden, BF16 projection/norms and FP32 selector rotary tables. Decode uses
+// in-place KV, after a full prefill on this per-session op-state slot.
+int wrap_qsa_group_query_attention(
+    RuntimeState *state, int op_state_slot, void *query, void *key, void *value,
+    void *past_key, void *past_value, void *seqlens_k, void *total_seq_len,
+    void *hidden, void *projection, void *q_norm, void *k_norm, void *cos,
+    void *sin, void *output, void *present_key, void *present_value,
+    int64_t batch, int64_t sequence, int64_t capacity);
+
 int wrap_group_query_attention_host_length(
     RuntimeState *state,
     int op_state_slot, // per-instance op-state slot (GEMM descriptor cache)

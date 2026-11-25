@@ -253,6 +253,8 @@ populateLoweringPatterns(LLVMTypeConverter &typeConverter,
   populateTransposeLoweringPatterns(typeConverter, patterns);
   populateRopeLoweringPatterns(typeConverter, patterns);
   populateGqaLoweringPatterns(typeConverter, patterns, hostScalars);
+  populateQsaGqaLoweringPatterns(typeConverter, patterns);
+  populateQwenQsaGqaLoweringPatterns(typeConverter, patterns);
   populateMultiHeadAttentionLoweringPatterns(typeConverter, patterns);
   populateMatMulNBitsLoweringPatterns(typeConverter, patterns);
   populateDequantBnb4LoweringPatterns(typeConverter, patterns);

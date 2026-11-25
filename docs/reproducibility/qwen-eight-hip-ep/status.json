@@ -1,0 +1,114 @@
+{
+  "state": "paused_by_user_request",
+  "started_unix": 1795549733.143137,
+  "pid": 36584,
+  "export_sha256": "370a4d1b543c1481ffc0fa6706f90a9b9732c62ee944dd028b731bceb6156e51",
+  "stages": [
+    {
+      "label": "validate",
+      "command": [
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qsa\\venv\\Scripts\\python.exe",
+        "-u",
+        "scripts/qwen_qsa/measure_eight.py",
+        "validate"
+      ],
+      "started_unix": 1795549733.4678679,
+      "state": "complete",
+      "pid": 39772,
+      "exit_code": 0,
+      "elapsed_seconds": 154.16702127456665
+    },
+    {
+      "label": "benchmark-4096",
+      "command": [
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qsa\\venv\\Scripts\\python.exe",
+        "-u",
+        "scripts/qwen_qsa/measure_eight.py",
+        "benchmark",
+        "--context",
+        "4096"
+      ],
+      "started_unix": 1795549887.8194578,
+      "state": "complete",
+      "pid": 15456,
+      "exit_code": 0,
+      "elapsed_seconds": 189.2096562385559
+    },
+    {
+      "label": "benchmark-16384",
+      "command": [
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qsa\\venv\\Scripts\\python.exe",
+        "-u",
+        "scripts/qwen_qsa/measure_eight.py",
+        "benchmark",
+        "--context",
+        "16384"
+      ],
+      "started_unix": 1795550077.2263615,
+      "state": "complete",
+      "pid": 39840,
+      "exit_code": 0,
+      "elapsed_seconds": 630.6392269134521
+    },
+    {
+      "label": "benchmark-32768",
+      "command": [
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qsa\\venv\\Scripts\\python.exe",
+        "-u",
+        "scripts/qwen_qsa/measure_eight.py",
+        "benchmark",
+        "--context",
+        "32768"
+      ],
+      "started_unix": 1795550707.9892917,
+      "state": "stopped_by_user_request",
+      "pid": 27412
+    }
+  ],
+  "accuracy_evaluations_authorized": false,
+  "source_sha256": {
+    "scripts\\qwen_qsa\\audit_bfcl_tokens.py": "82246852874e2bce530b22869684d88b543db6a222e2fcb8beb20be6d050f84a",
+    "scripts\\qwen_qsa\\audit_memory.py": "5d52b27b29e3a093ee5d717b73ba3b205f8c91d8fddefc61fd16be96c9fe1b83",
+    "scripts\\qwen_qsa\\audit_performance.py": "779874f13ee978548df58c9443c2263636fd0823ef17913d96986650caad99c1",
+    "scripts\\qwen_qsa\\benchmark_native.py": "5d4516e372a2452f0264319739a26cf84d91d6fb432a1453f1370768a4d15bc2",
+    "scripts\\qwen_qsa\\bfcl_client.py": "8bd623f2aea9fffd329a975a0bf9adc51980bf292762643ec04ba599cc308a55",
+    "scripts\\qwen_qsa\\bfcl_worker.py": "3535bee2da8e5e18d197a4a003d3b7b58066ab50f6e4370880a7f515a5c67d4d",
+    "scripts\\qwen_qsa\\default_inference.py": "d552bc32d49d5e28c6473e7cccecd86ec1e6c0682d1c420f8e045ac1b5109a91",
+    "scripts\\qwen_qsa\\evaluate_default.py": "ca06808fc44dda8232191bd6942f56d86ec208b8fcd071b3ad9a4ebe97322f82",
+    "scripts\\qwen_qsa\\evaluate_long_default.py": "5eaa0e988a11d9565800b37283a4899a8dcc84f96ee67cdd57e0d685a9f20301",
+    "scripts\\qwen_qsa\\evaluate_long_native.py": "31f5a8dd862e2aa1b4819c74d430381499f301cec4354f86481a96f906b29dda",
+    "scripts\\qwen_qsa\\evaluate_native.py": "6a88620c00a09149aa9dcc67d94c0d1d00bfbebd3804b25e6e31c1522b76b000",
+    "scripts\\qwen_qsa\\export_default.py": "49d8992da64188891c3536bf1191d90ebd5002f75527a75b5a65472d747c1bac",
+    "scripts\\qwen_qsa\\export_eight.py": "7bc69a0d6bf9cdf713423aaecacc98268a6f0bf8896a0f74d84fd423e0f19087",
+    "scripts\\qwen_qsa\\export_native_gqa.py": "56c329fb4e42369f54f182f50a85acb7cf058d626f222f9e4cc8d083e8fa871e",
+    "scripts\\qwen_qsa\\inspect_native_support.py": "91ebe4046755d8919bd2f5265ddd5e85872125bec0c78727f975c59f9c83bd07",
+    "scripts\\qwen_qsa\\lock_long_quality.py": "fe702da0f8d539b6a03cd2b0496349213572c072db1d17b487be35730b278274",
+    "scripts\\qwen_qsa\\lock_timing.py": "9276c8da1720c9b7d42c4003b07e7911eb13ff6c1791cd4b38f9cb142ab962c4",
+    "scripts\\qwen_qsa\\long_quality_inference.py": "6d91d50784f25cbaefae5dcd98c3554303eb739e1089ec482f328f42a0dc1fd4",
+    "scripts\\qwen_qsa\\measure_eight.py": "a516882f3c4defcbf55d34e92bd40ed72a42294edae1082d84027299dd210d11",
+    "scripts\\qwen_qsa\\memory_probe_worker.py": "3f1543954d6593bd3314644cdac3ac2ead2281f70b1b7d0f9aa5d014d7160d51",
+    "scripts\\qwen_qsa\\native_inference.py": "41dddd8e41a55591dd9271210ac7e9ba85dbdd7b37b16c52642ab5c3ea87081f",
+    "scripts\\qwen_qsa\\native_long_inference.py": "9ebad6431eb2af7cca75bbd3cff05f51a78780167bf90144aca965a5f9b4697c",
+    "scripts\\qwen_qsa\\package_evidence.py": "415528836ae60b2ea74d4401302b9a4a50b38a0290d7c7c7fbc39ee5808420c5",
+    "scripts\\qwen_qsa\\prepare_selector_fixtures.py": "901983a4011006c644d7b7c6335b8b01a0b2a8c0e381541ea9837dc1023bfd9b",
+    "scripts\\qwen_qsa\\probe_default.py": "7c3078e5a98c1cb5f52bef24cf195ece99c485a5391490d5c0611a8a37284a37",
+    "scripts\\qwen_qsa\\report_bfcl.py": "f98e564238561a7c5c6e553b63268ce94553b4e3822339dcef52513743c5ad81",
+    "scripts\\qwen_qsa\\report_results.py": "b18eb4dde5e82cd381535951df3f238e6ea92102f0845bb108df1a42f0a6074c",
+    "scripts\\qwen_qsa\\run_bfcl.py": "fd9fa9904ed611be7c4c9c3d4fad9362f6d9d6300b5de6084d16e78cd9976117",
+    "scripts\\qwen_qsa\\run_default_quality.py": "976645d06ff255f99f0e8be76ee73e43a8ab6d51952c98c4f965ba37ebfdb3a2",
+    "scripts\\qwen_qsa\\run_eight_performance.py": "6468fcf6ef3c83d9342c419b84434e25e68be5d3d391514117dd7c0322ea7edf",
+    "scripts\\qwen_qsa\\run_memory_matrix.py": "46b43ffc21c39029c2125f80a25ed6c43e77200444ce6e3616e358a753ebfdd0",
+    "scripts\\qwen_qsa\\run_native_quality.py": "5271ab64850c00ecba6fac2a769cb267d63c4bd4d5299a42569421f366d28c10",
+    "scripts\\qwen_qsa\\run_performance.py": "f79187c8ab5e9d218e52b652f0682f3baa367ad009896b09ee85f9933372b726",
+    "scripts\\qwen_qsa\\sample_memory.py": "3909c071411dc468ecbb452680df6a38890791118f0e44b776d58ff69bada5ea",
+    "scripts\\qwen_qsa\\selector_reference.py": "e12e37ce7c7e9d5c46b6f375de81a402ec21a998d52c6d446e68ccf4fddfffd0",
+    "scripts\\qwen_qsa\\validate_default.py": "6d6f5b5dba2f37b63450c12a7c625d6f1f0db705ca03d0bc7853f28ad7aebe0d",
+    "scripts\\qwen_qsa\\validate_kernels.py": "decb30d2baac59fd24f47745e8ff3a825fc001b4668ef59f5531a3f197976535",
+    "scripts\\qwen_qsa\\validate_native.py": "cc5f396a6bc48baf36600fdde714fb70272fdfdd19ec89b360a36ba15da59c5c",
+    "scripts\\qwen_qsa\\validate_operator.py": "132aafa6f70109d2f7667dcf23d47942b20c511515c993b33238b3ed23599527",
+    "scripts\\qwen_qsa\\verify_handoff.py": "7dc4919f44796dc4e0dad6ba738100b85e91ddc58967e09b84657180d68745db",
+    "scripts\\qsa\\runtime.py": "b839b0816065d57458e749ec666c105cf019015f037e449b87632089e31586de"
+  },
+  "pause_receipt": "pause-receipt.json",
+  "result_disposition": "Potentially contention-affected; not accepted as a clean comparison"
+}

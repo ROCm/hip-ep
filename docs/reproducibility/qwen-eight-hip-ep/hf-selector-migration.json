@@ -1,0 +1,129 @@
+{
+  "state": "passed",
+  "scope": "Public selector loading migration only; no inference/performance/accuracy rerun",
+  "all_60_bf16_tensor_payloads_match_measured_exports": true,
+  "assets": {
+    "olmo-four": {
+      "repo_id": "rajeevp/olmo-3-1025-7b-qsa-4-selectors",
+      "revision": "4fd10ef4e5dd1dca49d84491d54663980f7cc33a",
+      "tensor_count": 12,
+      "all_bf16_tensor_bytes_equal_to_measured_export": true,
+      "legacy_file_sha256": "decd3160f4321839c80fee2ba0b0241575fc06017676e38a04286a3ae3daa10b",
+      "published_file_sha256": "42fdd0a611e8479fadf386ace09ef513e304dd671a60c9efe545ea8da9638aa2"
+    },
+    "qwen-four": {
+      "repo_id": "rajeevp/qwen3.8-27b-qsa-4-selectors",
+      "revision": "6041df9d852345aaf26f0c63c304e0ef9c846074",
+      "tensor_count": 16,
+      "all_bf16_tensor_bytes_equal_to_measured_export": true,
+      "legacy_file_sha256": "d7729599f421d80ace536f84145bafa9a6e1eaad22dde18ce42392014a58b5e4",
+      "published_file_sha256": "d7729599f421d80ace536f84145bafa9a6e1eaad22dde18ce42392014a58b5e4"
+    },
+    "qwen-eight": {
+      "repo_id": "rajeevp/qwen3.8-27b-qsa-8-selectors",
+      "revision": "f59b0c17664755c1d070b3d6269bddc2452e5cda",
+      "tensor_count": 32,
+      "all_bf16_tensor_bytes_equal_to_measured_export": true,
+      "legacy_file_sha256": "8915ef00df9ad755808591862b473ee0e265cfd405ce1fc787bf948aea56eeeb",
+      "published_file_sha256": "360f8006ac85ca5d6f7cf85a6c964ca452e7433fb279a6aba3d0957dbe7ae4e5"
+    }
+  },
+  "exports": {
+    "olmo-four": {
+      "graph_and_selector_binary_bytes_equal": true,
+      "files_sha256": {
+        "original.onnx": "2a1b8cafd60fc52689c626df123d7b73a1f5508158837c0f5acd20ffa0afcab1",
+        "qsa.selectors.bin": "3e9b6744a8d2d5004012242906373aa8bb8e8567a33d30b5eb3133af1c5d053d"
+      },
+      "selector_asset": {
+        "repo_id": "rajeevp/olmo-3-1025-7b-qsa-4-selectors",
+        "revision": "4fd10ef4e5dd1dca49d84491d54663980f7cc33a",
+        "filename": "selectors.safetensors",
+        "sha256": "42fdd0a611e8479fadf386ace09ef513e304dd671a60c9efe545ea8da9638aa2",
+        "metadata_sha256": {
+          "selector_config.json": "4db23d8b6714e6767a8133b90ad7f58c3745a874d03aee1389ce0efe820a80c9",
+          "provenance.json": "917678b83caa50234e9e73304bdce12b7232a1efbf70c53f95ad988ac8f5e572"
+        },
+        "historical_export_identity_sha256": "decd3160f4321839c80fee2ba0b0241575fc06017676e38a04286a3ae3daa10b",
+        "tensor_count": 12
+      }
+    },
+    "qwen-four": {
+      "graph_and_selector_binary_bytes_equal": true,
+      "files_sha256": {
+        "default.onnx": "c1ce2a4c6f7950d16d4cce186af47a760bd3fa949b71ef07b9df583b0f21e680",
+        "qsa.selectors.bin": "c3f495f9f341e814e461a3e478952369c4d6f7e7a36e51cb0aa820f7591cbc59"
+      },
+      "selector_asset": {
+        "repo_id": "rajeevp/qwen3.8-27b-qsa-4-selectors",
+        "revision": "6041df9d852345aaf26f0c63c304e0ef9c846074",
+        "filename": "selectors.safetensors",
+        "sha256": "d7729599f421d80ace536f84145bafa9a6e1eaad22dde18ce42392014a58b5e4",
+        "metadata_sha256": {
+          "selector_config.json": "153c76ff86b4c43febc375dcd4977a02142b55deb2f348115f9492a191309c6d",
+          "provenance.json": "64a88482cadb6f8aa36f9c9ecdeb169a95afad157e10c972f3c56664ed09ca80"
+        },
+        "historical_export_identity_sha256": "d7729599f421d80ace536f84145bafa9a6e1eaad22dde18ce42392014a58b5e4",
+        "tensor_count": 16
+      }
+    },
+    "qwen-eight": {
+      "graph_and_selector_binary_bytes_equal": true,
+      "files_sha256": {
+        "default.onnx": "2c385a8e9aa957d8da0ffb3f740f857514e7ef1ff322f49dde4d42d8bbecce93",
+        "qsa.selectors.bin": "63b7c3b5abd9dc587e96ac671e259b5cb913536be364ecbc8c56b13f347a014e"
+      },
+      "selector_asset": {
+        "repo_id": "rajeevp/qwen3.8-27b-qsa-8-selectors",
+        "revision": "f59b0c17664755c1d070b3d6269bddc2452e5cda",
+        "filename": "selectors.safetensors",
+        "sha256": "360f8006ac85ca5d6f7cf85a6c964ca452e7433fb279a6aba3d0957dbe7ae4e5",
+        "metadata_sha256": {
+          "selector_config.json": "7c17a3cbc3aea0726afe45bc6c769bedba5567cb853a09924c139354f54b6c03",
+          "provenance.json": "7299b590a71bc6ca232c04da7b47567902c4f1637c24e74a9fc76f018e5b2aad"
+        },
+        "historical_export_identity_sha256": "8915ef00df9ad755808591862b473ee0e265cfd405ce1fc787bf948aea56eeeb",
+        "tensor_count": 32
+      }
+    }
+  },
+  "tests": {
+    "passed": 20,
+    "command": [
+      "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qsa\\venv\\Scripts\\python.exe",
+      "-m",
+      "pytest",
+      "test/python/test_qsa_selector_assets.py",
+      "test/python/test_qsa_export_contract.py",
+      "test/python/test_qwen_qsa_selector_exports.py",
+      "-q",
+      "-p",
+      "no:cacheprovider",
+      "--basetemp",
+      "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qwen-qsa\\audit\\hf-selectors-20261124\\pytest-a449033b079e401cb3bf83709b252c11"
+    ],
+    "log_sha256": "0081f0bb97d1337ecdf2c5b63d16db7e1cd741454171c35dc7697bcbf1e5eaa2"
+  },
+  "compiler_runtime_kernel_and_raw_measurements_unchanged": true,
+  "historical_export_identity_distinct_from_public_container_hash": true,
+  "cpu_stage_smoke": {
+    "status": "passed",
+    "stage": "hf-selector-smoke-0506de18a836",
+    "command": [
+      "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qsa\\venv\\Scripts\\python.exe",
+      "scripts/qsa/run_stage.py",
+      "--cpu",
+      "--timeout-seconds",
+      "60",
+      "hf-selector-smoke-0506de18a836",
+      "--",
+      "scripts/qsa/selector_assets.py",
+      "--variant",
+      "olmo-four",
+      "--offline"
+    ],
+    "selector_file_sha256": "42fdd0a611e8479fadf386ace09ef513e304dd671a60c9efe545ea8da9638aa2",
+    "historical_identity": "decd3160f4321839c80fee2ba0b0241575fc06017676e38a04286a3ae3daa10b",
+    "registry_snapshotted": true
+  }
+}

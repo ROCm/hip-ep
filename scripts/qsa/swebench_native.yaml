@@ -1,0 +1,12 @@
+##
+## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+model:
+  model_class: mini_native_model.NativeMiniModel
+  model_name: HipEP-OLMo3-Original
+  model_kwargs:
+    temperature: 0
+    max_tokens: 4096
+environment:
+  environment_class: docker

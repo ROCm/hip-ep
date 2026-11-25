@@ -1,0 +1,89 @@
+{
+  "status": "passed",
+  "rows": [
+    {
+      "path": "full",
+      "position": 2051,
+      "relative_rms": 0.00020762017811648548
+    },
+    {
+      "path": "cached",
+      "position": 2051,
+      "relative_rms": 0.0002938950783573091
+    },
+    {
+      "path": "full",
+      "position": 2052,
+      "relative_rms": 0.0002057944075204432
+    },
+    {
+      "path": "cached",
+      "position": 2052,
+      "relative_rms": 0.00020579426200129092
+    },
+    {
+      "path": "full",
+      "position": 2053,
+      "relative_rms": 0.00020869303261861205
+    },
+    {
+      "path": "cached",
+      "position": 2053,
+      "relative_rms": 0.0002086929598590359
+    },
+    {
+      "path": "full",
+      "position": 2054,
+      "relative_rms": 0.00020738040620926768
+    },
+    {
+      "path": "cached",
+      "position": 2054,
+      "relative_rms": 0.00020737989689223468
+    },
+    {
+      "path": "full",
+      "position": 2055,
+      "relative_rms": 0.00020640302682295442
+    },
+    {
+      "path": "cached",
+      "position": 2055,
+      "relative_rms": 0.00020640309958253056
+    },
+    {
+      "path": "full",
+      "position": 2056,
+      "relative_rms": 0.00020698092703241855
+    },
+    {
+      "path": "cached",
+      "position": 2056,
+      "relative_rms": 0.00020698083972092718
+    },
+    {
+      "path": "full",
+      "position": 2059,
+      "relative_rms": 0.0002054779470199719
+    },
+    {
+      "path": "cached",
+      "position": 2059,
+      "relative_rms": 0.0002054775832220912
+    },
+    {
+      "path": "full",
+      "position": 2063,
+      "relative_rms": 0.00020798957848455757
+    },
+    {
+      "path": "cached",
+      "position": 2063,
+      "relative_rms": 0.00020798952027689666
+    }
+  ],
+  "training_updates": 0,
+  "graph_sha256": "ff3786e45fe1fa677fcdea2a7ff244b15bebaa22338b474bcb4601158e303db7",
+  "kernel_validation_sha256": "861123a2222555ebd7a0d4e11943887745b23f51468d4995ea57b2a3dbcd7eab",
+  "validator_sha256": "1e3842a212534134e77a9c65131a6226a9f5e71b3965c9a832e0ebad088bc4f7"
+}

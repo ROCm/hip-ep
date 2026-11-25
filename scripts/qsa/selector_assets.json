@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "assets": {
+    "olmo-four": {
+      "repo_id": "rajeevp/olmo-3-1025-7b-qsa-4-selectors",
+      "revision": "4fd10ef4e5dd1dca49d84491d54663980f7cc33a",
+      "base_model": "allenai/Olmo-3-1025-7B",
+      "base_model_revision": "a81bae42db3975be1671e27b9c9a56da1a9f980f",
+      "layers": [
+        7,
+        11,
+        15,
+        23
+      ],
+      "tensor_shapes_per_layer": {
+        "projection.weight": [
+          640,
+          4096
+        ],
+        "q_norm.weight": [
+          128
+        ],
+        "k_norm.weight": [
+          128
+        ]
+      },
+      "compatibility_sha256": "decd3160f4321839c80fee2ba0b0241575fc06017676e38a04286a3ae3daa10b",
+      "source_export_sha256": "decd3160f4321839c80fee2ba0b0241575fc06017676e38a04286a3ae3daa10b",
+      "source_checkpoint_sha256": null,
+      "files": {
+        "selector_config.json": "4db23d8b6714e6767a8133b90ad7f58c3745a874d03aee1389ce0efe820a80c9",
+        "provenance.json": "917678b83caa50234e9e73304bdce12b7232a1efbf70c53f95ad988ac8f5e572",
+        "selectors.safetensors": "42fdd0a611e8479fadf386ace09ef513e304dd671a60c9efe545ea8da9638aa2"
+      }
+    },
+    "qwen-four": {
+      "repo_id": "rajeevp/qwen3.8-27b-qsa-4-selectors",
+      "revision": "6041df9d852345aaf26f0c63c304e0ef9c846074",
+      "base_model": "Qwen/Qwen3.8-27B",
+      "base_model_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+      "layers": [
+        27,
+        31,
+        35,
+        39
+      ],
+      "tensor_shapes_per_layer": {
+        "projection.weight": [
+          640,
+          5120
+        ],
+        "q_norm.weight": [
+          128
+        ],
+        "token_k_norm.weight": [
+          128
+        ],
+        "pool_k_norm.weight": [
+          128
+        ]
+      },
+      "compatibility_sha256": "d7729599f421d80ace536f84145bafa9a6e1eaad22dde18ce42392014a58b5e4",
+      "source_export_sha256": "2d2672cf7108d233bc4ff1f7259a4aff4f674434199165d966b493817a1d5edd",
+      "source_checkpoint_sha256": null,
+      "files": {
+        "selector_config.json": "153c76ff86b4c43febc375dcd4977a02142b55deb2f348115f9492a191309c6d",
+        "provenance.json": "64a88482cadb6f8aa36f9c9ecdeb169a95afad157e10c972f3c56664ed09ca80",
+        "selectors.safetensors": "d7729599f421d80ace536f84145bafa9a6e1eaad22dde18ce42392014a58b5e4"
+      }
+    },
+    "qwen-eight": {
+      "repo_id": "rajeevp/qwen3.8-27b-qsa-8-selectors",
+      "revision": "f59b0c17664755c1d070b3d6269bddc2452e5cda",
+      "base_model": "Qwen/Qwen3.8-27B",
+      "base_model_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+      "layers": [
+        3,
+        7,
+        23,
+        27,
+        31,
+        35,
+        39,
+        63
+      ],
+      "tensor_shapes_per_layer": {
+        "projection.weight": [
+          640,
+          5120
+        ],
+        "q_norm.weight": [
+          128
+        ],
+        "token_k_norm.weight": [
+          128
+        ],
+        "pool_k_norm.weight": [
+          128
+        ]
+      },
+      "compatibility_sha256": "8915ef00df9ad755808591862b473ee0e265cfd405ce1fc787bf948aea56eeeb",
+      "source_export_sha256": "8915ef00df9ad755808591862b473ee0e265cfd405ce1fc787bf948aea56eeeb",
+      "source_checkpoint_sha256": "76b1bcab417879a9d47d5cd8c023939ef35ada89d761c894c638461bd10a09b7",
+      "files": {
+        "selector_config.json": "7c17a3cbc3aea0726afe45bc6c769bedba5567cb853a09924c139354f54b6c03",
+        "provenance.json": "7299b590a71bc6ca232c04da7b47567902c4f1637c24e74a9fc76f018e5b2aad",
+        "selectors.safetensors": "360f8006ac85ca5d6f7cf85a6c964ca452e7433fb279a6aba3d0957dbe7ae4e5"
+      },
+      "source_tensor_digests": {
+        "3": "c0eee8954cb441e671798983e1ceb7d68846f83256284c91beb42aae1cdc467e",
+        "7": "aa28c1093a3192ec4b1596d36ef157104e88fbe3ac8ecc1bbc415c20386d5996",
+        "23": "44d686bb011b85ebe91bdbcfd2fba9cc72b83b2db0ac8ab9b41f142dd13047f3",
+        "27": "99ce9ffa8998d8a0ae380e5d48c9c3efedbdbc00dc978c1f8e7f4e09a6525a83",
+        "31": "83f6a43b720ae0df90414274e0c11f88a151f19bf9e3a7373b8287bcc0fd4cb7",
+        "35": "d10b65948d56b14cc11b2ce9cdae4cc1da650f286de7f5ea8801fbc3b133705e",
+        "39": "34517fcb812f418592a8cc03696a5a5cd9bb907254829646451aafda3c2d6205",
+        "63": "c1bed6b83e75bc6bd0c1514006ae2583fdd58351718a1c63f5dd0ef677c16f86"
+      }
+    }
+  }
+}

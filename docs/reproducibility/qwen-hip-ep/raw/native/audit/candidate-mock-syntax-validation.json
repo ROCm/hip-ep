@@ -1,0 +1,7 @@
+{
+  "status": "passed",
+  "candidate_source_commit": "b70ce2829ad58d145ee0cb6be942d0c3a51df573",
+  "source_sha256": "ef6ba2c7f099b3d7ffbd36a06d5c1b1b2c83afbd8419eac2808db8d4da00d12d",
+  "scope": "Complete candidate mock source passes MSVC C++17 syntax checking",
+  "log": "candidate-mock-syntax.log"
+}

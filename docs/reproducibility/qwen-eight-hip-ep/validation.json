@@ -1,0 +1,92 @@
+{
+  "status": "passed",
+  "binary_sha256": {
+    "hipgpu.dll": "399e7b10ac8c8da1142f36347bbdf4fa4ab58a0de6ecda190993cc3d12cc100e",
+    "custom_kernels_gfx1151.dll": "80183ff88257bb6c753365ced254beb36e88b11e5622e3351c74520df43e4fb7",
+    "hip-mlir-opt.exe": "8b32e457c69a1e8e2fc44360f55254c09e681b1b40fa0811c8a06ea017f45653",
+    "hip-compiler.exe": "e67e146993bb2ca080b51bf53054cb0414c1e521afb6d0c9e621b54e4017c574"
+  },
+  "selector_export_sha256": "8915ef00df9ad755808591862b473ee0e265cfd405ce1fc787bf948aea56eeeb",
+  "selector_layers": [
+    3,
+    7,
+    23,
+    27,
+    31,
+    35,
+    39,
+    63
+  ],
+  "export_receipt_sha256": "370a4d1b543c1481ffc0fa6706f90a9b9732c62ee944dd028b731bceb6156e51",
+  "graph_sha256": "2c385a8e9aa957d8da0ffb3f740f857514e7ef1ff322f49dde4d42d8bbecce93",
+  "backbone_sha256": "44b55d43fbd271cc85a3234fcc43950d11a8b343c89a8f7e642ebf60487e3262",
+  "machine": "Windows-11-10.0.26200-SP0",
+  "cpu": "AMD64 Family 26 Model 112 Stepping 0, AuthenticAMD",
+  "gpu": "AMD Radeon(TM) 8060S Graphics",
+  "torch": "2.13.0+rocm10.0.0",
+  "hip": "7.15.26333",
+  "onnxruntime": "1.31.0",
+  "ram_total_bytes": 68478697472,
+  "runtime_sha256": "b839b0816065d57458e749ec666c105cf019015f037e449b87632089e31586de",
+  "inference_sha256": "41dddd8e41a55591dd9271210ac7e9ba85dbdd7b37b16c52642ab5c3ea87081f",
+  "measurement_sha256": "a516882f3c4defcbf55d34e92bd40ed72a42294edae1082d84027299dd210d11",
+  "training_updates": 0,
+  "phase_policy": "sparse prefill and sparse decode",
+  "checks": [
+    {
+      "check": "full_support_exact",
+      "prefix": 17,
+      "decode": 4
+    },
+    {
+      "check": "full_support_exact",
+      "prefix": 513,
+      "decode": 4
+    },
+    {
+      "check": "full_support_exact",
+      "prefix": 2047,
+      "decode": 4
+    },
+    {
+      "check": "sparse_prefill_vs_cached_replay",
+      "prefix": 2051,
+      "end": 2057,
+      "relative_rms": 0.0013177137589082122,
+      "replay_exact": true,
+      "pruning_active_at_all_eight_nodes": true
+    },
+    {
+      "check": "sparse_prefill_vs_cached_replay",
+      "prefix": 4092,
+      "end": 4096,
+      "relative_rms": 0.0011844020336866379,
+      "replay_exact": true,
+      "pruning_active_at_all_eight_nodes": true
+    }
+  ],
+  "cold_load_seconds": {
+    "Original": 15.324812800000473,
+    "Eight": 15.925518800000646
+  },
+  "Original": {
+    "cache_pointers_unchanged": true,
+    "forward_calls": 16,
+    "ep_dispatches": 16,
+    "dispatches_per_forward": 1,
+    "profile": "_local\\qwen-qsa\\eight-qsa-v1\\profiles\\Original-default_2026-11-24_11-48-55_821.json",
+    "profile_sha256": "eab30a1b0f76b9a2ace568b4c57d2ba68e0da6b2f40269bf7f314462956b8810"
+  },
+  "sparse_differs_from_default": true,
+  "Eight": {
+    "cache_pointers_unchanged": true,
+    "forward_calls": 42,
+    "ep_dispatches": 42,
+    "dispatches_per_forward": 1,
+    "profile": "_local\\qwen-qsa\\eight-qsa-v1\\profiles\\Eight-default_2026-11-24_11-49-36_158.json",
+    "profile_sha256": "ad1b1c0d4ffe3dd8713c97e63ac452574b5ce02dcc98edb9f1ec29eaf541f5db"
+  },
+  "eight_node_replacement": true,
+  "frozen_tensors_verified": true,
+  "pruning_dispatch_evidence": "Eight lowered native nodes, strict EP/no fallback, one EP dispatch per forward; queries cross position2052 at every node, whose unchanged native branch selects sparse support; finite/replay/cache checks pass."
+}

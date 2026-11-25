@@ -1,0 +1,65 @@
+{
+  "source_performance_sha256": "bed3190aca4590fcc1ad85d566a7442e630e5dbbe348a0193400f554f762ff49",
+  "generator_sha256": "55633737ebaf7f5efefb88d99c9d953ccba769cc6ce35852bb732739933f7ce7",
+  "document_hash_normalization": "UTF-8 text with LF line endings",
+  "documents": {
+    "docs/experiments/qwen-qsa-eight-selector-results.md": {
+      "normalized_lf_sha256": "26f045bf971f28370422aee4f298acfea176c18b57c6443c8ff19579477a95b1",
+      "normalized_utf8_bytes": 3723
+    },
+    "docs/reproducibility/qwen-eight-hip-ep/README.md": {
+      "normalized_lf_sha256": "e3ae8ca677e7ce8f345027634fdf76226f7f831b39210a84447a066d37f5d168",
+      "normalized_utf8_bytes": 19259
+    },
+    "docs/experiments/qwen-qsa-native-gqa-results.md": {
+      "normalized_lf_sha256": "e8cc591c76388c888123711818f7ac63506a1eea3ba98049df4995e9d0e2e02e",
+      "normalized_utf8_bytes": 18350
+    },
+    "docs/reproducibility/qwen-hip-ep/README.md": {
+      "normalized_lf_sha256": "86a850ab8b819908d5e04449e2efdb0cade4b8cdc9c457cb53b928e7b4fbaecf",
+      "normalized_utf8_bytes": 17866
+    },
+    "docs/reproducibility/qwen-hip-ep/AUDIT.md": {
+      "normalized_lf_sha256": "e5afd7a2d5f3b178bc168b276a029fca33d35a88bc64170c58a52a32f88c689a",
+      "normalized_utf8_bytes": 11716
+    },
+    "docs/reproducibility/qwen-hip-ep/PR_DESCRIPTION.md": {
+      "normalized_lf_sha256": "31e8b40a1a9a0f25f99a267c459591629c81c1bab22545a42f61265f9b885a03",
+      "normalized_utf8_bytes": 4501
+    },
+    "docs/design/qwen-qsa-native-gqa.md": {
+      "normalized_lf_sha256": "d955893177e62e8e993017ae615c269d9131d7e8b1dbdc80dcada3092da9d82d",
+      "normalized_utf8_bytes": 10225
+    },
+    "docs/experiments/qwen-qsa-bfcl-v4-50.md": {
+      "normalized_lf_sha256": "8615a04b73416217bde21e74a2a29584d5fb9960036ff27673641d5c2e339398",
+      "normalized_utf8_bytes": 8081
+    },
+    "docs/experiments/qwen-qsa-memory.md": {
+      "normalized_lf_sha256": "1b1edacc382ea3e35fc662bfa0df5884915b505412b5cbe9f1d4159cb97dfb71",
+      "normalized_utf8_bytes": 3724
+    },
+    "README.md": {
+      "normalized_lf_sha256": "23b1737a25a0c452ea4cfeca6723e91f96ad9fe5676fba3efa94999fdb982225",
+      "normalized_utf8_bytes": 10057
+    },
+    "docs/experiments/qwen-qsa-eight-bfcl-v4-50.md": {
+      "normalized_lf_sha256": "ab2a2651612935ff18f0e6b98f5659b70cf01069c017ba51e4237f460033b157",
+      "normalized_utf8_bytes": 4882
+    },
+    "docs/design/qsa-support.md": {
+      "normalized_lf_sha256": "cfcaed8de43cdf9f7acf948acdcabfdde7ba4df4552ca57df0af588765e0c15c",
+      "normalized_utf8_bytes": 3162
+    },
+    "docs/design/qsa-selector-assets.md": {
+      "normalized_lf_sha256": "053dfa2d9c0c7ece1f23828a9cd71aa7b92df7a4160eb5e214ed4b701519175c",
+      "normalized_utf8_bytes": 4313
+    },
+    "docs/design/olmo-qsa-native-gqa.md": {
+      "normalized_lf_sha256": "1ff5be26df0d30f3ae2a399466fa81fa50e079ed68bae48a99fbf6b07cf97bb2",
+      "normalized_utf8_bytes": 6824
+    }
+  },
+  "bfcl_eight_summary_sha256": "32cb614f73ce96537af93e4a27bdd91bea876be25e2ea4969387c33e26ee8414",
+  "bfcl_eight_status_sha256": "4a7c1fcc113a73b1d60312ca05e0865b424ff8715bf85494dc5a9e049cd4f8b1"
+}

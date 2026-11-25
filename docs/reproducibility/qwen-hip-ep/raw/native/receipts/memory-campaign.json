@@ -1,0 +1,30 @@
+{
+  "status": "stopped_user",
+  "recorded_utc": "2026-11-22T04:42:55.448872+00:00",
+  "reason": "User reduced memory measurements to one configuration and canceled the remaining campaign.",
+  "selected_comparison": {
+    "batch": 1,
+    "context": 4096,
+    "variants": [
+      "Original",
+      "Changed"
+    ]
+  },
+  "supplementary_completed_comparison": {
+    "batch": 4,
+    "context": 4096
+  },
+  "interrupted": {
+    "batch": 8,
+    "context": 4096,
+    "variant": "Original",
+    "status": "canceled_user"
+  },
+  "remaining_work": "None; pause after local evidence packaging.",
+  "stopped_process_ids": [
+    5720,
+    40164,
+    50220
+  ],
+  "gpu_lock_released": true
+}

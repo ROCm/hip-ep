@@ -1,0 +1,146 @@
+{
+  "state": "estimate_only_no_accuracy_runs",
+  "estimates": {
+    "bfcl50": {
+      "eight_only_seconds": 7352.314541453714,
+      "fresh_original_plus_eight_seconds": 14303.118653292055,
+      "eight_only_range_seconds": [
+        5155.161985837599,
+        11838.146963285944
+      ],
+      "fresh_pair_range_seconds": [
+        11414.077062546394,
+        19914.870867275735
+      ],
+      "startup_eight_seconds": 28.47268939999958,
+      "startup_original_seconds": 31.913760542869568,
+      "scenarios": [
+        {
+          "trajectory": "Original",
+          "generation_calls": 294,
+          "prompt_tokens": 2217075,
+          "completion_tokens": 14333,
+          "observed_generation_seconds": 6806.350647400657,
+          "observed_active_seconds": 6918.890351295471,
+          "queue_tool_overhead_seconds": 112.53970389481401,
+          "historical_phase_model": {
+            "prefill_seconds": 5242.477118977158,
+            "decode_seconds": 1336.8971683046154,
+            "total_seconds": 6579.374287281774
+          },
+          "eight_phase_model": {
+            "prefill_seconds": 5827.564150461614,
+            "decode_seconds": 1312.5874883141137,
+            "total_seconds": 7140.151638775727
+          },
+          "calibration_factor": 1.03449816809444,
+          "eight_active_seconds": 7499.013494124818
+        },
+        {
+          "trajectory": "Four",
+          "generation_calls": 283,
+          "prompt_tokens": 2117348,
+          "completion_tokens": 13899,
+          "observed_generation_seconds": 6712.599010700011,
+          "observed_active_seconds": 6822.108175992966,
+          "queue_tool_overhead_seconds": 109.509165292955,
+          "historical_phase_model": {
+            "prefill_seconds": 5232.381922972217,
+            "decode_seconds": 1286.3235121716675,
+            "total_seconds": 6518.705435143884
+          },
+          "eight_phase_model": {
+            "prefill_seconds": 5563.360395327458,
+            "decode_seconds": 1272.4743220045407,
+            "total_seconds": 6835.834717331998
+          },
+          "calibration_factor": 1.0297441842533337,
+          "eight_active_seconds": 7148.670209982611
+        }
+      ]
+    },
+    "gsm8k128": {
+      "eight_only_seconds": 4280.433337813859,
+      "fresh_original_plus_eight_seconds": 8594.348342186457,
+      "eight_only_range_seconds": [
+        3430.0412081310874,
+        5434.9508105173245
+      ],
+      "fresh_pair_range_seconds": [
+        7315.756088120712,
+        10479.25224092151
+      ],
+      "startup_eight_seconds": 28.47268939999958,
+      "startup_original_seconds": 31.913760542869568,
+      "scenarios": [
+        {
+          "trajectory": "Original",
+          "cases": 128,
+          "prompt_tokens": 11167,
+          "completion_tokens": 43494,
+          "historical_four_process_seconds": 4409.656286001205,
+          "estimated_active_seconds": 4282.001243829727,
+          "historical_startup_proxy_seconds": 31.913760542869568,
+          "historical_phase_model": {
+            "prefill_seconds": 37.21746225242245,
+            "decode_seconds": 4059.1106668935095,
+            "total_seconds": 4096.328129145932
+          },
+          "eight_phase_model": {
+            "prefill_seconds": 39.637522561443845,
+            "decode_seconds": 4010.6203754426233,
+            "total_seconds": 4050.257898004067
+          },
+          "eight_active_seconds": 4233.842800259407
+        },
+        {
+          "trajectory": "Four",
+          "cases": 128,
+          "prompt_tokens": 11167,
+          "completion_tokens": 43494,
+          "historical_four_process_seconds": 4418.795553684235,
+          "estimated_active_seconds": 4298.450528621674,
+          "historical_startup_proxy_seconds": 30.08625626564026,
+          "historical_phase_model": {
+            "prefill_seconds": 38.25735430202265,
+            "decode_seconds": 4038.9120037604266,
+            "total_seconds": 4077.169358062449
+          },
+          "eight_phase_model": {
+            "prefill_seconds": 39.637522561443845,
+            "decode_seconds": 4010.6203754426233,
+            "total_seconds": 4050.257898004067
+          },
+          "eight_active_seconds": 4270.0784965683115
+        }
+      ]
+    }
+  },
+  "method": "Length-aware piecewise-linear prefill and mean-context per-token decode costs from3measured shapes, calibrated separately to both actual archived trajectories; retain actual BFCL tool/queue overhead. No single decode-TPS multiplier.",
+  "short_context_extrapolation": "Below4K: prefill line from one4K decode-call cost at length0 to measured4K prefill; decode held at4K rate. Calibration to actual old evaluation compensates for unmeasured short costs; no claim of a new short-context measurement.",
+  "startup": "Maximum observed new Eight session load/compile plus15s CPU/import/tokenizer allowance. Historical BFCL ready receipts proxy startup removed from4-process GSM totals. One resident session per variant; four32-case GSM processes would add3startup costs per variant.",
+  "bfcl": {
+    "cases": 50,
+    "single_turn": 26,
+    "multi_turn": 24,
+    "declared_turns": [
+      1,
+      7
+    ],
+    "response_cap": 1024,
+    "thinking": false
+  },
+  "gsm8k": {
+    "cases": 128,
+    "response_cap": 512,
+    "thinking": false
+  },
+  "caveats": [
+    "Planning envelopes are not confidence intervals or guaranteed upper bounds",
+    "BFCL conversations may change prompts,outputs,tool paths,calls,turns and stopping behavior with eight selectors",
+    "GSM uses the historical43494 output tokens as a workload assumption,not an accuracy or output prediction",
+    "Fresh Original estimates reuse its historical active duration; only4K recovery was freshly checked after the charger change",
+    "Observed startup can reuse compiler/OS caches;a clean toolchain/cache rebuild is excluded",
+    "Source checkpoint640 misses the fixed32K PPL gate;no accepted long-context accuracy is claimed"
+  ]
+}

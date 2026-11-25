@@ -4437,6 +4437,54 @@ def Hip_GqaOp : Hip_DpsOp_AutoReify<"gqa", [AttrSizedOperandSegments, OpStateOpI
   let hasVerifier = 1;
 }
 
+// Frozen OLMo QSA specialization. Q/K already have the backbone's external
+// normalization and RoPE. Selector weights remain BF16. Native per-node state
+// owns pooled selector history and persistent scratch on the EP stream.
+def Hip_QsaGqaOp : Hip_DpsOp_AutoReify<"qsa_gqa", [OpStateOpInterface]> {
+  let summary = "Frozen batch-one QSA specialization of GQA";
+  let arguments = (ins Hip_ContextType:$ctx,
+      Hip_TensorOrMemRef:$query, Hip_TensorOrMemRef:$key,
+      Hip_TensorOrMemRef:$value, Hip_TensorOrMemRef:$past_key,
+      Hip_TensorOrMemRef:$past_value, Hip_TensorOrMemRef:$seqlens_k,
+      Hip_TensorOrMemRef:$total_seq_len, Hip_TensorOrMemRef:$hidden,
+      Hip_TensorOrMemRef:$projection, Hip_TensorOrMemRef:$q_norm,
+      Hip_TensorOrMemRef:$k_norm, Hip_TensorOrMemRef:$cos_cache,
+      Hip_TensorOrMemRef:$sin_cache, Hip_TensorOrMemRef:$output,
+      Hip_TensorOrMemRef:$present_key, Hip_TensorOrMemRef:$present_value);
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+        ::mlir::Location loc, ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(builder, loc, statePtr, slot,
+          "hipdnn_ep_op_state_construct_qsa_gqa", {});
+    }
+  }];
+  let hasVerifier = 1;
+}
+
+// Qwen has distinct native GQA geometry, three zero-centered selector norms,
+// partial RoPE and a 512-historical-block budget. Keep OLMo's contract separate.
+def Hip_QwenQsaGqaOp : Hip_DpsOp_AutoReify<"qwen_qsa_gqa", [OpStateOpInterface]> {
+  let summary = "Frozen Qwen selector specialization of native GQA";
+  let arguments = (ins Hip_ContextType:$ctx,
+      Hip_TensorOrMemRef:$query, Hip_TensorOrMemRef:$key,
+      Hip_TensorOrMemRef:$value, Hip_TensorOrMemRef:$past_key,
+      Hip_TensorOrMemRef:$past_value, Hip_TensorOrMemRef:$seqlens_k,
+      Hip_TensorOrMemRef:$total_seq_len, Hip_TensorOrMemRef:$hidden,
+      Hip_TensorOrMemRef:$projection, Hip_TensorOrMemRef:$q_norm,
+      Hip_TensorOrMemRef:$token_k_norm, Hip_TensorOrMemRef:$pool_k_norm,
+      Hip_TensorOrMemRef:$cos_cache, Hip_TensorOrMemRef:$sin_cache,
+      Hip_TensorOrMemRef:$position_ids, Hip_TensorOrMemRef:$output,
+      Hip_TensorOrMemRef:$present_key, Hip_TensorOrMemRef:$present_value);
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+        ::mlir::Location loc, ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(builder, loc, statePtr, slot,
+          "hipdnn_ep_op_state_construct_qwen_qsa_gqa", {});
+    }
+  }];
+  let hasVerifier = 1;
+}
+
 // ===== hipDNN Graph Outlining + Execution ====================================
 
 def Hip_YieldOp : Hip_Op<"yield", [Pure, Terminator,

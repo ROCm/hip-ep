@@ -755,8 +755,8 @@ void MlirCustomOp::compute_with_output_allocator(
   MY_LOG(2) << "MlirCustomOp::compute_with_output_allocator()";
 
 #ifdef HIPDNN_EP_LINK_HIP_HOST
-  // This dispatch emits its own PerfSample (§4 per-call distribution) and
-  // per-op flush (§3 GPU table) here, so under HIPDNN_EP_PERF=1 a session
+  // This dispatch emits its own PerfSample (Â§4 per-call distribution) and
+  // per-op flush (Â§3 GPU table) here, so under HIPDNN_EP_PERF=1 a session
   // produces EP-side [PERF]/[PERF SUMMARY] lines. There is no marshal-out
   // pre-pass (outputs are allocated in-graph via output_allocate_cb), so
   // marshal_out_ms is 0.

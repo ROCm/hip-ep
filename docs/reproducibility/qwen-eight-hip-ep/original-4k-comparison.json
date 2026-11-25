@@ -1,0 +1,25 @@
+{
+  "context": 4096,
+  "batch": 1,
+  "new_measured_requests": 2,
+  "archived_measured_requests": 6,
+  "scope": "Original only; noQSA/accuracy;16K/32K canceled",
+  "new_summary_path": "_local\\qwen-qsa\\original-short-control-v1\\4096\\summary.json",
+  "new_rows_path": "_local\\qwen-qsa\\original-short-control-v1\\4096\\rows.jsonl",
+  "phases": {
+    "prefill": {
+      "current_tokens_s": 306.2475837955469,
+      "archived_tokens_s": 438.0642856135859,
+      "throughput_change_percent": -30.09072096197173,
+      "current_mean_seconds": 13.374799399999574,
+      "archived_mean_seconds": 9.350225833322233
+    },
+    "decode": {
+      "current_tokens_s": 10.174524735629346,
+      "archived_tokens_s": 10.683621009325318,
+      "throughput_change_percent": -4.765203419810582,
+      "current_mean_seconds": 6.290220099999715,
+      "archived_mean_seconds": 5.990478316680917
+    }
+  }
+}

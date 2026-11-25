@@ -1,0 +1,44 @@
+{
+  "state": "complete",
+  "context": 4096,
+  "batch": 1,
+  "warmups": 2,
+  "measured_requests": 2,
+  "decode_inputs": 64,
+  "phase_policy": "native default full attention in prefill and decode; no QSA nodes",
+  "charger_watts_user_reported": 140,
+  "charger_wattage_independently_measured": false,
+  "ACLineStatus": 1,
+  "native_original_graph_sha256": "c200a4c9a0d94c195ea78dada12fadd0df6cc8227e1ea5ad88e8a6bd32dec616",
+  "native_binary_sha256": {
+    "hipgpu.dll": "399e7b10ac8c8da1142f36347bbdf4fa4ab58a0de6ecda190993cc3d12cc100e",
+    "custom_kernels_gfx1151.dll": "80183ff88257bb6c753365ced254beb36e88b11e5622e3351c74520df43e4fb7",
+    "hip-mlir-opt.exe": "8b32e457c69a1e8e2fc44360f55254c09e681b1b40fa0811c8a06ea017f45653",
+    "hip-compiler.exe": "e67e146993bb2ca080b51bf53054cb0414c1e521afb6d0c9e621b54e4017c574"
+  },
+  "graph_binaries_and_stream_match_prior": true,
+  "rows_sha256": "8b61d9b0d990d62022407a2b7ee06aff5b31079f4da2473dcef83a6307ab15fa",
+  "protocol_sha256": "ffd0df08d10daecefdcaaa71f423722dc0daad2d5d2e1f6889b5f8a96377da50",
+  "no_qsa_session": true,
+  "no_accuracy_evaluation": true,
+  "no_longer_shapes": true,
+  "phases": {
+    "prefill": {
+      "charger_repeat_tokens_s": 431.7146202780296,
+      "earlier_control_tokens_s": 306.2475837955469,
+      "archived_original_tokens_s": 438.0642856135859,
+      "mean_seconds": 9.487749100000656,
+      "vs_earlier_control_percent": 40.969151471328956,
+      "vs_archived_percent": -1.449482540367908
+    },
+    "decode": {
+      "charger_repeat_tokens_s": 10.791045243320536,
+      "earlier_control_tokens_s": 10.174524735629346,
+      "archived_original_tokens_s": 10.683621009325318,
+      "mean_seconds": 5.930843449999884,
+      "vs_earlier_control_percent": 6.059452639908058,
+      "vs_archived_percent": 1.0055039756787565
+    }
+  },
+  "interpretation": "Near the archived baseline after the reported charger change; consistent with power limits contributing to the earlier drop. This temporal before/after diagnostic does not independently measure charger wattage or prove exclusive causality."
+}

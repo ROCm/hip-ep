@@ -1,0 +1,62 @@
+{
+  "state": "complete_4k_only_awaiting_review",
+  "started_unix": 1795551647.4938731,
+  "pid": 22592,
+  "source_sha256": {
+    "scripts\\qwen_qsa\\measure_eight_control.py": "8f5bb32ca75188c344383756009aa073dbc65dc23adf00e70d8674761c97acc8",
+    "scripts\\qwen_qsa\\measure_eight.py": "9734acff8928d067ca9c5603f6bfce343cbe64fd70fd8c545bf8efa52cdc4cc2",
+    "scripts\\qwen_qsa\\native_inference.py": "41dddd8e41a55591dd9271210ac7e9ba85dbdd7b37b16c52642ab5c3ea87081f",
+    "scripts\\qwen_qsa\\benchmark_native.py": "5d4516e372a2452f0264319739a26cf84d91d6fb432a1453f1370768a4d15bc2",
+    "scripts\\qwen_qsa\\export_eight.py": "01a5ef5931933f34d7979ef68407a02cec3d2763ff6eca798659cf9f38b5efa0",
+    "scripts\\qwen_qsa\\verify_handoff.py": "7dc4919f44796dc4e0dad6ba738100b85e91ddc58967e09b84657180d68745db",
+    "scripts\\qwen_qsa\\run_original_short_control.py": "8afa5c29898ccfea9c19945837896dc771cacb914ae25751f9edb4870fe278d7",
+    "scripts\\qsa\\runtime.py": "b839b0816065d57458e749ec666c105cf019015f037e449b87632089e31586de"
+  },
+  "scope": "Original only; B1 4096/16384/32768; two warmups and two measured requests per shape;64 forced decode inputs",
+  "eight_selector_runs": false,
+  "accuracy_evaluations_started": false,
+  "stages": [
+    {
+      "context": 4096,
+      "command": [
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qsa\\venv\\Scripts\\python.exe",
+        "-u",
+        "scripts/qwen_qsa/measure_eight_control.py",
+        "--context",
+        "4096",
+        "--output-root",
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qwen-qsa\\original-short-control-v1",
+        "--stop-file",
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qwen-qsa\\original-short-control-v1\\stop.json",
+        "--measured-requests",
+        "2"
+      ],
+      "started_unix": 1795551647.5208428,
+      "state": "complete",
+      "pid": 23440,
+      "exit_code": 0,
+      "elapsed_seconds": 101.12124752998352
+    },
+    {
+      "context": 16384,
+      "command": [
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qsa\\venv\\Scripts\\python.exe",
+        "-u",
+        "scripts/qwen_qsa/measure_eight_control.py",
+        "--context",
+        "16384",
+        "--output-root",
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qwen-qsa\\original-short-control-v1",
+        "--stop-file",
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qwen-qsa\\original-short-control-v1\\stop.json",
+        "--measured-requests",
+        "2"
+      ],
+      "started_unix": 1795551748.667884,
+      "state": "canceled_by_user_request",
+      "pid": 41588
+    }
+  ],
+  "preflight_sha256": "6afda9e8ebb36db8b2ff637fedaaed4895c0418b5e3a2e1db424e6455f92c1de",
+  "reason": "User narrowed control to4K;16K had launched and was canceled;32K not started"
+}

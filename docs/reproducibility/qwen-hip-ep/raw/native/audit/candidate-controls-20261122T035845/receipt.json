@@ -1,0 +1,140 @@
+{
+  "status": "passed",
+  "scope": "Merge-candidate correctness/build checks only; no inherited performance or accuracy campaign",
+  "candidate_branch": "codex/qwen-native-qsa-pr",
+  "candidate_source_commit": "b70ce2829ad58d145ee0cb6be942d0c3a51df573",
+  "local_origin_main": "f360f94f80440d08af97f74cb7c09e66f8e31c65",
+  "install": "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qwen-qsa\\pr-candidate\\native-gqa\\install",
+  "binary_sha256": {
+    "hipgpu.dll": "5622ada1f8310a445e38e19e783319f29cdc5a332f4e105d944697543dfc6917",
+    "custom_kernels_gfx1151.dll": "51f402b04d98cb4dbbb1e5117c458326f7838eae341d1a8f8da4cd4879697622",
+    "hip-mlir-opt.exe": "1db63b868ac983769c290a297bee577743add9af23f03574dfeb8adaa7e002a3",
+    "hip-compiler.exe": "c2f757b9a891e350158c25c93e216b822403370678f775e873ba083953065017"
+  },
+  "changed_native_source_sha256": {
+    "backend-mlir-compiler/custom-op-mlir/src/MlirCustomOp.cpp": "82b6093746c1a4be69be317c5274740c056fcfcdf881c64626ce76fb429f9b9f",
+    "backend-mlir-compiler/custom-op-schema/schema_only_custom_op.cpp": "1e80e77c277df464c71c39af200004e4f773b9fab2c9f6eabda2cde4119837e4",
+    "include/hip/Dialect/IR/HipBufferize.h": "5af67b378788ecb96d29e0a2d41780aef459eff235e26ea40bb5a1b4d1318739",
+    "include/hip/Dialect/IR/HipOps.td": "ec95647f9cde9d1401c47d075dd670de9be0edcd785613e0fef458075e4f824e",
+    "lib/Conversion/HipToLLVM/CMakeLists.txt": "606a86c4783ec4bb809bdf3f7da27fa176225481a97b20d02b16af646914d59b",
+    "lib/Conversion/HipToLLVM/HipToLLVM.cpp": "e1b285b90b0e882fd53f12b6b9feb9891816e2aa7f730544bfdf1e33f3d6bc1d",
+    "lib/Conversion/HipToLLVM/HipToLLVMUtils.h": "b3c3588c7a1da20331c89d4ce7135ee8ba95a3b1bba76e3ad2ea988c75bbcb19",
+    "lib/Conversion/HipToLLVM/QsaGqaLowering.cpp": "2519ad37cc1052c6740e85586443b26ead75f2d4bb8006a4159edd711015145c",
+    "lib/Conversion/HipToLLVM/QwenQsaGqaLowering.cpp": "6058850d241358f388b56cd353245098c85198cf89bbf5a28f91561d0eec17bf",
+    "lib/Conversion/OnnxToHip/CMakeLists.txt": "fbbed9f98a9464b8552c028386ce3b3e0943eaccd1ca2df681882312691bc8c4",
+    "lib/Conversion/OnnxToHip/OnnxToHip.cpp": "315dd23e10e823e89d2e725e5ae73fd440eb8fa61e9281edcf79134e5b88a240",
+    "lib/Conversion/OnnxToHip/OnnxToHipUtils.h": "7e2e59f21d74cf513f1d8668fc74b76f9d470fe0da6c89fe8a8c3601d19ed201",
+    "lib/Conversion/OnnxToHip/QsaGqaConversion.cpp": "6896f77a207128dce1b882b6bd90760c9d7d8120078ed98a3b1d139d893c624d",
+    "lib/Conversion/OnnxToHip/QwenQsaGqaConversion.cpp": "e5ec70307aa92b73c1e795d8902fc8e8e1b746a57ed58e06fea407206d6188bb",
+    "lib/Dialect/Hipsr/IR/HipsrComputeOp.cpp": "4f5f624f0c4ca73e8d947707b153caec1275a1daf3968a96e4f0a409de68f9f8",
+    "lib/Dialect/Hipsr/IR/HipsrPoolDomainOp.cpp": "333d602fc0fc7a814b6bdbd76b372650187d88fa0f448039acdfdbda10bf4cb2",
+    "lib/Dialect/Hipsr/IR/RegionSuccessorCompat.h": "45a338ac89a0b635bfe09c7eaa3b30cf4f9dccf6c5327f273e3c625501a198a8",
+    "lib/Dialect/Hipsr/Transforms/BufferizableOpInterfaceImpl.cpp": "7516e3476c7839f15c935bf4d41fd5d8bb2f0045991c46f4beb541887a0c6144",
+    "lib/Dialect/IR/HipDialect.cpp": "3b1e068992a3f4355b9152dae22c050db4266e25184c47393eacd22f471204b1",
+    "lib/Runtime/CMakeLists.txt": "7225b3a3d3bc8c2794ab6d5c4095c3d3e8e96d77e41c1379933005bf957125ce",
+    "lib/Runtime/Kernels/CMakeLists.txt": "d7824a82b530eee7df9f92164b70b4bb70e806d757ce351e6ca5c688c425cd61",
+    "lib/Runtime/Kernels/hip/qsa/qsa_gqa_kernels.hip.in": "b53ff0b9b039c5a0aa61656b974928d148215471fc0d24d34bf0f697383cf59b",
+    "lib/Runtime/Kernels/hip/qsa/qsa_gqa_projection.hip": "86a2735991f118ddb7d987d3157f3352a21b116b131e27ea7f5d2246ea330386",
+    "lib/Runtime/Kernels/hip/qsa/qsa_port.hip": "e0b25d2ba10d626dfaeec7cc0a44d9da1314e0b828fede3ea37d7407ce9c433f",
+    "lib/Runtime/Kernels/hip/qsa/qwen_qsa_kernels.hip.in": "ab50ac0dfd0d9b036170488b9df714211d33e9b210cb3ed289424771719fdc18",
+    "lib/Runtime/Kernels/hip/qsa/qwen_qsa_port.hip": "1afb32c2652054973b2183bb354441e454c969daca060149a694e299e72479b0",
+    "lib/Runtime/Kernels/include/hip_qsa.h": "08ffbe00f89987a61b0ae5a54078ded67cb68cbc62163f383d142462de619718",
+    "lib/Runtime/Kernels/include/hip_qsa_gqa.h": "5c63fda99c5bc2e667dc65b99546275bf4c0ca88fa18c0b6bb9c63df949581f3",
+    "lib/Runtime/Kernels/include/hip_qwen_qsa.h": "c7e41dc63a4f8950cd436be3b419e7d6d726ee05f4d6e581bdec96a909ba334f",
+    "lib/Runtime/Kernels/qsa/CMakeLists.txt": "b8cd9baf2ce360b02240fe352f875007cf2a45e8104108011d245f70ee176a02",
+    "lib/Runtime/hipdnn_ep_runtime.h": "2d9a3d93ea28dadf7768e05e0e25dcfb82259b2ac76977fd21439cd71d9ae303",
+    "lib/Runtime/mock/mock_gpu.cpp": "ef6ba2c7f099b3d7ffbd36a06d5c1b1b2c83afbd8419eac2808db8d4da00d12d",
+    "lib/Runtime/mock/op_state_stubs.cpp": "33c39e91228e20faf692fa2de059a62e65f0970ef5a226576002be388f2f892b",
+    "lib/Runtime/real/gqa.cpp": "e2c269c9f02efa1c10d0d0eaffc1120cc8d70165585487da36c44ad56ea159f2",
+    "lib/Runtime/real/qsa_gqa.cpp": "203bde2b30dd0fc95d96ffed8c1d5e40b83ce2b318db9f8fd185e6e2995cf2e0",
+    "lib/Runtime/real/qwen_qsa_gqa.cpp": "9aaf3f67e96e0aba6c628f45d1c768d2deed8c8fc4a5c26a1fc5def9291f6a99",
+    "morphizen/mlir-imp/src/mlir-constants.cpp": "446f49132e6a1e2a1126fa90b501c82a83cdb81c04380e2bac4b07f8c7aad19f",
+    "morphizen/mlir-imp/src/mlir-named-attribute.cpp": "63fe4e607081c2c6aa518b50f7bcbe81a6aef81a22d996f1500754c1685cbf26",
+    "morphizen/mlir-imp/src/mlir-node-arg.cpp": "c39746e0c09eb9697fd62fe1a4313328a9d2c0414395efd48f06278dc83e7fc0",
+    "morphizen/ort-bridge/src/morphizen-ep.cpp": "6c07ba2c77fcc17eca66747970ab4f74a75770dfc8eff49d23550f5faa888b2f"
+  },
+  "build_log": "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qwen-qsa\\audit\\candidate-build-6.log",
+  "build_log_sha256": "5318f28661130fb3a0f5ca2e3a4b00f1d741055b27d4828e3d512f4a57525d51",
+  "package_wide_kernel_ut": "disabled for this local build due Windows object-path warnings; dedicated QSA GPU controls run below",
+  "cpu_affinity": [
+    0,
+    1,
+    2,
+    3
+  ],
+  "cpu_priority": "below_normal",
+  "commands": [
+    {
+      "check": "bf16_and_constants",
+      "command": [
+        "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\Common7\\IDE\\CommonExtensions\\Microsoft\\CMake\\CMake\\bin\\ctest.exe",
+        "--test-dir",
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qwen-qsa\\pr-candidate\\native-gqa\\build",
+        "-C",
+        "Release",
+        "-R",
+        "MlirDtypeMappingUnit|HipsrExternalizeConstantsUnit",
+        "--output-on-failure"
+      ],
+      "log": "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qwen-qsa\\audit\\candidate-controls-20261122T035845\\bf16_and_constants.log",
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 0.526374340057373,
+      "log_sha256": "a17f69d6448c874a904fe99b31b32b3b7886c4e1baf4e6888c755d92157c0c95"
+    },
+    {
+      "check": "kernels",
+      "command": [
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qsa\\venv\\Scripts\\python.exe",
+        "-u",
+        "scripts/qwen_qsa/validate_kernels.py",
+        "--install",
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qwen-qsa\\pr-candidate\\native-gqa\\install",
+        "--output",
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qwen-qsa\\audit\\candidate-controls-20261122T035845\\kernel-validation.json"
+      ],
+      "log": "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qwen-qsa\\audit\\candidate-controls-20261122T035845\\kernels.log",
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 3.53334379196167,
+      "log_sha256": "b84563ecf900d82c2b300a145baa6fd815701eb4b2763439b4497370fa67d6b3"
+    },
+    {
+      "check": "operator",
+      "command": [
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qsa\\venv\\Scripts\\python.exe",
+        "-u",
+        "scripts/qwen_qsa/validate_operator.py",
+        "--output-dir",
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qwen-qsa\\audit\\candidate-controls-20261122T035845",
+        "--kernel-receipt",
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qwen-qsa\\audit\\candidate-controls-20261122T035845\\kernel-validation.json"
+      ],
+      "log": "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qwen-qsa\\audit\\candidate-controls-20261122T035845\\operator.log",
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 12.05210542678833,
+      "log_sha256": "f0a589f4dfdb0dddc2df84d323f859db293fa3f6f13156c00031207c9f780ec6"
+    },
+    {
+      "check": "full_model",
+      "command": [
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qsa\\venv\\Scripts\\python.exe",
+        "-u",
+        "scripts/qwen_qsa/validate_native.py",
+        "--output-dir",
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qwen-qsa\\audit\\candidate-controls-20261122T035845",
+        "--kernel-receipt",
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qwen-qsa\\audit\\candidate-controls-20261122T035845\\kernel-validation.json"
+      ],
+      "log": "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qwen-qsa\\audit\\candidate-controls-20261122T035845\\full_model.log",
+      "status": "passed",
+      "returncode": 0,
+      "elapsed_seconds": 96.73649191856384,
+      "log_sha256": "e385966cb3bd78677c7733aef669409fc6b76da3bcaea23ab6dfb831c995c9b8"
+    }
+  ],
+  "measured_binary_performance_reused": false,
+  "training_updates": 0,
+  "validation_directory": "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qwen-qsa\\audit\\candidate-controls-20261122T035845"
+}

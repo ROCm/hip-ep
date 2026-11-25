@@ -60,6 +60,21 @@ OrtStatusPtr ORT_API_CALL PropagatePrimaryInputOutput(
   return api.ShapeInferContext_SetOutputTypeShape(ort_ctx, 0, input_info);
 }
 
+OrtStatusPtr ORT_API_CALL InferQsaGqa(const OrtCustomOp *,
+                                      OrtShapeInferContext *ctx) {
+  const OrtApi &api = Ort::GetApi();
+  for (size_t output = 0; output < 3; ++output) {
+    OrtTensorTypeAndShapeInfo *info = nullptr;
+    if (OrtStatus *s = api.ShapeInferContext_GetInputTypeShape(
+            ctx, output == 0 ? 0 : output + 2, &info))
+      return s;
+    if (OrtStatus *s =
+            api.ShapeInferContext_SetOutputTypeShape(ctx, output, info))
+      return s;
+  }
+  return nullptr;
+}
+
 struct SchemaOnlyOpSpec {
   const char *domain;
   const char *name;
@@ -70,6 +85,8 @@ constexpr SchemaOnlyOpSpec kSchemaOnlyOps[] = {
     // Each row owns a distinct SchemaOnlyCustomOp instance with its own
     // OrtCustomOp::InferOutputShapeFn; shape_infer_fn is per op, not global.
     {"com.amd", "QMoE", PropagatePrimaryInputOutput},
+    {"com.amd", "QsaGroupQueryAttention", InferQsaGqa},
+    {"com.amd", "QwenQsaGroupQueryAttention", InferQsaGqa},
     // {"domain", "OpName", MyShapeInferFn},
 };
 

@@ -1,0 +1,10 @@
+{
+  "native_source_base_commit": "94a0b3615dae8447af5cbb8f7bc3916bdde48b2c",
+  "native_branch": "codex/qwen-eight-qsa-perf",
+  "source_handoff_commit": "441634f",
+  "source_observed_commit": "2c516d9d133ddc35e3d342a5cdf70773b1f94a4a",
+  "source_observed_branch": "codex/layer15-long-context",
+  "source_repository_writes": false,
+  "native_runtime_rebuilds": 0,
+  "accuracy_evaluations_started": false
+}

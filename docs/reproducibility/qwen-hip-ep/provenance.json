@@ -1,0 +1,299 @@
+{
+  "schema_version": 1,
+  "created_utc": "2026-11-22T12:30:58.377515+00:00",
+  "evidence_checkout_commit": "3d6ca3dd534b0c7995e7aced150096b37d69337e",
+  "packet_tool_commit": "3d6ca3dd534b0c7995e7aced150096b37d69337e",
+  "local_origin_main": "f360f94f80440d08af97f74cb7c09e66f8e31c65",
+  "source_reference_commit": "3b0c30ea4976085798a36d22cefa4089bbef6543",
+  "source_checkout_commit": "51b49c1b270c3be14fc6f27d0f2c75b65a4d0408",
+  "mi355x_memory_source_commit": "7a9739e32f19588a1879e2b6545053fff469b4da",
+  "packet_script_sha256": "415528836ae60b2ea74d4401302b9a4a50b38a0290d7c7c7fbc39ee5808420c5",
+  "historical_experiment_script_commit": "efe78ea",
+  "candidate_source_overlay": {
+    "commit": "95eefa47d8b9152aad8ccbf6016e7d2a7a393790",
+    "base_commit": "f360f94f80440d08af97f74cb7c09e66f8e31c65",
+    "files": {
+      "backend-mlir-compiler/custom-op-mlir/src/MlirCustomOp.cpp": "82b6093746c1a4be69be317c5274740c056fcfcdf881c64626ce76fb429f9b9f",
+      "backend-mlir-compiler/custom-op-schema/schema_only_custom_op.cpp": "1e80e77c277df464c71c39af200004e4f773b9fab2c9f6eabda2cde4119837e4",
+      "include/hip/Dialect/IR/HipBufferize.h": "5af67b378788ecb96d29e0a2d41780aef459eff235e26ea40bb5a1b4d1318739",
+      "include/hip/Dialect/IR/HipOps.td": "ec95647f9cde9d1401c47d075dd670de9be0edcd785613e0fef458075e4f824e",
+      "lib/Conversion/HipToLLVM/CMakeLists.txt": "606a86c4783ec4bb809bdf3f7da27fa176225481a97b20d02b16af646914d59b",
+      "lib/Conversion/HipToLLVM/HipToLLVM.cpp": "e1b285b90b0e882fd53f12b6b9feb9891816e2aa7f730544bfdf1e33f3d6bc1d",
+      "lib/Conversion/HipToLLVM/HipToLLVMUtils.h": "b3c3588c7a1da20331c89d4ce7135ee8ba95a3b1bba76e3ad2ea988c75bbcb19",
+      "lib/Conversion/HipToLLVM/QsaGqaLowering.cpp": "2519ad37cc1052c6740e85586443b26ead75f2d4bb8006a4159edd711015145c",
+      "lib/Conversion/HipToLLVM/QwenQsaGqaLowering.cpp": "6058850d241358f388b56cd353245098c85198cf89bbf5a28f91561d0eec17bf",
+      "lib/Conversion/OnnxToHip/CMakeLists.txt": "fbbed9f98a9464b8552c028386ce3b3e0943eaccd1ca2df681882312691bc8c4",
+      "lib/Conversion/OnnxToHip/OnnxToHip.cpp": "315dd23e10e823e89d2e725e5ae73fd440eb8fa61e9281edcf79134e5b88a240",
+      "lib/Conversion/OnnxToHip/OnnxToHipUtils.h": "7e2e59f21d74cf513f1d8668fc74b76f9d470fe0da6c89fe8a8c3601d19ed201",
+      "lib/Conversion/OnnxToHip/QsaGqaConversion.cpp": "6896f77a207128dce1b882b6bd90760c9d7d8120078ed98a3b1d139d893c624d",
+      "lib/Conversion/OnnxToHip/QwenQsaGqaConversion.cpp": "e5ec70307aa92b73c1e795d8902fc8e8e1b746a57ed58e06fea407206d6188bb",
+      "lib/Dialect/Hipsr/IR/HipsrComputeOp.cpp": "4f5f624f0c4ca73e8d947707b153caec1275a1daf3968a96e4f0a409de68f9f8",
+      "lib/Dialect/Hipsr/IR/HipsrPoolDomainOp.cpp": "333d602fc0fc7a814b6bdbd76b372650187d88fa0f448039acdfdbda10bf4cb2",
+      "lib/Dialect/Hipsr/IR/RegionSuccessorCompat.h": "45a338ac89a0b635bfe09c7eaa3b30cf4f9dccf6c5327f273e3c625501a198a8",
+      "lib/Dialect/Hipsr/Transforms/BufferizableOpInterfaceImpl.cpp": "7516e3476c7839f15c935bf4d41fd5d8bb2f0045991c46f4beb541887a0c6144",
+      "lib/Dialect/IR/HipDialect.cpp": "3b1e068992a3f4355b9152dae22c050db4266e25184c47393eacd22f471204b1",
+      "lib/Runtime/CMakeLists.txt": "7225b3a3d3bc8c2794ab6d5c4095c3d3e8e96d77e41c1379933005bf957125ce",
+      "lib/Runtime/Kernels/CMakeLists.txt": "d7824a82b530eee7df9f92164b70b4bb70e806d757ce351e6ca5c688c425cd61",
+      "lib/Runtime/Kernels/hip/qsa/qsa_gqa_kernels.hip.in": "b53ff0b9b039c5a0aa61656b974928d148215471fc0d24d34bf0f697383cf59b",
+      "lib/Runtime/Kernels/hip/qsa/qsa_gqa_projection.hip": "86a2735991f118ddb7d987d3157f3352a21b116b131e27ea7f5d2246ea330386",
+      "lib/Runtime/Kernels/hip/qsa/qsa_port.hip": "e0b25d2ba10d626dfaeec7cc0a44d9da1314e0b828fede3ea37d7407ce9c433f",
+      "lib/Runtime/Kernels/hip/qsa/qwen_qsa_kernels.hip.in": "ab50ac0dfd0d9b036170488b9df714211d33e9b210cb3ed289424771719fdc18",
+      "lib/Runtime/Kernels/hip/qsa/qwen_qsa_port.hip": "1afb32c2652054973b2183bb354441e454c969daca060149a694e299e72479b0",
+      "lib/Runtime/Kernels/include/hip_qsa.h": "08ffbe00f89987a61b0ae5a54078ded67cb68cbc62163f383d142462de619718",
+      "lib/Runtime/Kernels/include/hip_qsa_gqa.h": "5c63fda99c5bc2e667dc65b99546275bf4c0ca88fa18c0b6bb9c63df949581f3",
+      "lib/Runtime/Kernels/include/hip_qwen_qsa.h": "c7e41dc63a4f8950cd436be3b419e7d6d726ee05f4d6e581bdec96a909ba334f",
+      "lib/Runtime/Kernels/qsa/CMakeLists.txt": "b8cd9baf2ce360b02240fe352f875007cf2a45e8104108011d245f70ee176a02",
+      "lib/Runtime/hipdnn_ep_runtime.h": "2d9a3d93ea28dadf7768e05e0e25dcfb82259b2ac76977fd21439cd71d9ae303",
+      "lib/Runtime/mock/mock_gpu.cpp": "ef6ba2c7f099b3d7ffbd36a06d5c1b1b2c83afbd8419eac2808db8d4da00d12d",
+      "lib/Runtime/mock/op_state_stubs.cpp": "33c39e91228e20faf692fa2de059a62e65f0970ef5a226576002be388f2f892b",
+      "lib/Runtime/real/gqa.cpp": "e2c269c9f02efa1c10d0d0eaffc1120cc8d70165585487da36c44ad56ea159f2",
+      "lib/Runtime/real/qsa_gqa.cpp": "203bde2b30dd0fc95d96ffed8c1d5e40b83ce2b318db9f8fd185e6e2995cf2e0",
+      "lib/Runtime/real/qwen_qsa_gqa.cpp": "9aaf3f67e96e0aba6c628f45d1c768d2deed8c8fc4a5c26a1fc5def9291f6a99",
+      "morphizen/mlir-imp/src/mlir-constants.cpp": "446f49132e6a1e2a1126fa90b501c82a83cdb81c04380e2bac4b07f8c7aad19f",
+      "morphizen/mlir-imp/src/mlir-named-attribute.cpp": "63fe4e607081c2c6aa518b50f7bcbe81a6aef81a22d996f1500754c1685cbf26",
+      "morphizen/mlir-imp/src/mlir-node-arg.cpp": "c39746e0c09eb9697fd62fe1a4313328a9d2c0414395efd48f06278dc83e7fc0",
+      "morphizen/ort-bridge/src/morphizen-ep.cpp": "6c07ba2c77fcc17eca66747970ab4f74a75770dfc8eff49d23550f5faa888b2f",
+      "scripts/qsa/audit_native_bfcl.py": "2dc30f74cfce837a3b6b3cfe57883ac8914b821ffec3213f71c8d52ac4feeaa8",
+      "scripts/qsa/audit_results.py": "3555c57a1642f81141911ee6eed25c695ce4bd3448c1d319d28fe8c0f7da7273",
+      "scripts/qsa/benchmark_isolated.py": "1761fc841eef0fdf5162bd250c2b33a008728c814764ef59df66ad58e117f43a",
+      "scripts/qsa/benchmark_native_gqa.py": "aed85217e88891d3eb706c313ea8993b7a01aef1f48522b65108720d39e5c8e4",
+      "scripts/qsa/benchmark_original.py": "aec212b2efd9bead1b0da2ad68282583b7bf1edf729dac811bb5597c6c60bb4c",
+      "scripts/qsa/benchmark_pair.py": "465615a575869763d27d302c000b250f5880273b0da02b67dd6437574e78dc31",
+      "scripts/qsa/bfcl_cpu_requirements.txt": "956566361a12ef5a1e35d53b1d8893dd1d7f78583babf6e63140fb45a058035b",
+      "scripts/qsa/bfcl_native_eval.py": "bf45cf4155efdabf0e819e3f29555babe5286127b73bf776090d10530e108068",
+      "scripts/qsa/build_native_gqa.py": "fb17aae1bfaa21ff9af56dab571462ad68a104f62a2d12fb08ef91f9b13e201a",
+      "scripts/qsa/build_qsa.py": "31dd0a89095ef6e96441e07aaaa34161a34daf128898a4d007f0bb54c5b594f8",
+      "scripts/qsa/diagnose_quantization.py": "7053b9458bc139dffdaea957f13dd00efd8120e21790be6e6ad89d68020045ba",
+      "scripts/qsa/download_ranges.py": "f522a4689b2b83e302f9390ccd13adb417578713b92ff487fd75c3b5e6ce8cee",
+      "scripts/qsa/evaluate_native_gsm8k.py": "8a8d4610dc3af084c251978d47bd76f8524958cd7add89efa88c6dba64f7847b",
+      "scripts/qsa/evaluate_original.py": "ea30fe5d33bc1fd46ff981642afefd63bd04f93a2ad8bbded623f8368a5cff3a",
+      "scripts/qsa/evaluate_pair.py": "965debcbc815ab5088a32d9fb1df76e87c6fcde299d40332efb7f768b4b4b955",
+      "scripts/qsa/export_native_gqa.py": "2005cfcb83ce1576e02d8494168b30fdd0bfdf1befc34e74cf3c8ef0c76f1195",
+      "scripts/qsa/export_original.py": "d6ef20aaa2771a4219e32b73aedb1c2cdcea8d6003393a410df9d4d7b0172d63",
+      "scripts/qsa/mini_native_model.py": "ced86c7752a7346bf3dfe38c8d3c270065a9e599d16832941cb811c292949118",
+      "scripts/qsa/native_generation_worker.py": "9e9f26b9bd1cccc588d1444a68da51a86f03e7e2b19ec1309950a79cf040868d",
+      "scripts/qsa/native_response_cache.py": "09149fbe4a3bb8885a00808c3fa578422a5e8c87c158ec9f592676ff456915ce",
+      "scripts/qsa/original_inference.py": "565b9440c04fceee55710e61fa4ca31e9d5e783a26685c423d00f5a34f0ee300",
+      "scripts/qsa/partition_original.py": "c1dfa05787086abefd99f61e0f309d3ff0b900a719cffcc7faab6b198fff20d0",
+      "scripts/qsa/partitioned_inference.py": "a8d1428e4d12c9d2399ee70a3480a606293f3963fd4d02456db8958e1e594ec6",
+      "scripts/qsa/prepare_baseline.py": "1257073a007294f88be9420c6ec41a594ce3333d3c4dc706fa675abe86ca9a08",
+      "scripts/qsa/probe_operators.py": "1b61c3504edf9efd7c7ff76769a41c476615f29160472e802ca5bd0ea033edc8",
+      "scripts/qsa/probe_runtime.py": "98d5d99b452e5221dcea6462cd1239c8e3ac29bbfad3218bd5d97016f1e63893",
+      "scripts/qsa/qsa_runtime.py": "cc1a69e3fd2cd241cb3f0d15b982791f08fde8408100b852306c67bf91fab53c",
+      "scripts/qsa/record_environment.py": "f2d2b27df2aeae3b73d6a01795c31978bd5270d154d7dcd34bc4efb56ae38fd0",
+      "scripts/qsa/repair_gsm8k_encoding.py": "3cd3beccb60ff9cb61e3e45dbec45fcabec226c9c1a1f633ea93b43661bb5911",
+      "scripts/qsa/repair_rope_graph.py": "5a9ea57db6884f8c9f97a5b7bcafacbb7973858e8fe2b8679882e159fc3fb679",
+      "scripts/qsa/report_agent_accuracy.py": "6fa16ccbb66a27a16e71f1486b348a86f7df45138276dd764555e0cb48bc878a",
+      "scripts/qsa/report_native_gqa.py": "cf73245bdc2c04e8dc4a78a7ae28fb097640a6a900e362a9bbb27081357dcc2f",
+      "scripts/qsa/report_results.py": "552ef40349a33393ed97c03bd96282275df005f9d815fed92101d31c425552e5",
+      "scripts/qsa/run_native_bfcl_stage.py": "439821748a3b7e27aac023fdcd599493090a5426ce8f06ae3138c1ac10704075",
+      "scripts/qsa/run_native_gqa.py": "a4cf5033cffc49430b163a27697401faec26d8e9706e6f918d628980b30361e2",
+      "scripts/qsa/run_native_gsm8k.py": "cd814101ecd8f4cdaee613fcb2b6134b2eca65186ef1a3b4ec76b739b32b438d",
+      "scripts/qsa/run_remaining.py": "bd73bd16f556768a0a2050cc122ed4adcca8ec3570392e3d73dd21ecdf9db99c",
+      "scripts/qsa/run_stage.py": "2e744b943d3f681e5cb1fa70e009a189bfae9b38a1362cfd9e96771f859a4455",
+      "scripts/qsa/runtime.py": "b839b0816065d57458e749ec666c105cf019015f037e449b87632089e31586de",
+      "scripts/qsa/swebench_native.yaml": "7cd6f7dd7d64805ba75f22cd2d232c79c6f6f07ced795162bb638a26fdadf3f9",
+      "scripts/qsa/validate_changed.py": "43c1ca5a064928f6e758f5fb38bdadf7139e94e2df0bd3a4694db1a5059dce32",
+      "scripts/qsa/validate_mini_native_model.py": "65e9a065e46ec10cc008a95e308c6b8c4b4c1af5d3f248c80e72b4434c7df97e",
+      "scripts/qsa/validate_native_gqa.py": "22d1689d7149cbdeec830f1740b1298b5fb8fde2a54fbea251ec26b08d76fc6f",
+      "scripts/qsa/validate_native_gqa_errors.py": "46fd2a355a9cdd1054e1606eac7039f48998c1d7b684be63ed3101a1a0b98bfb",
+      "scripts/qsa/validate_partitioned.py": "952c209fc125a3411682f17365b3811cf998da0a7732625b6dade26702f22834",
+      "scripts/qsa/validate_qsa.py": "9cadef80ed44417b1b8829796ba99f617351d6c49e885ed9b0e5a04ccc7d76ca",
+      "scripts/qsa/validate_qsa_long.py": "fe74378ee445b3fc84fa97194fda89f11f1a73e370bd246bf987e30750be9722",
+      "scripts/qwen_qsa/audit_memory.py": "5d52b27b29e3a093ee5d717b73ba3b205f8c91d8fddefc61fd16be96c9fe1b83",
+      "scripts/qwen_qsa/audit_performance.py": "779874f13ee978548df58c9443c2263636fd0823ef17913d96986650caad99c1",
+      "scripts/qwen_qsa/benchmark_native.py": "5d4516e372a2452f0264319739a26cf84d91d6fb432a1453f1370768a4d15bc2",
+      "scripts/qwen_qsa/default_inference.py": "d552bc32d49d5e28c6473e7cccecd86ec1e6c0682d1c420f8e045ac1b5109a91",
+      "scripts/qwen_qsa/evaluate_default.py": "ca06808fc44dda8232191bd6942f56d86ec208b8fcd071b3ad9a4ebe97322f82",
+      "scripts/qwen_qsa/evaluate_long_default.py": "5eaa0e988a11d9565800b37283a4899a8dcc84f96ee67cdd57e0d685a9f20301",
+      "scripts/qwen_qsa/evaluate_long_native.py": "31f5a8dd862e2aa1b4819c74d430381499f301cec4354f86481a96f906b29dda",
+      "scripts/qwen_qsa/evaluate_native.py": "6a88620c00a09149aa9dcc67d94c0d1d00bfbebd3804b25e6e31c1522b76b000",
+      "scripts/qwen_qsa/export_default.py": "49d8992da64188891c3536bf1191d90ebd5002f75527a75b5a65472d747c1bac",
+      "scripts/qwen_qsa/export_native_gqa.py": "56c329fb4e42369f54f182f50a85acb7cf058d626f222f9e4cc8d083e8fa871e",
+      "scripts/qwen_qsa/inspect_native_support.py": "91ebe4046755d8919bd2f5265ddd5e85872125bec0c78727f975c59f9c83bd07",
+      "scripts/qwen_qsa/lock_long_quality.py": "fe702da0f8d539b6a03cd2b0496349213572c072db1d17b487be35730b278274",
+      "scripts/qwen_qsa/lock_timing.py": "9276c8da1720c9b7d42c4003b07e7911eb13ff6c1791cd4b38f9cb142ab962c4",
+      "scripts/qwen_qsa/long_quality_inference.py": "6d91d50784f25cbaefae5dcd98c3554303eb739e1089ec482f328f42a0dc1fd4",
+      "scripts/qwen_qsa/memory_probe_worker.py": "3f1543954d6593bd3314644cdac3ac2ead2281f70b1b7d0f9aa5d014d7160d51",
+      "scripts/qwen_qsa/native_inference.py": "41dddd8e41a55591dd9271210ac7e9ba85dbdd7b37b16c52642ab5c3ea87081f",
+      "scripts/qwen_qsa/native_long_inference.py": "9ebad6431eb2af7cca75bbd3cff05f51a78780167bf90144aca965a5f9b4697c",
+      "scripts/qwen_qsa/package_evidence.py": "07926f45878c2a1f0fec15764cbee6a38dd5876012ac3b426fdde34be97575b9",
+      "scripts/qwen_qsa/prepare_selector_fixtures.py": "901983a4011006c644d7b7c6335b8b01a0b2a8c0e381541ea9837dc1023bfd9b",
+      "scripts/qwen_qsa/probe_default.py": "7c3078e5a98c1cb5f52bef24cf195ece99c485a5391490d5c0611a8a37284a37",
+      "scripts/qwen_qsa/report_results.py": "5d71d96a0e861a855b233e21e8d3186cc19f9638982e2d55ed42e2659c381ac4",
+      "scripts/qwen_qsa/run_default_quality.py": "976645d06ff255f99f0e8be76ee73e43a8ab6d51952c98c4f965ba37ebfdb3a2",
+      "scripts/qwen_qsa/run_memory_matrix.py": "46b43ffc21c39029c2125f80a25ed6c43e77200444ce6e3616e358a753ebfdd0",
+      "scripts/qwen_qsa/run_native_quality.py": "5271ab64850c00ecba6fac2a769cb267d63c4bd4d5299a42569421f366d28c10",
+      "scripts/qwen_qsa/run_performance.py": "f79187c8ab5e9d218e52b652f0682f3baa367ad009896b09ee85f9933372b726",
+      "scripts/qwen_qsa/sample_memory.py": "3909c071411dc468ecbb452680df6a38890791118f0e44b776d58ff69bada5ea",
+      "scripts/qwen_qsa/selector_reference.py": "e12e37ce7c7e9d5c46b6f375de81a402ec21a998d52c6d446e68ccf4fddfffd0",
+      "scripts/qwen_qsa/validate_default.py": "6d6f5b5dba2f37b63450c12a7c625d6f1f0db705ca03d0bc7853f28ad7aebe0d",
+      "scripts/qwen_qsa/validate_kernels.py": "decb30d2baac59fd24f47745e8ff3a825fc001b4668ef59f5531a3f197976535",
+      "scripts/qwen_qsa/validate_native.py": "cc5f396a6bc48baf36600fdde714fb70272fdfdd19ec89b360a36ba15da59c5c",
+      "scripts/qwen_qsa/validate_operator.py": "132aafa6f70109d2f7667dcf23d47942b20c511515c993b33238b3ed23599527",
+      "scripts/qwen_qsa/verify_handoff.py": "7dc4919f44796dc4e0dad6ba738100b85e91ddc58967e09b84657180d68745db",
+      "test/lit/Conversion/hip-to-llvm/test_qsa_gqa.mlir": "c5a29dad201b5cabfb510ea3c11a13094bcf0cc655dbe651b0c68e2df540c300",
+      "test/lit/Conversion/hip-to-llvm/test_qwen_qsa_gqa.mlir": "a6ac5c72bfa885487f88d4658a072831da8c3d71051e6972fccb7c568bc4a096",
+      "test/lit/Conversion/onnx-to-hip/test_qsa_gqa.mlir": "a6a4ac311ca662cc9e7867171b42faccba6387edbb49291e17141fd5e9a75ea7",
+      "test/lit/Conversion/onnx-to-hip/test_qwen_qsa_gqa.mlir": "03b6788ad657ebcf301636505acbed8180637bc1fdea2894ffe26b6f62f261e1",
+      "test/lit/Dialect/test_qsa_gqa_verify.mlir": "529003bc41d72a7ef0dcce02a5f5b150857102cc84081aa134c6c75f7d0ae6bc",
+      "test/lit/Dialect/test_qwen_qsa_gqa_verify.mlir": "d6eeb3e36300183af9f63f609f9437e31eecb52b0fa2694bb7716950358cd038",
+      "test/python/test_qsa_export_contract.py": "327cfc475792dfda7a2e48842dcd1337b3ecea79b36bf326c6b592d8e2b3c276",
+      "test/unit/test_dtype_mapping.cpp": "c75ba975ae493fdd664144b8a27d8c96175acbe9c16a8fd379733cc56351a517"
+    }
+  },
+  "source_line_endings": "Git source reconstructions use repository-normalized bytes; measured Windows source hashes can include CRLF. Original raw protocols and per-probe source snapshots preserve actual execution bytes.",
+  "measured_native_source_reconstruction": {
+    "backend-mlir-compiler/custom-op-mlir/src/MlirCustomOp.cpp": {
+      "git_blob": "a699ef15b7fe8ce448e13dc136797bd3767ddab5",
+      "sha256": "772b24f3bbb32c2f4b3005f42cc1a18b967963922c357c2761265c0a97849164"
+    },
+    "backend-mlir-compiler/custom-op-schema/schema_only_custom_op.cpp": {
+      "git_blob": "9c9d47912adc3830b3c468ff440946afa1ec7e57",
+      "sha256": "e84600ceb1947ede7e68d1a9b402dd717c8af2561557efdfc57fae9bfb820be3"
+    },
+    "include/hip/Dialect/IR/HipBufferize.h": {
+      "git_blob": "de26e2dc407c584efec6a16ab3bdfd321681fa34",
+      "sha256": "0b9fb0d34e9dc2d513dc747e1ad7b5de7a06e9e759004fe552c534b86ed15d0b"
+    },
+    "include/hip/Dialect/IR/HipOps.td": {
+      "git_blob": "b940a4e754acf817515d1374d0d1fb631ad7c9dc",
+      "sha256": "4d2c9056082e83493979ef202f80818e774f282c9d3d3c58e2b4fc85f2062c72"
+    },
+    "lib/Conversion/HipToLLVM/CMakeLists.txt": {
+      "git_blob": "b05e24cea3b637c3e0d323b5eefbab0bd762f599",
+      "sha256": "b1a8a2a72336fc6093bf72329f383e153ccf6b8fff6c9a79a0e1cc4dfc264993"
+    },
+    "lib/Conversion/HipToLLVM/HipToLLVM.cpp": {
+      "git_blob": "c0d7a104a6570dfd9a1c200e178e64a2d4e7cc40",
+      "sha256": "13d4e5c63eeb553fed80e81126c6d6290168d7c469858453f97fb7a07804b284"
+    },
+    "lib/Conversion/HipToLLVM/HipToLLVMUtils.h": {
+      "git_blob": "f25060d3aa0469ebccab89fdbc691300e71796a1",
+      "sha256": "0ed81010d03f2946e1502a032f6735249c4c711e2eecfdba15d7585e477c784e"
+    },
+    "lib/Conversion/HipToLLVM/QsaGqaLowering.cpp": {
+      "git_blob": "cad552dbce2c3e7377e9380b49d4ff3d113689c7",
+      "sha256": "ef5eea12ccf316f8dd95db5d7da026d89eea037899f0725b1fa3b06aeba393d8"
+    },
+    "lib/Conversion/HipToLLVM/QwenQsaGqaLowering.cpp": {
+      "git_blob": "cd817d61138a248f919db88433a5e751f6ceeb63",
+      "sha256": "462197167fb8fbe46c7c95f15a3b090546203e9b0cef7ebd12055bdb9499fe89"
+    },
+    "lib/Conversion/OnnxToHip/CMakeLists.txt": {
+      "git_blob": "4286bf083e450c76cc6b16d044254e78eaac8991",
+      "sha256": "5859572df61dc6916da9b305557389958fd2c560d6422144349436f624b6fe70"
+    },
+    "lib/Conversion/OnnxToHip/OnnxToHip.cpp": {
+      "git_blob": "170ece508847932bb1a54d92261cd0bcf5baabac",
+      "sha256": "195769da212e86f9f3753657e2a146343ab3e48612e0903478e86b5caab64f39"
+    },
+    "lib/Conversion/OnnxToHip/OnnxToHipUtils.h": {
+      "git_blob": "95a5e012969b4ca71a3a5b7c38172023562ff8e0",
+      "sha256": "981c9d90bb6e0c32a9c09af7c0ed897aacd873900fa3175fb62525a4e6e9d503"
+    },
+    "lib/Conversion/OnnxToHip/QsaGqaConversion.cpp": {
+      "git_blob": "35efcc772f4a1c6b5eab2ed5e12911cac84b812e",
+      "sha256": "a6b04de05e1f81a58414b8a553b8000f6392a645d2302474931e5c277be84bc7"
+    },
+    "lib/Conversion/OnnxToHip/QwenQsaGqaConversion.cpp": {
+      "git_blob": "7d9fe4cc0564233f6450a5a6c13ae05b33c96c47",
+      "sha256": "d4604faeeb4834d618dc171d0b1006cc579ae043d3a08d92d7bc3116a16096b6"
+    },
+    "lib/Dialect/IR/HipDialect.cpp": {
+      "git_blob": "fd04fc70ee6f3b5aad8be4798d5132b940a8b03a",
+      "sha256": "13e35693744898560e8f8ab06cac27b69889cd94a9928ded8724c7700e48e6b7"
+    },
+    "lib/Runtime/CMakeLists.txt": {
+      "git_blob": "8f1318eceba611c374ee024325eeb4cbfa7c58ae",
+      "sha256": "47e828d1b746af2d3132678a9e6ccbdb5f17da7f0f207d9a398c2698d876b74e"
+    },
+    "lib/Runtime/Kernels/CMakeLists.txt": {
+      "git_blob": "a19c5e899eff45e263ad697bd5ad38150ff8188a",
+      "sha256": "5790eaf708c59d5ddd78d5185de917cf9c4d63499839a184e1e721dfaf148c77"
+    },
+    "lib/Runtime/Kernels/hip/qsa/qsa_gqa_kernels.hip.in": {
+      "git_blob": "b5fa1e6ec841b3c7371d4f13a420c35a4e4ebbee",
+      "sha256": "7f6e852da9239f4a9ea26d1f3b3733af5f41350e09d1830d73c1d89be524055b"
+    },
+    "lib/Runtime/Kernels/hip/qsa/qsa_gqa_projection.hip": {
+      "git_blob": "3535a30c2026c4bf50da292e732a8010351658e9",
+      "sha256": "6fc8e14bc4622fea53bcdb8d62fdef516d1293dd38efd1f70456c117630edbf7"
+    },
+    "lib/Runtime/Kernels/hip/qsa/qsa_port.hip": {
+      "git_blob": "6d51c7a7f47b8f1e892203b6599566c40360ef68",
+      "sha256": "a34a05b13ddc918347f9ad0f0f1bdf21edd3b06306b9a22cf7f646991bdaa05d"
+    },
+    "lib/Runtime/Kernels/hip/qsa/qwen_qsa_kernels.hip.in": {
+      "git_blob": "6f2bcc519664a144a7e29eef10aa49ce35d6166c",
+      "sha256": "6e04699fcb67d5afb691ca8966d26494948d791369cb8a0a30705c5490b8744b"
+    },
+    "lib/Runtime/Kernels/hip/qsa/qwen_qsa_port.hip": {
+      "git_blob": "054d9cc42ad4846472aaed58c92e9f148e0995d3",
+      "sha256": "43b59cd814c6c107c4d54cda475498850e493f5dde606dd33718210857df5c0d"
+    },
+    "lib/Runtime/Kernels/include/hip_qsa.h": {
+      "git_blob": "05337b97bade2dbe967b5671179e78b9fc8da0d9",
+      "sha256": "f323787ff6074574beb2051a5108f02ba33d0d3abac495dee0aeeaf9b97e3f09"
+    },
+    "lib/Runtime/Kernels/include/hip_qsa_gqa.h": {
+      "git_blob": "159a92129f2465ffb599649d86f1ef428739ada3",
+      "sha256": "21450f780f818ead6c51cfae4f1f3519fcd7850daf85810ce3ac2fa14944cbed"
+    },
+    "lib/Runtime/Kernels/include/hip_qwen_qsa.h": {
+      "git_blob": "0e8d7807c6b110008aa1e90eb52fc106124b2402",
+      "sha256": "bf36b277bf7279c2941656e8b53c8a41cd94296d06b070de860557f02aefeb72"
+    },
+    "lib/Runtime/Kernels/qsa/CMakeLists.txt": {
+      "git_blob": "5a2bd44c5e1323b4024ac041f3572babaa1f41bc",
+      "sha256": "9d0d6fd0d976edcf7050300665b3d31c920d028ef5db11313608da4282a5477f"
+    },
+    "lib/Runtime/hipdnn_ep_runtime.h": {
+      "git_blob": "5b25b88373b14cf03e2eaaad738d284cd7c647a6",
+      "sha256": "77c0ac2e965af84c5c57daf485ddd72b22eded2d165f44f15ad90280feb3ad94"
+    },
+    "lib/Runtime/mock/mock_gpu.cpp": {
+      "git_blob": "35f248d891d98a61db5127cb6c9ae82e90d07a0a",
+      "sha256": "87fc62827c23faa8322d1ee9852174d8eef9c9c6e0c99b4022a0a3934985c217"
+    },
+    "lib/Runtime/mock/op_state_stubs.cpp": {
+      "git_blob": "bfc88b868d68d9dc36ba2dd43b0c785482015af4",
+      "sha256": "09c5d90a38d448c77ee3f24c5d653975f46df235037911708eeda5e7850b9954"
+    },
+    "lib/Runtime/real/gqa.cpp": {
+      "git_blob": "e70dbfffd64340b21cdeb3d7014757a476541f37",
+      "sha256": "235ab91d74f8ddce5093565fbd8d98899b9590d987bed04b692bf2be820bb64e"
+    },
+    "lib/Runtime/real/qsa_gqa.cpp": {
+      "git_blob": "286f2af607dc51d0d141875c5bf386b5332f824b",
+      "sha256": "058054c805e7a1406316e1b18650f759368bdf8c6e3e4a74cde8c4bdbeb10ebc"
+    },
+    "lib/Runtime/real/qwen_qsa_gqa.cpp": {
+      "git_blob": "13f2e7823eb7ef8a3a2913d77a06315f816e67ef",
+      "sha256": "7a9b98b03cf5dcecee907bc147b0705b1363d62fb2f754548b1ac0942fc65e45"
+    },
+    "morphizen/mlir-imp/src/mlir-constants.cpp": {
+      "git_blob": "defea6d23db7323f1a64f5b5828ab2d0f34ad98c",
+      "sha256": "33056bc2a849f561166cedc3f0bb68ab80890839980017264f624d17e1e855fe"
+    },
+    "morphizen/mlir-imp/src/mlir-named-attribute.cpp": {
+      "git_blob": "8595bf3405f648ebdcf95d748a0501b463334b3a",
+      "sha256": "d4a6e94e223c5464a9287e988a8665ac0e60f55d3186ab34dba301391655fe37"
+    },
+    "morphizen/mlir-imp/src/mlir-node-arg.cpp": {
+      "git_blob": "c577394b9c276771770b8ba744c7eaafea70e65c",
+      "sha256": "ec08464e712b519e5d070bb7d2685693c56feea359b24c56a4acfb53e3c4080b"
+    },
+    "morphizen/ort-bridge/src/morphizen-ep.cpp": {
+      "git_blob": "40199346d688deff656a6e245d6e538b9ec79edc",
+      "sha256": "e885bd09e387ea0ea5ab7b24541f894359e002b720cc955b6f510c50f7ce8c40"
+    }
+  },
+  "build_provenance_limit": "Measured build began at dirty HEAD2a43690; native implementation subsequently committed in7a71b72. Binary hashes and execution receipts are authoritative; final PR merge build is separate and has no inherited performance claims.",
+  "errata": [
+    "Historical generic run_stage.py receipts for Qwen hashed the OLMo selector and only snapshotted scripts/qsa. Use the Qwen execution protocols/export/tensor hashes as model identity; the stage selector fields are not Qwen identity. Future runner selects the Qwen payload and snapshots both script directories.",
+    "Historical native-support.json recorded unused gqa_back.cpp; compiled implementation is real/gqa.cpp. Inspector corrected without rewriting historical receipt.",
+    "32K paired timing memory sampler attached after four measured pairs; 4K/16K timing had no sampler.",
+    "Batch4/4K default memory probe completed after1551.55s. Stop attempt found parent already gone; retain as complete, not timing or failure."
+  ]
+}

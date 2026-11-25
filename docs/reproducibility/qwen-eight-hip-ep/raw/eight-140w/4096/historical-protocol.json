@@ -1,0 +1,24 @@
+{
+  "context": 4096,
+  "batch": 1,
+  "capacity": 4160,
+  "warmup_pairs": 2,
+  "measured_pairs": 6,
+  "decode_calls": 64,
+  "timing_manifest_sha256": "3c712f4d4b2a933e3b8957904f442b57bdf30c178592dbd3ff4201799c0e075a",
+  "stream_sha256": "5c8ac2934c8f90d049337e50ea89b95a0c427c1b9b21291cc9d18de1827e567b",
+  "binary_sha256": {
+    "hipgpu.dll": "399e7b10ac8c8da1142f36347bbdf4fa4ab58a0de6ecda190993cc3d12cc100e",
+    "custom_kernels_gfx1151.dll": "80183ff88257bb6c753365ced254beb36e88b11e5622e3351c74520df43e4fb7",
+    "hip-mlir-opt.exe": "8b32e457c69a1e8e2fc44360f55254c09e681b1b40fa0811c8a06ea017f45653",
+    "hip-compiler.exe": "e67e146993bb2ca080b51bf53054cb0414c1e521afb6d0c9e621b54e4017c574"
+  },
+  "benchmark_sha256": "5d4516e372a2452f0264319739a26cf84d91d6fb432a1453f1370768a4d15bc2",
+  "inference_sha256": "4dafbfbd0e59d5ce687e100507c3b0001d5a85c9c7d20e2df12b683a9884f67c",
+  "timer": "Independent HIP-synchronized wall phase timers",
+  "prefill": "Full session with final-position head; allocation/binding and recurrent-state zeroing outside timer",
+  "decode": "64 common teacher-forced full-session calls; prefill, sampling and allocation/binding outside timer",
+  "cache": "Identical resident cache buffers shared serially; native selector state owned separately",
+  "statistics": "Paired mean-time ratio and 10000 paired bootstrap resamples seed42; within-run uncertainty",
+  "training_updates": 0
+}

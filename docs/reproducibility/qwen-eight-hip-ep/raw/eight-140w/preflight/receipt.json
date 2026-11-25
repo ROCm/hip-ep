@@ -1,0 +1,125 @@
+{
+  "checked_unix": 1795552470.699796,
+  "no_competing_gpu_work_observed": true,
+  "cpu_percent": 5.2,
+  "gpu_active": [
+    {
+      "pid": 22492,
+      "name": "ChatGPT.exe",
+      "percent": 0.9891891098912707
+    },
+    {
+      "pid": 22492,
+      "name": "ChatGPT.exe",
+      "percent": 0.14678976041733227
+    },
+    {
+      "pid": 2968,
+      "name": "dwm.exe",
+      "percent": 0.21429198037985356
+    },
+    {
+      "pid": 22492,
+      "name": "ChatGPT.exe",
+      "percent": 1.1052425839686277
+    },
+    {
+      "pid": 22492,
+      "name": "ChatGPT.exe",
+      "percent": 0.1741320321426312
+    },
+    {
+      "pid": 2968,
+      "name": "dwm.exe",
+      "percent": 0.2559721039691195
+    },
+    {
+      "pid": 4,
+      "name": "System",
+      "percent": 0.15744272632850542
+    },
+    {
+      "pid": 22492,
+      "name": "ChatGPT.exe",
+      "percent": 1.283262356331172
+    },
+    {
+      "pid": 22492,
+      "name": "ChatGPT.exe",
+      "percent": 0.21379479391858106
+    },
+    {
+      "pid": 2968,
+      "name": "dwm.exe",
+      "percent": 0.28583960187987784
+    },
+    {
+      "pid": 22492,
+      "name": "ChatGPT.exe",
+      "percent": 1.0518639261378084
+    },
+    {
+      "pid": 22492,
+      "name": "ChatGPT.exe",
+      "percent": 0.12425481969551636
+    },
+    {
+      "pid": 2968,
+      "name": "dwm.exe",
+      "percent": 0.273886738033081
+    },
+    {
+      "pid": 4,
+      "name": "System",
+      "percent": 0.11053773636873498
+    }
+  ],
+  "python_processes": [
+    {
+      "pid": 6732,
+      "cpu_percent_one_core": 0.0,
+      "command": [
+        "C:\\Users\\rajeevp\\AppData\\Local\\miniforge3\\python.exe",
+        "C:\\Users\\rajeevp\\AppData\\Local\\miniforge3\\Scripts\\conda-script.py",
+        "run",
+        "--no-capture-output",
+        "-n",
+        "llmfc",
+        "python",
+        "-B",
+        "-m",
+        "llmfc_mcp"
+      ]
+    },
+    {
+      "pid": 29720,
+      "cpu_percent_one_core": 0.0,
+      "command": [
+        "python",
+        "-B",
+        "-m",
+        "llmfc_mcp"
+      ]
+    },
+    {
+      "pid": 45816,
+      "cpu_percent_one_core": 0.0,
+      "command": [
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qsa\\venv\\Scripts\\python.exe",
+        "-"
+      ]
+    },
+    {
+      "pid": 48264,
+      "cpu_percent_one_core": 0.0,
+      "command": [
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qsa\\venv\\Scripts\\python.exe",
+        "-"
+      ]
+    }
+  ],
+  "available_ram_bytes": 43747127296,
+  "charger_watts_user_reported": 140,
+  "charger_wattage_independently_measured": false,
+  "scope": "Eight only B1 4K/16K/32K;2warmups,6measured requests,64forced decode inputs;noaccuracy"
+}

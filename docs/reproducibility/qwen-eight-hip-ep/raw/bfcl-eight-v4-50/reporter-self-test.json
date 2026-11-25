@@ -1,0 +1,8 @@
+{
+  "status": "passed",
+  "scope": "Historical four-selector records only; no new score asserted",
+  "source_rows_sha256": "df0d071d2770c6f225e0af6268e7f16c5d3e79de7bae7dcaabc0faf40dde76ae",
+  "case_rows": 100,
+  "generation_rows": 577,
+  "known_bootstrap_interval_reproduced": true
+}

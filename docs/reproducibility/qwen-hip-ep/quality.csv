@@ -1,0 +1,3 @@
+platform,variant,state,ppl_documents,targets,nll,ppl,gsm_questions,gsm_correct,gsm_caps,gsm_accuracy_percent,bfcl_pilot_cases,bfcl_pilot_correct,bfcl_pilot_accuracy_percent
+Radeon 8060S gfx1151,Original,complete,64,262080,1.786527149842939,5.9686880721288516,128,111,18,86.71875,50,26,52
+Radeon 8060S gfx1151,Changed,complete,64,262080,1.7869597082874613,5.971270437028778,128,111,18,86.71875,50,24,48

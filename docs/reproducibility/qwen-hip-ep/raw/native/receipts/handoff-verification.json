@@ -1,0 +1,308 @@
+{
+  "status": "passed",
+  "scope": "CPU payload/data verification and backbone-header inventory; no inference",
+  "source_commit": "75ef56b6039939a9e9d7703b18079d363761ea30",
+  "model": "Qwen/Qwen3.8-27B",
+  "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+  "selector_sha256": "d7729599f421d80ace536f84145bafa9a6e1eaad22dde18ce42392014a58b5e4",
+  "parameters": 13108736,
+  "tensors": {
+    "selectors.27.pool_k_norm.weight": {
+      "dtype": "BF16",
+      "shape": [
+        128
+      ],
+      "raw_sha256": "25f3c401c387e9599e7708f2c4c817254a5f608cdb2fb97506033578dcc3fcd9"
+    },
+    "selectors.27.projection.weight": {
+      "dtype": "BF16",
+      "shape": [
+        640,
+        5120
+      ],
+      "raw_sha256": "17b7eb71b1252a92c170808478bf8d22995b527e90c153db4b4d248476513edd"
+    },
+    "selectors.27.q_norm.weight": {
+      "dtype": "BF16",
+      "shape": [
+        128
+      ],
+      "raw_sha256": "bc3079148d393af0a4721ed802a9fa5850b355b18ad81673fa35c60ec8ce4da8"
+    },
+    "selectors.27.token_k_norm.weight": {
+      "dtype": "BF16",
+      "shape": [
+        128
+      ],
+      "raw_sha256": "281a92c6ade0afa7508cd8c99023c3fc2aed656e170badd54b319231f5d62063"
+    },
+    "selectors.31.pool_k_norm.weight": {
+      "dtype": "BF16",
+      "shape": [
+        128
+      ],
+      "raw_sha256": "ca342b64c55d80fe163058e87935c9b00a13f3ee70196a0dc93788279fe928d5"
+    },
+    "selectors.31.projection.weight": {
+      "dtype": "BF16",
+      "shape": [
+        640,
+        5120
+      ],
+      "raw_sha256": "f398ac2e052c71327328c7382bc609a8d5fa7958e7652cc67e400d3fbd44f228"
+    },
+    "selectors.31.q_norm.weight": {
+      "dtype": "BF16",
+      "shape": [
+        128
+      ],
+      "raw_sha256": "54faf2fb32099b01003d325b26b0a7cb7f86864b694c149685a57f7d90eec20e"
+    },
+    "selectors.31.token_k_norm.weight": {
+      "dtype": "BF16",
+      "shape": [
+        128
+      ],
+      "raw_sha256": "da4cb3c2330e04d59e33a9753d030bde98182db7eff2466c631d3264e11aa3c9"
+    },
+    "selectors.35.pool_k_norm.weight": {
+      "dtype": "BF16",
+      "shape": [
+        128
+      ],
+      "raw_sha256": "068c789f3c2cf4018bbcc8c6d1048bd42d71175174cbc53d12df569425ed01ec"
+    },
+    "selectors.35.projection.weight": {
+      "dtype": "BF16",
+      "shape": [
+        640,
+        5120
+      ],
+      "raw_sha256": "c28092090a55ded16ebca92fb46e751fe2768faa5e495f4dbcb3de346564876d"
+    },
+    "selectors.35.q_norm.weight": {
+      "dtype": "BF16",
+      "shape": [
+        128
+      ],
+      "raw_sha256": "c353da14a222809b5218e1987ed17cc055ecc4cf04d0bde32e1e7c49991e43d8"
+    },
+    "selectors.35.token_k_norm.weight": {
+      "dtype": "BF16",
+      "shape": [
+        128
+      ],
+      "raw_sha256": "e94c78606a5a97b50f76f6c0e46ccde569914233571efb2369dbf937dc81cc01"
+    },
+    "selectors.39.pool_k_norm.weight": {
+      "dtype": "BF16",
+      "shape": [
+        128
+      ],
+      "raw_sha256": "9aca3e89d69768ac32ac2f37878a6bbc546d0820e3959d82c49c94794634028b"
+    },
+    "selectors.39.projection.weight": {
+      "dtype": "BF16",
+      "shape": [
+        640,
+        5120
+      ],
+      "raw_sha256": "1392984b130d3a8a84f1e34308ebcb9e6c6b6b5b0c1737b2c2dc82e3e6c93fb3"
+    },
+    "selectors.39.q_norm.weight": {
+      "dtype": "BF16",
+      "shape": [
+        128
+      ],
+      "raw_sha256": "2af281bbb0878f9a64c57604a7a1a1d58c65c40738506399e0abcb2b1aa43370"
+    },
+    "selectors.39.token_k_norm.weight": {
+      "dtype": "BF16",
+      "shape": [
+        128
+      ],
+      "raw_sha256": "54622af575692f1030f104d3f02af96635b959640a94bfd682831dbd8c49d597"
+    }
+  },
+  "data_sha256": {
+    "train.json": "fda26c9657832e625f829702b8dbb81d956f4532d3c27eaefeb99ff6176fa064",
+    "validation.json": "14161d9fa7bbe98725bd42a528e5ec1354b6045e09ae9b4cc97a8ab937541d97",
+    "test.json": "255b0110c2d500438f489de52c424eb993bdcd0f2a13a20851cd6a878ac64227",
+    "gsm8k.json": "81ff84e59c942977cc8306ae41ee83cd02225e103bbb3d3c012f072566a100c7"
+  },
+  "backbone": {
+    "snapshot": "C:\\Users\\rajeevp\\.cache\\huggingface\\hub\\models--Qwen--Qwen3.8-27B\\snapshots\\1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+    "exists": true,
+    "weight_bytes_verified": true,
+    "shards": 18,
+    "tensors": 1199,
+    "tensor_bytes": 55562855904,
+    "dtype_bytes": {
+      "BF16": 55562855904
+    },
+    "config": {
+      "architectures": [
+        "Qwen3_5ForConditionalGeneration"
+      ],
+      "image_token_id": 248056,
+      "language_model_only": false,
+      "model_type": "qwen3_5",
+      "text_config": {
+        "attention_bias": false,
+        "attention_dropout": 0.0,
+        "attn_output_gate": true,
+        "bos_token_id": 248044,
+        "dtype": "bfloat16",
+        "eos_token_id": 248044,
+        "full_attention_interval": 4,
+        "head_dim": 256,
+        "hidden_act": "silu",
+        "hidden_size": 5120,
+        "initializer_range": 0.02,
+        "intermediate_size": 17408,
+        "layer_types": [
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention"
+        ],
+        "linear_conv_kernel_dim": 4,
+        "linear_key_head_dim": 128,
+        "linear_num_key_heads": 16,
+        "linear_num_value_heads": 48,
+        "linear_value_head_dim": 128,
+        "mamba_ssm_dtype": "float32",
+        "max_position_embeddings": 262144,
+        "model_type": "qwen3_5_text",
+        "mtp_num_hidden_layers": 1,
+        "mtp_use_dedicated_embeddings": false,
+        "num_attention_heads": 24,
+        "num_hidden_layers": 64,
+        "num_key_value_heads": 4,
+        "output_gate_type": "swish",
+        "pad_token_id": null,
+        "partial_rotary_factor": 0.25,
+        "rms_norm_eps": 1e-06,
+        "rope_parameters": {
+          "mrope_interleaved": true,
+          "mrope_section": [
+            11,
+            11,
+            10
+          ],
+          "partial_rotary_factor": 0.25,
+          "rope_theta": 10000000,
+          "rope_type": "default"
+        },
+        "tie_word_embeddings": false,
+        "use_cache": true,
+        "vocab_size": 248320
+      },
+      "tie_word_embeddings": false,
+      "transformers_version": "5.8.0.dev0",
+      "video_token_id": 248057,
+      "vision_config": {
+        "deepstack_visual_indexes": [],
+        "depth": 27,
+        "hidden_act": "gelu_pytorch_tanh",
+        "hidden_size": 1152,
+        "in_channels": 3,
+        "initializer_range": 0.02,
+        "intermediate_size": 4304,
+        "model_type": "qwen3_5",
+        "num_heads": 16,
+        "num_position_embeddings": 2304,
+        "out_hidden_size": 5120,
+        "patch_size": 16,
+        "spatial_merge_size": 2,
+        "temporal_patch_size": 2
+      },
+      "vision_end_token_id": 248054,
+      "vision_start_token_id": 248053
+    },
+    "index_sha256": "77042094076611b69791a610065f28b7013b8c621795fa86ddccc8bac7d1b9df",
+    "shard_sha256": {
+      "model-00001-of-00018.safetensors": "ba0ce20aae489ad196733da5064bcdf159a1fe84f53336648196e1ebb7751b1c",
+      "model-00002-of-00018.safetensors": "06a148c01bfbe3faa14a5f184a7ff29a706f7ae1c8b2705d2058e26d17a001fb",
+      "model-00003-of-00018.safetensors": "2e1bf62cbcd406eaa64b60d10353e1f0ef4039d0976e56f05cabe953454f9968",
+      "model-00004-of-00018.safetensors": "511e34063187882659753c4d93f3859f93c019fd438d8813071921c81d9a3f1a",
+      "model-00005-of-00018.safetensors": "635cb53446dc74f219740fc59e18b774f877b803b9722e289ca62575a6efa701",
+      "model-00006-of-00018.safetensors": "0bc5214fac607f0e6cc92eec3789d4b8559410ef9fce66621ba8158e8410dae0",
+      "model-00007-of-00018.safetensors": "80b0c49033e9a0d5762562aa12f4acdb7f54da586f3d0110f28c48d91cf07892",
+      "model-00008-of-00018.safetensors": "7192c5b66185d3592927daabee1cc19e6f6e0ce75988ee20e824b624765fda79",
+      "model-00009-of-00018.safetensors": "af3c48cc37af44f3db6ae0579baf019180d48d9c527caa0a1f03ff85813a56d8",
+      "model-00010-of-00018.safetensors": "163490a76f3bea3a40855b7efc04ce6d27afaf1a34f0bbde495b9491f76457c9",
+      "model-00011-of-00018.safetensors": "5f3ae1b948aeee39da77aec558e8236cd65fe4d7cb7686a76bb007acc563c6d8",
+      "model-00012-of-00018.safetensors": "a3de1c7114677a8f5ac5c4892c90e8238ea5c1e2038c80e757dfc87c3902ca55",
+      "model-00013-of-00018.safetensors": "06ab79a41f74c9c5cb734816feb0c7fc364104b227165ee7391231e1155aa02a",
+      "model-00014-of-00018.safetensors": "4138ed94603065ba884bbcadedb04d7718bb40117e85e6f5c6fc5b9c05b7a85b",
+      "model-00015-of-00018.safetensors": "69224e27b9de4e7dbf6fc936c6eaae08447bda3b80a6c31a871ab451173afd22",
+      "model-00016-of-00018.safetensors": "73cb9a1089fb6155cb648609478d6633be8a5c7d9ca5a05bc8925ce8a553cefe",
+      "model-00017-of-00018.safetensors": "beb51f01056142ac4984bd800507b0dd0fd18de57f8e9ef6ea41d1a3598983a8",
+      "model-00018-of-00018.safetensors": "1d3479509e21494658f9b64d317f5ea8e55c4025d28c702d6c4d0b356ce8ea06"
+    }
+  },
+  "training_updates": 0,
+  "gpu_allocations": 0,
+  "baseline_established": false
+}

@@ -1,0 +1,30 @@
+{
+  "state": "metadata_corrected_no_rerun",
+  "raw_protocol_path": "_local\\qwen-qsa\\original-short-control-v1\\4096\\protocol.json",
+  "raw_protocol_sha256": "868f786d5902c904e65ec6862999a53ecf7e7382debdec8b89200befcb34b99b",
+  "incorrect_field": "phase_policy",
+  "incorrect_value": "sparse prefill and sparse decode",
+  "correct_value": "native default full attention in prefill and decode; no QSA nodes",
+  "explanation": "The shared identity() helper refers to the paused eight-selector transfer and supplied an inherited phase-policy string. The control overrides model graph/export identity and instantiates Native(native-gqa/models/Original) only. Eight reference metadata is read on CPU; no Eight session is created.",
+  "model_folder": "_local\\qwen-qsa\\native-gqa\\models\\Original",
+  "original_graph_sha256": "c200a4c9a0d94c195ea78dada12fadd0df6cc8227e1ea5ad88e8a6bd32dec616",
+  "original_backbone_sha256": "44b55d43fbd271cc85a3234fcc43950d11a8b343c89a8f7e642ebf60487e3262",
+  "archived_original_validation_sha256": "7515bb8db117d5da2d47ea20fc6c85c8ecd29a9f7136da6224896708cf075826",
+  "archived_original_performance_protocol_sha256": "0b46c95a4e51e0d8b865cc4c1017ff30d9de3e40b6c8669d0faa3a4ec0755e9f",
+  "native_binary_sha256": {
+    "hipgpu.dll": "399e7b10ac8c8da1142f36347bbdf4fa4ab58a0de6ecda190993cc3d12cc100e",
+    "custom_kernels_gfx1151.dll": "80183ff88257bb6c753365ced254beb36e88b11e5622e3351c74520df43e4fb7",
+    "hip-mlir-opt.exe": "8b32e457c69a1e8e2fc44360f55254c09e681b1b40fa0811c8a06ea017f45653",
+    "hip-compiler.exe": "e67e146993bb2ca080b51bf53054cb0414c1e521afb6d0c9e621b54e4017c574"
+  },
+  "archived_binary_hashes_exact": true,
+  "archived_original_graph_exact": true,
+  "executed_qsa_nodes": 0,
+  "native_gqa_nodes": 16,
+  "gdn_nodes": 48,
+  "selector_layers": [],
+  "as_run_control_source_sha256": "8f5bb32ca75188c344383756009aa073dbc65dc23adf00e70d8674761c97acc8",
+  "raw_protocol_unchanged": true,
+  "model_or_binary_changes": false,
+  "additional_gpu_runs": 0
+}

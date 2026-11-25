@@ -402,7 +402,7 @@ MorphiZenEP::GetCapability(OrtGraphWrapper &graph_viewer,
   }
   MY_LOG(1) << "Using backend: " << backend_ir;
   auto with_new_api = setup_global_morphizen_ort_api(backend_ir);
-  // Build IRConverterConfig — threshold priority:
+  // Build IRConverterConfig â€” threshold priority:
   //   1. provider option XLNX_model_clone_external_data_threshold (per-session)
   //   2. env param XLNX_ABI_2_0_CLONE_EXTERNAL_DATA_THRESHOLD    (process-wide)
   //   3. default 127                                              (fallback)

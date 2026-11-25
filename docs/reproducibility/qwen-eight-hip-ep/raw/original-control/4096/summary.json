@@ -1,0 +1,28 @@
+{
+  "status": "complete",
+  "context": 4096,
+  "batch": 1,
+  "measured_requests": 2,
+  "load_compile_seconds": 15.147992799999884,
+  "cache_pointers_unchanged": true,
+  "sessions_unchanged": true,
+  "replay_exact": true,
+  "protocol_sha256": "868f786d5902c904e65ec6862999a53ecf7e7382debdec8b89200befcb34b99b",
+  "rows_sha256": "0c61afa98ee716a426733a13d055abbacf9eb16c9959653c6d5e428abfdf8ce4",
+  "phases": {
+    "prefill": {
+      "mean_seconds": 13.374799399999574,
+      "tokens_s": 306.2475837955469,
+      "min_seconds": 13.283711599999151,
+      "max_seconds": 13.465887199999997,
+      "std_seconds": 0.12881760212732643
+    },
+    "decode": {
+      "mean_seconds": 6.290220099999715,
+      "tokens_s": 10.174524735629346,
+      "min_seconds": 6.268027999999504,
+      "max_seconds": 6.312412199999926,
+      "std_seconds": 0.03138436879783866
+    }
+  }
+}

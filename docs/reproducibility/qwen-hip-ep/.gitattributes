@@ -1,0 +1,6 @@
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the MIT License.
+# Checksums refer to original bytes, including the measured Windows protocols.
+*.json -text whitespace=cr-at-eol
+*.csv -text whitespace=cr-at-eol
+raw/** -text whitespace=cr-at-eol

@@ -1,0 +1,77 @@
+{
+  "model": "olmo",
+  "variant": "Changed",
+  "shapes": [
+    [
+      16384,
+      1
+    ],
+    [
+      16384,
+      2
+    ],
+    [
+      16384,
+      4
+    ],
+    [
+      32768,
+      1
+    ],
+    [
+      32768,
+      2
+    ],
+    [
+      32768,
+      4
+    ],
+    [
+      65472,
+      1
+    ],
+    [
+      65472,
+      2
+    ],
+    [
+      65472,
+      4
+    ]
+  ],
+  "backbone_sha256": "1f77ca4fd3fe62ef6e81f57b3961d90d150cf5ffef6a05968e45d503c733b826",
+  "selector_sha256": "decd3160f4321839c80fee2ba0b0241575fc06017676e38a04286a3ae3daa10b",
+  "loaded": {
+    "allocated_bytes": 5156911104,
+    "reserved_bytes": 5312086016,
+    "device_used_bytes": 6121586688,
+    "device_total_bytes": 309220868096
+  },
+  "idle": {
+    "allocated_bytes": 0,
+    "reserved_bytes": 0,
+    "device_used_bytes": 645922816,
+    "device_total_bytes": 309220868096
+  },
+  "model_storage_bytes": 5084390400,
+  "selector_storage_bytes": 20973568,
+  "warmup_requests_per_shape": 1,
+  "measured_requests_per_shape": 2,
+  "decode_steps": 64,
+  "separate_process_per_model_and_variant": true,
+  "original_has_no_selector_tensors": false,
+  "allocator": "default; empty_cache after each completed request, never between prefill and decode",
+  "device_peak": "20ms polling target of hipMemGetInfo via torch; sampled whole-device usage, not exact process peak",
+  "counters": "allocated/reserved current and exact phase high-water marks; unique storage capacities for decomposition",
+  "exclusions": [
+    "Qwen 65536 B8 unsupported",
+    "OLMo 65472 B4 native prefill unsupported; cache expansion decode only"
+  ],
+  "no_training": true,
+  "no_accuracy": true,
+  "no_performance_results": true,
+  "torch": "2.11.0+rocm10.0.0",
+  "hip": "7.15.26333",
+  "gpu": "AMD Instinct MI355X",
+  "visible_devices": "3"
+}

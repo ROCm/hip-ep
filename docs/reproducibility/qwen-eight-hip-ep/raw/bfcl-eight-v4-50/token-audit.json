@@ -1,0 +1,37 @@
+{
+  "status": "passed",
+  "cases": 50,
+  "variant_rows": 50,
+  "complete": true,
+  "generations": 295,
+  "capped_generations": 0,
+  "actual_qsa_pruned_generations": 269,
+  "every_prompt_retokenized": true,
+  "every_completion_decoded": true,
+  "official_metadata_token_counts_match": true,
+  "gpu_initialized": false,
+  "rows_sha256": "5aeb0d81640973aef02009224c73dc8c5bab8574ea69227b6a43d83f788417bc",
+  "rows_prefix_bytes": 12973179,
+  "protocol_sha256": "571fa5e0f40ebc3bcc9efc57bc3f031fcedf750a73c1e08cae706b833c8d5bc9",
+  "observed_turn_records": 132,
+  "official_step_limited_case_ids": {
+    "Eight": [
+      "multi_turn_miss_param_195"
+    ]
+  },
+  "official_step_limited_cases": {
+    "Eight": 1
+  },
+  "groups_by_frozen_initial_prompt": {
+    "Eight": {
+      "initially_pruned": {
+        "cases": 24,
+        "correct": 9
+      },
+      "initially_full_support": {
+        "cases": 26,
+        "correct": 20
+      }
+    }
+  }
+}

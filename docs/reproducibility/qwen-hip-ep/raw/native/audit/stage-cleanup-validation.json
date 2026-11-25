@@ -1,0 +1,9 @@
+{
+  "status": "passed",
+  "scope": "CPU-only timeout fixture; parent and spawned child terminated; no model inference",
+  "fixture_pids": {
+    "worker": 25516,
+    "child": 49548
+  },
+  "stage_error": "TimeoutError('2-second stage limit; partial evidence retained')"
+}

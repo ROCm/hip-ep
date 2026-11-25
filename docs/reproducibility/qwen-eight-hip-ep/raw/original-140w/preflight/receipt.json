@@ -1,0 +1,110 @@
+{
+  "checked_unix": 1795552190.3984606,
+  "charger_watts_user_reported": 140,
+  "charger_wattage_independently_measured": false,
+  "ACLineStatus": 1,
+  "battery_flags": 1,
+  "cpu_percent": 2.8,
+  "gpu_active": [
+    {
+      "pid": 22492,
+      "name": "ChatGPT.exe",
+      "percent": 0.838544741610419
+    },
+    {
+      "pid": 2968,
+      "name": "dwm.exe",
+      "percent": 0.23426461297428536
+    },
+    {
+      "pid": 22492,
+      "name": "ChatGPT.exe",
+      "percent": 1.5178388969072785
+    },
+    {
+      "pid": 2968,
+      "name": "dwm.exe",
+      "percent": 0.33763412191594466
+    },
+    {
+      "pid": 4,
+      "name": "System",
+      "percent": 0.12305681779272717
+    },
+    {
+      "pid": 22492,
+      "name": "ChatGPT.exe",
+      "percent": 0.8909304308076254
+    },
+    {
+      "pid": 2968,
+      "name": "dwm.exe",
+      "percent": 0.22473653648954175
+    },
+    {
+      "pid": 22492,
+      "name": "ChatGPT.exe",
+      "percent": 0.8305819920122635
+    },
+    {
+      "pid": 2968,
+      "name": "dwm.exe",
+      "percent": 0.23437053296904006
+    },
+    {
+      "pid": 4,
+      "name": "System",
+      "percent": 0.4692052051134707
+    }
+  ],
+  "python_processes": [
+    {
+      "pid": 6732,
+      "name": "python.exe",
+      "cpu_percent_one_core": 0.0,
+      "command": [
+        "C:\\Users\\rajeevp\\AppData\\Local\\miniforge3\\python.exe",
+        "C:\\Users\\rajeevp\\AppData\\Local\\miniforge3\\Scripts\\conda-script.py",
+        "run",
+        "--no-capture-output",
+        "-n",
+        "llmfc",
+        "python",
+        "-B",
+        "-m",
+        "llmfc_mcp"
+      ]
+    },
+    {
+      "pid": 24040,
+      "name": "python.exe",
+      "cpu_percent_one_core": 0.5,
+      "command": [
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qsa\\venv\\Scripts\\python.exe",
+        "-"
+      ]
+    },
+    {
+      "pid": 29720,
+      "name": "python.exe",
+      "cpu_percent_one_core": 0.0,
+      "command": [
+        "python",
+        "-B",
+        "-m",
+        "llmfc_mcp"
+      ]
+    },
+    {
+      "pid": 40096,
+      "name": "python.exe",
+      "cpu_percent_one_core": 0.0,
+      "command": [
+        "C:\\Users\\rajeevp\\claude-projects\\hip-ep\\_local\\qsa\\venv\\Scripts\\python.exe",
+        "-"
+      ]
+    }
+  ],
+  "available_ram_bytes": 44101414912,
+  "no_competing_gpu_work_observed": true
+}

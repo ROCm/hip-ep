@@ -1,0 +1,16 @@
+{
+  "state": "complete",
+  "ppl_documents": 64,
+  "gsm_questions": 128,
+  "protocol_sha256": "ad0d441fdd06f75bb1f5d0729c6ac170d0be4144a876282d0b7bb50f0597cc12",
+  "row_files_sha256": {
+    "ppl": "6874b314eba9836541f52e0afba1c34ab8db5dde18005796a472d46a0ab2b53f",
+    "gsm8k": "f94ca385545a959f3fa95ff6abe8f3ff81a8a6794dcdf51b0d62325e001d9615"
+  },
+  "gsm_correct": 111,
+  "gsm_caps": 18,
+  "training_updates": 0,
+  "targets": 262080,
+  "nll": 1.7869597082874613,
+  "ppl": 5.971270437028778
+}
