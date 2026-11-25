@@ -4,6 +4,7 @@
 import csv
 import json
 import random
+import re
 import statistics
 from pathlib import Path
 
@@ -14,7 +15,7 @@ GQA_KEY = ('phase', 'head_dim', 'kv_dtype', 'num_heads', 'kv_num_heads', 'batch'
 
 
 def key_fields(op):
-    return NBITS_KEY if op == 'matmul_nbits' else GQA_KEY
+    return ('shape',) if op == 'paged_attention' else NBITS_KEY if op == 'matmul_nbits' else GQA_KEY
 
 
 def table_key(op, point):
@@ -31,8 +32,101 @@ def config_values(text):
     return {k: v if k == 'route' else int(v) for k, v in values.items()}
 
 
+def paged_shape(shape):
+    pattern = (r'(decode|prefill)_B(\d+)_H(\d+)_G(\d+)_D(\d+)_P(\d+)_S(\d+)_M(\d+)'
+               r'_q([0-9+]+)_past([0-9+]+)_rope([01])_rD(\d+)_inter([01])_pos(\d+)'
+               r'_scale([^_]+)_win(-?\d+)_cap([^_]+)_map(ordered|permuted|shared)_shared(\d+)_seed(\d+)_errnone')
+    match = re.fullmatch(pattern, shape)
+    if not match:
+        raise ValueError('malformed/unsupported Page shape (normal cases only)')
+    phase, b, h, g, d, p, size, columns, q, past, rope, rd, inter, pos, scale, window, cap, page_map, shared, seed = match.groups()
+    b,h,g,d,p,size,columns,rope,rd,inter,pos,window,shared,seed=map(int,(b,h,g,d,p,size,columns,rope,rd,inter,pos,window,shared,seed))
+    q,past=[int(x) for x in q.split('+')],[int(x) for x in past.split('+')]
+    if min(b,h,g,p,size,columns,pos)<=0 or d not in (64,96,128,256) or h%g or len(q)!=b or len(past)!=b:
+        raise ValueError('invalid Page base dimensions/arrays')
+    if not sum(q) or sum(q)>2**31-1 or any(x+y>2**31-1 or (x+y+size-1)//size>columns for x,y in zip(q,past)):
+        raise ValueError('invalid Page T/post/capacity')
+    if phase=='decode' and (any(x>1 for x in q) or h//g not in (1,2,3,4,5,6,8,16) and not(h//g==9 and d==128)):
+        raise ValueError('unsupported Page decode geometry')
+    if phase=='prefill' and d==256 and window>0 or float(cap)!=0 or not(float(scale)>=0 and float(scale)<float('inf')):
+        raise ValueError('unsupported Page options')
+    if rope and (inter or rd not in (0,d) or any(x and x+y>pos for x,y in zip(q,past))):
+        raise ValueError('invalid Page RoPE options/position')
+    if shared and (page_map!='shared' or shared%size or any(x and y<shared for x,y in zip(q,past))):
+        raise ValueError('invalid Page shared prefix')
+    return dict(phase=phase, B=b,H=h,G=g,D=d,P=p,S=size,M=columns,q=q,past=past,rope=rope,rD=rd,inter=inter,pos=pos,scale=scale,window=window,map=page_map,shared=shared,seed=seed)
+
+
+def paged_config(shape, text):
+    d=paged_shape(shape)
+    c=config_values(text)
+    fields=set(c)
+    if fields not in ({'splits','bkv'},{'splits','bkv','hb','qw','mt','nd'}):
+        raise ValueError('Page config must contain legacy or versioned final geometry')
+    if d['phase']=='decode':
+        legal=c['bkv']==0 and (0 if len(c)==6 else 1)<=c['splits']<=64 and all(c.get(k,0)==0 for k in ('hb','qw','mt','nd'))
+    else:
+        legal=c['splits']==0 and c['bkv'] in ((16,32) if d['D']==256 else (16,32,64))
+        if len(c)==6:
+            hb,qw,mt,nd=(c[k] for k in ('hb','qw','mt','nd'))
+            legacy=(hb==1 and qw==2 and mt==1 and nd==0 and d['D']<=128)
+            if d['D']==256 or d['D']==128 and nd>0:
+                legal=legal and d['window']<=0 and c['bkv'] in (16,32) and mt==1 and qw==0 and (nd,hb) in ((2,1),(2,2),(2,3),(2,4),(4,1),(4,2)) and (d['D']*(c['bkv']+8)+c['bkv']*(d['D']+8))*2+hb*nd*c['bkv']*16*4<=65536
+            else:
+                nw=hb*qw
+                layouts=((1,1),(2,1),(1,4),(2,2),(4,1),(1,8),(2,4),(4,2),(8,1))
+                normal=(hb,qw) in layouts and nd==0 and c['bkv'] in (32,64) and mt in ((1,2) if d['D']==64 else (1,))
+                normal=normal and not(d['window']>0 and nw>4) and not(d['D']==96 and nw<4) and not(d['D']==128 and (nw==2 or c['bkv']==64 and nw!=8)) and not(mt==2 and c['bkv']==64)
+                legal=legal and (legacy or normal)
+            legal=legal and hb>0 and (d['H']//d['G'])%hb==0
+    if not legal:raise ValueError('incompatible Page config geometry')
+    return c
+
+
+def paged_header(doc):
+    version=doc.get('schema_version')
+    expected=dict(kernel_abi='paged_fp16_pshd_v'+str(version),op='paged_attention',layout='PSHD',dtype='Fp16')
+    if version not in (1,2) or any(doc.get(k)!=v for k,v in expected.items()) or not isinstance(doc.get('gpu_arch'),str):
+        raise ValueError('incompatible Page op/layout/dtype/schema/ABI/arch header')
+
+
+def paged_pool(doc):
+    return doc['configs_v2'] if doc['schema_version']==2 else doc['configs']
+
+
+def migrate_paged_v1(doc):
+    """Preserve v1 arrays and indices; append only conflicting D geometries."""
+    paged_header(doc)
+    if doc['schema_version']!=1:raise ValueError('migration requires a v1 Page table')
+    import copy
+    out=copy.deepcopy(doc)
+    def convert(c,d):
+        if d['phase']=='decode':return dict(splits=c['splits'],bkv=c['bkv'],hb=0,qw=0,mt=0,nd=0)
+        return dict(splits=c['splits'],bkv=c['bkv'],hb=1,qw=0 if d['D']==256 else 2,mt=1,nd=2 if d['D']==256 else 0)
+    uses={}
+    for point in out['points']:
+        index=point['config'];d=paged_shape(point['shape']);paged_config(point['shape'],config_text(doc['configs'][index]))
+        uses.setdefault(index,[]).append((point,d))
+    pool=[]
+    for index,c in enumerate(doc['configs']):
+        d=uses[index][0][1] if index in uses else dict(phase='decode' if c['splits'] else 'prefill',D=64)
+        pool.append(convert(c,d))
+    remapped=[]
+    for index,points in uses.items():
+        for point,d in points:
+            c=convert(doc['configs'][index],d)
+            if c!=pool[index]:
+                target=next((i for i,x in enumerate(pool) if x==c),len(pool))
+                if target==len(pool):pool.append(c)
+                point['config']=target;remapped.append(dict(shape=point['shape'],old=index,new=target))
+    out.update(schema_version=2,kernel_abi='paged_fp16_pshd_v2',configs_v2=pool,fallbacks_v2=[])
+    return out,dict(old_configs=len(doc['configs']),new_configs=len(pool),remapped=remapped,old_fields_preserved=True)
+
+
 def native_config(op, doc, point):
-    c = doc['configs'][point['config']]
+    c = (paged_pool(doc) if op=='paged_attention' else doc['configs'])[point['config']]
+    if op == 'paged_attention':
+        return config_text({k:c[k] for k in (('splits','bkv','hb','qw','mt','nd') if doc['schema_version']==2 else ('splits','bkv'))})
     if op == 'gqa':
         return config_text(dict(wmma=c['use_wmma'], splits=point['splits'],
                                 **{k: c[k] for k in ('bkv', 'hb', 'qw', 'mt', 'nd')}))
@@ -47,6 +141,14 @@ def native_config(op, doc, point):
 
 def point_input(op, doc, point, activation='fp16', prefill_kv='fp16'):
     """Lossless schema key mapping. Unsupported semantic classes are explicit."""
+    if op == 'paged_attention':
+        paged_header(doc)
+        d=paged_shape(point['shape'])
+        if point.get('phase')!=d['phase'] or not isinstance(point.get('config'),int) or not 0<=point['config']<len(paged_pool(doc)):
+            raise ValueError('invalid Page point phase/config index')
+        text=native_config(op,doc,point)
+        paged_config(point['shape'],text)
+        return dict(key=table_key(op,point),leaf=f"paged_attention/{d['phase']}/Xfp16_Wfp16_Yfp16",shape=point['shape'],old_config=text,point=point)
     if op == 'matmul_nbits':
         bits = {'B2': 'u2', 'B3': 'u3', 'B4': 'u4', 'B8': 'i8'}.get(point['bits'])
         if bits is None or point['group_size'] not in ('G16', 'G32', 'G64', 'G128', 'G256', 'G512'):
@@ -99,6 +201,7 @@ def point_input(op, doc, point, activation='fp16', prefill_kv='fp16'):
 
 
 def inventory(op, doc, activation='fp16', prefill_kv='fp16'):
+    if op=='paged_attention': paged_header(doc)
     points, skipped, seen = [], [], set()
     for p in doc['points']:
         key = table_key(op, p)
@@ -188,6 +291,10 @@ def seed(args, installed):
 
 
 def record_point(op, record):
+    if op=='paged_attention':
+        d=paged_shape(record['shape'])
+        if record['leaf']!=f"paged_attention/{d['phase']}/Xfp16_Wfp16_Yfp16":raise ValueError('Page phase/leaf mismatch')
+        return dict(phase=d['phase'],shape=record['shape'])
     d = rank.fields(record['shape'])
     if op == 'matmul_nbits':
         # The leaf has no dp4a/padded route. A singleton gemv_m/naive stays skipped.
@@ -226,7 +333,10 @@ def update_points(op, doc, records):
         if old is not None and native_config(op, doc, old) == text:
             continue
         c = config_values(text)
-        if op == 'gqa':
+        if op == 'paged_attention':
+            config=paged_config(p['shape'],text)
+            pool=paged_pool(doc)
+        elif op == 'gqa':
             config = dict(kind='Decode' if p['phase'] == 'Decode' else 'Prefill', use_wmma=c['wmma'],
                           **{k: c[k] for k in ('bkv', 'hb', 'qw', 'mt', 'nd')})
             p['splits'] = c['splits']
@@ -250,7 +360,10 @@ def update_points(op, doc, records):
             plain = dict(config)
             if plain.pop('ext', 0):
                 doc.setdefault('extended_configs', []).append(dict(config=index, variant=plain.pop('variant')))
-            doc['configs'].append(plain)
+            if op == 'paged_attention':
+                pool.append(plain)
+            else:
+                doc['configs'].append(plain)
         p['config'] = pool.index(config) if config in pool else len(pool)
         if old is None:
             doc['points'].append(p)

@@ -137,3 +137,21 @@ add_test(NAME MatMulNBitsAutotuneUnitTest COMMAND test-matmul-nbits-autotune)
 set_tests_properties(MatMulNBitsAutotuneUnitTest PROPERTIES
     ENVIRONMENT "HIPDNN_EP_MATMUL_NBITS_ARCH=gfx1151")
 set_target_properties(test-matmul-nbits-autotune PROPERTIES FOLDER "runtime-tests")
+
+# Host-only tests link real wrappers against counted native/HIP boundaries.
+# They test validation and routing, not GPU arithmetic or model execution.
+foreach(_op IN ITEMS paged_attention)
+  string(REPLACE "_" "-" _target "${_op}")
+  add_executable(test-${_target}-runtime
+      test_${_op}_runtime.cpp
+      ${CMAKE_SOURCE_DIR}/lib/Runtime/real/${_op}.cpp)
+  target_compile_features(test-${_target}-runtime PRIVATE cxx_std_17)
+  target_compile_definitions(test-${_target}-runtime PRIVATE HIPDNN_EP_RT_NO_EXPORT)
+  target_include_directories(test-${_target}-runtime BEFORE PRIVATE
+      ${CMAKE_SOURCE_DIR}/lib/Runtime/mock
+      ${CMAKE_SOURCE_DIR}/lib/Runtime
+      ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/include
+      ${CMAKE_SOURCE_DIR}/include)
+  set_target_properties(test-${_target}-runtime PROPERTIES FOLDER "runtime-tests")
+endforeach()
+add_test(NAME PagedAttentionRuntimeUnitTest COMMAND test-paged-attention-runtime)

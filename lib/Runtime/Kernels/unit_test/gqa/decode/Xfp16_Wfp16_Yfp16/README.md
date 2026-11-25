@@ -2,8 +2,8 @@
 
 Standalone `hipcc`-only test for `hip_gqa_flash_decode()` (fp16 KV cache).
 No CMake, no EP build. Entirely self-contained: inputs and the CPU fp32
-reference are generated in-process, no python, no data files, no
-`unit_test/common/`.
+reference are generated in-process, no Python input generator or data files. Timing and input utilities
+come from `unit_test/common/`.
 
 ```
 make test        OFFLOAD=--offload-arch=%GFX% HIP_SDK=%HIP_SDK% [COVERAGE=1|2|3]
@@ -29,8 +29,8 @@ widened to also cover a short/interactive decode length: tier3 (default) =
 `{128, 512, 2048, 8192}`, tier2 = `{128, 2048, 8192}`, tier1 = `{2048}`
 alone. `COVERAGE=1|2|3` (`make test COVERAGE=N` or env `HIPDNN_UT_COVERAGE`)
 only picks which of those lengths run; it never drops a categorical
-situation. At startup the exe prints `coverage=N -> running <n> typical
-length(s) x 17 categorical case(s) = <n*17> gqa_decode cases`. No human
+situation. Fixed HpG3 and COPY representatives are also included at every
+tier; startup reports the total case count. No human
 edits a shape list -- there is no `shapes.csv` or `gen_data.py` in this
 leaf. Decode's reference cost scales ~linearly with context length (one
 query against `eff` keys), so no threading was needed here.
@@ -51,3 +51,24 @@ production) and dispatch the resolved config through
 `hip_gqa_flash_decode_configured()`. Both modes append to `out/results.csv`.
 
 CI passes `OFFLOAD`/`HIP_SDK` explicitly; there is no personal default.
+
+The optional GPU admission handshake starts after CPU reference preparation.
+After the final device work, rotation/input cleanup and synchronization finish
+before admission release and CPU comparison/CSV; a lookup phase reacquires it.
+
+`--only-shape <CSV / UT_TIMING shape>` selects exactly one built-in case at
+the requested coverage tier; an absent or ambiguous match returns nonzero.
+
+Online configuration logging is disabled by default, including preparation;
+its CSV config is `unlogged`. Set `HIPDNN_UT_GQA_DIAGNOSTIC=1` only in a
+separate diagnostic run to capture configuration selection. Lookup and rank
+still record their explicit configurations; use rank output for LUT refresh.
+
+Regression property support uses the existing shared timer and public APIs.
+`test_custom` also accepts `COPY=0`, `SPLITS=0`. The matching executable flags are `--copy`, `--splits`.
+`COPY=1` validates original history and new KV, present KV including unused capacity, output and guard regions. It includes history copy/append plus attention; `--fused` remains the older attention-only API. Auto and explicit splits and HpG4/5/6/8 representatives run at every coverage tier.
+
+COPY requires `B=1`, `D=128`, HpG in `{4,5,6,8}`, no sliding window,
+`2 <= TOTAL <= MAX_SEQ`, and `SPLITS=0` (automatic) or `1..64`.
+Invalid custom COPY inputs fail before device access. COPY cases are not
+part of the attention-only rank/LUT catalog.

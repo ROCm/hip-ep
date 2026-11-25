@@ -2286,11 +2286,20 @@ int hipdnn_ep_state_set_error_flag(RuntimeState *state, int code) {
     fprintf(stderr, "hipdnn_ep_state_set_error_flag: invalid state\n");
     return -1;
   }
-  // Same stream as the post-graph read. Synchronize before returning so the
-  // stack source is not read after this call, and so the flag is visible even
-  // if the caller returns without launching another kernel.
-  hipError_t err = hipMemcpyAsync(state->device_error_flag, &code, sizeof(code),
-                                  hipMemcpyHostToDevice, state->stream);
+  // Observe previous device validation on the graph stream first. A later
+  // wrapper failure must not overwrite the original error attribution.
+  int previous = 0;
+  hipError_t err =
+      hipMemcpyAsync(&previous, state->device_error_flag, sizeof(previous),
+                     hipMemcpyDeviceToHost, state->stream);
+  if (err != hipSuccess || hipStreamSynchronize(state->stream) != hipSuccess)
+    return -1;
+  if (previous != 0)
+    return 0;
+  // Synchronize before the stack source expires and before returning to a
+  // caller that may launch no more kernels.
+  err = hipMemcpyAsync(state->device_error_flag, &code, sizeof(code),
+                       hipMemcpyHostToDevice, state->stream);
   if (err != hipSuccess)
     return -1;
   err = hipStreamSynchronize(state->stream);

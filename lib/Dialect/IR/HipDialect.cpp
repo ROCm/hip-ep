@@ -4479,47 +4479,110 @@ LogicalResult GqaOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
-// PagedAttentionOp: com.microsoft.PagedAttention (stub runtime)
+// PagedAttentionOp: com.microsoft.PagedAttention with shared PSHD page pools
 //===----------------------------------------------------------------------===//
 
-MutableOperandRange PagedAttentionOp::getDpsInitsMutable() {
-  unsigned numInputs = 1; // ctx
-  if (getQuery())
-    ++numInputs;
-  if (getKey())
-    ++numInputs;
-  if (getValue())
-    ++numInputs;
-  if (getKeyCache())
-    ++numInputs;
-  if (getValueCache())
-    ++numInputs;
-  if (getCumulativeSequenceLength())
-    ++numInputs;
-  if (getPastSeqlens())
-    ++numInputs;
-  if (getBlockTable())
-    ++numInputs;
-  if (getCosCache())
-    ++numInputs;
-  if (getSinCache())
-    ++numInputs;
-  if (getAttentionMetadata())
-    ++numInputs;
-
-  unsigned numInits = 1;
-  if (getKeyCacheOut())
-    ++numInits;
-  if (getValueCacheOut())
-    ++numInits;
-
-  return MutableOperandRange(*this, /*start=*/numInputs, /*length=*/numInits);
+void BindOutputOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Write::get(),
+                       SideEffects::DefaultResource::get());
 }
-
+LogicalResult BindOutputOp::verify() {
+  auto type = cast<MemRefType>(getSource().getType());
+  if (getOutIdx() < 0 || getSource().getType() != getMemref().getType() ||
+      !type.getLayout().isIdentity())
+    return emitOpError(
+        "requires a nonnegative index and identical contiguous memref types");
+  return success();
+}
+MutableOperandRange PagedAttentionOp::getDpsInitsMutable() {
+  return MutableOperandRange(*this, getOutputMutable().getOperandNumber(), 3);
+}
 void PagedAttentionOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+  for (auto *operand : {&getKeyPoolMutable(), &getValuePoolMutable()})
+    effects.emplace_back(MemoryEffects::Read::get(), operand,
+                         SideEffects::DefaultResource::get());
+}
+LogicalResult PagedAttentionOp::verify() {
+  SmallVector<Value> data = {getQuery(),     getKey(),         getValue(),
+                             getCuSeqlens(), getPastSeqlens(), getBlockTable(),
+                             getOutput(),    getKeyPool(),     getValuePool()};
+  for (Value v : {getCosCache(), getSinCache(), getAttentionMetadata()})
+    if (v)
+      data.push_back(v);
+  if (failed(verifyDpsComputeOp(*this, data, 3)))
+    return failure();
+  for (Value value : data)
+    if (auto type = dyn_cast<MemRefType>(value.getType()))
+      if (!type.getLayout().isIdentity())
+        return emitOpError("requires contiguous row-major memrefs");
+  auto q = cast<ShapedType>(getQuery().getType());
+  auto pool = cast<ShapedType>(getKeyPool().getType());
+  auto past = cast<ShapedType>(getPastSeqlens().getType());
+  if (q.getRank() != 2 || pool.getRank() != 4 || past.getRank() != 1 ||
+      q.isDynamicDim(1) || pool.isDynamicDim(2) || pool.isDynamicDim(3))
+    return emitOpError(
+        "requires Q [T,H*D], PSHD pools with static H,D, and past [B]");
+  int64_t h = getNumHeads(), kv = getKvNumHeads(), d = pool.getDimSize(3);
+  if (h < 1 || kv < 1 || h > INT32_MAX || kv > INT32_MAX || h % kv ||
+      (d != 64 && d != 96 && d != 128 && d != 256) ||
+      (!pool.isDynamicDim(1) &&
+       (pool.getDimSize(1) < 1 || pool.getDimSize(1) > INT32_MAX)) ||
+      pool.getDimSize(2) != kv)
+    return emitOpError("unsupported head/page geometry");
+  // The generated I64Attr getter zero-extends; -1 disables the window.
+  int64_t window = getLocalWindowSizeAttr().getInt();
+  if ((getDoRotary() != 0 && getDoRotary() != 1) ||
+      getRotaryInterleaved() != 0 || window < -1 || window > INT32_MAX ||
+      getSoftcap().convertToFloat() != 0 ||
+      !std::isfinite(getScale().convertToFloat()) ||
+      getScale().convertToFloat() < 0)
+    return emitOpError("unsupported rotary/window/softcap/scale options");
+  constexpr int64_t any = ShapedType::kDynamic;
+  auto matches = [&](Value v, Type elem, ArrayRef<int64_t> dims) {
+    auto t = cast<ShapedType>(v.getType());
+    if (t.getElementType() != elem ||
+        t.getRank() != static_cast<int64_t>(dims.size()))
+      return false;
+    for (auto [i, dim] : llvm::enumerate(dims))
+      if (dim != any && t.getDimSize(i) != dim)
+        return false;
+    return true;
+  };
+  Type f16 = Float16Type::get(getContext()),
+       i32 = IntegerType::get(getContext(), 32);
+  int64_t b = past.getDimSize(0), t = q.getDimSize(0);
+  if (!matches(getQuery(), f16, {t, h * d}) ||
+      !matches(getKey(), f16, {t, kv * d}) ||
+      !matches(getValue(), f16, {t, kv * d}) ||
+      !matches(getOutput(), f16, {t, h * d}) ||
+      !matches(getKeyPool(), f16, pool.getShape()) ||
+      !matches(getValuePool(), f16, pool.getShape()) ||
+      !matches(getPastSeqlens(), i32, {b}) ||
+      !matches(getCuSeqlens(), i32, {b == any ? any : b + 1}) ||
+      !matches(getBlockTable(), i32, {b, any}))
+    return emitOpError(
+        "inconsistent Q/K/V/cache/request shapes or element types");
+  if (getAttentionMetadata()) {
+    auto m = cast<ShapedType>(getAttentionMetadata().getType());
+    if (m.getRank() != 1 || m.getElementType() != i32 ||
+        (!m.isDynamicDim(0) && m.getDimSize(0) != 2 && m.getDimSize(0) != 3))
+      return emitOpError("attention_metadata must be i32[2 or 3]");
+  }
+  if (static_cast<bool>(getCosCache()) != static_cast<bool>(getSinCache()) ||
+      (getDoRotary() && !getCosCache()))
+    return emitOpError("rotary requires both cos/sin caches");
+  if (getCosCache()) {
+    auto c = cast<ShapedType>(getCosCache().getType());
+    if (c.getRank() != 2 || !matches(getCosCache(), f16, {any, d / 2}) ||
+        !matches(getSinCache(), f16, c.getShape()))
+      return emitOpError("rotary caches must be matching f16[P,D/2]");
+  }
+  return success();
 }
 
 //===----------------------------------------------------------------------===//

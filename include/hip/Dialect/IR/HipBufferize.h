@@ -102,6 +102,28 @@ struct HipReadbackBufferizableModel
   }
 };
 
+struct HipPagedBufferizableModel
+    : public bufferization::DstBufferizableOpInterfaceExternalModel<
+          HipPagedBufferizableModel, PagedAttentionOp> {
+  bool bufferizesToMemoryRead(Operation *op, OpOperand &operand,
+                              const bufferization::AnalysisState &) const {
+    auto page = cast<PagedAttentionOp>(op);
+    return operand.get() != page.getOutput();
+  }
+  bool mustBufferizeInPlace(Operation *op, OpOperand &operand,
+                            const bufferization::AnalysisState &) const {
+    auto page = cast<PagedAttentionOp>(op);
+    return &operand == &page.getKeyPoolMutable() ||
+           &operand == &page.getValuePoolMutable();
+  }
+  LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
+                          const bufferization::BufferizationOptions &options,
+                          bufferization::BufferizationState &state) const {
+    return HipDstBufferizableModel<PagedAttentionOp>().bufferize(
+        op, rewriter, options, state);
+  }
+};
+
 inline void
 registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
   registry.addExtension(+[](MLIRContext *ctx, HipDialect *) {
@@ -138,8 +160,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     RangeOp::attachInterface<HipDstBufferizableModel<RangeOp>>(*ctx);
     SiluOp::attachInterface<HipDstBufferizableModel<SiluOp>>(*ctx);
     GqaOp::attachInterface<HipDstBufferizableModel<GqaOp>>(*ctx);
-    PagedAttentionOp::attachInterface<
-        HipDstBufferizableModel<PagedAttentionOp>>(*ctx);
+    PagedAttentionOp::attachInterface<HipPagedBufferizableModel>(*ctx);
     CastOp::attachInterface<HipDstBufferizableModel<CastOp>>(*ctx);
     SigmoidOp::attachInterface<HipDstBufferizableModel<SigmoidOp>>(*ctx);
     TanhOp::attachInterface<HipDstBufferizableModel<TanhOp>>(*ctx);

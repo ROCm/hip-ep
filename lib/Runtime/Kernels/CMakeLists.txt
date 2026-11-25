@@ -256,6 +256,7 @@ if(HIP_EP_RING_ENABLED)
     list(APPEND _kernel_sources hip/ring/ring_gqa.hip)
 endif()
 
+set(_paged_attention_autotune_dir ${CMAKE_CURRENT_SOURCE_DIR}/hip/autotune/paged_attention)
 foreach(_arch IN LISTS HIP_ARCHITECTURES)
     set(_ring_device_enabled 0)
     # gfx11-generic also runs on Strix Halo. Compile Ring into that release
@@ -272,11 +273,14 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
     set(_target custom_kernels_${_arch})
     _matmul_nbits_lut_data_source(${_arch} _matmul_lut_src)
     _gqa_lut_data_source(${_arch} _gqa_lut_src)
+    _emit_lut_registry(${_arch} ${_paged_attention_autotune_dir} kPagedAttentionLut _paged_lut_src)
     hip_add_library(${_target} SHARED ${_kernel_sources}
             ${_matmul_nbits_autotune_dir}/matmul_nbits_autotune.cpp
             ${_matmul_lut_src}
             ${_gqa_autotune_dir}/gqa_autotune.cpp
             ${_gqa_lut_src}
+            ${_paged_attention_autotune_dir}/paged_attention_autotune.cpp
+            ${_paged_lut_src}
         INCLUDE_DIRECTORIES
             ${CMAKE_CURRENT_SOURCE_DIR}/include
             # matmul_nbits_autotune_generated.h and gqa_autotune_generated.h;

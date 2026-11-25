@@ -28,6 +28,7 @@ struct hipDeviceProp_t {
 #define HIPBLAS_STATUS_SUCCESS 0
 #define hipMemcpyHostToDevice 0
 #define hipMemcpyDeviceToHost 1
+#define hipMemcpyDefault 4
 #define hipHostMallocDefault 0
 #define hipHostMallocMapped 0
 #define hipHostMallocNonCoherent 0

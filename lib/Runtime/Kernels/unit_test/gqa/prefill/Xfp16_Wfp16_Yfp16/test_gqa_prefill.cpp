@@ -29,6 +29,7 @@
 #include "../../../common/ut_gqa_rank_input.h"
 #include <hip/hip_runtime.h>
 #include "../../../common/hip_adaptive_timing.h"
+#include "../../../common/ut_gqa_input_binding.h"
 #ifdef HIPDNN_UT_GPU_PHASE_HEADER
 #include HIPDNN_UT_GPU_PHASE_HEADER
 #elif !defined(HIPDNN_UT_GPU_PHASE_LINKED)
@@ -140,6 +141,10 @@ inline std::string besideExe(const std::string& name) {
 inline std::vector<std::string> captureLogLines(
     const char* env_var, const std::string& tmp_name,
     const std::function<void()>& fn) {
+  // Normal measurements leave production configuration logging disabled.
+  // A separate diagnostic process observes routes without poisoning timing.
+  if (!std::getenv("HIPDNN_UT_GQA_DIAGNOSTIC")) { fn(); return {}; }
+  if (!env_var) { fn(); return {}; }
   const char* leaf_stderr = std::getenv("HIPDNN_KERNEL_UT_STDERR");
   const bool redirect = !leaf_stderr || !leaf_stderr[0];
   const std::string path = redirect ? besideExe(tmp_name) : leaf_stderr;
@@ -626,6 +631,11 @@ static bool run_case(const Case& c, int iters, const hipdnn_ep_test::timing::Ran
   std::vector<__half> Qh(qn), Kh(kn), Vh(kn);
   for (size_t i = 0; i < qn; ++i) Qh[i] = __float2half(Qf[i]);
   for (size_t i = 0; i < kn; ++i) { Kh[i] = __float2half(Kf[i]); Vh[i] = __float2half(Vf[i]); }
+  gqaInputBinding(case_shape(c).c_str(), "Q_fp16", Qh);
+  gqaInputBinding(case_shape(c).c_str(), "K_upload_fp16", Kh);
+  gqaInputBinding(case_shape(c).c_str(), "V_upload_fp16", Vh);
+  gqaInputBinding(case_shape(c).c_str(), "sink_fp16", sinkh);
+  gqaInputBinding(case_shape(c).c_str(), "key_bias_fp32", Kb);
 
   __half *dQ, *dK, *dV, *dO, *dSink;
   hipdnn_ep_test::GpuExecutionScope gpu_execution([] { HIP_CHECK(hipDeviceSynchronize()); });
@@ -760,9 +770,8 @@ static bool run_case(const Case& c, int iters, const hipdnn_ep_test::timing::Ran
   };
 #endif
 
-  // The op's [gqa-cfg] diagnostic names the config it dispatched. It latches on
-  // at its first read and then prints once per dispatch, so every launch below
-  // runs inside a capture window to keep those lines off the console.
+  // Capture the selected config during the initial correctness call, then
+  // leave configuration logging disabled throughout native timing.
   std::string launched_cfg;
   int rc = 0;
   {
@@ -839,7 +848,7 @@ static bool run_case(const Case& c, int iters, const hipdnn_ep_test::timing::Ran
       dK, dV, B * G, max_seq, static_cast<size_t>(D) * sizeof(__half),
       c.window > 0 ? std::max(0, past_len - c.window) : 0, skv);
   hipdnn_ep_test::captureLogLines(
-      "HIPDNN_GQA_AUTOTUNE_LOG", "_cfg_capture.tmp", [&]() {
+      nullptr, "", [&]() {
         for (int i = 0; i < 10; ++i) launch(kv.k(0), kv.v(0), kv.rows());
         HIP_CHECK(hipDeviceSynchronize());
         gpu_phase.timingBegin();
@@ -928,10 +937,12 @@ int main(int argc, char** argv) {
   // (plus --b/--past/--window, which the i8 variant doesn't expose).
   Case single = {"custom", 1, 32, 8, 128, 512, 0, kSinkNone, false, 0};
   bool have_single = false;
+  std::string only_shape;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     auto next = [&](int& v) { if (i + 1 < argc) v = std::atoi(argv[++i]); };
     if (!std::strcmp(argv[i], "--iters") && i + 1 < argc) iters = std::atoi(argv[++i]);
+    else if (a == "--only-shape" && i + 1 < argc) only_shape = argv[++i];
     else if (a == "--b") { next(single.B); have_single = true; }
     else if (a == "--h") { next(single.H); have_single = true; }
     else if (a == "--g") { next(single.G); have_single = true; }
@@ -960,6 +971,10 @@ int main(int argc, char** argv) {
   }
 
   if (have_single) {
+    if (!only_shape.empty()) {
+      std::fprintf(stderr, "--only-shape selects a suite case; omit custom shape flags\n");
+      return 1;
+    }
     bool ok = run_case(single, iters);
     printf("\n%s (%d failing case(s))\n", ok ? "ALL PASS" : "SOME FAILED", ok ? 0 : 1);
     return ok ? 0 : 1;
@@ -1157,9 +1172,16 @@ int main(int argc, char** argv) {
          n_idxs, kNumCases);
 
   int fails = 0;
+  size_t selected = 0;
   for (size_t i = 0; i < n_idxs; ++i) {
     const Case& c = idxs ? cases[idxs[i]] : cases[i];
+    if (!only_shape.empty() && case_shape(c) != only_shape) continue;
+    ++selected;
     if (!run_case(c, iters)) ++fails;
+  }
+  if (!only_shape.empty() && selected != 1) {
+    std::fprintf(stderr, "--only-shape matched %zu cases at coverage=%d\n", selected, coverage_tier);
+    return 1;
   }
   printf("\n%s (%d failing case(s))\n", fails == 0 ? "ALL PASS" : "SOME FAILED", fails);
   return fails == 0 ? 0 : 1;

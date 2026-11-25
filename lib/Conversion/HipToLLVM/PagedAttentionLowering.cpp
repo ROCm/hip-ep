@@ -2,147 +2,93 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-
 #include "HipToLLVMUtils.h"
 
-namespace mlir {
-namespace hip {
+namespace mlir::hip {
 namespace {
-
-struct PagedAttentionOpLowering
-    : public ConvertOpToLLVMPattern<PagedAttentionOp> {
+struct PagedAttentionOpLowering : ConvertOpToLLVMPattern<PagedAttentionOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
-
   LogicalResult
   matchAndRewrite(PagedAttentionOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
-    ModuleOp module = op->getParentOfType<ModuleOp>();
-    Type ptrType = getPtrType();
-    Type i64Type = rewriter.getI64Type();
-    Type i32Type = rewriter.getI32Type();
-    Type f32Type = rewriter.getF32Type();
-
-    auto createI64Const = [&](int64_t value) -> Value {
-      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+    Type ptr = getPtrType(), i64 = rewriter.getI64Type(),
+         f32 = rewriter.getF32Type();
+    auto c = [&](int64_t value) -> Value {
+      return LLVM::ConstantOp::create(rewriter, loc, i64,
                                       rewriter.getI64IntegerAttr(value));
     };
-    auto createF32Const = [&](float value) -> Value {
-      return LLVM::ConstantOp::create(rewriter, loc, f32Type,
-                                      rewriter.getF32FloatAttr(value));
+    auto data = [&](Value v) -> Value {
+      return v ? extractContiguousMemRefPtr(v, rewriter, loc)
+               : LLVM::ZeroOp::create(rewriter, loc, ptr).getResult();
     };
-
-    Value statePtr = adaptor.getCtx();
-    Value queryPtr =
-        extractContiguousMemRefPtr(adaptor.getQuery(), rewriter, loc);
-    Value keyPtr = extractOptionalMemRefPtr(adaptor.getKey(), rewriter, loc);
-    Value valuePtr =
-        extractOptionalMemRefPtr(adaptor.getValue(), rewriter, loc);
-    Value keyCachePtr =
-        extractContiguousMemRefPtr(adaptor.getKeyCache(), rewriter, loc);
-    Value valueCachePtr =
-        extractContiguousMemRefPtr(adaptor.getValueCache(), rewriter, loc);
-    Value cumSeqPtr = extractContiguousMemRefPtr(
-        adaptor.getCumulativeSequenceLength(), rewriter, loc);
-    Value pastSeqlensPtr =
-        extractContiguousMemRefPtr(adaptor.getPastSeqlens(), rewriter, loc);
-    Value blockTablePtr =
-        extractContiguousMemRefPtr(adaptor.getBlockTable(), rewriter, loc);
-    Value cosPtr =
-        extractOptionalMemRefPtr(adaptor.getCosCache(), rewriter, loc);
-    Value sinPtr =
-        extractOptionalMemRefPtr(adaptor.getSinCache(), rewriter, loc);
-    Value outputPtr =
-        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
-    Value keyCacheOutPtr =
-        extractOptionalMemRefPtr(adaptor.getKeyCacheOut(), rewriter, loc);
-    Value valueCacheOutPtr =
-        extractOptionalMemRefPtr(adaptor.getValueCacheOut(), rewriter, loc);
-
-    Value numHeads = createI64Const(op.getNumHeads());
-    Value kvNumHeads = createI64Const(op.getKvNumHeads());
-    Value doRotary = createI64Const(op.getDoRotary());
-    Value rotaryInterleaved = createI64Const(op.getRotaryInterleaved());
-    Value localWindowSize = createI64Const(op.getLocalWindowSize());
-    Value scale = createF32Const(op.getScale().convertToFloat());
-    Value softcap = createF32Const(op.getSoftcap().convertToFloat());
-
-    auto queryTy = cast<MemRefType>(op.getQuery().getType());
-    MemRefDescriptor qDesc(adaptor.getQuery());
-    Value numTokens = queryTy.isDynamicDim(0)
-                          ? qDesc.size(rewriter, loc, 0)
-                          : createI64Const(queryTy.getDimSize(0));
-    Value queryDim1 = queryTy.isDynamicDim(1)
-                          ? qDesc.size(rewriter, loc, 1)
-                          : createI64Const(queryTy.getDimSize(1));
-    Value elemSizeBytes =
-        createI64Const(queryTy.getElementType().getIntOrFloatBitWidth() / 8);
-
-    auto dimAt = [&](MemRefType type, MemRefDescriptor descriptor,
-                     unsigned index) -> Value {
-      if (type.isDynamicDim(index))
-        return descriptor.size(rewriter, loc, index);
-      return createI64Const(type.getDimSize(index));
+    auto dim = [&](Value original, Value converted, unsigned axis) -> Value {
+      return getMemRefDimSize(cast<MemRefType>(original.getType()), axis,
+                              converted, rewriter, loc);
     };
-    auto cacheTy = cast<MemRefType>(op.getKeyCache().getType());
-    MemRefDescriptor cacheDesc(adaptor.getKeyCache());
-    auto pastTy = cast<MemRefType>(op.getPastSeqlens().getType());
-    MemRefDescriptor pastDesc(adaptor.getPastSeqlens());
-    auto tableTy = cast<MemRefType>(op.getBlockTable().getType());
-    MemRefDescriptor tableDesc(adaptor.getBlockTable());
-    Value batch = dimAt(pastTy, pastDesc, 0);
-    Value numBlocks = dimAt(cacheTy, cacheDesc, 0);
-    Value blockSize = dimAt(cacheTy, cacheDesc, 1);
-    Value headSize = dimAt(cacheTy, cacheDesc, 3);
-    Value maxBlocks = dimAt(tableTy, tableDesc, 1);
-
-    SmallVector<Type, 32> paramTypes = {
-        ptrType, // state
-        ptrType, ptrType, ptrType, ptrType, ptrType, ptrType,
-        ptrType, ptrType, ptrType, ptrType,          // query..sin (10)
-        ptrType, ptrType, ptrType,                   // outputs
-        i64Type, i64Type, i64Type, i64Type, i64Type, // attrs i64
-        f32Type, f32Type,                            // scale, softcap
-        i64Type, i64Type, i64Type, // num_tokens, query_dim1, elem
-        i64Type, i64Type, i64Type, i64Type, i64Type // batch, blocks, block,
-                                                    // head, cols
-    };
-
-    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kWrapPagedAttention, paramTypes, i32Type);
-    if (failed(funcOp))
+    SmallVector<Value> args = {
+        adaptor.getCtx(),
+        getOpStateSlotValue(op, rewriter, loc),
+        data(adaptor.getQuery()),
+        data(adaptor.getKey()),
+        data(adaptor.getValue()),
+        data(adaptor.getKeyPool()),
+        data(adaptor.getValuePool()),
+        data(adaptor.getCuSeqlens()),
+        data(adaptor.getPastSeqlens()),
+        data(adaptor.getBlockTable()),
+        data(adaptor.getCosCache()),
+        data(adaptor.getSinCache()),
+        data(adaptor.getAttentionMetadata()),
+        data(adaptor.getOutput()),
+        dim(op.getQuery(), adaptor.getQuery(), 0),
+        dim(op.getKey(), adaptor.getKey(), 0),
+        dim(op.getValue(), adaptor.getValue(), 0),
+        dim(op.getOutput(), adaptor.getOutput(), 0),
+        dim(op.getPastSeqlens(), adaptor.getPastSeqlens(), 0),
+        dim(op.getKeyPool(), adaptor.getKeyPool(), 0),
+        dim(op.getValuePool(), adaptor.getValuePool(), 0),
+        dim(op.getKeyPool(), adaptor.getKeyPool(), 1),
+        dim(op.getValuePool(), adaptor.getValuePool(), 1),
+        dim(op.getKeyPool(), adaptor.getKeyPool(), 3),
+        dim(op.getBlockTable(), adaptor.getBlockTable(), 0),
+        dim(op.getBlockTable(), adaptor.getBlockTable(), 1),
+        dim(op.getCuSeqlens(), adaptor.getCuSeqlens(), 0),
+        op.getAttentionMetadata()
+            ? dim(op.getAttentionMetadata(), adaptor.getAttentionMetadata(), 0)
+            : c(0),
+        op.getCosCache() ? dim(op.getCosCache(), adaptor.getCosCache(), 0)
+                         : c(0),
+        op.getSinCache() ? dim(op.getSinCache(), adaptor.getSinCache(), 0)
+                         : c(0),
+        c(op.getNumHeads()),
+        c(op.getKvNumHeads()),
+        c(op.getLocalWindowSizeAttr().getInt()),
+        c(op.getDoRotary()),
+        c(op.getRotaryInterleaved()),
+        LLVM::ConstantOp::create(
+            rewriter, loc, f32,
+            rewriter.getF32FloatAttr(op.getScale().convertToFloat())),
+        LLVM::ConstantOp::create(
+            rewriter, loc, f32,
+            rewriter.getF32FloatAttr(op.getSoftcap().convertToFloat()))};
+    SmallVector<Type> types{ptr, rewriter.getI32Type()};
+    types.append(12, ptr);
+    types.append(21, i64);
+    types.append(2, f32);
+    auto fn = LLVM::lookupOrCreateFn(rewriter, op->getParentOfType<ModuleOp>(),
+                                     "wrap_paged_attention", types,
+                                     rewriter.getI32Type());
+    if (failed(fn))
       return failure();
-
-    SmallVector<Value, 32> args = {
-        statePtr,        queryPtr,
-        keyPtr,          valuePtr,
-        keyCachePtr,     valueCachePtr,
-        cumSeqPtr,       pastSeqlensPtr,
-        blockTablePtr,   cosPtr,
-        sinPtr,          outputPtr,
-        keyCacheOutPtr,  valueCacheOutPtr,
-        numHeads,        kvNumHeads,
-        doRotary,        rotaryInterleaved,
-        localWindowSize, scale,
-        softcap,         numTokens,
-        queryDim1,       elemSizeBytes,
-        batch,           numBlocks,
-        blockSize,       headSize,
-        maxBlocks,
-    };
-
-    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    LLVM::CallOp::create(rewriter, loc, *fn, args);
     rewriter.eraseOp(op);
     return success();
   }
 };
-
 } // namespace
-
 void populatePagedAttentionLoweringPatterns(const LLVMTypeConverter &converter,
                                             RewritePatternSet &patterns) {
   patterns.add<PagedAttentionOpLowering>(converter);
 }
-
-} // namespace hip
-} // namespace mlir
+} // namespace mlir::hip

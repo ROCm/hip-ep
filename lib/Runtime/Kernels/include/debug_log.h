@@ -50,7 +50,18 @@ inline bool gqa_autotune_log_enabled() {
         return v && v[0] >= '1';
 #endif
     }();
-    return enabled;
+    // Keep the normal initially-disabled path cached. A native config capture
+    // can clear its flag afterwards; do not keep logging inside timed calls.
+    if (!enabled) return false;
+#ifdef _WIN32
+    char buf[8];
+    unsigned long n =
+        GetEnvironmentVariableA("HIPDNN_GQA_AUTOTUNE_LOG", buf, sizeof(buf));
+    return n > 0 && buf[0] >= '1';
+#else
+    const char* v = getenv("HIPDNN_GQA_AUTOTUNE_LOG");
+    return v && v[0] >= '1';
+#endif
 }
 
 // MatMulNBits autotune logging, gated on its own HIPDNN_MATMUL_AUTOTUNE_LOG so

@@ -247,6 +247,10 @@ void *hipdnn_ep_alloc_output(RuntimeState *state, int64_t out_idx,
                              const int64_t *shape, int64_t rank,
                              int64_t elem_size);
 
+void *hipdnn_ep_bind_output(RuntimeState *state, int64_t out_idx,
+                            const int64_t *shape, int64_t rank,
+                            int64_t elem_size, void *source);
+
 // Initialize runtime state with external constant storage via FileSystem.
 // Used when compiled with hip_compile_with_fs.
 // Reads constants_filename and constant_sizes from the FlatBuffers blob
@@ -424,8 +428,8 @@ int hipdnn_ep_state_ensure_matmul_dp4a_scratch(RuntimeState *state,
 void *hipdnn_ep_state_get_la_scratch(RuntimeState *state);
 int hipdnn_ep_state_ensure_la_scratch(RuntimeState *state, size_t needed_size);
 
-// Per-session scratch for hip_paged_attention: metadata staging plus the
-// context-split partials. Same policy as la_scratch: grown on demand, never
+// Per-session native Page workspace: validation status, request metadata,
+// optional rotated Q and reduction partials. Grown on demand, never
 // shrunk, freed in hipdnn_ep_state_cleanup, shared by all attention layers
 // because the stream is serialised.
 void *hipdnn_ep_state_get_paged_attention_scratch(RuntimeState *state);
@@ -1041,21 +1045,21 @@ int wrap_multi_head_attention(
     int64_t query_hidden, int64_t v_hidden, int64_t head_size,
     int64_t query_rank, int64_t element_size_bytes);
 
-// PagedAttention (com.microsoft). key_cache_out / value_cache_out alias the
-// cache inputs. The last five integers are batch, num_blocks, block_size,
-// head_size, and block_table columns.
-int wrap_paged_attention(RuntimeState *state, void *query, void *key,
-                         void *value, void *key_cache, void *value_cache,
-                         void *cumulative_sequence_length, void *past_seqlens,
-                         void *block_table, void *cos_cache, void *sin_cache,
-                         void *output, void *key_cache_out,
-                         void *value_cache_out, int64_t num_heads,
-                         int64_t kv_num_heads, int64_t do_rotary,
-                         int64_t rotary_interleaved, int64_t local_window_size,
-                         float scale, float softcap, int64_t num_tokens,
-                         int64_t query_dim1, int64_t element_size_bytes,
-                         int64_t batch, int64_t num_blocks, int64_t block_size,
-                         int64_t head_size, int64_t max_blocks);
+// PagedAttention (com.microsoft). Pools are read/write and graph cache outputs
+// must bind to them before this call. Forward independent dynamic extents and
+// consume native workspace errors through the inference error protocol.
+int wrap_paged_attention(
+    RuntimeState *state, int32_t op_state_slot, const void *q, const void *k,
+    const void *v, void *k_pool, void *v_pool, const int32_t *cum,
+    const int32_t *past, const int32_t *table, const void *cos_cache,
+    const void *sin_cache, const int32_t *metadata, void *output,
+    int64_t tokens, int64_t key_tokens, int64_t value_tokens,
+    int64_t output_tokens, int64_t batch, int64_t pages, int64_t value_pages,
+    int64_t page_size, int64_t value_page_size, int64_t head_dim,
+    int64_t table_batch, int64_t table_columns, int64_t cum_count,
+    int64_t metadata_count, int64_t cos_rows, int64_t sin_rows,
+    int64_t num_heads, int64_t kv_heads, int64_t window, int64_t do_rotary,
+    int64_t rotary_interleaved, float scale, float softcap);
 
 // Generic element-wise tensor operation wrapper with per-operand 4D shapes.
 // Computes output = op(lhs, rhs) element-wise via the custom HIP kernels

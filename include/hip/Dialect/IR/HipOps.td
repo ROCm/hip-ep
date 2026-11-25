@@ -4495,76 +4495,66 @@ def Hip_GqaOp : Hip_DpsOp_AutoReify<"gqa", [AttrSizedOperandSegments, OpStateOpI
 
 // ===== Paged Attention (com.microsoft) =======================================
 
-def Hip_PagedAttentionOp : Hip_DpsOp_AutoReify<"paged_attention",
-    [AttrSizedOperandSegments]> {
-  let summary = "PagedAttention (com.microsoft)";
+def Hip_BindOutputOp : Hip_Op<"bind_output", [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Require an externally bound output to alias an input buffer";
   let description = [{
-    Maps `onnx.Custom` with `function_name = "PagedAttention"` and domain
-    `com.microsoft` to a single HIP op lowered to `wrap_paged_attention`.
-    `key_cache_out` and `value_cache_out` alias the corresponding cache inputs.
+    Calls the existing output allocator with the source shape. A different
+    pointer is an error; no cache copy is performed. The result descriptor is
+    null on failure, preventing the Page writer from modifying either pool.
+    Only emitted for the shared-cache outputs of PagedAttention.
   }];
+  let arguments = (ins Hip_ContextType:$ctx, AnyMemRef:$source, I64Attr:$out_idx);
+  let results = (outs AnyMemRef:$memref);
+  let assemblyFormat = [{ `(` $ctx `,` $source `)` attr-dict `:` type($source) `->` type($memref) }];
+  let hasVerifier = 1;
+}
 
-  let arguments = (ins
-    Hip_ContextType:$ctx,
-
-    Hip_TensorOrMemRef:$query,
-    Optional<Hip_TensorOrMemRef>:$key,
-    Optional<Hip_TensorOrMemRef>:$value,
-    Hip_TensorOrMemRef:$key_cache,
-    Hip_TensorOrMemRef:$value_cache,
-    Hip_TensorOrMemRef:$cumulative_sequence_length,
-    Hip_TensorOrMemRef:$past_seqlens,
+def Hip_PagedAttentionOp : Hip_DpsOp_AutoReify<"paged_attention", [AttrSizedOperandSegments, OpStateOpInterface]> {
+  let summary = "Separate Q/K/V attention with shared PSHD page pools";
+  let description = [{
+    Separate FP16 Q/K/V [T,H*D], device i32 cumulative lengths/past/page table,
+    optional FP16 rotary caches, and host/device metadata i32[2 or 3]. Metadata
+    contains query/KV upper bounds and an optional KV lower bound; zero means
+    unknown. Bounds select backend sizing; device request lengths define masks.
+    key_pool/value_pool are read/write DPS inits and must bufferize in place.
+    Their result tensors alias the input pools, including at graph outputs.
+  }];
+  let arguments = (ins Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$query, Hip_TensorOrMemRef:$key, Hip_TensorOrMemRef:$value,
+    Hip_TensorOrMemRef:$cu_seqlens, Hip_TensorOrMemRef:$past_seqlens,
     Hip_TensorOrMemRef:$block_table,
     Optional<Hip_TensorOrMemRef>:$cos_cache,
     Optional<Hip_TensorOrMemRef>:$sin_cache,
     Optional<Hip_TensorOrMemRef>:$attention_metadata,
-
-    Hip_TensorOrMemRef:$output,
-    Optional<Hip_TensorOrMemRef>:$key_cache_out,
-    Optional<Hip_TensorOrMemRef>:$value_cache_out,
-
-    I64Attr:$num_heads,
-    I64Attr:$kv_num_heads,
-    DefaultValuedAttr<I64Attr, "0">:$do_rotary,
-    DefaultValuedAttr<I64Attr, "0">:$rotary_interleaved,
-    DefaultValuedAttr<I64Attr, "-1">:$local_window_size,
-    DefaultValuedAttr<F32Attr, "0.0">:$scale,
-    DefaultValuedAttr<F32Attr, "0.0">:$softcap
-  );
-
+    Hip_TensorOrMemRef:$output, Hip_TensorOrMemRef:$key_pool,
+    Hip_TensorOrMemRef:$value_pool,
+    I64Attr:$num_heads, I64Attr:$kv_num_heads,
+    DefaultValuedAttr<F32Attr,"0.0f">:$scale,
+    DefaultValuedAttr<I64Attr,"-1">:$local_window_size,
+    DefaultValuedAttr<F32Attr,"0.0f">:$softcap,
+    DefaultValuedAttr<I64Attr,"0">:$do_rotary,
+    DefaultValuedAttr<I64Attr,"0">:$rotary_interleaved);
   let assemblyFormat = [{
-    `(` $ctx `)` `ins` `(`
-        $query
-        ( `,` $key^ )?
-        ( `,` $value^ )?
-        `,` $key_cache `,` $value_cache `,` $cumulative_sequence_length `,`
-        $past_seqlens `,` $block_table
-        ( `,` $cos_cache^ )?
-        ( `,` $sin_cache^ )?
-        ( `,` $attention_metadata^ )?
-        `:`
-        type($query)
-        ( `,` type($key)^ )?
-        ( `,` type($value)^ )?
-        `,` type($key_cache) `,` type($value_cache) `,`
-        type($cumulative_sequence_length) `,` type($past_seqlens) `,`
-        type($block_table)
-        ( `,` type($cos_cache)^ )?
-        ( `,` type($sin_cache)^ )?
-        ( `,` type($attention_metadata)^ )?
-    `)`
-    `outs` `(`
-        $output
-        ( `,` $key_cache_out^ )?
-        ( `,` $value_cache_out^ )?
-        `:`
-        type($output)
-        ( `,` type($key_cache_out)^ )?
-        ( `,` type($value_cache_out)^ )?
-    `)`
-    attr-dict (`:` type($result_tensors)^)?
+    `(` $ctx `)` `ins` `(` $query `,` $key `,` $value `,` $cu_seqlens `,`
+      $past_seqlens `,` $block_table `:` type($query) `,` type($key) `,`
+      type($value) `,` type($cu_seqlens) `,` type($past_seqlens) `,` type($block_table) `)`
+    (`cos` `(` $cos_cache^ `:` type($cos_cache) `)`)?
+    (`sin` `(` $sin_cache^ `:` type($sin_cache) `)`)?
+    (`metadata` `(` $attention_metadata^ `:` type($attention_metadata) `)`)?
+    `outs` `(` $output `,` $key_pool `,` $value_pool `:` type($output) `,`
+      type($key_pool) `,` type($value_pool) `)` attr-dict (`:` type($result_tensors)^)?
   }];
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+        ::mlir::Location loc, ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(builder, loc, statePtr, slot,
+          "hipdnn_ep_op_state_construct_paged_attention", {});
+    }
+  }];
+  let hasVerifier = 1;
 }
+
+
 
 // ===== hipDNN Graph Outlining + Execution ====================================
 

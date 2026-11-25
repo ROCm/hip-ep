@@ -487,6 +487,75 @@ struct AllocOutputOpLowering : public ConvertOpToLLVMPattern<AllocOutputOp> {
 // GetConstantOp Lowering
 //===----------------------------------------------------------------------===//
 
+struct BindOutputOpLowering : ConvertOpToLLVMPattern<BindOutputOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+  LogicalResult
+  matchAndRewrite(BindOutputOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    auto type = cast<MemRefType>(op.getSource().getType());
+    if (!isConvertibleAndHasIdentityMaps(type))
+      return failure();
+    Type ptr = getPtrType(), i64 = rewriter.getI64Type(),
+         i32 = rewriter.getI32Type();
+    auto c = [&](int64_t x) -> Value {
+      return LLVM::ConstantOp::create(rewriter, loc, i64,
+                                      rewriter.getI64IntegerAttr(x));
+    };
+    SmallVector<Value> sizes, dynamicSizes, strides;
+    for (int64_t i = 0; i < type.getRank(); ++i) {
+      Value size =
+          getMemRefDimSize(type, i, adaptor.getSource(), rewriter, loc);
+      sizes.push_back(size);
+      if (type.isDynamicDim(i))
+        dynamicSizes.push_back(size);
+    }
+    auto array =
+        LLVM::LLVMArrayType::get(i64, std::max<int64_t>(1, type.getRank()));
+    Value shape = LLVM::AllocaOp::create(rewriter, loc, ptr, array, c(1), 8);
+    for (int64_t i = 0; i < type.getRank(); ++i) {
+      Value index = LLVM::ConstantOp::create(rewriter, loc, i32,
+                                             rewriter.getI32IntegerAttr(i));
+      Value gep = LLVM::GEPOp::create(rewriter, loc, ptr, i64, shape, index);
+      LLVM::StoreOp::create(rewriter, loc, sizes[i], gep);
+    }
+    auto module = op->getParentOfType<ModuleOp>();
+    if (failed(verifyCallbackRankAgainstMetadata(
+            module, op->getParentOfType<func::FuncOp>(), op.getOutIdx(),
+            type.getRank(), loc)))
+      return failure();
+    auto fn = LLVM::lookupOrCreateFn(rewriter, module, "hipdnn_ep_bind_output",
+                                     {ptr, i64, ptr, i64, i64, ptr}, ptr);
+    if (failed(fn))
+      return failure();
+    Value raw =
+        LLVM::CallOp::create(
+            rewriter, loc, *fn,
+            ValueRange{
+                adaptor.getCtx(), c(op.getOutIdx()), shape, c(type.getRank()),
+                c((type.getElementType().getIntOrFloatBitWidth() + 7) / 8),
+                extractContiguousMemRefPtr(adaptor.getSource(), rewriter, loc)})
+            .getResult();
+    auto addressSpace = getTypeConverter()->getMemRefAddressSpace(type);
+    if (failed(addressSpace))
+      return failure();
+    Value data = raw;
+    if (*addressSpace != 0)
+      data = LLVM::AddrSpaceCastOp::create(
+          rewriter, loc,
+          LLVM::LLVMPointerType::get(rewriter.getContext(), *addressSpace),
+          raw);
+    Value bytes;
+    sizes.clear();
+    getMemRefDescriptorSizes(loc, type, dynamicSizes, rewriter, sizes, strides,
+                             bytes, true);
+    auto descriptor =
+        createMemRefDescriptor(loc, type, data, data, sizes, strides, rewriter);
+    rewriter.replaceOp(op, {descriptor});
+    return success();
+  }
+};
+
 struct GetConstantOpLowering : public ConvertOpToLLVMPattern<GetConstantOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -1004,10 +1073,11 @@ struct PackedViewOpLowering : public ConvertOpToLLVMPattern<PackedViewOp> {
 
 void populateMemoryLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns) {
-  patterns.add<AllocOpLowering, FreeOpLowering, GetPoolOpLowering,
-               GetHostScratchOpLowering, AllocOutputOpLowering,
-               GetConstantOpLowering, MemRefAllocOpLowering,
-               MemRefDeallocOpLowering, PackedViewOpLowering>(converter);
+  patterns
+      .add<AllocOpLowering, FreeOpLowering, GetPoolOpLowering,
+           GetHostScratchOpLowering, AllocOutputOpLowering,
+           BindOutputOpLowering, GetConstantOpLowering, MemRefAllocOpLowering,
+           MemRefDeallocOpLowering, PackedViewOpLowering>(converter);
   patterns.add<MemRefCopyOpLowering>(converter);
 }
 
