@@ -116,7 +116,8 @@ def run_bench(
 ) -> dict:
     env.require("bin", "model")
     bench._defaults(spec)
-    cmd = bench._command(env, spec, Path(out_dir) / "bench.json")
+    # The target runs with HIPEP_BIN as its working directory.
+    cmd = bench._command(env, spec, Path(out_dir).resolve() / "bench.json")
     extra = dict(spec.set_env)
     if fence:
         extra.update(fence.env())
