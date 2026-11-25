@@ -1123,3 +1123,180 @@ extern "C" int hip_causal_conv_prefill_nlc(
                 B, C, L, has_bias, act_silu);
         });
 }
+
+namespace {
+
+constexpr int kNlcStateThreads = 256;
+
+// One thread per (b, t, c); grid.x packs the channel blocks of every t so a
+// long sequence does not run into the grid.y limit.
+template <typename T>
+__global__ void causal_conv_nlc_state_out_kernel(
+    const T* __restrict__ input,
+    const T* __restrict__ weight,
+    const T* __restrict__ bias,
+    const T* __restrict__ past_state,
+    T* __restrict__ output,
+    int channels,
+    int seq_len,
+    int K,
+    int dilation,
+    int act_silu) {
+
+    const int cblocks = (channels + kNlcStateThreads - 1) / kNlcStateThreads;
+    const int t = static_cast<int>(blockIdx.x) / cblocks;
+    const int c = (static_cast<int>(blockIdx.x) % cblocks) * kNlcStateThreads +
+                  static_cast<int>(threadIdx.x);
+    const int b = static_cast<int>(blockIdx.z);
+    if (c >= channels) {
+        return;
+    }
+
+    const int state_len = (K - 1) * dilation;
+    const int64_t in_base = static_cast<int64_t>(b) * seq_len * channels;
+    const int64_t st_base = static_cast<int64_t>(b) * state_len * channels;
+    const T* wp = weight + static_cast<int64_t>(c) * K;
+
+    float y = 0.0f;
+    for (int j = 0; j < K; ++j) {
+        const int i = t + j * dilation;
+        float x = 0.0f;
+        if (i < state_len) {
+            if (past_state != nullptr) {
+                x = to_f32<T>(
+                    past_state[st_base + static_cast<int64_t>(i) * channels + c]);
+            }
+        } else {
+            x = to_f32<T>(input[in_base +
+                                static_cast<int64_t>(i - state_len) * channels +
+                                c]);
+        }
+        y += to_f32<T>(wp[j]) * x;
+    }
+    if (bias != nullptr) {
+        y += to_f32<T>(bias[c]);
+    }
+    if (act_silu) {
+        y *= 1.0f / (1.0f + expf(-y));
+    }
+    output[in_base + static_cast<int64_t>(t) * channels + c] = from_f32<T>(y);
+}
+
+// One thread per (b, c), walking the state slots in ascending order. Slot s
+// reads virtual position seq_len + s >= s + 1, so an aliased past_state is
+// always read before it is overwritten.
+template <typename T>
+__global__ void causal_conv_nlc_state_carry_kernel(
+    const T* __restrict__ input,
+    const T* past_state,
+    T* present_state,
+    int channels,
+    int seq_len,
+    int state_len) {
+
+    const int c = static_cast<int>(blockIdx.x) * kNlcStateThreads +
+                  static_cast<int>(threadIdx.x);
+    const int b = static_cast<int>(blockIdx.y);
+    if (c >= channels) {
+        return;
+    }
+    const int64_t in_base = static_cast<int64_t>(b) * seq_len * channels;
+    const int64_t st_base = static_cast<int64_t>(b) * state_len * channels;
+    for (int s = 0; s < state_len; ++s) {
+        const int i = seq_len + s;
+        T v = from_f32<T>(0.0f);
+        if (i < state_len) {
+            if (past_state != nullptr) {
+                v = past_state[st_base + static_cast<int64_t>(i) * channels + c];
+            }
+        } else {
+            v = input[in_base + static_cast<int64_t>(i - state_len) * channels +
+                      c];
+        }
+        present_state[st_base + static_cast<int64_t>(s) * channels + c] = v;
+    }
+}
+
+template <typename T>
+hipError_t launch_nlc_state(
+    hipStream_t stream, const T* input, const T* weight, const T* bias,
+    const T* past_state, T* output, T* present_state, int batch_size,
+    int channels, int seq_len, int K, int dilation, int act_silu) {
+
+    const int cblocks = (channels + kNlcStateThreads - 1) / kNlcStateThreads;
+    hipLaunchKernelGGL((causal_conv_nlc_state_out_kernel<T>),
+                       dim3(cblocks * seq_len, 1, batch_size),
+                       dim3(kNlcStateThreads), 0, stream, input, weight, bias,
+                       past_state, output, channels, seq_len, K, dilation,
+                       act_silu);
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+        return err;
+    }
+    const int state_len = (K - 1) * dilation;
+    if (state_len == 0) {
+        return hipSuccess;
+    }
+    hipLaunchKernelGGL((causal_conv_nlc_state_carry_kernel<T>),
+                       dim3(cblocks, batch_size), dim3(kNlcStateThreads), 0,
+                       stream, input, past_state, present_state, channels,
+                       seq_len, state_len);
+    return hipGetLastError();
+}
+
+} // namespace
+
+extern "C" int hip_causal_conv_nlc_state(
+    void* stream,
+    const void* input,
+    const void* weight,
+    const void* bias,
+    const void* past_state,
+    void* output,
+    void* present_state,
+    int64_t batch_size,
+    int64_t channels,
+    int64_t seq_len,
+    int64_t kernel_size,
+    int64_t dilation,
+    int64_t activation,
+    int64_t element_size_bytes) {
+
+    if (dilation < 1) {
+        fprintf(stderr,
+                "[custom_kernels] hip_causal_conv_nlc_state: dilation=%lld "
+                "must be at least 1\n",
+                (long long)dilation);
+        return -1;
+    }
+    return prefill_common(
+        "hip_causal_conv_nlc_state", input, weight, output, present_state,
+        batch_size, channels, seq_len, kernel_size, activation,
+        element_size_bytes,
+        [&](bool is_f32) {
+            hipStream_t s = static_cast<hipStream_t>(stream);
+            const int K = static_cast<int>(kernel_size);
+            const int D = static_cast<int>(dilation);
+            const int B = static_cast<int>(batch_size);
+            const int C = static_cast<int>(channels);
+            const int L = static_cast<int>(seq_len);
+            const int act_silu = (activation == 1) ? 1 : 0;
+            if (is_f32) {
+                return launch_nlc_state<float>(
+                    s, static_cast<const float*>(input),
+                    static_cast<const float*>(weight),
+                    static_cast<const float*>(bias),
+                    static_cast<const float*>(past_state),
+                    static_cast<float*>(output),
+                    static_cast<float*>(present_state), B, C, L, K, D,
+                    act_silu);
+            }
+            return launch_nlc_state<__half>(
+                s, static_cast<const __half*>(input),
+                static_cast<const __half*>(weight),
+                static_cast<const __half*>(bias),
+                static_cast<const __half*>(past_state),
+                static_cast<__half*>(output),
+                static_cast<__half*>(present_state), B, C, L, K, D, act_silu);
+        });
+}

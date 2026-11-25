@@ -128,16 +128,20 @@ class OrtEpBackend(Backend):
             )
         return ep_device
 
+    def create_session(self, model_path: str) -> ort.InferenceSession:
+        """Session for tests that need IO binding instead of :meth:`run`."""
+        opts = ort.SessionOptions()
+        opts.log_severity_level = 3
+        opts.add_session_config_entry("session.disable_cpu_ep_fallback", "1")
+        opts.add_provider_for_devices([self._ep_device], dict(self._provider_options))
+        return ort.InferenceSession(model_path, sess_options=opts)
+
     def run(
         self,
         model_path: str,
         inputs: list[np.ndarray],
     ) -> list[np.ndarray]:
-        opts = ort.SessionOptions()
-        opts.log_severity_level = 3
-        opts.add_session_config_entry("session.disable_cpu_ep_fallback", "1")
-        opts.add_provider_for_devices([self._ep_device], dict(self._provider_options))
-        sess = ort.InferenceSession(model_path, sess_options=opts)
+        sess = self.create_session(model_path)
         input_dict = {sess.get_inputs()[i].name: inp for i, inp in enumerate(inputs)}
         outputs = sess.run(None, input_dict)
         del sess

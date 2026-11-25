@@ -27,6 +27,30 @@
 // is acyclic.
 #include "op_state.h"
 
+struct DiskConstant {
+  const uint8_t *data; // table start inside the read-only file `view`
+  void *view;
+  size_t view_size;
+  int64_t size;
+};
+
+// Copies the rows of disk-resident constant `constant_index` selected by device
+// `indices` into device `dst`, in index order, and synchronizes state->stream.
+// Negative indices wrap; an out-of-range index yields a zero row.
+int hipdnn_ep_disk_constant_gather_rows(RuntimeState *state,
+                                        int64_t constant_index,
+                                        const void *indices,
+                                        int64_t num_indices,
+                                        int64_t index_bytes, int64_t num_rows,
+                                        int64_t row_bytes, void *dst);
+
+// Host value of a qsa SparseAttentionIndexer's device int32
+// past_sequence_length. The first read of `ptr` in a Compute copies it to the
+// host and synchronizes `stream`; later reads, including the paired
+// DynamicSparseAttention's, hit sai_past_len_cached_*.
+bool hipdnn_ep_read_past_sequence_length(RuntimeState *state, void *stream,
+                                         const void *ptr, int64_t *out);
+
 // Internal runtime state structure
 // This struct is opaque to generated code (passed as void*)
 struct RuntimeState {
@@ -40,6 +64,13 @@ struct RuntimeState {
   void *gpu_constants_blob;
   void **gpu_constants;
   size_t num_constants;
+
+  // Indexed like gpu_constants; null when no constant is disk-resident.
+  // Entry i has a non-null data exactly when ConstantInfo[i].disk_resident,
+  // and then gpu_constants[i] is null.
+  DiskConstant *disk_constants;
+  void *disk_gather_staging; // hipHostMalloc'd, grown on demand
+  size_t disk_gather_staging_size;
 
   // Memory pooling support — multi-domain.
   //
@@ -61,9 +92,16 @@ struct RuntimeState {
   // the grow-on-demand contract of the individual pools. realloc-move is safe
   // because nothing caches &pool_base[i] across calls; pool_base[domain_id] is
   // re-derived from state on every access.
-  int num_pool_domains;   // Number of slots currently allocated in the arrays
-  void **pool_base;       // [num_pool_domains] per-domain GPU pool base ptrs
-  size_t *pool_size;      // [num_pool_domains] per-domain pool size in bytes
+  int num_pool_domains; // Number of slots currently allocated in the arrays
+  void **pool_base;     // [num_pool_domains] per-domain GPU pool base ptrs
+  size_t *pool_size;    // [num_pool_domains] per-domain pool size in bytes
+  // Outlined Scan bodies are independently pool-planned functions whose
+  // domain ids also start at zero. Keep a separate cached domain set while a
+  // body runs so its temporaries cannot overwrite parent-function captures.
+  int num_scan_pool_domains;
+  void **scan_pool_base;
+  size_t *scan_pool_size;
+  bool scan_pool_active;
   size_t *buffer_offsets; // Offsets for static buffers in domain 0
   size_t num_buffers;     // Static buffer count in domain 0
 
@@ -258,6 +296,11 @@ struct RuntimeState {
   int32_t seqlens_k_cached_val;
   const void *seqlens_k_cached_ptr;
 
+  // SparseAttentionIndexer past_sequence_length, same lifetime as above.
+  bool sai_past_len_cached_valid;
+  int32_t sai_past_len_cached_val;
+  const void *sai_past_len_cached_ptr;
+
   // ONNX Loop driver state. Lazily allocated by hipdnn_ep_run_counted_loop /
   // hipdnn_ep_run_loop on first call; freed in hipdnn_ep_state_cleanup.
   //
@@ -331,6 +374,19 @@ struct RuntimeState {
   // their casts and fused kernels.
   void *gqa_fp32_adapter_scratch;
   size_t gqa_fp32_adapter_scratch_size;
+
+  // TransientArena (hipdnn_ep_runtime_state.cpp), reserved right after the
+  // constants blob so the weights keep placement priority over it; null when
+  // the session runs without an arena.
+  void *transient_arena;
 };
+
+// Every session-owned device transient (pools, workspace, op scratch) must be
+// allocated and freed through these, never with raw hipMalloc/hipFree, so it
+// is served from the transient arena when one exists and has room. Both keep
+// hipMalloc/hipFree semantics, including the device synchronization on free.
+hipError_t hipdnn_ep_state_device_alloc(RuntimeState *state, void **ptr,
+                                        size_t size);
+hipError_t hipdnn_ep_state_device_free(RuntimeState *state, void *ptr);
 
 #endif // HIPDNN_EP_RUNTIME_STATE_INTERNAL_H

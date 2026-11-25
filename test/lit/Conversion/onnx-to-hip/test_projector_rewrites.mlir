@@ -25,8 +25,8 @@ module {
     return %arg0 : tensor<1xf32>
   }
 
-  // AveragePool with kernel == stride (canonical patch-pooling shape).
-  // Trigger the AveragePoolToReshapeMean rewrite.
+  // AveragePool with kernel == stride. The reshape+reduce rewrite is not
+  // registered, so this lowers to hip.pool.
   func.func @test_avgpool_to_reshape_mean(
       %x: tensor<?x1152x16x16xf16>) -> tensor<?x1152x4x4xf16> {
     %y = "onnx.AveragePool"(%x) {
@@ -50,14 +50,11 @@ module {
   }
 }
 
-// AvgPool decomp emits an onnx.Transpose with perm=[0,1,2,4,3,5] BEFORE
-// it lowers (the Transpose converter then turns it into the hip-dialect
-// equivalent). FileCheck on the perm attribute is the most reliable
-// signature — the surrounding Reshape / ReduceSum / Div forms are
-// implementation details that may move around.
 // CHECK-LABEL: func.func @test_avgpool_to_reshape_mean
-// CHECK-DAG: perm = [0, 1, 2, 4, 3, 5]
 // CHECK-NOT: onnx.AveragePool
+// CHECK-NOT: hip.reduce_mean
+// CHECK: hip.pool
+// CHECK-SAME: pool_mode = 0
 
 // Broadcast Div: onnx.Div is gone, replaced by Reciprocal + Mul which
 // then lower to hip.reciprocal + hip.mul. Either form (onnx.* mid-

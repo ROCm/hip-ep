@@ -44,4 +44,52 @@ module {
     // CHECK: llvm.call @wrap_expand({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, i64) -> i32
     return
   }
+
+  // wrap_expand copies elements by width. A type with a runtime data type
+  // keeps it (bf16 = 2); one without is passed as the integer type of the
+  // same width (i1 as i8 = 5, ui32 as i32 = 3).
+  func.func @expand_bf16(
+      %ctx: !hip.context,
+      %x: memref<1xbf16, 1>,
+      %shape: memref<1xi64, 1>,
+      %y: memref<?xbf16, 1>) {
+    // CHECK-LABEL: llvm.func @expand_bf16
+
+    hip.expand(%ctx) ins(%x, %shape : memref<1xbf16, 1>, memref<1xi64, 1>)
+                     outs(%y : memref<?xbf16, 1>)
+
+    // CHECK: %[[DT:.*]] = llvm.mlir.constant(2 : i64) : i64
+    // CHECK: llvm.call @wrap_expand(%{{.*}}, %[[DT]]) :
+    return
+  }
+
+  func.func @expand_i1(
+      %ctx: !hip.context,
+      %x: memref<1xi1, 1>,
+      %shape: memref<1xi64, 1>,
+      %y: memref<?xi1, 1>) {
+    // CHECK-LABEL: llvm.func @expand_i1
+
+    hip.expand(%ctx) ins(%x, %shape : memref<1xi1, 1>, memref<1xi64, 1>)
+                     outs(%y : memref<?xi1, 1>)
+
+    // CHECK: %[[DT:.*]] = llvm.mlir.constant(5 : i64) : i64
+    // CHECK: llvm.call @wrap_expand(%{{.*}}, %[[DT]]) :
+    return
+  }
+
+  func.func @expand_ui32(
+      %ctx: !hip.context,
+      %x: memref<1xui32, 1>,
+      %shape: memref<1xi64, 1>,
+      %y: memref<?xui32, 1>) {
+    // CHECK-LABEL: llvm.func @expand_ui32
+
+    hip.expand(%ctx) ins(%x, %shape : memref<1xui32, 1>, memref<1xi64, 1>)
+                     outs(%y : memref<?xui32, 1>)
+
+    // CHECK: %[[DT:.*]] = llvm.mlir.constant(3 : i64) : i64
+    // CHECK: llvm.call @wrap_expand(%{{.*}}, %[[DT]]) :
+    return
+  }
 }

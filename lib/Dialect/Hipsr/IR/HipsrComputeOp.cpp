@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 
+#include "RegionSuccessorCompat.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #include "llvm/Support/ErrorHandling.h"
@@ -19,8 +20,10 @@ OperandRange ComputeOp::getEntrySuccessorOperands(RegionSuccessor successor) {
 }
 
 ValueRange ComputeOp::getSuccessorInputs(RegionSuccessor successor) {
-  return successor.isParent() ? ValueRange(getResults())
-                              : ValueRange(getBody().getArguments());
+  // The parent-op successor is the exit edge, so its inputs are the results.
+  return successor.getSuccessor() == nullptr
+             ? ValueRange(getResults())
+             : ValueRange(getBody().getArguments());
 }
 
 void ComputeOp::getSuccessorRegions(RegionBranchPoint point,
@@ -35,10 +38,7 @@ void ComputeOp::getSuccessorRegions(RegionBranchPoint point,
     llvm::report_fatal_error(
         "hipsr.compute received an unexpected branch point");
   }
-  // TODO: Current llvm couldn't construct RegionSuccessor from op
-  // When it does, use the following:
-  // regions.emplace_back(getOperation());
-  regions.emplace_back(nullptr);
+  regions.push_back(mlir::hipsr::detail::parentSuccessor(getOperation()));
 }
 
 LogicalResult ComputeOp::verify() {

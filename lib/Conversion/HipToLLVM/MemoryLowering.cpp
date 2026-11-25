@@ -4,6 +4,7 @@
  */
 
 #include "HipToLLVMUtils.h"
+#include "hip/Dialect/Transforms/BufferUtils.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -605,8 +606,12 @@ struct MemRefDeallocOpLowering
   }
 };
 
-/// Static strides in elements for identity or strided memref types (no dynamic
-/// dims/strides).
+/// Effective static strides in elements for identity or strided memref types.
+/// A dynamic stride on a statically-singleton dimension is immaterial to the
+/// addressed element set, so canonicalize it from the adjacent inner stride
+/// when the inner extents are static. This occurs in rank-expanding output
+/// subviews whose statically-singleton outer dimension retains a dynamic
+/// stride.
 static FailureOr<SmallVector<int64_t>> tryStaticStridesElems(MemRefType ty) {
   ArrayRef<int64_t> shape = ty.getShape();
   unsigned rank = ty.getRank();
@@ -628,27 +633,21 @@ static FailureOr<SmallVector<int64_t>> tryStaticStridesElems(MemRefType ty) {
     auto strides = llvm::to_vector(sl.getStrides());
     if (strides.size() != rank)
       return failure();
-    for (int64_t s : strides)
-      if (ShapedType::isDynamic(s))
+
+    for (int i = static_cast<int>(rank) - 1; i >= 0; --i) {
+      unsigned dim = static_cast<unsigned>(i);
+      if (ShapedType::isDynamic(strides[dim])) {
+        if (shape[dim] != 1)
+          return failure();
+        strides[dim] = dim + 1 < rank ? strides[dim + 1] * shape[dim + 1] : 1;
+      }
+      if (ShapedType::isDynamic(shape[dim]))
         return failure();
+    }
     return strides;
   }
 
   return failure();
-}
-
-static FailureOr<SmallVector<int64_t>>
-computeRowMajorStridesElems(ArrayRef<int64_t> shape) {
-  unsigned rank = shape.size();
-  SmallVector<int64_t> out(rank);
-  int64_t running = 1;
-  for (int i = static_cast<int>(rank) - 1; i >= 0; --i) {
-    out[static_cast<unsigned>(i)] = running;
-    if (ShapedType::isDynamic(shape[static_cast<unsigned>(i)]))
-      return failure();
-    running *= shape[static_cast<unsigned>(i)];
-  }
-  return out;
 }
 
 static FailureOr<int64_t> tryElemSizeBytes(Type elemTy) {
@@ -658,16 +657,6 @@ static FailureOr<int64_t> tryElemSizeBytes(Type elemTy) {
   if (bits % 8 != 0)
     return failure();
   return static_cast<int64_t>(bits / 8);
-}
-
-static bool strideVectorsEqual(ArrayRef<int64_t> a, ArrayRef<int64_t> b) {
-  if (a.size() != b.size())
-    return false;
-  for (size_t i = 0, e = a.size(); i != e; ++i) {
-    if (a[i] != b[i])
-      return false;
-  }
-  return true;
 }
 
 /// Lowers memref.copy on GPU memrefs to wrap_hipMemcpyAsync /
@@ -693,8 +682,25 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
     if (!srcTy || !dstTy)
       return rewriter.notifyMatchFailure(op, "expected ranked memrefs");
 
-    if (srcTy.getShape() != dstTy.getShape())
-      return rewriter.notifyMatchFailure(op, "copy shape mismatch");
+    // memref.copy requires equal runtime extents, so a dimension that is
+    // dynamic on one side and static on the other has the static extent.
+    // Refining both types to the merged shape keeps copies such as
+    // memref<?x100x91xf32> -> memref<1x100x91xf32> on the device path; the
+    // default lowering would emit a host memcpy on device pointers.
+    if (srcTy.getShape() != dstTy.getShape()) {
+      if (srcTy.getRank() != dstTy.getRank())
+        return rewriter.notifyMatchFailure(op, "copy rank mismatch");
+      SmallVector<int64_t> merged;
+      for (auto [s, d] : llvm::zip_equal(srcTy.getShape(), dstTy.getShape())) {
+        if (!ShapedType::isDynamic(s) && !ShapedType::isDynamic(d) && s != d)
+          return rewriter.notifyMatchFailure(op, "copy shape mismatch");
+        merged.push_back(ShapedType::isDynamic(s) ? d : s);
+      }
+      srcTy = MemRefType::get(merged, srcTy.getElementType(), srcTy.getLayout(),
+                              srcTy.getMemorySpace());
+      dstTy = MemRefType::get(merged, dstTy.getElementType(), dstTy.getLayout(),
+                              dstTy.getMemorySpace());
+    }
 
     FailureOr<int64_t> elemBytesOr = tryElemSizeBytes(srcTy.getElementType());
     if (failed(elemBytesOr))
@@ -762,14 +768,12 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
     ArrayRef<int64_t> srcStrides = *srcStridesOr;
     ArrayRef<int64_t> dstStrides = *dstStridesOr;
 
-    FailureOr<SmallVector<int64_t>> denseStridesOr =
-        computeRowMajorStridesElems(shape);
-    if (failed(denseStridesOr))
-      return rewriter.notifyMatchFailure(op, "need static shape");
-
-    // Single D2D memcpy only for dense row-major storage (no holes).
-    if (strideVectorsEqual(srcStrides, dstStrides) &&
-        strideVectorsEqual(srcStrides, ArrayRef<int64_t>(*denseStridesOr))) {
+    // Single D2D memcpy when each side stores its elements without holes. The
+    // two sides' strides need not match: both walk the same row-major order,
+    // and a differing stride on a dimension of extent 1 moves nothing.
+    // Leaving such a copy to the default MemRef->LLVM lowering would emit host
+    // loads and stores, which fault on these device pointers.
+    if (hasFlatRuntimeCopyLowering(srcTy, dstTy)) {
       int64_t numElems = 1;
       for (int64_t d : shape)
         numElems *= d;
@@ -929,6 +933,18 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
 };
 
 } // namespace
+
+bool hasFlatRuntimeCopyLowering(MemRefType source, MemRefType target) {
+  if (!source || !target || source.getShape() != target.getShape() ||
+      failed(tryElemSizeBytes(source.getElementType())))
+    return false;
+  auto sourceStrides = tryStaticStridesElems(source);
+  auto targetStrides = tryStaticStridesElems(target);
+  if (failed(sourceStrides) || failed(targetStrides))
+    return source.getLayout().isIdentity() && target.getLayout().isIdentity();
+  return isContiguousRowMajor(source.getShape(), *sourceStrides) &&
+         isContiguousRowMajor(target.getShape(), *targetStrides);
+}
 
 void populateMemoryLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns) {

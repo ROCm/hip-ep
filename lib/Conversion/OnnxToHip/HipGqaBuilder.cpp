@@ -25,13 +25,15 @@
 namespace mlir {
 namespace hip {
 
-mlir::LogicalResult buildHipGqaCall(
-    mlir::Operation *op, mlir::PatternRewriter &rewriter, mlir::Value context,
-    mlir::Value query, mlir::Value key, mlir::Value value, mlir::Value pastKey,
-    mlir::Value pastValue, mlir::Value seqlensK, mlir::Value totalSeqLen,
-    int64_t numHeads, float scale, bool noCausal,
-    mlir::RankedTensorType outputType, mlir::RankedTensorType presentKeyType,
-    mlir::RankedTensorType presentValueType, mlir::Value attentionBias) {
+mlir::LogicalResult
+buildHipGqaCall(mlir::Operation *op, mlir::PatternRewriter &rewriter,
+                mlir::Value context, mlir::Value query, mlir::Value key,
+                mlir::Value value, mlir::Value pastKey, mlir::Value pastValue,
+                mlir::Value seqlensK, mlir::Value totalSeqLen, int64_t numHeads,
+                float scale, bool noCausal, mlir::RankedTensorType outputType,
+                mlir::RankedTensorType presentKeyType,
+                mlir::RankedTensorType presentValueType,
+                mlir::Value attentionBias, mlir::Value presentLength) {
   mlir::Location loc = op->getLoc();
 
   // DPS init buffers. present_* follows past_* when a cache is concatenated
@@ -48,6 +50,10 @@ mlir::LogicalResult buildHipGqaCall(
     for (int64_t dimIdx : llvm::seq<int64_t>(presentType.getRank())) {
       if (!presentType.isDynamicDim(dimIdx))
         continue;
+      if (dimIdx == 2 && presentLength && presentType.getRank() == 4) {
+        dynSizes.push_back(presentLength);
+        continue;
+      }
       int64_t srcDim = dimIdx;
       if (bshQuery) {
         if (dimIdx == 0)
@@ -111,6 +117,7 @@ mlir::LogicalResult buildHipGqaCall(
   segmentSizes.push_back(0);                     // head_sink
   segmentSizes.push_back(0);                     // k_scale
   segmentSizes.push_back(0);                     // v_scale
+  segmentSizes.push_back(0);                     // key_bias
   segmentSizes.push_back(1);                     // output
   segmentSizes.push_back(1);                     // present_key
   segmentSizes.push_back(1);                     // present_value

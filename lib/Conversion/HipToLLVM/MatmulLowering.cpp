@@ -140,6 +140,27 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
       }
     }
 
+    // hipBLASLt reads a 4-byte element as f32. An i32 matmul has to take the
+    // integer kernel instead, or the bits are interpreted as floats. The
+    // kernel still needs B's batch stride: 0 reuses one matrix, K*N steps
+    // to the next. Omitting it made a rank-2 B look batch-contiguous.
+    if (AType.getElementType().isInteger(32)) {
+      if (transA || transB)
+        return op.emitError("hip.matmul of i32 does not support transpose");
+      SmallVector<Type, 9> i32Params = {ptrType, ptrType, ptrType,
+                                        ptrType, i64Type, i64Type,
+                                        i64Type, i64Type, i64Type};
+      FailureOr<LLVM::LLVMFuncOp> i32Fn = LLVM::lookupOrCreateFn(
+          rewriter, module, kWrapMatmulI32, i32Params, i32Type);
+      if (failed(i32Fn))
+        return failure();
+      SmallVector<Value, 9> i32Args = {
+          statePtr, APtr, BPtr, outputPtr, M, N, K, batchCount, bBatchStride};
+      LLVM::CallOp::create(rewriter, loc, *i32Fn, i32Args);
+      rewriter.eraseOp(op);
+      return success();
+    }
+
     // Runtime signature:
     // int wrap_hipblasLtMatmul(RuntimeState* state,
     //                          const void* A, const void* B, void* output,

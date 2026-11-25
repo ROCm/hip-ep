@@ -30,6 +30,10 @@ struct Leaf {
 };
 
 static const Leaf kLeaves[] = {
+#if HIP_EP_RING_ENABLED
+    {"gqa/ring", "Xfp16_Wfp16_Yfp16",
+     "hipdnn-kernel-ut-gqa-ring-xfp16-wfp16-yfp16.exe"},
+#endif
     {"matmul_nbits", "Xfp16_Wu2_Yfp16",
      "hipdnn-kernel-ut-matmul-nbits-xfp16-wu2-yfp16.exe"},
     {"matmul_nbits", "Xfp16_Wu3_Yfp16",
@@ -54,8 +58,19 @@ static const Leaf kLeaves[] = {
      "hipdnn-kernel-ut-gqa-prefill-xfp16-wfp16-yfp16.exe"},
     {"gqa/prefill", "Xfp16_Wi8_Yfp16",
      "hipdnn-kernel-ut-gqa-prefill-xfp16-wi8-yfp16.exe"},
+    {"qmoe", "Xfp16_Wu4_Yfp16",
+     "hipdnn-kernel-ut-qmoe-xfp16-wu4-yfp16.exe"},
     {"qmoe_ragged_mm", "Xfp16_Wu4_Yfp16",
      "hipdnn-kernel-ut-qmoe-ragged-mm-xfp16-wu4-yfp16.exe"},
+    {"qmoe_ragged_mm", "Xfp16_Wu2_Yfp16",
+     "hipdnn-kernel-ut-qmoe-ragged-mm-xfp16-wu2-yfp16.exe"},
+    {"gather_block_quantized", "Xi64_Wu4_Yfp16",
+     "hipdnn-kernel-ut-gather-block-quantized-xi64-wu4-yfp16.exe"},
+    {"gather_block_quantized", "Xi64_Wu8_Yfp16",
+     "hipdnn-kernel-ut-gather-block-quantized-xi64-wu8-yfp16.exe"},
+    {"gather_block_quantized", "Xi64_Wfp8_Yfp16",
+     "hipdnn-kernel-ut-gather-block-quantized-xi64-wfp8-yfp16.exe"},
+    {"cast", "Xany_Yany_bf16", "hipdnn-kernel-ut-cast-xany-yany-bf16.exe"},
 };
 
 static std::string executableDirectory() {
@@ -94,6 +109,7 @@ static const GenericTarget kGenericTargets[] = {
     {"gfx11-generic",
      {"gfx1100", "gfx1101", "gfx1102", "gfx1103", "gfx1150", "gfx1151",
       "gfx1152", "gfx1153"}},
+    {"gfx11-7-generic", {"gfx1170", "gfx1171", "gfx1172"}},
     {"gfx12-generic", {"gfx1200", "gfx1201"}},
 };
 
@@ -189,17 +205,22 @@ static bool runLeaf(const fs::path& executable, const fs::path& working_dir,
 int main(int argc, char** argv) {
   std::string arch;
   std::string mode = "lookup";
+  const char* timing_env = std::getenv("HIPDNN_UT_TIMING");
+  std::string timing = timing_env && timing_env[0] ? timing_env : "standard";
   int coverage = 3;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--arch") == 0 && i + 1 < argc)
       arch = argv[++i];
     else if (std::strcmp(argv[i], "--mode") == 0 && i + 1 < argc)
       mode = argv[++i];
+    else if (std::strcmp(argv[i], "--timing") == 0 && i + 1 < argc)
+      timing = argv[++i];
     else if (std::strcmp(argv[i], "--coverage") == 0 && i + 1 < argc)
       coverage = std::atoi(argv[++i]);
     else if (std::strcmp(argv[i], "--help") == 0) {
       std::printf("Usage: hipdnn-kernel-ut.exe [--arch gfxNNNN] "
-                  "[--mode lookup|autotune] [--coverage 1|2|3]\n");
+                  "[--mode lookup|autotune] [--coverage 1|2|3] "
+                  "[--timing screen|standard|confirm]\n");
       return 0;
     } else {
       std::fprintf(stderr, "unrecognized argument: %s\n", argv[i]);
@@ -207,6 +228,11 @@ int main(int argc, char** argv) {
     }
   }
 
+  if (timing != "screen" && timing != "standard" && timing != "confirm") {
+    std::fprintf(stderr, "--timing must be screen, standard or confirm\n");
+    return 2;
+  }
+  if (!setEnvironment("HIPDNN_UT_TIMING", timing)) return 1;
   if (mode != "lookup" && mode != "autotune") {
     std::fprintf(stderr, "--mode must be lookup or autotune, got %s\n",
                  mode.c_str());
@@ -258,6 +284,12 @@ int main(int argc, char** argv) {
 
   bool passed = true;
   for (const Leaf& leaf : kLeaves) {
+    // Ring's generic package slice is validated only on Strix Halo.
+    // On gfx1151 a missing executable or failed device guard must fail CI.
+    if (std::strcmp(leaf.op, "gqa/ring") == 0 && detectedArch() != "gfx1151") {
+      std::printf("[gqa/ring] not applicable on this GPU (requires gfx1151)\n");
+      continue;
+    }
     // Do not predict a table hit from the leaf name. Every leaf receives the
     // requested mode; the DLL resolver matches its actual request (dtype/bits,
     // shape, and arch) and falls through to autotune on a miss.

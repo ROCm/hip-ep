@@ -191,7 +191,8 @@ func.func @cast_i8_to_f32(%ctx: !hip.context, %x: tensor<4xi8>,
   return %r : tensor<4xf32>
 }
 
-// rock-tosa-to-elementwise rejects tosa.cast float->int; emit rocMLIR custom.
+// ONNX Cast truncates float->int, while tosa.cast rounds to nearest even:
+// emit rocMLIR's truncating fp_to_int_cast.
 // CHECK-LABEL: func.func @cast_f32_to_i8
 // CHECK: tosa.custom %arg1 {{.*}}operator_name = "fp_to_int_cast"
 // CHECK-NOT: hip.cast

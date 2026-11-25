@@ -14,7 +14,10 @@
 // instantiate the destructor. The header itself does not include any HIP
 // runtime headers, so this stays cheap for callers.
 #include "./morphizen-hip-gpu-allocator.hpp"
+#include <map>
 #include <memory>
+#include <mutex>
+#include <utility>
 #endif
 
 namespace morphizen {
@@ -135,6 +138,13 @@ struct MorphiZenEpFactory : OrtEpFactory, ApiPtrs {
   MemoryInfoPtr gpu_memory_info_{nullptr, nullptr}; // hipMalloc-backed
   MemoryInfoPtr gpu_host_accessible_memory_info_{
       nullptr, nullptr}; // hipHostMalloc-backed
+
+  // One allocator per (memory type, device id), shared by every session and
+  // freed with the factory; ReleaseAllocatorImpl does not delete.
+  std::mutex allocators_mutex_;
+  std::map<std::pair<OrtDeviceMemoryType, int>,
+           std::unique_ptr<HipGpuAllocator>>
+      allocators_;
 
   // Single shared OrtDataTransferImpl returned from CreateDataTransferImpl.
   std::unique_ptr<HipDataTransferImpl> data_transfer_impl_;

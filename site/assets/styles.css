@@ -40,6 +40,19 @@
    Tokens
    Both themes are defined here. `data-theme` is set on <html> before first
    paint by the inline script in _layouts/default.html.
+
+   PALETTE. One cool grey ramp with a desaturated steel blue sitting on top of
+   it. Desaturated deliberately: a fully saturated blue is the default accent
+   of every developer-tool template, and this site spends it at display sizes
+   -- a 3.4rem figure in the hero panel, a filled pill, every link in a
+   paragraph of docs prose -- where it stops being an accent and becomes the
+   loudest thing on a page about throughput numbers. A steel blue holds the
+   same hierarchy at a fraction of the volume.
+
+   The greys are not neutral either: each one carries the accent's hue at very
+   low saturation. A truly neutral grey beside a blue accent reads faintly
+   yellow by simultaneous contrast, which is most of what makes a dark theme
+   look grubby. Keep any new colour on the same hue (~215deg) or it will show.
    ========================================================================== */
 
 :root {
@@ -67,62 +80,115 @@
   --step-1: clamp(1.15rem, 1.08rem + 0.35vw, 1.35rem);
   --step-2: clamp(1.5rem, 1.35rem + 0.75vw, 2rem);
   --step-3: clamp(2rem, 1.6rem + 2vw, 3rem);
+
+  /* Referenced by the sortable-header caret in the model matrix, which had
+     been transitioning against two names nothing defined -- so the caret
+     snapped rather than faded. Defined here rather than inlined there because
+     anything else that animates should agree with it. */
+  --dur-fast: .12s;
+  --ease: cubic-bezier(.4, 0, .2, 1);
 }
 
 html[data-theme="dark"] {
-  --bg: #06070d;
-  --bg-elevated: #0d0f18;
-  --bg-sunken: #04050a;
-  --surface: #111420;
-  --border: #232838;
-  --border-strong: #333a4f;
-  --text: #e8eaf2;
-  --text-muted: #9aa2b8;
-  --text-faint: #6b7288;
-  --accent: #4da3ff;
-  --accent-hover: #7cbcff;
-  --accent-contrast: #04050a;
-  --accent-soft: rgba(77, 163, 255, 0.12);
-  --warn: #ffb454;
-  --warn-soft: rgba(255, 180, 84, 0.11);
-  --danger: #ff6b6b;
-  --danger-soft: rgba(255, 107, 107, 0.11);
-  --ok: #4ade80;
-  --ok-soft: rgba(74, 222, 128, 0.11);
+  /* Blue-black rather than neutral black. #06070d read as a hole in the
+     screen with a blue panel floating in it; lifting the floor two steps and
+     tinting it puts the page and the panels in the same material. */
+  --bg: #0a0d14;
+  --bg-elevated: #111624;
+  --bg-sunken: #070910;
+  --surface: #141a28;
+  --border: #212939;
+  --border-strong: #38425a;
+  --text: #e6eaf2;
+  --text-muted: #9aa4b8;
+  --text-faint: #6b7589;
+  /* 7.4:1 on --bg, so it still passes as body-size link text despite being
+     most of the way to grey. Anything further desaturated stops reading as a
+     colour at all and the links look merely lighter than the prose. */
+  --accent: #8fabd0;
+  --accent-hover: #b4c8e4;
+  --accent-contrast: #080b11;
+  --accent-soft: rgba(143, 171, 208, 0.13);
+  /* The lit edge along the top of a raised surface. A fixed rgba rather than
+     the accent at an opacity, because it has to survive sitting on both
+     --surface and --bg-elevated without picking up their tint. */
+  --hairline: rgba(170, 196, 230, 0.34);
+  --warn: #e0ad5c;
+  --warn-soft: rgba(224, 173, 92, 0.11);
+  --danger: #e2808a;
+  --danger-soft: rgba(226, 128, 138, 0.11);
+  --ok: #78c39b;
+  --ok-soft: rgba(120, 195, 155, 0.11);
   --shadow: 0 1px 2px rgba(0, 0, 0, .5), 0 8px 24px rgba(0, 0, 0, .35);
   /* Wide and very soft: on a near-black page a tight shadow is invisible, so
      the only way a surface reads as raised is a large blur radius. */
   --shadow-lg: 0 32px 90px rgba(0, 0, 0, .55);
-  --glow: 0 6px 22px rgba(77, 163, 255, .28);
-  --bloom: rgba(77, 163, 255, .20);
+  /* Not a glow any more -- a steel blue has no light to throw. What the
+     primary button needs instead is weight, so this is a plain drop shadow
+     with just enough of the accent in it to stay in the same hue family. */
+  --glow: 0 8px 26px rgba(10, 13, 20, .55), 0 2px 8px rgba(143, 171, 208, .14);
+  /* The background field. --field is the colour the top of the document is
+     washed with before it resolves into --bg; the blooms are two offset
+     highlights on top of it. All three are a long way up from where they were
+     -- at .16 the wash was present in the stylesheet and absent on the screen,
+     which is the worst of both. --field is a flat colour rather than an alpha
+     so the top of the page is a stated colour, not --bg plus a guess. */
+  --field: #101a30;
+  --bloom: rgba(143, 171, 208, .30);
+  --bloom-2: rgba(110, 142, 190, .22);
+  /* The network. Edges are the weaker of the two on purpose: at equal weight
+     the lines dominate and the field reads as a mesh rather than as nodes
+     that happen to be connected. */
+  --net-edge: rgba(143, 171, 208, .16);
+  --net-node: rgba(143, 171, 208, .34);
+  --net-node-lit: rgba(143, 171, 208, .72);
 }
 
 html[data-theme="light"] {
-  --bg: #ffffff;
-  --bg-elevated: #f7f8fb;
-  --bg-sunken: #eef0f6;
+  /* Off-white, with the cards left at pure white. On a pure-white page a white
+     card is only a border, so every surface on the site had to carry its own
+     outline to exist; two steps of paper between them does the same job
+     without drawing a line. */
+  --bg: #fbfcfe;
+  --bg-elevated: #f1f4f9;
+  --bg-sunken: #e7ebf3;
   --surface: #ffffff;
-  --border: #e2e5ee;
-  --border-strong: #c8cddb;
-  --text: #111726;
-  --text-muted: #4d566e;
-  --text-faint: #79809a;
-  --accent: #0b62d6;
-  --accent-hover: #0950b0;
+  --border: #dfe4ee;
+  --border-strong: #bfc8d8;
+  --text: #111826;
+  --text-muted: #4d566b;
+  --text-faint: #79839a;
+  /* 6.9:1 on --bg. The light theme's accent is the dark end of the same ramp
+     the dark theme takes its accent from the light end of, which is why the
+     two themes read as one design rather than as a palette and its inverse. */
+  --accent: #3f5d82;
+  --accent-hover: #2b4564;
   --accent-contrast: #ffffff;
-  --accent-soft: rgba(11, 98, 214, 0.08);
-  --warn: #a15c00;
-  --warn-soft: rgba(161, 92, 0, 0.09);
-  --danger: #c02626;
-  --danger-soft: rgba(192, 38, 38, 0.08);
-  --ok: #1a7f45;
-  --ok-soft: rgba(26, 127, 69, 0.09);
-  --shadow: 0 1px 2px rgba(16, 24, 40, .06), 0 8px 24px rgba(16, 24, 40, .08);
+  --accent-soft: rgba(63, 93, 130, 0.08);
+  --hairline: rgba(63, 93, 130, 0.16);
+  --warn: #8f5405;
+  --warn-soft: rgba(143, 84, 5, 0.09);
+  --danger: #b03232;
+  --danger-soft: rgba(176, 50, 50, 0.08);
+  --ok: #1a7049;
+  --ok-soft: rgba(26, 112, 73, 0.09);
+  --shadow: 0 1px 2px rgba(17, 24, 38, .05), 0 8px 24px rgba(17, 24, 38, .07);
   /* Much weaker than the dark theme's. On white, a shadow at that opacity
      reads as dirt rather than depth; the border carries the edge instead. */
-  --shadow-lg: 0 24px 60px rgba(16, 24, 40, .10);
-  --glow: 0 6px 20px rgba(11, 98, 214, .22);
-  --bloom: rgba(11, 98, 214, .13);
+  --shadow-lg: 0 24px 60px rgba(17, 24, 38, .09);
+  --glow: 0 8px 22px rgba(63, 93, 130, .22);
+  /* The same field, inverted. The light theme cannot take the dark theme's
+     treatment at the dark theme's strength: a wash that reads as "lit" on a
+     near-black page reads as "dirty" on paper, and the eye forgives far less
+     tint above white than below black. So this is roughly half the contrast
+     against --bg that the dark values carry, and the network is weaker still
+     -- dark lines on white are read as content, light lines on black are not. */
+  --field: #e4ecf8;
+  --bloom: rgba(63, 93, 130, .18);
+  --bloom-2: rgba(90, 116, 150, .13);
+  --net-edge: rgba(63, 93, 130, .13);
+  --net-node: rgba(63, 93, 130, .24);
+  --net-node-lit: rgba(63, 93, 130, .52);
 }
 
 /* ==========================================================================
@@ -140,6 +206,10 @@ html { scroll-behavior: smooth; scroll-padding-top: 90px; }
 
 body {
   margin: 0;
+  /* The containing block for .backdrop, which is absolutely positioned and has
+     to measure itself against the document rather than against whichever
+     ancestor happens to be positioned. */
+  position: relative;
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-sans);
@@ -164,7 +234,7 @@ img { max-width: 100%; height: auto; }
    `overflow-wrap` inherits, and .model-card is a .card, so the measurement
    strip has to opt back out explicitly -- see .model-card__metrics below.
    Dropping dt/dd from this selector list would not have done it. */
-a, p, li, figcaption, .card, .panel, .deck {
+a, p, li, figcaption, .card, .panel, .specs__item {
   overflow-wrap: anywhere;
 }
 
@@ -182,6 +252,76 @@ a, p, li, figcaption, .card, .panel, .deck {
 
 .page { display: flex; flex-direction: column; min-height: 100vh; }
 .page__inner { flex: 1; }
+
+/* ==========================================================================
+   Backdrop
+   The single background field the whole site sits on. Markup and the rationale
+   for what it is: _includes/backdrop.html.
+   ========================================================================== */
+
+/* Absolutely positioned against <body> rather than fixed, so it scrolls with
+   the document. Fixed would hold the field still under moving content, which
+   looks like a window until the page gets long and then looks like a bug;
+   it is also the attachment mode iOS Safari has never rendered reliably.
+
+   A stated height rather than inset:0. The field belongs to the top of the
+   document -- it is what the first screen and the one after it are made of,
+   and a docs page that runs to eight thousand pixels should be reading
+   against --bg long before the end of it. 1400px covers the landing hero and
+   the start of the section below it at every viewport height worth designing
+   for.
+
+   z-index -1 puts it above the canvas (body's background propagates there)
+   and below every positioned descendant of .page. Nothing in the content
+   needs its own stacking context to clear it. */
+.backdrop {
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 1400px;
+  /* An absolutely positioned box still contributes to the viewport's
+     scrollable overflow, so on a page with less content than the field is
+     tall the layer hangs past the footer and the page scrolls into empty
+     colour. /docs/models/phi/ is 1371px and was scrolling to 1400. The
+     percentage resolves against <body>, whose height is set by in-flow
+     content only, so this cannot feed back into itself. */
+  max-height: 100%;
+  z-index: -1;
+  pointer-events: none;
+  overflow: hidden;
+  background:
+    radial-gradient(68rem 38rem at 14% -10%, var(--bloom), transparent 66%),
+    radial-gradient(50rem 32rem at 88% 0%, var(--bloom-2), transparent 68%),
+    linear-gradient(180deg, var(--field) 0%, transparent 72%);
+}
+
+/* The network sits in the upper two thirds of the field and is masked away
+   before the field itself ends, so the texture finishes first and the colour
+   finishes second. Both ending together gives a visible horizon line across
+   the page. */
+.backdrop__svg {
+  position: absolute;
+  top: 0; left: 0;
+  width: 100%; height: 72%;
+  display: block;
+  mask-image: linear-gradient(180deg, #000 0%, #000 44%, transparent 94%);
+  -webkit-mask-image: linear-gradient(180deg, #000 0%, #000 44%, transparent 94%);
+}
+.backdrop__edges { fill: none; stroke: var(--net-edge); stroke-width: 1; }
+/* Filled with the page colour, not left transparent: an edge passing behind a
+   node is then occluded by it, which is the detail that makes this read as a
+   graph rather than as circles lying on a tangle of lines. */
+.backdrop__nodes { fill: var(--bg); stroke: var(--net-node); stroke-width: 1.2; }
+.backdrop__nodes--lit { fill: var(--net-node-lit); stroke: none; }
+
+/* Phones. The drawing is cover-fitted, so at a 390px-wide layer the same
+   viewBox is scaled up roughly four times and the viewer gets five enormous
+   nodes and two lines -- which is not a texture, it is a decoration that
+   looks placed by accident. Shortening the field and thinning it down is the
+   honest version: on a screen this size the wash is doing the work anyway. */
+@media (max-width: 680px) {
+  .backdrop { height: 900px; }
+  .backdrop__svg { height: 62%; opacity: .55; }
+}
 
 .section { padding: clamp(2.75rem, 6vw, 5rem) 0; }
 
@@ -229,10 +369,16 @@ a, p, li, figcaption, .card, .panel, .deck {
   letter-spacing: .2em; text-transform: uppercase;
   color: var(--text-faint); margin: 0 0 .65rem;
 }
-/* 1.2, not the 1.05-ish a display face is usually set at: the headline wraps to
-   three lines here, and at a tighter leading those lines lock into a block that
-   has to be read as a shape before it is read as a sentence. */
-.headline-lg { font-size: var(--step-3); line-height: 1.2; letter-spacing: -.02em; margin: 0 0 1.25rem; }
+/* 1.2, not the 1.05-ish a display face is usually set at: the headline wraps,
+   and at a tighter leading those lines lock into a block that has to be read
+   as a shape before it is read as a sentence. */
+/* Weight 600, not the 700 a browser gives an h1. Space Grotesk at 3rem is
+   already a heavy face; the extra 100 closes the counters and the headline
+   stops being read as words and starts being read as a mass. */
+.headline-lg { font-size: var(--step-3); font-weight: 600; line-height: 1.2; letter-spacing: -.028em; margin: 0 0 1.25rem; }
+/* One word of the headline, in the accent, marking the claim the rest of the
+   sentence is shared with every other backend. */
+.headline-accent { color: var(--accent); }
 .headline-md { font-size: var(--step-2); line-height: 1.18; letter-spacing: -.015em; margin: 0 0 .75rem; }
 .headline-sm { font-size: var(--step-1); line-height: 1.3; margin: 0 0 .5rem; }
 /* A release tag annotating the heading it sits in -- on the same line rather
@@ -269,9 +415,15 @@ a, p, li, figcaption, .card, .panel, .deck {
    Header
    ========================================================================== */
 
+/* 72% rather than 88%. The header is tinted with --bg, which is the colour the
+   page settles to a long way down -- so against the top of the backdrop field,
+   which is several steps lighter, a nearly opaque header read as a separate
+   darker slab with a seam under it rather than as glass over the same surface.
+   Below 70% the blur stops being enough to keep body copy legible as it passes
+   underneath. */
 .site-header {
   position: sticky; top: 0; z-index: 50;
-  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
   backdrop-filter: saturate(180%) blur(12px);
   border-bottom: 1px solid var(--border);
 }
@@ -534,8 +686,8 @@ code, kbd, samp { font-family: var(--font-mono); font-size: .88em; }
    only when it cannot fit, and in a narrow column that turns `--help` into `-`
    followed by `-help` on the next line -- which reads as a different flag.
    `break-word` still rescues a wheel filename or a URL that genuinely does not
-   fit; it just stops volunteering. Scoped to .prose so the cards and the
-   feature deck keep `anywhere`, which their grid tracks are measured with. */
+   fit; it just stops volunteering. Scoped to .prose so the cards and the hero
+   rail keep `anywhere`, which their grid tracks are measured with. */
 .prose :not(pre) > code { word-break: normal; overflow-wrap: break-word; }
 
 div.highlight, pre.highlight {
@@ -627,163 +779,148 @@ div.highlight:hover .code-copy, .code-copy:focus-visible { opacity: 1; }
    Hero (landing page only)
    ========================================================================== */
 
+/* The top padding is deliberately short of what a hero usually gets. There is
+   no eyebrow above the headline, so this is the entire gap between the header
+   rule and the first word on the page.
+
+   `overflow: hidden` is gone with the layers that needed it. Nothing in this
+   section bleeds past its own box any more, and keeping the clip would mean
+   the hero quietly truncates anything a later change puts near its edge. */
 .hero {
-  position: relative;
-  padding: clamp(3.5rem, 9vw, 7rem) 0 clamp(2.5rem, 5vw, 4.5rem);
-  overflow: hidden;
+  padding: clamp(1.75rem, 3.5vw, 3rem) 0 clamp(2.5rem, 5vw, 4.5rem);
 }
-/* A single soft accent wash rather than a background image: it costs nothing to
-   load, and it reads correctly in both themes without a second asset. */
-.hero::before {
-  content: "";
-  position: absolute; inset: -40% 0 auto -10%;
-  height: 130%; pointer-events: none; z-index: -1;
-  background:
-    radial-gradient(48rem 26rem at 18% 22%, var(--bloom), transparent 68%),
-    radial-gradient(38rem 22rem at 82% 8%, var(--bloom), transparent 72%);
-}
-/* Full text colour here, unlike the muted lede elsewhere. This one is the only
-   description of the project above the fold, so it is body copy that happens to
-   be set large rather than a subtitle attached to the headline. */
-.hero .lede { max-width: 56ch; color: var(--text); }
-.hero .btn-row { margin-top: 1.75rem; }
+/* The hero carries no background of its own. It used to own two generated
+   layers -- an accent wash and a masked dot lattice -- and both are gone into
+   .backdrop, which does the same job for the whole document instead of for
+   one section. That is the point of the change: a wash that stops at the fold
+   announces where the hero ends, and the hero ending was never information
+   worth spending a horizon line on. */
 
-/* Headline on the left, feature deck on the right, at an even split: the deck
-   carries eight claims and is the only part of the hero a returning visitor
-   reads, so it gets the same weight as the headline rather than the remainder
-   of the row. `minmax(0, ...)` on both tracks so neither can be sized by its
-   content and push the row wider than the page. Below 960px the deck moves
-   under the headline rather than shrinking: at that width it would be narrower
-   than the shortest slide title. */
-.hero__grid {
-  display: grid; gap: 2.5rem 3rem; align-items: center;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+/* Not the muted grey the lede is elsewhere, and not full text colour either.
+   This is the only description of the project above the fold, so it is body
+   copy rather than a subtitle -- but at full contrast directly under a 600
+   weight headline it competes with it, and the two together read as one wall
+   of type. Four fifths of the way to text colour is where the headline wins
+   and the sentence is still prose. */
+.hero .lede {
+  max-width: 54ch;
+  color: color-mix(in srgb, var(--text) 80%, var(--text-muted));
+  font-size: clamp(1.05rem, .99rem + .26vw, 1.18rem);
+  /* Keeps the last line from falling short by a word or two, which is the
+     thing that makes a three-line paragraph look accidental. */
+  text-wrap: pretty;
 }
-.hero__main { min-width: 0; }
-@media (max-width: 960px) {
-  .hero__grid { grid-template-columns: minmax(0, 1fr); }
-}
+.hero .btn-row { margin-top: 2rem; gap: .7rem; }
 
-/* The feature deck. It is a panel with one visible slide, not a scrolling
-   track: the point is to show a claim at a time, and a horizontal track would
-   need to be swipeable to be honest about that on touch. */
-.deck {
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: var(--radius-lg); padding: clamp(1.5rem, 2.2vw, 2rem);
-  box-shadow: var(--shadow);
-  display: flex; flex-direction: column;
-  /* Sized like a piece of media rather than like a text block, so the deck is a
-     fixed object in the hero instead of something whose height is decided by
-     whichever slide happens to be showing. A floor rather than an aspect ratio:
-     the reference site's 16:10 frame carries a screen recording, and at the
-     width this column actually gets the ratio resolves below its own 400px
-     floor anyway — while a ratio would also fix the height, and the no-script
-     fallback stacks all eight slides inside this box. */
-  min-height: 400px;
-}
-@media (max-width: 960px) {
-  /* Stacked, the deck has the full page width and the same floor leaves a block
-     of empty panel; it goes back to being sized by its content. */
-  .deck { min-height: 0; }
-}
-/* The slide is centred in whatever height the panel has rather than pinned to
-   the top: the panel is now taller than any one slide, and a short slide pinned
-   to the top of it reads as a rendering fault.
-   The floor reserves the height of the tallest slide before JS hides the
-   others, so stepping through does not reflow the page under the pointer. It
-   only bites in the stacked layout, where the panel has no floor of its own.
-   Both values are measured, and the tallest slide is the hardware one either
-   way: 216px exactly -- 13.5rem -- everywhere the spec list keeps its two
-   columns, and 295px once it stacks below 500px, rising to 326px under a
-   360px viewport where the slide title takes a third line. 20.5rem covers
-   that; under a 344px viewport the codename row wraps as well and the panel
-   grows by 22px rather than holding. Generous for the other three slides,
-   which is the trade the floor has always made. Re-measure both if that
-   slide gains a row or its wording gets longer. */
-.deck__viewport {
-  flex: 1; min-height: 13.5rem;
-  display: flex; flex-direction: column; justify-content: center;
-}
-@media (max-width: 499px) { .deck__viewport { min-height: 20.5rem; } }
-.deck__slide + .deck__slide { margin-top: 1.25rem; padding-top: 1.25rem; border-top: 1px solid var(--border); }
-.deck.is-ready .deck__slide + .deck__slide { margin-top: 0; padding-top: 0; border-top: 0; }
-.deck__kicker {
-  margin: 0 0 .5rem; font-family: var(--font-mono); font-size: .72rem;
-  letter-spacing: .2em; text-transform: uppercase; color: var(--accent);
-}
-/* The one thing on the slide a visitor is guaranteed to take in. It is set at
-   headline size and in the accent so the panel can be read at a glance from
-   across the page, which a slide made only of sentences cannot. */
-.deck__stat {
-  margin: 0 0 .35rem; font-size: clamp(2.4rem, 1.9rem + 2vw, 3.4rem);
-  font-weight: 700; line-height: 1.05; letter-spacing: -.03em;
-  font-variant-numeric: tabular-nums; color: var(--accent);
-}
-/* A word is wider than a number at the same size and would wrap on this
-   column, so the non-numeric slides get their own size. */
-.deck__stat--word { font-size: clamp(1.8rem, 1.45rem + 1.4vw, 2.5rem); letter-spacing: -.02em; }
+/* The hero is a single left-aligned column. It was a two-column grid with a
+   stat carousel in the right track, which is the layout of the competing
+   site this one kept being mistaken for; the carousel's content is the spec
+   strip at the bottom of this section now, and nothing moved into the vacated
+   column. The headline, the lede, the buttons and the strip all start on the
+   same line, and a left margin running unbroken from the first word to the
+   last cell is a stronger piece of structure than anything that could have
+   been parked beside it.
 
-/* A step up from the old sizes, because the panel is now a 400px object: at
-   body size the slide read as a caption floating in a large empty frame. */
-.deck__title {
-  margin: 0 0 .7rem; font-size: clamp(1.25rem, 1.1rem + .55vw, 1.55rem);
-  font-weight: 700; line-height: 1.35; letter-spacing: -.01em;
-}
-.deck__body { margin: 0; color: var(--text-muted); font-size: var(--step-0); line-height: 1.7; }
+   What keeps the empty right of the headline reading as deliberate rather
+   than as a column that failed to fill is now the backdrop: the field runs
+   full-bleed behind all of it, so the hero is a short block of type on a
+   surface rather than a grid with one track left blank. Nothing should be
+   moved into that space.
 
-/* One slide lists rather than asserts: three product series against the
-   platforms they are sold as. Two aligned columns rather than "Ryzen AI 300
-   series (Strix Point, Krackan Point)" prose, because the codename is what a
-   reader scans this panel for and prose buries it mid-sentence.
-   `max-content` on the first column, so the series names set the gutter and
-   the codenames all start on the same edge. That gutter is 155px and fixed,
-   which is what sets the breakpoint: below a 500px viewport the second column
-   can no longer hold "incl. Strix Point, Krackan Point" on one line, and what
-   it does instead is break that row across three ragged lines rather than two
-   clean ones. Measured, not guessed -- the narrowest viewport where all three
-   rows stay single-line is 500px, and it moved out from 472px when the rows
-   gained their "incl." prefix. Re-measure rather than assume if that wording
-   changes again. Below the breakpoint the pairs stack, which is both shorter
-   and easier to read. */
-.deck__spec {
-  display: grid; grid-template-columns: max-content 1fr;
-  column-gap: 1.25rem; row-gap: .55rem;
-  margin: 0; font-size: var(--step-0); line-height: 1.45;
+   Capped at roughly two lines, because the full column is 1200px and a 3rem
+   headline set across all of it is a single line the eye has to track from one
+   side of the screen to the other. `balance` splits it evenly rather than
+   leaving two words on the second line. 32ch is the measure that holds the
+   current sentence to two lines, breaking after "LLM", from the widest
+   viewport down to 640px; below that it takes a third line, which is correct
+   on a phone. The break point moves with the wording -- it was after
+   "inference" until the superlatives came out of the headline -- so re-measure
+   rather than assume this number still does what it says. */
+.hero__headline { max-width: 32ch; text-wrap: balance; }
+
+/* The spec strip. Four figures on one line, which is what the carousel it
+   replaced could never be: a reader comparing backends wants all four at
+   once, and a widget that shows one of them every seven seconds is a worse
+   way to deliver four facts than a list is.
+
+   What it keeps from the carousel is the movement, and only the movement: the
+   accent walks between the four on an uneven cadence that initSpecStrip()
+   drives. Nothing is hidden while it does that and there is nothing to press,
+   so a reader who ignores it loses nothing -- which is the difference between
+   this and the thing it replaced.
+
+   Label above figure, not below -- the same order the carousel panel used, and
+   the right one here too: the labels are short and uniform, so they form a
+   readable header row across the strip, whereas four figures of different
+   widths on the top line would not line up as anything. */
+.specs {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1.5rem 2rem; align-items: start;
+  margin: clamp(2.5rem, 5vw, 3.25rem) 0 0;
 }
-.deck__spec dt { font-weight: 600; color: var(--text); }
-.deck__spec dd { margin: 0; color: var(--text-muted); }
-/* "incl." is a qualifier, not part of the codename, and is set back a step so
-   the eye lands on the name it is scanning for. Dimmer than the codename it
-   introduces, but not a decoration: it is what stops the row reading as an
-   equation. Kept as markup rather than a ::before, so it survives being
-   copied out of the page. */
-.deck__spec-hint { font-size: var(--step--1); opacity: .65; }
-@media (max-width: 499px) {
-  .deck__spec { grid-template-columns: 1fr; row-gap: .1rem; }
-  .deck__spec dd { margin-bottom: .55rem; }
-  .deck__spec dd:last-child { margin-bottom: 0; }
+/* The rule is per item rather than one line across the container, because it
+   is also the highlight: each cell owns the segment above itself, so the
+   accent can land on one of four without a second element to position. */
+.specs__item {
+  position: relative; min-width: 0;
+  padding-top: 1.75rem; border-top: 1px solid var(--border);
+}
+/* Drawn over the border rather than recolouring it, so the transition is a
+   wipe from the left -- the segment fills in the direction the eye is already
+   travelling, which a colour fade does not. transform and opacity only: this
+   runs for as long as the tab is open and must stay off the main thread. */
+.specs__item::before {
+  content: ""; position: absolute; top: -1px; left: 0; right: 0; height: 1px;
+  background: var(--accent); opacity: 0;
+  transform: scaleX(0); transform-origin: left;
+  transition: transform .5s var(--ease), opacity .5s var(--ease);
+}
+.specs__item.is-lit::before { opacity: 1; transform: scaleX(1); }
+/* Flat accent, not the gradient fill the carousel's figure carried. That
+   treatment exists to keep a 3.5rem number from looking washed out; at a
+   quarter of that size it is invisible, and four of them would be four
+   gradients on one line for no gain. */
+.specs__value {
+  margin: 0 0 .35rem; font-size: var(--step-2); font-weight: 600;
+  line-height: 1.1; letter-spacing: -.03em; color: var(--accent);
+  font-variant-numeric: tabular-nums;
+  transition: color .5s var(--ease);
+}
+/* The one value in the strip that is a word rather than a figure. Both of the
+   settings it drops are settings for numerals: -.03em is tracking tight enough
+   to look cramped on letters, and tabular-nums has nothing to act on. Not a
+   size change -- the carousel this replaced needed one (.deck__stat--word,
+   because a word did not fit its 400px column), and this does not: "Open
+   source" measures a single line at every width the strip is laid out at. The
+   tightest point is just above the two-column breakpoint, where the text is
+   166px in a 177px cell -- about one character of headroom, so re-measure
+   rather than assume if this wording ever grows. */
+.specs__value--word { letter-spacing: -.015em; font-variant-numeric: normal; }
+.specs__label {
+  margin: 0 0 .5rem; font-family: var(--font-mono); font-size: .7rem;
+  letter-spacing: .22em; text-transform: uppercase; color: var(--text-faint);
+}
+.specs__note {
+  margin: 0; font-size: var(--step--1); line-height: 1.5; color: var(--text-muted);
+}
+/* THE FALLBACK IS THE DEFAULT, AND THIS IS WHERE IT IS ENFORCED. Everything
+   above renders all four figures at full accent. Dimming the three that are
+   not lit is scoped to .is-ready, which initSpecStrip() adds only once it has
+   actually started cycling -- so with script.js absent, or under
+   prefers-reduced-motion where the function returns before adding it, no cell
+   is ever left dim with nothing coming to light it again. Do not move these
+   declarations up into the base rules. */
+.specs.is-ready .specs__value { color: var(--text-muted); }
+.specs.is-ready .is-lit .specs__value { color: var(--accent); }
+.specs.is-ready .is-lit .specs__note { color: var(--text); }
+
+@media (max-width: 880px) {
+  .specs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 440px) {
+  .specs { grid-template-columns: minmax(0, 1fr); gap: 1.25rem; }
 }
 
-.deck__controls {
-  display: flex; align-items: center; gap: .75rem;
-  margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid var(--border);
-}
-.deck__nav {
-  display: inline-grid; place-items: center; width: 34px; height: 34px; flex: none;
-  background: transparent; border: 1px solid var(--border); border-radius: 50%;
-  color: var(--text-muted); font-size: 1.1rem; line-height: 1; cursor: pointer;
-}
-.deck__nav:hover { color: var(--text); border-color: var(--border-strong); }
-.deck__dots { display: flex; flex-wrap: wrap; gap: .4rem; margin-inline: auto; }
-/* The dots are the only progress indicator, so they have to be reachable by
-   keyboard as well as legible: the hit area is padded well past the 6px mark
-   the eye is given. */
-.deck__dot {
-  width: 6px; height: 6px; padding: 0; flex: none; box-sizing: content-box;
-  border: 6px solid transparent; background-clip: content-box;
-  background-color: var(--border-strong); border-radius: 999px; cursor: pointer;
-}
-.deck__dot[aria-current="true"] { background-color: var(--accent); }
 
 /* ==========================================================================
    Components
@@ -800,21 +937,40 @@ div.highlight:hover .code-copy, .code-copy:focus-visible { opacity: 1; }
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: .45rem;
   max-width: 100%; min-width: 0; text-align: center;
-  padding: .65rem 1.4rem; border-radius: 999px;
-  font-weight: 600; font-size: var(--step--1); border: 1px solid transparent; cursor: pointer;
-  transition: transform .12s ease, background .12s ease, border-color .12s ease, color .12s ease;
+  padding: .7rem 1.45rem; border-radius: 999px;
+  font-weight: 600; font-size: var(--step--1); letter-spacing: -.005em;
+  border: 1px solid transparent; cursor: pointer;
+  transition: transform .12s ease, background .12s ease, border-color .12s ease,
+              color .12s ease, box-shadow .12s ease;
 }
+/* Filled with a vertical gradient rather than a flat accent, and carrying a
+   1px inset highlight along its own top edge -- the same lit-from-above
+   treatment as .section--alt, so the raised things on the page agree about
+   where the light is. A flat fill in a desaturated accent
+   reads as a disabled control; the gradient is what makes it read as a key. */
 .btn--primary {
-  background: var(--accent); color: var(--accent-contrast); box-shadow: var(--glow);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 88%, #fff), var(--accent));
+  color: var(--accent-contrast);
+  box-shadow: var(--glow), inset 0 1px 0 rgba(255, 255, 255, .22);
 }
 .btn--primary:hover {
-  background: var(--accent-hover); color: var(--accent-contrast); text-decoration: none;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent-hover) 88%, #fff), var(--accent-hover));
+  color: var(--accent-contrast); text-decoration: none;
   transform: translateY(-1px);
 }
-.btn--ghost { border-color: var(--border-strong); color: var(--text); }
+/* Filled, not outlined. Three hollow pills beside a solid one read as the
+   row the designer could not decide about -- and on the dot lattice behind
+   them an outline-only pill has the pattern running through it, so the label
+   sits on texture while the primary's sits on paint. A surface fill makes all
+   four the same object at two levels of emphasis. */
+.btn--ghost {
+  border-color: var(--border); color: var(--text);
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  box-shadow: var(--shadow);
+}
 .btn--ghost:hover {
-  border-color: var(--accent); color: var(--accent); text-decoration: none;
-  background: var(--accent-soft); transform: translateY(-1px);
+  border-color: var(--border-strong); color: var(--accent); text-decoration: none;
+  background: var(--bg-elevated); transform: translateY(-1px);
 }
 .btn-row { display: flex; flex-wrap: wrap; gap: .65rem; margin: 1.25rem 0; }
 
@@ -861,8 +1017,13 @@ div.highlight:hover .code-copy, .code-copy:focus-visible { opacity: 1; }
    overrides the track sizing above and the row overflows anyway. */
 .card {
   min-width: 0;
-  padding: 1.15rem; background: var(--surface);
+  padding: 1.25rem; background: var(--surface);
   border: 1px solid var(--border); border-radius: var(--radius-lg);
+  /* A resting shadow, not only a hover one. The light theme's page is now
+     off-white and its cards are pure white, so a card already separates
+     without an outline; the shadow is what stops the border from being the
+     only thing doing it, which is what made the grid read as a table. */
+  box-shadow: var(--shadow);
 }
 .card__title { margin: 0 0 .4rem; font-size: var(--step-0); font-weight: 700; }
 .card__body { margin: 0; color: var(--text-muted); font-size: var(--step--1); }
@@ -884,10 +1045,10 @@ a.card--link:hover .card__title::after { color: var(--accent); }
 
 /* Panel ---------------------------------------------------------------- */
 
-/* An even two-column row of panels, at the same split and the same collapse
-   point as .hero__grid. Separate from it because of the alignment: the hero
-   centres its deck against the headline, and a row of panels has to start at
-   the same line as the text beside it or the panel reads as having slipped.
+/* An even two-column row of panels, collapsing to one below 960px. The hero
+   used to carry a grid at the same split, and this was defined as a separate
+   rule because the two needed different alignment; the hero is a single
+   column now, so this one stands alone and its numbers are its own.
    `stretch` so two panels of different length are still one row -- ragged
    bottoms in a two-panel row look like a layout bug rather than like text. */
 .panel-row {
@@ -904,11 +1065,9 @@ a.card--link:hover .card__title::after { color: var(--accent); }
   .panel-row { grid-template-columns: minmax(0, 1fr); gap: 1.75rem; }
 }
 
-/* The right-hand block of a .hero__grid row, and the unit the catalog page is
-   built from. Same surface treatment as .deck, without its 400px floor: the
-   deck is sized like a piece of media because it holds one slide at a time,
-   whereas a panel is sized by its text and two panels in a row should not be
-   padded out to a height neither of them needs. */
+/* The unit the catalog page is built from. Sized by its text rather than
+   given a height floor: two panels in a row should not be padded out to a
+   height neither of them needs. */
 .panel {
   min-width: 0;
   background: var(--surface); border: 1px solid var(--border);
@@ -934,8 +1093,13 @@ a.card--link:hover .card__title::after { color: var(--accent); }
      clear it -- but if it clears it from a rule that sits after :hover and
      .is-active in the file, it also clears their fills at equal specificity,
      and the selected pill loses its accent background while keeping the
-     on-accent text colour. That is black on black in the dark theme. */
-  background: transparent;
+     on-accent text colour. That is black on black in the dark theme.
+
+     A surface fill rather than the `transparent` this used to be, to match
+     .btn--ghost: the row sits directly under a heading on the page
+     background, and hollow pills there read as a wireframe. It still has to
+     be set here, and for the same reason. */
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
   /* `nowrap` stays: these are family names and a break would put "DeepSeek"
      across two lines inside a pill. max-width only stops a pill from widening
      the row past the viewport; the row already wraps pill by pill. */
@@ -944,7 +1108,7 @@ a.card--link:hover .card__title::after { color: var(--accent); }
   transition: border-color .12s ease, background .12s ease, color .12s ease;
 }
 .pill-list__item:hover, .pill-list__item:focus-visible {
-  border-color: var(--accent); background: var(--bg-elevated);
+  border-color: var(--border-strong); background: var(--bg-elevated);
   color: var(--accent); text-decoration: none;
 }
 /* The qualifier rides inside the pill rather than after it, so wrapping can
@@ -1098,13 +1262,20 @@ a.card--link:hover .card__title::after { color: var(--accent); }
    Syntax highlighting (Rouge)
    ========================================================================== */
 
+/* Pulled toward the page palette rather than left at a stock code theme. The
+   name and error colours are the ones that showed: a vivid #82b1ff identifier
+   sitting three lines under a steel-blue heading read as two different blues
+   rather than as one site. Token colours stay more saturated than anything
+   else here on purpose -- inside a code block, hue is the only thing telling
+   a string from a number, and desaturating them far enough to match the page
+   would cost that. */
 html[data-theme="dark"] .highlight {
-  --hl-comment: #6b7288; --hl-keyword: #c792ea; --hl-string: #a5e075;
-  --hl-number: #ffb454; --hl-name: #82b1ff; --hl-builtin: #4dd0e1; --hl-err: #ff6b6b;
+  --hl-comment: #6b7589; --hl-keyword: #c49ae8; --hl-string: #9cd68a;
+  --hl-number: #e0ad5c; --hl-name: #9cbce4; --hl-builtin: #6dc5cf; --hl-err: #e2808a;
 }
 html[data-theme="light"] .highlight {
-  --hl-comment: #6a737d; --hl-keyword: #8b2fa8; --hl-string: #157a3f;
-  --hl-number: #a15c00; --hl-name: #0b62d6; --hl-builtin: #0a6b7a; --hl-err: #c02626;
+  --hl-comment: #6b7280; --hl-keyword: #7e3394; --hl-string: #15663a;
+  --hl-number: #8f5405; --hl-name: #3f5d82; --hl-builtin: #0f6273; --hl-err: #b03232;
 }
 
 .highlight .c, .highlight .c1, .highlight .cm, .highlight .cs, .highlight .cd { color: var(--hl-comment); font-style: italic; }

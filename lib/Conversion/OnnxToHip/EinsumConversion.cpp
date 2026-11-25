@@ -30,6 +30,14 @@ namespace {
 //     %e = tensor.expand_shape %m [[0], [1, 2], [3]] -> tensor<3x2x4x6xf16>
 //     %y = hip.transpose %e {perm = [1, 0, 2, 3]} -> tensor<2x3x4x6xf16>
 //
+// With no contracted letter the same classification is an outer product:
+// each operand is permuted into output-letter order and unit axes are
+// inserted for the letters it does not carry, then hip.mul broadcasts.
+// `bc,d->bcd` is `[1,3] -> [1,3,1]`, `[10] -> [1,1,10]`, multiply to
+// `[1,3,10]`. hip.mul's shape ABI stops at rank 4, and its runtime multiply
+// is f16 or f32. f64 stays onnx.Einsum: wrap_elementwise rejects it and
+// leaves the output unwritten.
+//
 // Letters that appear in only one operand and not in the output, a repeated
 // letter, ellipsis, or an operand count other than two stay unconverted.
 // Every extent must be static so a collapsed M/N/K product is a constant.
@@ -179,9 +187,21 @@ EinsumToMatmul::matchAndRewrite(mlir::Operation *op,
       return rewriter.notifyMatchFailure(
           op, "einsum reduction of a single operand is not a matmul");
   }
-  if (mDims.empty() || nDims.empty() || kDims.empty())
+  // No contracted index: the einsum is a product once both operands are
+  // viewed in output order with a size-1 axis for every missing letter.
+  if (kDims.empty()) {
+    if (outLetters.empty())
+      return rewriter.notifyMatchFailure(op, "scalar einsum is not lowered");
+    if (outType.getRank() > 4)
+      return rewriter.notifyMatchFailure(
+          op, "outer-product einsum rank exceeds hip.mul");
+    if (!elem.isF16() && !elem.isF32())
+      return rewriter.notifyMatchFailure(
+          op, "outer-product einsum requires f16 or f32");
+  } else if (mDims.empty() || nDims.empty()) {
     return rewriter.notifyMatchFailure(
         op, "einsum is not a batched matmul with M, N, and K");
+  }
 
   auto productOf = [&](llvm::ArrayRef<char> letters,
                        int64_t &product) -> mlir::LogicalResult {
@@ -195,11 +215,6 @@ EinsumToMatmul::matchAndRewrite(mlir::Operation *op,
     }
     return mlir::success();
   };
-  int64_t mProd = 0, nProd = 0, kProd = 0;
-  if (mlir::failed(productOf(mDims, mProd)) ||
-      mlir::failed(productOf(nDims, nProd)) ||
-      mlir::failed(productOf(kDims, kProd)))
-    return mlir::failure();
 
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))
@@ -229,6 +244,61 @@ EinsumToMatmul::matchAndRewrite(mlir::Operation *op,
                                           rewriter.getI64ArrayAttr(perm))
         ->getResult(0);
   };
+
+  if (kDims.empty()) {
+    auto alignToOutput = [&](mlir::Value input,
+                             llvm::ArrayRef<char> from) -> mlir::Value {
+      Letters desired;
+      for (char letter : outLetters)
+        if (hasLetter(from, letter))
+          desired.push_back(letter);
+      mlir::Value permuted = permuteTo(input, from, desired);
+      if (static_cast<int64_t>(desired.size()) == outType.getRank())
+        return permuted;
+
+      llvm::SmallVector<int64_t> alignedShape;
+      alignedShape.reserve(outLetters.size());
+      for (char letter : outLetters) {
+        alignedShape.push_back(hasLetter(from, letter) ? extent.lookup(letter)
+                                                       : 1);
+      }
+      llvm::SmallVector<mlir::ReassociationIndices> reassoc;
+      int64_t outAxis = 0;
+      for (size_t axis = 0, count = desired.size(); axis < count; ++axis) {
+        mlir::ReassociationIndices group;
+        while (outAxis < outType.getRank() &&
+               outLetters[outAxis] != desired[axis])
+          group.push_back(outAxis++);
+        group.push_back(outAxis++);
+        if (axis + 1 == count) {
+          while (outAxis < outType.getRank())
+            group.push_back(outAxis++);
+        }
+        reassoc.push_back(std::move(group));
+      }
+      auto alignedType = mlir::RankedTensorType::get(alignedShape, elem);
+      llvm::SmallVector<mlir::OpFoldResult> foldShape;
+      for (int64_t dim : alignedShape)
+        foldShape.push_back(rewriter.getIndexAttr(dim));
+      return mlir::tensor::ExpandShapeOp::create(rewriter, loc, alignedType,
+                                                 permuted, reassoc, foldShape)
+          .getResult();
+    };
+
+    mlir::Value lhs = alignToOutput(a, aLetters);
+    mlir::Value rhs = alignToOutput(b, bLetters);
+    mlir::Value init = mlir::tensor::EmptyOp::create(
+        rewriter, loc, outType.getShape(), elem, mlir::ValueRange{});
+    auto mul = mlir::hip::MulOp::create(rewriter, loc, context, lhs, rhs, init);
+    rewriter.replaceOp(op, mul->getResult(0));
+    return mlir::success();
+  }
+
+  int64_t mProd = 0, nProd = 0, kProd = 0;
+  if (mlir::failed(productOf(mDims, mProd)) ||
+      mlir::failed(productOf(nDims, nProd)) ||
+      mlir::failed(productOf(kDims, kProd)))
+    return mlir::failure();
 
   // Collapse the two trailing groups. Leading batch letters stay separate so
   // hip.matmul's batch count is their product on both operands.

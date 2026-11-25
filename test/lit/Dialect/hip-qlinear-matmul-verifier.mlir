@@ -2,8 +2,9 @@
 // Licensed under the MIT License.
 
 // hip.qlinear_matmul accepts static rank-2 shapes with a matching contracting
-// dimension and a single scale and zero point. A mismatch is rejected before
-// lowering, where the runtime call would read or write the wrong extent.
+// dimension. A's and Y's scale and zero point are one element. B's may be one
+// element or one value per column. A mismatch is rejected before lowering,
+// where the runtime call would read or write the wrong extent.
 //
 // RUN: hip-mlir-opt --split-input-file --verify-diagnostics %s | FileCheck %s
 
@@ -92,6 +93,8 @@ func.func @qlinear_matmul_dynamic_shape(%ctx: !hip.context,
 
 // -----
 
+// CHECK-LABEL: func.func @qlinear_matmul_per_column
+// CHECK:         hip.qlinear_matmul
 func.func @qlinear_matmul_per_column(%ctx: !hip.context,
                                      %a: tensor<2x4xui8>,
                                      %as: tensor<f32>,
@@ -102,10 +105,30 @@ func.func @qlinear_matmul_per_column(%ctx: !hip.context,
                                      %ys: tensor<f32>,
                                      %yz: tensor<ui8>,
                                      %y: tensor<2x3xui8>) -> tensor<2x3xui8> {
-  // expected-error @below {{b scale and zero point must be a single element}}
   %r = hip.qlinear_matmul(%ctx) ins(%a, %as, %az, %b, %bs, %bz, %ys, %yz :
       tensor<2x4xui8>, tensor<f32>, tensor<ui8>,
       tensor<4x3xi8>, tensor<3xf32>, tensor<3xi8>,
+      tensor<f32>, tensor<ui8>)
+    outs(%y : tensor<2x3xui8>) : tensor<2x3xui8>
+  return %r : tensor<2x3xui8>
+}
+
+// -----
+
+func.func @qlinear_matmul_b_scale_length(%ctx: !hip.context,
+                                         %a: tensor<2x4xui8>,
+                                         %as: tensor<f32>,
+                                         %az: tensor<ui8>,
+                                         %b: tensor<4x3xi8>,
+                                         %bs: tensor<2xf32>,
+                                         %bz: tensor<3xi8>,
+                                         %ys: tensor<f32>,
+                                         %yz: tensor<ui8>,
+                                         %y: tensor<2x3xui8>) -> tensor<2x3xui8> {
+  // expected-error @below {{b scale and zero point must be one element or one value per column}}
+  %r = hip.qlinear_matmul(%ctx) ins(%a, %as, %az, %b, %bs, %bz, %ys, %yz :
+      tensor<2x4xui8>, tensor<f32>, tensor<ui8>,
+      tensor<4x3xi8>, tensor<2xf32>, tensor<3xi8>,
       tensor<f32>, tensor<ui8>)
     outs(%y : tensor<2x3xui8>) : tensor<2x3xui8>
   return %r : tensor<2x3xui8>

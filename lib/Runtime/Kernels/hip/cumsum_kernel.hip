@@ -9,10 +9,12 @@
  *   axis_size = shape[axis]
  *   inner     = product(shape[axis+1:])
  *
- * One thread per (outer, inner) slice. Each thread sequentially scans
- * `axis_size` elements with stride `inner`. This is O(axis_size) per slice
- * but maximally parallel across slices, which is the right shape for the
- * way CumSum is used in vision models (large outer*inner, small axis).
+ * Many short slices (vision models: large outer*inner, small axis): one
+ * thread per slice scans `axis_size` elements serially with stride `inner`.
+ * Few long slices (e.g. positions over a decode attention mask, one slice of
+ * total_sequence_length): one block per slice walks the axis in tiles,
+ * block-scanning each tile and carrying its total into the next; the serial
+ * path is latency-bound when there are few slices.
  *
  * Attribute handling:
  *   exclusive=0 (default): y[k] = sum(x[0..k])
@@ -21,9 +23,6 @@
  *   reverse=1            : scan from the end (y[k] = sum(x[k..N-1]) etc.)
  *
  * Ported from onnxruntime/core/providers/cuda/math/cumsum_impl.cu @ v1.22.2.
- * ORT uses a per-block Kogge-Stone style scan; we use a per-thread serial
- * scan -- simpler, identical numerics, and faster when slices >> threads-
- * per-block which is the common case here.
  */
 
 #include "hip_custom_kernels.h"
@@ -101,18 +100,113 @@ __global__ void hip_cumsum_kernel(const T *__restrict__ x, T *__restrict__ y,
                          reverse);
 }
 
+constexpr int kScanThreads = 256;
+constexpr int kScanItems = 8;
+constexpr int64_t kScanTile = kScanThreads * kScanItems;
+
+template <typename T, typename ACC>
+__global__ void __launch_bounds__(kScanThreads)
+    hip_cumsum_block_kernel(const T *__restrict__ x, T *__restrict__ y,
+                            int64_t axis_size, int64_t inner, bool exclusive,
+                            bool reverse) {
+  __shared__ ACC partial[kScanThreads];
+  const int64_t slice = blockIdx.x;
+  const int64_t base = (slice / inner) * axis_size * inner + slice % inner;
+  const T *xs = x + base;
+  T *ys = y + base;
+  const int t = threadIdx.x;
+  auto at = [&](int64_t k) {
+    return (reverse ? axis_size - 1 - k : k) * inner;
+  };
+
+  ACC carry = ACC(0);
+  for (int64_t tile = 0; tile < axis_size; tile += kScanTile) {
+    const int64_t first = tile + static_cast<int64_t>(t) * kScanItems;
+    ACC v[kScanItems];
+    ACC sum = ACC(0);
+#pragma unroll
+    for (int j = 0; j < kScanItems; ++j) {
+      v[j] = first + j < axis_size ? static_cast<ACC>(xs[at(first + j)])
+                                   : ACC(0);
+      sum += v[j];
+    }
+    partial[t] = sum;
+    __syncthreads();
+    for (int off = 1; off < kScanThreads; off <<= 1) {
+      const ACC p = t >= off ? partial[t - off] : ACC(0);
+      __syncthreads();
+      partial[t] += p;
+      __syncthreads();
+    }
+    ACC acc = carry + (t > 0 ? partial[t - 1] : ACC(0));
+    carry += partial[kScanThreads - 1];
+#pragma unroll
+    for (int j = 0; j < kScanItems; ++j) {
+      if (first + j >= axis_size) {
+        break;
+      }
+      if (exclusive) {
+        ys[at(first + j)] = static_cast<T>(acc);
+        acc += v[j];
+      } else {
+        acc += v[j];
+        ys[at(first + j)] = static_cast<T>(acc);
+      }
+    }
+    __syncthreads();
+  }
+}
+
+constexpr int kSerialBlockSize = 256;
+
+static unsigned serial_grid(int64_t num_slices) {
+  return static_cast<unsigned>((num_slices + kSerialBlockSize - 1) /
+                               kSerialBlockSize);
+}
+
+static void launch_cumsum_serial(hipStream_t stream, const __half *x,
+                                 __half *y, int64_t outer, int64_t axis_size,
+                                 int64_t inner, bool exclusive, bool reverse) {
+  hipLaunchKernelGGL(hip_cumsum_kernel_f16, dim3(serial_grid(outer * inner)),
+                     dim3(kSerialBlockSize), 0, stream, x, y, outer,
+                     axis_size, inner, exclusive, reverse);
+}
+
+template <typename T>
+static void launch_cumsum_serial(hipStream_t stream, const T *x, T *y,
+                                 int64_t outer, int64_t axis_size,
+                                 int64_t inner, bool exclusive, bool reverse) {
+  hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_cumsum_kernel<T>),
+                     dim3(serial_grid(outer * inner)), dim3(kSerialBlockSize),
+                     0, stream, x, y, outer, axis_size, inner, exclusive,
+                     reverse);
+}
+
+template <typename T, typename ACC>
+static void launch_cumsum(hipStream_t stream, const void *x, void *y,
+                          int64_t outer, int64_t axis_size, int64_t inner,
+                          bool exclusive, bool reverse) {
+  const int64_t num_slices = outer * inner;
+  constexpr int64_t kBlockScanMaxSlices = 2048;
+  if (axis_size >= kScanThreads && num_slices <= kBlockScanMaxSlices) {
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_cumsum_block_kernel<T, ACC>),
+                       dim3(static_cast<unsigned>(num_slices)),
+                       dim3(kScanThreads), 0, stream,
+                       static_cast<const T *>(x), static_cast<T *>(y),
+                       axis_size, inner, exclusive, reverse);
+    return;
+  }
+  launch_cumsum_serial(stream, static_cast<const T *>(x), static_cast<T *>(y),
+                       outer, axis_size, inner, exclusive, reverse);
+}
+
 extern "C" int hip_cumsum(void *stream, const void *x, void *y,
                           int64_t outer, int64_t axis_size, int64_t inner,
                           int hip_dtype, int exclusive, int reverse) {
   if (outer <= 0 || axis_size <= 0 || inner <= 0)
     return 0;
 
-  int64_t num_slices = outer * inner;
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
-  constexpr int kBlockSize = 256;
-  int grid_size =
-      static_cast<int>((num_slices + kBlockSize - 1) / kBlockSize);
-
   bool excl = exclusive != 0;
   bool rev = reverse != 0;
 
@@ -124,32 +218,20 @@ extern "C" int hip_cumsum(void *stream, const void *x, void *y,
 
   switch (hip_dtype) {
   case HIP_DTYPE_FLOAT16:
-    hipLaunchKernelGGL(hip_cumsum_kernel_f16, dim3(grid_size),
-                       dim3(kBlockSize), 0, hip_stream,
-                       static_cast<const __half *>(x),
-                       static_cast<__half *>(y), outer, axis_size, inner, excl,
-                       rev);
+    launch_cumsum<__half, float>(hip_stream, x, y, outer, axis_size, inner,
+                                 excl, rev);
     break;
   case HIP_DTYPE_FLOAT32:
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_cumsum_kernel<float>),
-                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
-                       static_cast<const float *>(x),
-                       static_cast<float *>(y), outer, axis_size, inner, excl,
-                       rev);
+    launch_cumsum<float, float>(hip_stream, x, y, outer, axis_size, inner,
+                                excl, rev);
     break;
   case HIP_DTYPE_INT32:
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_cumsum_kernel<int32_t>),
-                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
-                       static_cast<const int32_t *>(x),
-                       static_cast<int32_t *>(y), outer, axis_size, inner, excl,
-                       rev);
+    launch_cumsum<int32_t, int32_t>(hip_stream, x, y, outer, axis_size, inner,
+                                    excl, rev);
     break;
   case HIP_DTYPE_INT64:
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_cumsum_kernel<int64_t>),
-                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
-                       static_cast<const int64_t *>(x),
-                       static_cast<int64_t *>(y), outer, axis_size, inner, excl,
-                       rev);
+    launch_cumsum<int64_t, int64_t>(hip_stream, x, y, outer, axis_size, inner,
+                                    excl, rev);
     break;
   default:
     fprintf(stderr, "[custom_kernels] hip_cumsum: unsupported dtype=%d\n",

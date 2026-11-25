@@ -4,8 +4,8 @@
  *
  * custom_kernels MatMulNBits bits=4 (uint4, nibble-packed) Verification.
  *
- * Unit-test model: this file is entirely self-contained (no unit_test/common/,
- * no python, no on-disk data) -- inputs, the uint4 packing, and the
+ * Unit-test model: inputs and the CPU reference are generated in-process
+ * (no python or on-disk data; timing uses unit_test/common/) -- inputs, the uint4 packing, and the
  * dequant+matmul CPU reference are all generated in-process. The case set is
  * every categorical situation this op supports (group_size in {32,64,128},
  * zero-points on/off) crossed with a comprehensive list of
@@ -28,7 +28,19 @@
  *           (optional; default zero point is 8 when absent)
  * C:        FP16 row-major [M, N]
  */
+#include "../../common/ut_gpu_execution_scope.h"
 #include <hip/hip_runtime.h>
+#include "../../common/hip_adaptive_timing.h"
+#include "../../common/ut_case_input.h"
+#include "../../common/ut_matmul_nbits_rank_input.h"
+#ifdef HIPDNN_UT_GPU_PHASE_HEADER
+#include HIPDNN_UT_GPU_PHASE_HEADER
+#elif !defined(HIPDNN_UT_GPU_PHASE_LINKED)
+namespace hipdnn_ep_test {
+struct GpuPhase { void begin() {} void finish(bool = false) {} void timingBegin() {} void timingEnd() {} };
+}
+#endif
+
 #include <hip/hip_fp16.h>
 #include "hip_custom_kernels.h"
 
@@ -36,14 +48,17 @@
 #include "matmul_nbits_autotune.h"
 
 #ifndef HIPDNN_LUT_LINKED_EXTERNALLY
-// MODE=autotune (default): no real FlatBuffers LUT is linked. Empty resolve()
-// lets the kernel link and fall back to its runtime sweep. MODE=lut links the
-// real matmul_nbits_autotune.cpp resolver instead (see Makefile), which
-// defines these symbols, so this stub must not also define them.
+// MODE=autotune, and MODE=lookup on a chip with no table: no FlatBuffers LUT is
+// linked. Empty resolve() lets the kernel link and fall back to its runtime
+// sweep, and extendedConfigsMeasured() is false, as on a device whose table
+// names no extended entry, so that sweep times the original entries. MODE=lookup
+// links the real matmul_nbits_autotune.cpp resolver instead (see Makefile),
+// which defines these symbols, so this stub must not also define them.
 namespace hipdnn_ep {
 namespace matmul_nbits_autotune {
 Result resolve(const Request&, WmmaValidator, GemvValidator, void*) { return {}; }
 Stats stats() { return {}; }
+bool extendedConfigsMeasured() { return false; }
 }  // namespace matmul_nbits_autotune
 }  // namespace hipdnn_ep
 #else
@@ -72,6 +87,7 @@ extern "C" const size_t               kMatmulNbitsLutBlobCount    = 1;
 #include <random>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 // ---- Tiny inline coverage-tier resolver + CSV writer (replaces
@@ -112,6 +128,7 @@ class CsvWriter {
   }
   ~CsvWriter() { if (f_) std::fclose(f_); }
   void write(const CsvRow& r) {
+    timing::emitCsvBinding(r.shape, r.config, r.verdict, r.rel_l2, r.time_ms);
     if (!f_) return;
     std::fprintf(f_, "%s,%s,%s,%s,%s,%s,%.6f,%.6e,%s\n",
                  env_or("HIPDNN_RESULTS_OP", "unknown"),
@@ -244,45 +261,30 @@ inline int* holdReleaseFlag() {
   return flag;
 }
 
-// Mean milliseconds per launch over `iters` back-to-back launches on `stream`,
-// launch(c) reading copy c. Untimed launches over the rotation go first, until
-// kColdSettleBytes have been read.
+// The shared UT policy selects the actual call count from a device pilot.
+// launch(c) invokes the complete op with operand copy c.
 template <class Launch>
-double rotatedMeanMs(hipStream_t stream, int iters, const ColdCopies& copies,
-                     Launch&& launch) {
-  const int n = copies.count();
-  int turn = 0;
-  if (n > 1) {
-    const size_t settle = std::min<size_t>(
-        n, (kColdSettleBytes + copies.bytes() - 1) / copies.bytes());
-    for (size_t i = 0; i < settle; ++i) launch(turn++ % n);
-  }
-  // Drained, so the hold below holds the timed launches rather than being
-  // released while earlier launches are still queued ahead of it.
-  (void)hipStreamSynchronize(stream);
-  volatile int* release = holdReleaseFlag();
-  void* release_dev = nullptr;
-  if (release &&
-      hipHostGetDevicePointer(&release_dev, const_cast<int*>(release), 0) ==
-          hipSuccess) {
-    *release = 0;
-    holdStreamKernel<<<1, 1, 0, stream>>>(static_cast<const int*>(release_dev));
-  }
-  hipEvent_t start, stop;
-  (void)hipEventCreate(&start);
-  (void)hipEventCreate(&stop);
-  (void)hipEventRecord(start, stream);
-  for (int i = 0; i < iters; ++i) launch(turn++ % n);
-  (void)hipEventRecord(stop, stream);
-  if (release) *release = 1;
-  (void)hipEventSynchronize(stop);
-  float ms = 0.0f;
-  (void)hipEventElapsedTime(&ms, start, stop);
-  (void)hipEventDestroy(start);
-  (void)hipEventDestroy(stop);
-  return iters > 0 ? ms / iters : 0.0;
+double rotatedMeanMs(hipStream_t stream, int /*legacy_iters*/, const ColdCopies& copies,
+                     Launch&& launch, const timing::RankOptions* ranking = nullptr) {
+  return timing::adaptiveRotatedMeanMs(
+      stream, copies, launch, holdReleaseFlag(),
+      [&](const int* flag) { holdStreamKernel<<<1, 1, 0, stream>>>(flag); },
+      warmTiming(), kColdSettleBytes, "matmul_nbits_fp16_wu4", nullptr, timing::NoPreparation{}, ranking);
 }
 }  // namespace hipdnn_ep_test
+
+// `name` in this executable's directory. The capture file must not follow the
+// working directory: started anywhere but the leaf directory, a relative
+// "out/..." names a folder that is not there, freopen() fails and leaves
+// stderr closed, and the next diagnostic ends the process with 0xC0000409
+// before it prints anything.
+static std::string beside_exe(const char* name) {
+  char* exe = nullptr;
+  if (_get_pgmptr(&exe) != 0 || !exe) return name;
+  const std::string path(exe);
+  const size_t slash = path.find_last_of("\\/");
+  return slash == std::string::npos ? name : path.substr(0, slash + 1) + name;
+}
 
 // Runs `fn` and returns the stderr lines it produced. The kernels log from
 // custom_kernels_<arch>.dll, which links its own static CRT: its stderr is the
@@ -293,7 +295,8 @@ double rotatedMeanMs(hipStream_t stream, int iters, const ColdCopies& copies,
 // when they are linked into this executable (the local make build).
 template <typename Fn>
 static std::vector<std::string> capture_stderr(Fn&& fn) {
-  static const char* const kCapture = "out/_config_capture.tmp";
+  static const std::string capture = beside_exe("_config_capture.tmp");
+  const char* const kCapture = capture.c_str();
   const char* leaf_stderr = std::getenv("HIPDNN_KERNEL_UT_STDERR");
   const bool redirect = !leaf_stderr || !leaf_stderr[0];
   const char* path = redirect ? kCapture : leaf_stderr;
@@ -301,6 +304,7 @@ static std::vector<std::string> capture_stderr(Fn&& fn) {
   std::fflush(stderr);
   if (redirect) {
     if (!std::freopen(kCapture, "w", stderr)) {
+      std::freopen("CON", "w", stderr);  // the failed freopen closed it
       fn();
       return {};
     }
@@ -345,7 +349,7 @@ static std::string capture_selected_config(const char* tune_key, Fn&& launch) {
       // The op prints the table's Source as a number; name it the way
       // matmul_nbits_autotune.h does.
       static const char* const kSources[] = {"none", "exact", "nearest",
-                                             "fallback"};
+                                             "fallback", "interval"};
       int src = -1;
       double distance = 0.0;
       const size_t tier = line.find("(src=");
@@ -353,7 +357,7 @@ static std::string capture_selected_config(const char* tune_key, Fn&& launch) {
         std::sscanf(line.c_str() + tier, "(src=%d d=%lf)", &src, &distance);
       char source[48];
       std::snprintf(source, sizeof(source), " (%s d=%.3f)",
-                    src >= 0 && src < 4 ? kSources[src] : "unknown", distance);
+                    src >= 0 && src < 5 ? kSources[src] : "unknown", distance);
       lut = "lookup:" + line.substr(line.find("config[")) + source;
     } else if (line.find("best config[") != std::string::npos) {
       tuned = "autotune:" + line.substr(line.find("best config["));
@@ -594,6 +598,9 @@ static constexpr bool kFp32 = false;
 struct Case {
   int M, K, N, gs;
   bool zero, fp32;
+  int route = 0;  // 0: nbits, 1: dp4a, 2: padrow
+  bool zp_u8 = false;
+  int b_row_bytes = 0;  // legacy explicit padded-stride spelling
 };
 
 static std::vector<Case> buildCases(int tier) {
@@ -609,7 +616,55 @@ static std::vector<Case> buildCases(int tier) {
   return out;
 }
 
-static bool runOne(const Case& c, int idx) {
+static bool runOne(const Case& c, int idx, const hipdnn_ep_test::timing::RankRow* rank_row = nullptr) {
+  char timing_shape[160];
+  std::snprintf(timing_shape, sizeof(timing_shape), "M%d_N%d_K%d_gs%d%s",
+                c.M, c.N, c.K, c.gs, c.zero ? "" : "_noz");
+  if (c.zero && c.zp_u8) std::strcat(timing_shape, "_zpu8");
+  if (c.route == 1) std::strcat(timing_shape, "_dp4a");
+  if (c.route == 2) std::strcat(timing_shape, "_padrow");
+  if (c.b_row_bytes) std::strcat(timing_shape, ("_p" + std::to_string(c.b_row_bytes)).c_str());
+  const char* entry = c.route == 1 ? "hip_matmul_nbits_dp4a" :
+      c.route == 2 ? "hip_matmul_nbits_u4_wmma_padrow" : "hip_matmul_nbits";
+  hipdnn_ep_test::timing::CaseScope timing_case("matmul_nbits/Xfp16_Wu4_Yfp16", timing_shape, entry);
+  const UtNbitsShape rank_shape{c.M, c.N, c.K, 4, c.gs, c.zero ? 1 : 0, 2};
+  if (rank_row && std::getenv("HIPDNN_UT_RANK_CATALOG")) {
+#ifdef HIPDNN_UT_RANK_NBITS_ADAPTER
+    hipdnn_ep_test::timing::printNbitsCatalog(rank_shape);
+    return true;
+#else
+    throw std::runtime_error("UT rank: MatMulNBits catalog requires standalone RANK=1 build");
+#endif
+  }
+  if (rank_row && (c.route || c.zp_u8))
+    throw std::invalid_argument("UT ranking does not represent custom route/zero-point inputs");
+  std::string pinned_config;
+  const char* pin = std::getenv((c.route == 1) ? "HIPDNN_EP_MATMUL_DP4A_CFG" : "HIPDNN_MATMUL_NBITS_WMMA_CFG");
+  if (pin && *pin) {
+    const int cfg = std::atoi(pin);
+    if (!(c.route == 1)) {
+      HipMatmulNBitsWmmaConfigDesc dsc{};
+      if (hip_matmul_nbits_u4_wmma_config_desc(cfg, &dsc) != 0 ||
+          dsc.bk <= 0 || c.K % dsc.bk ||
+          (!dsc.ext && dsc.bn < 64 && c.N > 2 * dsc.bn) ||
+          c.gs % (dsc.bn * dsc.bk / ((dsc.bm / (16 * dsc.wt_m)) * (dsc.bn / (16 * dsc.wt_n)) * 32)) ||
+          (dsc.ext && !hip_matmul_nbits_u4_wmma_ext_device()) ||
+          ((c.route == 2) && !dsc.fused)) {
+        std::fprintf(stderr, "illegal pinned WMMA config %d\n", cfg);
+        return false;
+      } else {
+        char desc[180];
+        std::snprintf(desc, sizeof(desc), "pin_config%d_bm%d_bn%d_sw%d_wt%dx%d_bk%d_fused%d_ext%d_var%d",
+                      cfg, dsc.bm, dsc.bn, dsc.swizzle_n, dsc.wt_m, dsc.wt_n,
+                      dsc.bk, dsc.fused, dsc.ext, dsc.variant);
+        pinned_config = desc;
+      }
+    } else {
+      pinned_config = "dp4a_pin_config" + std::to_string(cfg);
+    }
+  }
+  if (rank_row && !pinned_config.empty())
+    throw std::invalid_argument("UT ranking cannot run with an environment-pinned config");
   CaseData d;
   genCase(c.M, c.K, c.N, c.gs, c.zero, c.fp32, /*seed=*/1000u + idx, d);
 
@@ -617,6 +672,9 @@ static bool runOne(const Case& c, int idx) {
   const size_t countC = static_cast<size_t>(c.M) * c.N;
   const size_t elem = c.fp32 ? 4 : 2;
 
+  hipdnn_ep_test::GpuExecutionScope gpu_execution([] { HIP_CHECK(hipDeviceSynchronize()); });
+  hipdnn_ep_test::GpuPhase gpu_phase;
+  gpu_phase.begin();
   void *dA = nullptr, *dC = nullptr;
   __half* dS = nullptr;
   __half* dZ = nullptr;
@@ -635,12 +693,52 @@ static bool runOne(const Case& c, int idx) {
 
   hipStream_t stream;
   HIP_CHECK(hipStreamCreate(&stream));
-  auto launch = [&]() {
-    return hip_matmul_nbits(stream, dA, dB, dS, c.zero ? dZ : nullptr,
-                            nullptr, dC, c.M, c.N, c.K, /*batch_count=*/1,
-                            /*bits=*/4, c.gs, static_cast<int>(elem),
-                            /*zp_elem_size=*/2, nullptr, nullptr);
+  // Mirror the EP's per-weight packed-zero conversion outside timing.
+  void* zero_u8 = nullptr;
+  if (c.zero && c.zp_u8) {
+    const int groups = (c.K + c.gs - 1) / c.gs;
+    const size_t stride = (static_cast<size_t>(groups) + 1) / 2;
+    std::vector<uint8_t> packed(static_cast<size_t>(c.N) * stride, 0);
+    for (int n = 0; n < c.N; ++n)
+      for (int g = 0; g < groups; ++g) {
+        const auto z = static_cast<uint8_t>(half_to_float(d.zeros[static_cast<size_t>(n) * groups + g]));
+        packed[static_cast<size_t>(n) * stride + g / 2] |= static_cast<uint8_t>(z << (4 * (g & 1)));
+      }
+    void* device_packed = nullptr;
+    HIP_CHECK(hipMalloc(&device_packed, packed.size()));
+    HIP_CHECK(hipMemcpy(device_packed, packed.data(), packed.size(), hipMemcpyHostToDevice));
+    if (c.route == 1) {
+      HIP_CHECK(hipMalloc(&zero_u8, d.zeros.size()));
+      hip_matmul_nbits_unpack_zp_u8(stream, device_packed, zero_u8, c.N, groups);
+    } else {
+      hip_matmul_nbits_convert_zp_fp16(stream, device_packed, dZ, c.N, groups);
+    }
+    HIP_CHECK(hipGetLastError());
+    HIP_CHECK(hipStreamSynchronize(stream));
+    HIP_CHECK(hipFree(device_packed));
+  }
+  void* dp4a_scratch = nullptr;
+  const size_t scale_offset = (static_cast<size_t>(c.M) * c.K + 63) & ~size_t(63);
+  if (c.route == 1)
+    HIP_CHECK(hipMalloc(&dp4a_scratch, scale_offset + static_cast<size_t>(c.M) * ((c.K + c.gs - 1) / c.gs) * sizeof(float)));
+  const void* active_zeros = c.route == 1 ? zero_u8 : static_cast<void*>(dZ);
+  const size_t zero_bytes = c.zero ? d.zeros.size() * (c.route == 1 ? 1 : sizeof(__half)) : 0;
+  auto invoke = [&](const void* b, const void* scales, const void* zeros) {
+    if (c.route == 1)
+      return hip_matmul_nbits_dp4a(stream, dA, b, scales, zeros, nullptr, dC,
+                                  c.M, c.N, c.K, c.gs, dp4a_scratch,
+                                  static_cast<char*>(dp4a_scratch) + scale_offset);
+    if (c.route == 2) {
+      const int rc = hip_matmul_nbits_u4_wmma_padrow(
+          stream, -1, c.M, c.N, c.K, c.gs, dA, c.K, b, scales, zeros, dC, c.N);
+      if (rc != -1) return rc;
+      // Same bounded-scratch/unsupported-config fallback as the EP wrapper.
+    }
+    return hip_matmul_nbits(stream, dA, b, scales, zeros, nullptr, dC,
+                            c.M, c.N, c.K, 1, 4, c.gs,
+                            static_cast<int>(elem), 2, nullptr, nullptr);
   };
+  auto launch = [&]() { return invoke(dB, dS, c.zero ? active_zeros : nullptr); };
 
   // 3 calls: first triggers this shape's autotune search / LUT resolve
   // (cached after), the rest are correctness-check warmup.
@@ -648,11 +746,55 @@ static bool runOne(const Case& c, int idx) {
   char tune_key[64];
   std::snprintf(tune_key, sizeof(tune_key), "%dx%dx%d_gs%d_%s", c.M, c.N, c.K,
                 c.gs, c.zero ? "z" : "noz");
-  const std::string selected_config = capture_selected_config(tune_key, [&] {
+  std::string selected_config = capture_selected_config(tune_key, [&] {
     for (int w = 0; w < 3; ++w) status = launch();
     HIP_CHECK(hipStreamSynchronize(stream));
   });
 
+  if (rank_row) {
+#ifndef HIPDNN_UT_RANK_NBITS_ADAPTER
+    throw std::runtime_error("UT rank: MatMulNBits requires standalone RANK=1 build");
+#else
+    if (status != 0) throw std::runtime_error("UT rank: no-LUT default launch failed");
+    {
+    const hipdnn_ep_test::ColdCopies weights(
+        {{dB, d.Bpacked.size()}, {dS, d.scales.size() * sizeof(__half)},
+         {dZ, c.zero ? d.zeros.size() * sizeof(d.zeros[0]) : 0}});
+    auto validate = [&]() {
+      HIP_CHECK(hipMemset(dC, 0, countC * elem));
+      if (launch() != 0) throw std::runtime_error("UT rank: candidate launch failed");
+      HIP_CHECK(hipStreamSynchronize(stream));
+      std::vector<uint8_t> raw(countC * elem);
+      HIP_CHECK(hipMemcpy(raw.data(), dC, raw.size(), hipMemcpyDeviceToHost));
+      double ssd = 0.0, ssr = 0.0;
+      for (size_t i = 0; i < countC; ++i) {
+        const float g = c.fp32 ? reinterpret_cast<const float*>(raw.data())[i]
+                              : half_to_float(reinterpret_cast<const __half*>(raw.data())[i]);
+        const float r = c.fp32 ? d.Cref32[i] : half_to_float(d.Cref16[i]);
+        const float diff = std::fabs(g - r);
+        if (!(diff <= std::fabs(r) * 0.05f + 0.1f))
+          throw std::runtime_error("UT rank: candidate CPU reference FAIL");
+        ssd += double(diff) * diff; ssr += double(r) * r;
+      }
+      return ssr > 0.0 ? std::sqrt(ssd / ssr) : std::sqrt(ssd);
+    };
+    const auto options = hipdnn_ep_test::timing::nbitsRankOptions(rank_shape, *rank_row, validate);
+    hipdnn_ep_test::rotatedMeanMs(stream, 0, weights, [&](int i) {
+      return hip_matmul_nbits(stream, dA, weights.part(i, 0), weights.part(i, 1),
+                       c.zero ? weights.part(i, 2) : nullptr, nullptr, dC, c.M,
+                       c.N, c.K, /*batch_count=*/1, /*bits=*/4, c.gs,
+                       static_cast<int>(elem), /*zp_elem_size=*/2, nullptr,
+                       nullptr);
+    }, &options);
+    }
+    hipFree(dA); hipFree(dB); hipFree(dS); if (dZ) hipFree(dZ); hipFree(dC);
+    HIP_CHECK(hipStreamDestroy(stream));
+    gpu_phase.finish(true);
+    return true;
+#endif
+  }
+
+  if (!pinned_config.empty()) selected_config = pinned_config;
   double avg_ms = 0.0;
   if (status == 0) {
     constexpr int kIters = 20;
@@ -661,21 +803,31 @@ static bool runOne(const Case& c, int idx) {
     const hipdnn_ep_test::ColdCopies weights(
         {{dB, d.Bpacked.size()},
          {dS, d.scales.size() * sizeof(__half)},
-         {dZ, c.zero ? d.zeros.size() * sizeof(__half) : 0}});
+         {active_zeros, zero_bytes}});
+    gpu_phase.timingBegin();
     avg_ms = hipdnn_ep_test::rotatedMeanMs(stream, kIters, weights, [&](int i) {
-      hip_matmul_nbits(stream, dA, weights.part(i, 0), weights.part(i, 1),
-                       c.zero ? weights.part(i, 2) : nullptr, nullptr, dC, c.M,
-                       c.N, c.K, /*batch_count=*/1, /*bits=*/4, c.gs,
-                       static_cast<int>(elem), /*zp_elem_size=*/2, nullptr,
-                       nullptr);
+      return invoke(weights.part(i, 0), weights.part(i, 1),
+                    c.zero ? weights.part(i, 2) : nullptr);
     });
+    gpu_phase.timingEnd();
   }
 
+  std::vector<uint8_t> raw(countC * elem);
+  if (status == 0)
+    HIP_CHECK(hipMemcpy(raw.data(), dC, countC * elem, hipMemcpyDeviceToHost));
+  hipFree(dA);
+  hipFree(dB);
+  hipFree(dS);
+  if (dZ) hipFree(dZ);
+  if (zero_u8) HIP_CHECK(hipFree(zero_u8));
+  if (dp4a_scratch) HIP_CHECK(hipFree(dp4a_scratch));
+  hipFree(dC);
+  hipStreamDestroy(stream);
+  gpu_phase.finish(true);
+  gpu_execution.finish();
   bool pass = (status == 0);
   double rel_l2 = 0.0;
   if (status == 0) {
-    std::vector<uint8_t> raw(countC * elem);
-    HIP_CHECK(hipMemcpy(raw.data(), dC, countC * elem, hipMemcpyDeviceToHost));
     double ssd = 0.0, ssr = 0.0;
     int errors = 0;
     for (size_t i = 0; i < countC; ++i) {
@@ -684,12 +836,12 @@ static bool runOne(const Case& c, int idx) {
       const float ref_val = c.fp32 ? d.Cref32[i] : half_to_float(d.Cref16[i]);
       const float diff = std::fabs(gpu_val - ref_val);
       const float tol = std::fabs(ref_val) * 0.05f + 0.1f;
-      if (diff > tol) ++errors;
+      if (!(diff <= tol) || !std::isfinite(gpu_val)) ++errors;
       ssd += (double)diff * diff;
       ssr += (double)ref_val * ref_val;
     }
     rel_l2 = ssr > 0.0 ? std::sqrt(ssd / ssr) : std::sqrt(ssd);
-    pass = (errors == 0);
+    pass = (errors == 0) && std::isfinite(rel_l2);
   }
 
   std::printf("  M=%d N=%d K=%d gs=%d zero=%d dtype=%s  status=%d  %.4f ms  relL2=%.3e  %s\n",
@@ -703,7 +855,7 @@ static bool runOne(const Case& c, int idx) {
     std::snprintf(shape_buf, sizeof(shape_buf), "M%d_N%d_K%d_gs%d%s", c.M, c.N,
                  c.K, c.gs, c.zero ? "" : "_noz");
     CsvRow row;
-    row.shape = shape_buf;
+    row.shape = timing_shape;
     row.config = selected_config;
     row.time_ms = avg_ms;
     row.rel_l2 = rel_l2;
@@ -711,12 +863,7 @@ static bool runOne(const Case& c, int idx) {
     csv.write(row);
   }
 
-  hipFree(dA);
-  hipFree(dB);
-  hipFree(dS);
-  if (dZ) hipFree(dZ);
-  hipFree(dC);
-  hipStreamDestroy(stream);
+
   return pass;
 }
 
@@ -736,35 +883,234 @@ static int run(int coverage_tier) {
 }  // namespace sweep
 
 // ============================================================
+// Forced extended entries. Every WMMA_EXT_CONFIGS entry is run by index
+// through hip_matmul_nbits_u4_wmma_run_config, which refuses a config that
+// does not serve the shape instead of substituting another, so a pass here
+// means that entry's kernel produced the result. Each runs on a tile-exact and
+// a ragged M x N, group sizes 32 and 128, with and without zero points, at the
+// arrival pitch and with 128- and 256-byte row pads, against the CPU
+// reference. The LUT may stop selecting an entry; this keeps all of them
+// checked. An entry that serves none of the cases fails.
+// ============================================================
+namespace forced {
+
+static int run() {
+  const int count = hip_matmul_nbits_u4_wmma_config_count();
+  constexpr int K = 512;
+  const int pads[] = {0, 128, 256};
+  hipStream_t stream;
+  HIP_CHECK(hipStreamCreate(&stream));
+  // Entries with the same tile share their shapes, and the CPU reference is
+  // the expensive part, so each (M, N, group size, zero points) is generated
+  // once and reused by every entry that runs it.
+  std::map<std::tuple<int, int, int, bool>, CaseData> cases;
+  int entries = 0, fail = 0;
+  std::string never_ran;
+  for (int cfg = 0; cfg < count; ++cfg) {
+    HipMatmulNBitsWmmaConfigDesc t{};
+    if (hip_matmul_nbits_u4_wmma_config_desc(cfg, &t) != 0 || !t.ext) continue;
+    ++entries;
+    int ran = 0;
+    const int shapes[2][2] = {{2 * t.bm, 2 * t.bn}, {2 * t.bm - 5, 2 * t.bn - 16}};
+    for (const auto& mn : shapes) {
+      const int M = mn[0], N = mn[1];
+      for (int gs : {32, 128}) {
+        for (bool zero : {true, false}) {
+          auto it = cases.find(std::make_tuple(M, N, gs, zero));
+          if (it == cases.end()) {
+            it = cases.emplace(std::make_tuple(M, N, gs, zero), CaseData{}).first;
+            genCase(M, K, N, gs, zero, /*fp32=*/false,
+                    /*seed=*/7000u + static_cast<unsigned>(cases.size()), it->second);
+          }
+          const CaseData& d = it->second;
+          const int row_bytes = K / 2;
+          void *dA = nullptr, *dB = nullptr, *dS = nullptr, *dZ = nullptr, *dC = nullptr;
+          HIP_CHECK(hipMalloc(&dA, d.A16.size() * sizeof(__half)));
+          HIP_CHECK(hipMalloc(&dS, d.scales.size() * sizeof(__half)));
+          HIP_CHECK(hipMalloc(&dB, static_cast<size_t>(N) * (row_bytes + 256)));
+          HIP_CHECK(hipMalloc(&dC, static_cast<size_t>(M) * N * sizeof(__half)));
+          if (zero) HIP_CHECK(hipMalloc(&dZ, d.zeros.size() * sizeof(__half)));
+          HIP_CHECK(hipMemcpy(dA, d.A16.data(), d.A16.size() * sizeof(__half),
+                              hipMemcpyHostToDevice));
+          HIP_CHECK(hipMemcpy(dS, d.scales.data(), d.scales.size() * sizeof(__half),
+                              hipMemcpyHostToDevice));
+          if (zero)
+            HIP_CHECK(hipMemcpy(dZ, d.zeros.data(), d.zeros.size() * sizeof(__half),
+                                hipMemcpyHostToDevice));
+          for (int pad : pads) {
+            const int pitch = row_bytes + pad;
+            std::vector<uint8_t> b(static_cast<size_t>(N) * pitch, 0xAB);
+            for (int n = 0; n < N; ++n)
+              std::memcpy(&b[static_cast<size_t>(n) * pitch],
+                          &d.Bpacked[static_cast<size_t>(n) * row_bytes], row_bytes);
+            HIP_CHECK(hipMemcpy(dB, b.data(), b.size(), hipMemcpyHostToDevice));
+            // 0xFFFF is an fp16 NaN: an output the kernel never writes fails.
+            HIP_CHECK(hipMemset(dC, 0xFF, static_cast<size_t>(M) * N * sizeof(__half)));
+            const int rc = hip_matmul_nbits_u4_wmma_run_config(
+                stream, cfg, M, N, K, gs, dA, K, dB, dS, zero ? dZ : nullptr, dC, N,
+                pad ? pitch : 0);
+            if (rc == -2) continue;  // this entry does not serve the shape
+            HIP_CHECK(hipStreamSynchronize(stream));
+            int errors = 0;
+            double ssd = 0.0, ssr = 0.0;
+            std::vector<__half> out(static_cast<size_t>(M) * N);
+            if (rc == 0) {
+              HIP_CHECK(hipMemcpy(out.data(), dC, out.size() * sizeof(__half),
+                                  hipMemcpyDeviceToHost));
+              for (size_t i = 0; i < out.size(); ++i) {
+                const float g = half_to_float(out[i]);
+                const float r = half_to_float(d.Cref16[i]);
+                const float diff = std::fabs(g - r);
+                if (!(diff <= std::fabs(r) * 0.05f + 0.1f)) ++errors;
+                ssd += static_cast<double>(diff) * diff;
+                ssr += static_cast<double>(r) * r;
+              }
+            }
+            const bool pass = rc == 0 && errors == 0;
+            ++ran;
+            if (!pass) ++fail;
+            std::printf("  forced cfg[%d] %dx%d WT%dx%d BK%d var=%d  M=%d N=%d K=%d gs=%d "
+                        "zero=%d pad=%d  rc=%d  relL2=%.3e  %s\n",
+                        cfg, t.bm, t.bn, t.wt_m, t.wt_n, t.bk, t.variant, M, N, K, gs,
+                        zero, pad, rc, ssr > 0.0 ? std::sqrt(ssd / ssr) : std::sqrt(ssd),
+                        pass ? "PASS" : "*** FAIL ***");
+          }
+          hipFree(dA);
+          hipFree(dB);
+          hipFree(dS);
+          if (dZ) hipFree(dZ);
+          hipFree(dC);
+        }
+      }
+    }
+    if (ran == 0) {
+      ++fail;
+      never_ran += " " + std::to_string(cfg);
+    }
+  }
+  HIP_CHECK(hipStreamDestroy(stream));
+  std::printf("\nForced extended entries: %d entries, %zu reference cases, %d failed%s%s\n",
+              entries, cases.size(), fail, never_ran.empty() ? "" : "; served no case:",
+              never_ran.c_str());
+  return entries > 0 && fail == 0 ? 0 : 1;
+}
+
+}  // namespace forced
+
+// ============================================================
 // Single-shape convenience path (make test_custom): in-process rng, no data
 // files. SIZE=MxKxN GS=<group_size> [NO_ZEROS=1].
 // ============================================================
-static int runCustom(int M, int N, int K, int gs, bool zero) {
-  return sweep::runOne({M, K, N, gs, zero, sweep::kFp32}, /*idx=*/0) ? 0 : 1;
+static int runCustom(const sweep::Case& c) {
+  return sweep::runOne(c, /*idx=*/0) ? 0 : 1;
 }
 
-int main(int argc, char* argv[]) {
+static int runMain(int argc, char* argv[]) {
+  if (argc == 2 && std::strcmp(argv[1], "--list-configs") == 0) {
+    for (int cfg = 0; cfg < hip_matmul_nbits_u4_wmma_config_count(); ++cfg) {
+      HipMatmulNBitsWmmaConfigDesc d{};
+      if (hip_matmul_nbits_u4_wmma_config_desc(cfg, &d) != 0) return 2;
+      std::printf("WMMA_CONFIG {\"config\":%d,\"bm\":%d,\"bn\":%d,\"swizzle\":%d,\"wt_m\":%d,\"wt_n\":%d,\"bk\":%d,\"fused\":%d,\"ext\":%d,\"variant\":%d}\n",
+                  cfg, d.bm, d.bn, d.swizzle_n, d.wt_m, d.wt_n, d.bk,
+                  d.fused, d.ext, d.variant);
+    }
+    return 0;
+  }
+  if (hipdnn_ep_test::timing::rankRequested()) {
+    try {
+      const auto rows = hipdnn_ep_test::timing::readRankRows("matmul_nbits/Xfp16_Wu4_Yfp16");
+      for (size_t i = 0; i < rows.size(); ++i) {
+        int m = 0, n = 0, k = 0, gs = 0, end = 0;
+        if (std::sscanf(rows[i].shape.c_str(), "M%d_N%d_K%d_gs%d%n", &m, &n, &k, &gs, &end) != 4 ||
+            m <= 0 || n <= 0 || k <= 0 || gs <= 0 ||
+            (rows[i].shape.substr(end) != "" && rows[i].shape.substr(end) != "_noz"))
+          throw std::invalid_argument("UT rank: malformed MatMulNBits shape");
+        if (!sweep::runOne({m, k, n, gs, rows[i].shape.substr(end).empty(), sweep::kFp32},
+                           static_cast<int>(i), &rows[i])) return 1;
+      }
+      HIP_CHECK(hipDeviceSynchronize());
+      return 0;
+    } catch (const std::exception& error) {
+      std::fprintf(stderr, "UT rank: %s\n", error.what()); return 1;
+    }
+  }
+  hipdnn_ep_test::timing::printTimingMode();
   std::printf("custom_kernels MatMulNBits bits=4 (nibble-packed) Verification\n");
   std::printf("===============================================================\n");
 
+  using namespace hipdnn_ep_test::input;
+  sweep::Case single{0, 0, 0, 128, true, sweep::kFp32};
+  bool have_custom = false, semantic_option = false, route_selected = false;
+  auto choose_route = [&](int route) {
+    if (route_selected && single.route != route)
+      throw std::invalid_argument("conflicting --route/--dp4a/--b-row-bytes options");
+    single.route = route;
+    route_selected = true;
+  };
+  for (int i = 1; i < argc; ++i) {
+    const std::string a = argv[i];
+    if (a == "--help") {
+      std::printf("usage: %s [MxKxN --group-size G --no-zeros --zp-type fp16|u8 --route nbits|dp4a|padrow] [--coverage 1|2|3]\n", argv[0]);
+      return 0;
+    }
+    if (a == "--coverage") { (void)integer(value(argc, argv, i), "coverage", 1, 3); continue; }
+    if (a == "--no-zeros") { single.zero = false; semantic_option = true; }
+    else if (a == "--dp4a") { choose_route(1); semantic_option = true; }
+    else if (a == "--b-row-bytes") { single.b_row_bytes = static_cast<int>(integer(value(argc, argv, i), "b-row-bytes")); choose_route(2); semantic_option = true; }
+    else if (a == "--group-size") { single.gs = static_cast<int>(integer(value(argc, argv, i), "group-size")); semantic_option = true; }
+    else if (a == "--zp-type") {
+      const auto v = value(argc, argv, i);
+      if (v != "fp16" && v != "u8") throw std::invalid_argument("--zp-type must be fp16 or u8");
+      single.zp_u8 = v == "u8";
+      semantic_option = true;
+    } else if (a == "--route") {
+      const auto v = value(argc, argv, i);
+      if (v != "nbits" && v != "dp4a" && v != "padrow") throw std::invalid_argument("unknown --route");
+      choose_route(v == "dp4a" ? 1 : v == "padrow" ? 2 : 0);
+      semantic_option = true;
+    } else if (!a.empty() && a[0] != '-') {
+      if (have_custom) throw std::invalid_argument("only one MxKxN may be supplied");
+      shape3(a, single.M, single.K, single.N);
+      have_custom = true;
+    } else throw std::invalid_argument("unknown argument: " + a);
+  }
+  if (semantic_option && !have_custom) throw std::invalid_argument("single-case options require MxKxN");
+  if (have_custom) {
+    const auto& c = single;
+    if (c.K % 2 || c.gs % 2 || static_cast<int64_t>(c.K) + c.gs - 1 > std::numeric_limits<int>::max())
+      throw std::invalid_argument("u4 requires even K/group-size and representable group geometry");
+    (void)bytes({static_cast<uint64_t>(c.M), static_cast<uint64_t>(c.K)}, c.fp32 ? 4 : 2);
+    (void)bytes({static_cast<uint64_t>(c.M), static_cast<uint64_t>(c.N)}, c.fp32 ? 4 : 2);
+    (void)bytes({static_cast<uint64_t>(c.N), static_cast<uint64_t>(c.K)}, 1);
+    if (c.route == 1 && (c.fp32 || c.M > 7 || c.K % 32 || c.K % c.gs || (c.zero && !c.zp_u8)))
+      throw std::invalid_argument("dp4a requires fp16, M=1..7, 32-aligned K divisible by group-size and absent/u8 zero points");
+    if (c.b_row_bytes && (c.route != 2 || c.b_row_bytes != c.K / 2 + 128))
+      throw std::invalid_argument("--b-row-bytes must equal K/2+128 and select padrow");
+    if (c.route == 2 && (c.fp32 || c.M < 2 || c.K % 32 || c.K % c.gs))
+      throw std::invalid_argument("padrow requires fp16, M>=2 and 32-aligned K divisible by group-size");
+  }
   hipDeviceProp_t prop;
   HIP_CHECK(hipGetDeviceProperties(&prop, 0));
   std::printf("GPU: %s (arch: %s)\n", prop.name, prop.gcnArchName);
-
-  int M = 0, N = 0, K = 0;
-  int gs = 128;
-  bool no_zeros = false;
-  bool have_custom = false;
-  for (int i = 1; i < argc; ++i) {
-    std::string a = argv[i];
-    if (a == "--no-zeros") no_zeros = true;
-    else if (a == "--group-size" && i + 1 < argc) gs = std::atoi(argv[++i]);
-    else if (sscanf(argv[i], "%dx%dx%d", &M, &K, &N) == 3) have_custom = true;
-  }
-
-  if (have_custom)
-    return runCustom(M, N, K, gs, !no_zeros);
+  if (have_custom) return runCustom(single);
 
   const int tier = hipdnn_ep_test::resolveCoverageTier(argc, argv);
-  return sweep::run(tier);
+  const int sweep_rc = sweep::run(tier);
+  // The extended entries run on gfx1151 only; elsewhere only the sweep above
+  // applies.
+  int forced_rc = 0;
+  if (!hip_matmul_nbits_u4_wmma_ext_device())
+    std::printf("SKIP: extended WMMA entries run on gfx1151 only, not %s\n",
+                prop.gcnArchName);
+  else
+    forced_rc = forced::run();
+  return sweep_rc != 0 || forced_rc != 0 ? 1 : 0;
+}
+
+int main(int argc, char* argv[]) {
+  try { return runMain(argc, argv); }
+  catch (const std::exception& error) {
+    std::fprintf(stderr, "invalid UT input: %s\n", error.what());
+    return 2;
+  }
 }

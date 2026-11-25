@@ -67,6 +67,11 @@ namespace hip {
 namespace {
 
 constexpr int64_t kConstantAlignment = 64;
+// Logical element count (a 4-bit packed byte holds two), so quantization does
+// not move a table across the line. Sits above the largest token embedding of
+// common local LLMs (Gemma-3-27B, 1.41e9) and below per-layer embedding tables
+// (Gemma 3n E2B, 2.01e9).
+constexpr int64_t kMinDiskResidentGatherElements = 1600000000;
 
 using SourceKind = hip::ConstantOp::SourceKind;
 
@@ -77,6 +82,7 @@ struct ConstantPlan {
   SourceKind source = SourceKind::Inline;
   bool externalize = false;
   bool splat = false;
+  bool diskResident = false;
   int64_t numElements = 0;
   int64_t size = 0;
   /// Dense index in the generated constant metadata arrays.
@@ -369,11 +375,54 @@ private:
       return failure();
     }
 
+    plan.diskResident = isDiskResidentGatherTable(plan);
     if (plan.externalize &&
         failed(assignExternalStorage(plan, currentOffset, plannedSymbols)))
       return failure();
     plans.push_back(std::move(plan));
     return success();
+  }
+
+  bool isDiskResidentGatherTable(ConstantPlan &plan) const {
+    if (!skipData || !plan.externalize || plan.source != SourceKind::File) {
+      return false;
+    }
+    Value result = plan.op.getResult();
+    if (result.use_empty()) {
+      return false;
+    }
+    int64_t rank = plan.type.getRank();
+    auto isAxis0 = [rank](int64_t axis) {
+      return (axis < 0 ? axis + rank : axis) == 0;
+    };
+    int64_t elementsPerStored = 1;
+    for (OpOperand &use : result.getUses()) {
+      Operation *user = use.getOwner();
+      if (auto gather = dyn_cast<hip::GatherOp>(user)) {
+        if (use.getOperandNumber() !=
+                gather.getDataMutable().getOperandNumber() ||
+            !isAxis0(static_cast<int64_t>(gather.getAxis()))) {
+          return false;
+        }
+      } else if (auto gbq = dyn_cast<hip::GatherBlockQuantizedOp>(user)) {
+        if (use.getOperandNumber() != gbq.getDataMutable().getOperandNumber() ||
+            !isAxis0(static_cast<int64_t>(gbq.getGatherAxis()))) {
+          return false;
+        }
+        if (gbq.getBits() == 4) {
+          // Packed along quantize_axis: on axis 0 a stored row holds two
+          // table rows, so rows cannot be read independently.
+          if (isAxis0(static_cast<int64_t>(gbq.getQuantizeAxis()))) {
+            return false;
+          }
+          elementsPerStored = 2;
+        }
+      } else {
+        return false;
+      }
+    }
+    return plan.numElements * elementsPerStored >=
+           kMinDiskResidentGatherElements;
   }
 
   LogicalResult planInlineSource(ConstantPlan &plan) {
@@ -455,13 +504,15 @@ private:
   LogicalResult assignExternalStorage(ConstantPlan &plan,
                                       int64_t &currentOffset,
                                       llvm::StringSet<> &plannedSymbols) {
-    FailureOr<int64_t> aligned = checkedAlign(plan.op, currentOffset);
-    if (failed(aligned))
-      return failure();
-    plan.blobOffset = *aligned;
-    if (plan.blobOffset > std::numeric_limits<int64_t>::max() - plan.size)
-      return plan.op.emitError("constant layout range overflows int64");
-    currentOffset = plan.blobOffset + plan.size;
+    if (!plan.diskResident) {
+      FailureOr<int64_t> aligned = checkedAlign(plan.op, currentOffset);
+      if (failed(aligned))
+        return failure();
+      plan.blobOffset = *aligned;
+      if (plan.blobOffset > std::numeric_limits<int64_t>::max() - plan.size)
+        return plan.op.emitError("constant layout range overflows int64");
+      currentOffset = plan.blobOffset + plan.size;
+    }
 
     if (externalizedCount >
         static_cast<size_t>(std::numeric_limits<int64_t>::max()))
@@ -520,7 +571,8 @@ private:
       int64_t splatValue = 0;
       Attribute filePath = emptyPath;
       if (plan.source == SourceKind::File) {
-        kind = ConstantMetadataSourceKind::File;
+        kind = plan.diskResident ? ConstantMetadataSourceKind::DiskFile
+                                 : ConstantMetadataSourceKind::File;
         filePath = StringAttr::get(ctx, plan.filePath);
       } else if (plan.splat) {
         kind = ConstantMetadataSourceKind::Splat;
@@ -680,6 +732,11 @@ private:
   }
 
   void commitInline(ConstantPlan &plan) {
+    auto intType = dyn_cast<IntegerType>(plan.type.getElementType());
+    if (intType && !intType.isSignless()) {
+      commitInlineGlobal(plan);
+      return;
+    }
     OpBuilder builder(plan.op);
     auto constant =
         arith::ConstantOp::create(builder, plan.op.getLoc(), plan.value);
@@ -687,18 +744,50 @@ private:
     plan.op.erase();
   }
 
+  // arith.constant rejects signed and unsigned integer element types, so these
+  // are emitted as what arith.constant bufferizes to: a read-only global.
+  void commitInlineGlobal(ConstantPlan &plan) {
+    MemRefType memrefType =
+        MemRefType::get(plan.type.getShape(), plan.type.getElementType());
+    // Built before the global exists, so insert() uniques against the rest of
+    // the module rather than against the new global itself.
+    if (!symbolTable)
+      symbolTable.emplace(module);
+    OpBuilder moduleBuilder(module.getContext());
+    auto global = memref::GlobalOp::create(
+        moduleBuilder, plan.op.getLoc(), "hip_inline_constant",
+        moduleBuilder.getStringAttr("private"), memrefType, plan.value,
+        /*constant=*/true, moduleBuilder.getI64IntegerAttr(kConstantAlignment));
+    symbolTable->insert(global, module.getBody()->begin());
+
+    OpBuilder builder(plan.op);
+    auto getGlobal = memref::GetGlobalOp::create(
+        builder, plan.op.getLoc(), memrefType, global.getSymName());
+    auto tensor = bufferization::ToTensorOp::create(
+        builder, plan.op.getLoc(), plan.type, getGlobal,
+        /*restrict=*/builder.getUnitAttr(), /*writable=*/nullptr);
+    plan.op.getResult().replaceAllUsesWith(tensor.getResult());
+    plan.op.erase();
+  }
+
   void commitExternal(ConstantPlan &plan) {
     MemRefType memrefType =
         MemRefType::get(plan.type.getShape(), plan.type.getElementType());
     OpBuilder moduleBuilder(module.getBody(), module.getBody()->begin());
-    DictionaryAttr externalData = moduleBuilder.getDictionaryAttr({
+    SmallVector<NamedAttribute> externalEntries = {
         moduleBuilder.getNamedAttr("index",
                                    moduleBuilder.getI64IntegerAttr(plan.index)),
         moduleBuilder.getNamedAttr(
             "offset", moduleBuilder.getI64IntegerAttr(plan.blobOffset)),
         moduleBuilder.getNamedAttr("size",
                                    moduleBuilder.getI64IntegerAttr(plan.size)),
-    });
+    };
+    if (plan.diskResident) {
+      externalEntries.push_back(moduleBuilder.getNamedAttr(
+          "disk_resident", moduleBuilder.getUnitAttr()));
+    }
+    DictionaryAttr externalData =
+        moduleBuilder.getDictionaryAttr(externalEntries);
     auto global = memref::GlobalOp::create(
         moduleBuilder, plan.op.getLoc(), plan.symbolName,
         moduleBuilder.getStringAttr("private"), memrefType,
@@ -726,6 +815,7 @@ private:
   int64_t totalBlobSize = 0;
   int64_t partialBlobSize = 0;
   std::vector<ConstantPlan> plans;
+  std::optional<SymbolTable> symbolTable;
 };
 
 struct ExternalizeConstantsPass

@@ -27,6 +27,7 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include <type_traits>
 
 using namespace mlir;
 using namespace mlir::bufferization;
@@ -35,6 +36,17 @@ using namespace mlir::hipsr;
 namespace mlir {
 namespace hipsr {
 namespace {
+
+template <typename Function>
+std::optional<Attribute> constantMemorySpace(const Function &function,
+                                             TensorType type) {
+  // LLVM widened this callback from TensorType to TensorLikeType. Pass the
+  // explicit interface when required by the newer signature on MSVC.
+  if constexpr (std::is_invocable_v<const Function &, TensorType>)
+    return function(type);
+  else
+    return function(cast<TensorLikeType>(type));
+}
 
 template <typename OpTy>
 BlockArgument getEntryArgument(OpTy op, unsigned operandIndex) {
@@ -118,7 +130,7 @@ struct ConstantBufferizableModel
                                           SmallVector<Value> &) const {
     auto tensorType = cast<TensorType>(value.getType());
     std::optional<Attribute> memorySpace =
-        options.defaultMemorySpaceFn(tensorType);
+        constantMemorySpace(options.defaultMemorySpaceFn, tensorType);
     if (!memorySpace) {
       return op->emitError("could not infer memory space");
     }

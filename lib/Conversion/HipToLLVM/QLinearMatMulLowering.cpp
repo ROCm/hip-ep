@@ -21,7 +21,8 @@ namespace {
 //                                  %y, 1, 4, 3, 7, 5, 7, 1, 1, 1, 1, 1, 1)
 //
 // M, K, and N come from the memref descriptors. Scale and zero-point lengths
-// are element counts; this op only accepts the per-tensor count of 1.
+// are element counts. A and Y are per-tensor. B's count is 1, or N when the
+// weight has one scale and zero point per output column.
 struct QLinearMatMulOpLowering
     : public ConvertOpToLLVMPattern<QLinearMatMulOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;

@@ -52,7 +52,8 @@ from onnx import TensorProto, helper
 from framework.comparator import compare_outputs
 from framework.onnx_utils import make_model_from_nodes
 
-SEQ_LENS = [1, 128]
+# 2..16 run the one-launch burst kernel (speculative verify), 128 the chunked scan.
+SEQ_LENS = [1, 2, 5, 16, 128]
 
 # Chunk-opt model footprint (Qwen3.5 GatedDeltaNet)
 CHUNK_OPT_Q_DIM = 2048
@@ -280,6 +281,9 @@ class TestLinearAttention:
             (1, 8, 4, 4, 16, 16),
             (1, 1, 4, 4, 16, 16),
             (1, 48, 4, 4, 16, 16),
+            (1, 48, 2, 2, 32, 48),
+            (1, 48, 2, 2, 16, 96),
+            (1, 600, 2, 2, 32, 16),
         ],
     )
     @pytest.mark.parametrize("update_rule", ["gated", "gated_delta"])
@@ -304,7 +308,7 @@ class TestLinearAttention:
         sharing) so the output-dim convention is unambiguous.  Asymmetric
         head-grouping is exercised separately by ``test_la_chunk_opt_shape``
         with the 16/32 q/kv layout used by the real Qwen3.5 chunk_opt
-        model -- the only asymmetric case the EP must support."""
+        model, and by ``test_la_gated_grouped_query_key``."""
         q_dim = qh * d_k
         k_dim = kvh * d_k
         v_dim = kvh * d_v
@@ -338,6 +342,42 @@ class TestLinearAttention:
         actual, expected = model_runner.run_sample(model, inputs)
         # Both rules accumulate outer-product updates over T tokens in fp32
         # internally; fp16 round-trip on the I/O still leaves a tight tolerance.
+        compare_outputs(actual, expected, atol=5e-3, rtol=1e-2)
+
+    @pytest.mark.parametrize("seq_len", [1, 48])
+    def test_la_gated_grouped_query_key(self, model_runner, seq_len):
+        """Gated rule with query and key holding fewer heads than the state
+        (q_num_heads = n_k = 2, kv_num_heads = 8), each shared by 4
+        consecutive state heads."""
+        batch, groups, kvh, d_k, d_v = 1, 2, 8, 32, 16
+        q_dim = groups * d_k
+        k_dim = groups * d_k
+        v_dim = kvh * d_v
+        model = _make_linear_attention_model(
+            batch,
+            seq_len,
+            groups,
+            kvh,
+            q_dim,
+            k_dim,
+            v_dim,
+            d_k,
+            d_v,
+            scale=1.0,
+            update_rule="gated",
+        )
+        inputs = _make_inputs(
+            np.random.default_rng(41),
+            batch,
+            seq_len,
+            kvh,
+            q_dim,
+            k_dim,
+            v_dim,
+            d_k,
+            d_v,
+        )
+        actual, expected = model_runner.run_sample(model, inputs)
         compare_outputs(actual, expected, atol=5e-3, rtol=1e-2)
 
     @pytest.mark.parametrize("seq_len", SEQ_LENS)

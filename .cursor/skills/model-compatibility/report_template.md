@@ -40,6 +40,18 @@ A line above the percentage says whether the model compiles as a whole.
 That is a different question from how many operators are supported, and at
 level C the answer is no while the percentage can still be high.
 
+Do not add an ORT session-load line. The dump allows CPU fallback so it can
+write MLIR; a failure there is not a HIP EP result.
+
+### Kernel attribute support
+
+Not rendered by `generate_final_reports.py`. After the run, append this
+section to `<OutputDir>/model_compatibility_report.md`. See SKILL.md. One
+row per attribute value this model sets that the kernel does not implement:
+the lowering's accepted set does not contain it, or the runtime wrapper
+rejects it. A silent fallthrough to a default still counts. `None.` when
+every such value is implemented.
+
 ### Compatibility summary
 
 The same operators as the table above, bucketed by status, one line each:

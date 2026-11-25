@@ -31,15 +31,28 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace mlir {
 namespace hip {
 
 // One compiled kernel: the ELF blob plus the launch geometry rocMLIR picked.
+// A kernel argument that rocMLIR needs filled before every launch
+// (`rock.prefill`), such as the output of a split-K kernel, which the kernel
+// accumulates into with atomics.
+struct KernelPrefill {
+  int64_t argIndex = 0;
+  // Bytes per element: 1, 2 or 4.
+  int64_t elementBytes = 0;
+  // The element's bit pattern, repeated over the buffer.
+  uint64_t pattern = 0;
+};
+
 struct CompiledKernel {
   std::string binary;
   int64_t gridSize = 0;
   int64_t blockSize = 0;
+  std::vector<KernelPrefill> prefills;
   // Only populated when stopping after the high-level pipeline.
   std::string highLevelMlir;
 };
@@ -70,6 +83,11 @@ struct RocMlirEmbedOptions {
 
 // ROCK_ARCH wins, else a default the rock backend can parse.
 std::string resolveRocMlirArch();
+
+// The gemm element types, printed as in IR (f16, bf16, ...), that `arch`
+// runs on matrix cores, for fuse-rocmlir's gemm-gemm-accel-types option.
+std::vector<std::string> getRocMlirGemmAccelTypes(MLIRContext &context,
+                                                  StringRef arch);
 
 // Register rock/migraphx/triton into `context` alongside the hip dialects, so
 // the rock pipelines run on our own ModuleOp with no serialization boundary.

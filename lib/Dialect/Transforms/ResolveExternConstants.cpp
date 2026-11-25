@@ -65,6 +65,7 @@ void ResolveExternConstantsPass::runOnOperation() {
     int64_t index;
     int64_t offset;
     int64_t size;
+    bool diskResident;
   };
   SmallVector<ExternGlobalInfo> externGlobals;
 
@@ -80,8 +81,9 @@ void ResolveExternConstantsPass::runOnOperation() {
       globalOp.emitError("hip.external_data missing index, offset, or size");
       return signalPassFailure();
     }
-    externGlobals.push_back(
-        {globalOp, indexAttr.getInt(), offsetAttr.getInt(), sizeAttr.getInt()});
+    externGlobals.push_back({globalOp, indexAttr.getInt(), offsetAttr.getInt(),
+                             sizeAttr.getInt(),
+                             extDataAttr.contains("disk_resident")});
   }
 
   if (externGlobals.empty())
@@ -135,6 +137,29 @@ void ResolveExternConstantsPass::runOnOperation() {
       auto origMemRefType = getGlobalOp.getType();
       auto getConstOp = hip::GetConstantOp::create(builder, loc, origMemRefType,
                                                    ctxArg, indexVal);
+      if (info.diskResident) {
+        auto isGatherData = [](OpOperand &use) {
+          Operation *user = use.getOwner();
+          if (auto gather = dyn_cast<hip::GatherOp>(user)) {
+            return use.getOperandNumber() ==
+                   gather.getDataMutable().getOperandNumber();
+          }
+          if (auto gbq = dyn_cast<hip::GatherBlockQuantizedOp>(user)) {
+            return use.getOperandNumber() ==
+                   gbq.getDataMutable().getOperandNumber();
+          }
+          return false;
+        };
+        for (OpOperand &use : getGlobalOp.getResult().getUses()) {
+          if (!isGatherData(use)) {
+            use.getOwner()->emitError(
+                "disk-resident constant has no GPU copy; only hip.gather / "
+                "hip.gather_block_quantized data may use it");
+            return signalPassFailure();
+          }
+        }
+        getConstOp->setAttr("hip.disk_resident", builder.getUnitAttr());
+      }
 
       getGlobalOp.replaceAllUsesWith(getConstOp.getResult());
       getGlobalOp.erase();

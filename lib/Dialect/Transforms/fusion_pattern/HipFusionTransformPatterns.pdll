@@ -43,6 +43,7 @@ Constraint IsHipSplatScale(val: Value);
 Constraint HasExtractableQdqZeropoint(op: Op);
 Constraint IsHipQdqQuantizedWidth(op: Op, widths: Attr);
 Constraint IsHipQdqUnsignedQuantized(op: Op);
+Constraint HasSameHipQdqElementType(lhs: Op, rhs: Op, out: Op);
 Constraint IsHipPerAxisQuantizedWeight(dq: Op, rank: Attr, axis: Attr,
                                        packedInt4: Attr);
 Constraint IsHipPerChannelQuantizedWeight(dq: Op, consumer: Op);

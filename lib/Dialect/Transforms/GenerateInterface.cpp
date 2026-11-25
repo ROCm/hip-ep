@@ -129,7 +129,10 @@ buildMetadataNative(ModuleOp module, const std::string &constantsFile) {
         const auto *base = reinterpret_cast<const uint8_t *>(&splatValues[i]);
         splat->elem_bytes.assign(base, base + n);
         ci->source.Set(std::move(*splat));
-      } else if (kind == mlir::hip::ConstantMetadataSourceKind::File) {
+      } else if (kind == mlir::hip::ConstantMetadataSourceKind::File ||
+                 kind == mlir::hip::ConstantMetadataSourceKind::DiskFile) {
+        ci->disk_resident =
+            kind == mlir::hip::ConstantMetadataSourceKind::DiskFile;
         auto fref = std::make_unique<mlir::hip::FileRefSourceT>();
         if (filePathsAttr && i < filePathsAttr.size()) {
           if (auto s = dyn_cast<StringAttr>(filePathsAttr.getValue()[i]))

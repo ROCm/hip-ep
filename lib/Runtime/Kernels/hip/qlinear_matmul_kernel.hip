@@ -8,10 +8,11 @@
 //   dot = matmul(a - a_zp, b - b_zp)
 //   y = saturate(round(dot * a_scale * b_scale / y_scale) + y_zp)
 //
-// a is [M, K], b is [K, N], y is [M, N], all row-major. Scales and zero
-// points are per-tensor. The dot product accumulates in int64 so the only
-// rounding is the final requantization, which uses rintf (ties to even),
-// matching QuantizeLinear.
+// a is [M, K], b is [K, N], y is [M, N], all row-major. A's and Y's scales
+// and zero points are per-tensor. B's scale and zero point each have length
+// 1, or length N with one value per output column. The dot product
+// accumulates in int64 so the only rounding is the final requantization,
+// which uses rintf (ties to even), matching QuantizeLinear.
 
 #include "hip_custom_kernels.h"
 
@@ -35,22 +36,23 @@ __global__ void qlinear_matmul_2d(const AT *a, const float *a_scale,
                                   const AT *a_zp, const BT *b,
                                   const float *b_scale, const BT *b_zp,
                                   const float *y_scale, const YT *y_zp, YT *y,
-                                  int64_t m, int64_t k, int64_t n) {
+                                  int64_t m, int64_t k, int64_t n,
+                                  int64_t b_scale_count, int64_t b_zp_count) {
   const int64_t total = m * n;
   const int64_t stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
   const float as = a_scale[0];
-  const float bs = b_scale[0];
   const float ys = y_scale[0];
   const int a_zp_v = static_cast<int>(a_zp[0]);
-  const int b_zp_v = static_cast<int>(b_zp[0]);
   const int y_zp_v = static_cast<int>(y_zp[0]);
-  const float scale = as * bs / ys;
 
   for (int64_t idx =
            static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
        idx < total; idx += stride) {
     const int64_t col = idx % n;
     const int64_t row = idx / n;
+    const float bs = b_scale_count == 1 ? b_scale[0] : b_scale[col];
+    const int b_zp_v = static_cast<int>(b_zp_count == 1 ? b_zp[0] : b_zp[col]);
+    const float scale = as * bs / ys;
     int64_t dot = 0;
     const AT *a_row = a + row * k;
     for (int64_t ki = 0; ki < k; ++ki) {
@@ -70,7 +72,8 @@ int launch_qlinear_matmul(hipStream_t stream, const void *a,
                           const void *a_scale, const void *a_zp, const void *b,
                           const void *b_scale, const void *b_zp,
                           const void *y_scale, const void *y_zp, void *y,
-                          int64_t m, int64_t k, int64_t n) {
+                          int64_t m, int64_t k, int64_t n,
+                          int64_t b_scale_count, int64_t b_zp_count) {
   const int64_t total = m * n;
   if (total <= 0)
     return 0;
@@ -87,7 +90,7 @@ int launch_qlinear_matmul(hipStream_t stream, const void *a,
                      static_cast<const BT *>(b_zp),
                      static_cast<const float *>(y_scale),
                      static_cast<const YT *>(y_zp), static_cast<YT *>(y), m, k,
-                     n);
+                     n, b_scale_count, b_zp_count);
   return 0;
 }
 
@@ -110,10 +113,20 @@ int hip_qlinear_matmul(void *stream, const void *a, const void *a_scale,
                        const void *b_scale, const void *b_zero_point,
                        const void *y_scale, const void *y_zero_point, void *y,
                        int64_t m, int64_t k, int64_t n, int a_dtype, int b_dtype,
-                       int y_dtype) {
+                       int y_dtype, int64_t b_scale_count, int64_t b_zp_count) {
   bool a_signed = false;
   bool b_signed = false;
   bool y_signed = false;
+  if (m < 1 || k < 1 || n < 1 ||
+      (b_scale_count != 1 && b_scale_count != n) ||
+      (b_zp_count != 1 && b_zp_count != n)) {
+    fprintf(stderr,
+            "[custom_kernels] hip_qlinear_matmul: bad geometry M=%lld K=%lld "
+            "N=%lld b_scale=%lld b_zp=%lld\n",
+            (long long)m, (long long)k, (long long)n, (long long)b_scale_count,
+            (long long)b_zp_count);
+    return -1;
+  }
   if (hip_dtype_pair(a_dtype, &a_signed) || hip_dtype_pair(b_dtype, &b_signed) ||
       hip_dtype_pair(y_dtype, &y_signed)) {
     fprintf(stderr,
@@ -126,7 +139,8 @@ int hip_qlinear_matmul(void *stream, const void *a, const void *a_scale,
   using LaunchFn =
       int (*)(hipStream_t, const void *, const void *, const void *,
               const void *, const void *, const void *, const void *,
-              const void *, void *, int64_t, int64_t, int64_t);
+              const void *, void *, int64_t, int64_t, int64_t, int64_t,
+              int64_t);
   LaunchFn launch = nullptr;
   if (!a_signed && b_signed && !y_signed)
     launch = launch_qlinear_matmul<uint8_t, int8_t, uint8_t>;
@@ -147,7 +161,8 @@ int hip_qlinear_matmul(void *stream, const void *a, const void *a_scale,
 
   (void)hipGetLastError();
   int rc = launch(static_cast<hipStream_t>(stream), a, a_scale, a_zero_point, b,
-                  b_scale, b_zero_point, y_scale, y_zero_point, y, m, k, n);
+                  b_scale, b_zero_point, y_scale, y_zero_point, y, m, k, n,
+                  b_scale_count, b_zp_count);
   if (rc != 0)
     return rc;
 

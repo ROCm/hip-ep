@@ -15,6 +15,9 @@ namespace hip {
 /// Lowers HIP GPU operations to LLVM calls to MIOpen/HIP runtime.
 std::unique_ptr<Pass> createConvertHipToLLVMPass();
 
+/// Register access guarantees provided by the native HIP runtime lowerings.
+void registerRuntimeAccessOpInterfaceExternalModels(DialectRegistry &registry);
+
 } // namespace hip
 } // namespace mlir
 

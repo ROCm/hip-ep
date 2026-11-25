@@ -89,6 +89,46 @@ def _make_qlinear_matmul_case(a_shape, b, y_dtype, y_np, scales):
     )
 
 
+def _make_qlinear_matmul_arrays(
+    a_shape, b, a_scale, a_zp, b_scale, b_zp, y_scale, y_zp
+):
+    """Build one QLinearMatMul from numpy parameters.
+
+    B, its scale, and its zero point may be per-tensor or one value per column.
+    """
+    y_dtype = (
+        TensorProto.UINT8 if np.dtype(y_zp.dtype) == np.uint8 else TensorProto.INT8
+    )
+    a_info = helper.make_tensor_value_info("a", TensorProto.UINT8, list(a_shape))
+    y_info = helper.make_tensor_value_info("y", y_dtype, [a_shape[0], b.shape[1]])
+    node = helper.make_node(
+        "QLinearMatMul",
+        [
+            "a",
+            "a_scale",
+            "a_zero_point",
+            "b",
+            "b_scale",
+            "b_zero_point",
+            "y_scale",
+            "y_zero_point",
+        ],
+        ["y"],
+    )
+    inits = [
+        numpy_helper.from_array(np.asarray(a_scale, dtype=np.float32), "a_scale"),
+        numpy_helper.from_array(np.asarray(a_zp), "a_zero_point"),
+        numpy_helper.from_array(np.asarray(b), "b"),
+        numpy_helper.from_array(np.asarray(b_scale, dtype=np.float32), "b_scale"),
+        numpy_helper.from_array(np.asarray(b_zp), "b_zero_point"),
+        numpy_helper.from_array(np.asarray(y_scale, dtype=np.float32), "y_scale"),
+        numpy_helper.from_array(np.asarray(y_zp), "y_zero_point"),
+    ]
+    return make_model_from_nodes(
+        [node], [a_info], [y_info], initializers=inits, opset=12
+    )
+
+
 class TestQLinearMatMul:
     def test_row_vector(self, model_runner):
         model = _make_qlinear_matmul(1, 4, 3, 0)
@@ -131,3 +171,57 @@ class TestQLinearMatMul:
         a = np.array([[200]], dtype=np.uint8)
         actual, expected = model_runner.run_sample(model, [a])
         compare_outputs(actual, expected, atol=0, rtol=0)
+
+    def test_per_column_b(self, model_runner):
+        # B's scale and zero point have one value per output column. A constant
+        # fill would hide a kernel that still reads element 0.
+        b = np.array([[2, 1, 0], [3, 0, 4], [1, 2, 1], [0, 3, 2]], dtype=np.uint8)
+        b_scale = np.array([0.5, 1.0, 2.0], dtype=np.float32)
+        b_zp = np.array([1, 0, 2], dtype=np.uint8)
+        a = np.array([[1, 2, 3, 4], [0, 5, 1, 2]], dtype=np.uint8)
+        model = _make_qlinear_matmul_arrays(
+            a.shape,
+            b,
+            np.float32(1.0),
+            np.uint8(1),
+            b_scale,
+            b_zp,
+            np.float32(1.0),
+            np.uint8(3),
+        )
+        actual, expected = model_runner.run_sample(model, [a])
+        compare_outputs(actual, expected, atol=0, rtol=0)
+        got = np.asarray(actual[0])
+
+        def cell(row, col):
+            acc = 0
+            for ki in range(b.shape[0]):
+                acc += (int(a[row, ki]) - 1) * (int(b[ki, col]) - int(b_zp[col]))
+            q = np.rint(acc * float(b_scale[col])) + 3
+            return int(np.clip(q, 0, 255))
+
+        for row, col in ((0, 0), (0, 2), (1, 1)):
+            assert int(got[row, col]) == cell(row, col)
+
+    def test_per_column_b_scalar_zp(self, model_runner):
+        # Scale is per-column and the zero point stays a scalar, so the two
+        # counts are independent.
+        b = np.array([[1, 4], [2, 0], [3, 1]], dtype=np.int8)
+        b_scale = np.array([2.0, 0.5], dtype=np.float32)
+        a = np.array([[2, 1, 0]], dtype=np.uint8)
+        model = _make_qlinear_matmul_arrays(
+            a.shape,
+            b,
+            np.float32(1.0),
+            np.uint8(0),
+            b_scale,
+            np.int8(1),
+            np.float32(1.0),
+            np.uint8(0),
+        )
+        actual, expected = model_runner.run_sample(model, [a])
+        compare_outputs(actual, expected, atol=0, rtol=0)
+        got = np.asarray(actual[0])
+        # Column 0: dot 1, scale 2. Column 1: dot 5, scale 0.5, rint(2.5) == 2.
+        assert int(got[0, 0]) == 2
+        assert int(got[0, 1]) == 2

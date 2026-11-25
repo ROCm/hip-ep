@@ -15,13 +15,8 @@ namespace {
 // onnx.MaxPool / onnx.AveragePool / onnx.LpPool -> hip.pool
 //===----------------------------------------------------------------------===//
 //
-// General (fallback) lowering for window pooling. MaxPool and LpPool always
-// land here. AveragePool is tried first by `AveragePoolToReshapeMean` in
-// `ProjectorOpsRewrites.cpp` (pre-lowering, benefit = 2) when NCHW,
-// kernel == stride, no pad, and static divisible spatial dims — that fast
-// path decomposes into Reshape + Transpose + ReduceMean. Any AveragePool
-// outside those constraints (overlapping windows, padding, 1D/3D, etc.)
-// survives pre-lowering and is converted here via `hip.pool` (benefit = 1).
+// General lowering for window pooling. MaxPool, LpPool, and AveragePool all
+// land here as hip.pool. AveragePoolToReshapeMean is not registered.
 //
 // One conversion pattern services all three ONNX window-pooling ops; the
 // reduction kind is injected per registered op name via `poolMode`

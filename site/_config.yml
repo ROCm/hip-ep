@@ -86,6 +86,9 @@ exclude:
   # Maintainer note on font provenance; the OFL texts beside it are published
   # on purpose, since the license requires them to travel with the fonts.
   - assets/fonts/README.md
+  # The generator for the backdrop network's coordinates. Maintainer note, and
+  # a .md under assets/ would otherwise be rendered to assets/README.html.
+  - assets/README.md
 
 defaults:
   - scope:

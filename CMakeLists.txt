@@ -23,12 +23,23 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 project(
   onnx-hipdnn-ep
-  VERSION 0.5.1
+  VERSION 0.5.3
   LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+# Compile the experimental implementation; runtime dispatch remains opt-in.
+option(HIP_EP_ENABLE_RING_ATTENTION "Build Ring attention (runtime opt-in)" ON)
+if(DEFINED HIP_EP_GQA_IMPL)
+  message(FATAL_ERROR "HIP_EP_GQA_IMPL was replaced by HIP_EP_ENABLE_RING_ATTENTION=ON/OFF")
+endif()
+if(HIP_EP_ENABLE_RING_ATTENTION)
+  set(HIP_EP_RING_ENABLED 1)
+else()
+  set(HIP_EP_RING_ENABLED 0)
+endif()
 
 if(WIN32)
   if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR CMAKE_C_COMPILER_ID STREQUAL "Clang" )
@@ -102,6 +113,13 @@ option(BUILD_HIP_UNIT_TESTS "Build and register LIT and E2E tests with CTest" ON
 option(BUILD_HIP_KERNEL_UNIT_TESTS
   "Build the standalone GPU kernel unit-test executables (Windows, real runtime)" ON)
 option(BUILD_PYTHON_WHEEL "Configure the 'wheel' target that packages the EP as a Python wheel" OFF)
+# Native .dll/.so artifacts (DLLLinker + in-process lld on Windows). Off by
+# default so hipgpu does not carry the native linker. artifact_format=NATIVE
+# throws at runtime unless this is ON. Declared before deps.cmake so a
+# from-source LLVM build can omit the lld project.
+option(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS
+  "Build the opt-in native .dll/.so artifact path (lld). When OFF, artifact_format=NATIVE throws."
+  OFF)
 
 # Build rocMLIR/Triton (rocmlirTriton) in-tree as a subdirectory, reusing the
 # same LLVM/MLIR this project already resolves (see cmake/deps.cmake). When ON,
@@ -135,6 +153,14 @@ if(HIPDNN_EP_LOAD_KERNEL_DLLS AND NOT HIPDNN_EP_LINK_HIP_HOST)
   message(FATAL_ERROR
     "HIPDNN_EP_LOAD_KERNEL_DLLS=ON requires HIPDNN_EP_LINK_HIP_HOST=ON "
     "(LlvmIrJit::detectCustomKernelArch needs hipGetDeviceProperties).")
+endif()
+
+if(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS)
+  message(STATUS "Native artifacts: ON")
+  add_compile_definitions(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS=1)
+else()
+  message(STATUS "Native artifacts: OFF")
+  add_compile_definitions(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS=0)
 endif()
 
 # FlatBuffers schemas (HipSchemas). Added here rather than with the other
@@ -208,6 +234,12 @@ add_subdirectory(lib)
 # Must come AFTER lib/Runtime (RuntimeBitcode dep) and BEFORE tools/
 # (tools/hip-test links morphizen-custom-op-mlir).
 add_subdirectory(backend-mlir-compiler)
+
+# Test-only pass registrations used by hip-mlir-opt LIT coverage.
+# Define the library before configuring tools so the target is linked by name.
+if(BUILD_HIP_UNIT_TESTS)
+  add_subdirectory(test/lib/Dialect/Hip)
+endif()
 
 # Executable targets
 add_subdirectory(tools)

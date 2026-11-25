@@ -21,3 +21,4 @@ numpy
 onnx
 onnxruntime
 pytest
+ml_dtypes

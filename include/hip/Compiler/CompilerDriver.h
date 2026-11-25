@@ -39,7 +39,9 @@ namespace hip::compiler {
 ///     * Bitcode (default): OS-portable LLVM bitcode (consumed by LlvmIrJit
 ///       in the EP DLL, which JIT-loads its own per-OS runtime.bc separately).
 ///     * Native: merge runtime.bc, emit a host object, and link a per-OS
-///       .dll/.so via DLLLinker. Opt-in for benchmarking/dev.
+///       .dll/.so via DLLLinker. Opt-in for benchmarking/dev. Compiled only
+///       when HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS is ON; otherwise compile()
+///       fails and the EP throws if artifact_format=NATIVE.
 class CompilerDriver {
 public:
   CompilerDriver() = default;

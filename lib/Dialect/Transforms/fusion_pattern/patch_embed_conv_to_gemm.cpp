@@ -127,6 +127,11 @@ std::optional<PatchEmbedPlan> analyzePatchEmbedConv(
       xType.getElementType() != yType.getElementType())
     return decline("conv.mixed_element_types");
 
+  // hip.gemm lowering accepts f16, bf16, f32, and f64. An integer convolution
+  // rewritten here fails that lowering before the integer conv kernel runs.
+  if (xType.getElementType().isInteger())
+    return decline("conv.integer_element_type");
+
   PatchEmbedPlan plan;
   plan.inChannels = xType.getDimSize(1);
   if (plan.inChannels == mlir::ShapedType::kDynamic)

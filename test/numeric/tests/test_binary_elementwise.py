@@ -269,6 +269,38 @@ class TestMod:
         atol = 1e-3 if dtype == np.float16 else 1e-5
         compare_outputs(actual, expected, atol=atol, rtol=1e-3)
 
+    @pytest.mark.parametrize(
+        "dtype,lhs_shape,rhs_shape,fmod",
+        [
+            (np.int64, [748], [], 0),
+            (np.int32, [4, 8], [1, 8], 0),
+            (np.int64, [4, 1], [1, 8], 0),
+            (np.float32, [4, 8], [4, 1], 1),
+            (np.float16, [2, 3, 8], [8], 1),
+        ],
+    )
+    def test_mod_broadcast(self, model_runner, dtype, lhs_shape, rhs_shape, fmod):
+        out_shape = list(np.broadcast_shapes(tuple(lhs_shape), tuple(rhs_shape)))
+        tp = np_to_onnx_type(dtype)
+        A = helper.make_tensor_value_info("A", tp, lhs_shape)
+        B = helper.make_tensor_value_info("B", tp, rhs_shape)
+        Y = helper.make_tensor_value_info("Y", tp, out_shape)
+        node = helper.make_node("Mod", ["A", "B"], ["Y"], fmod=fmod)
+        model = make_model_from_nodes([node], [A, B], [Y])
+
+        rng = np.random.default_rng(208)
+        if np.issubdtype(dtype, np.integer):
+            a = rng.integers(-50, 50, lhs_shape, dtype=dtype)
+        else:
+            a = rng.uniform(-3.0, 3.0, lhs_shape).astype(dtype)
+        b = np.asarray(_safe_divisor(rng, dtype, rhs_shape), dtype=dtype)
+        actual, expected = model_runner.run_sample(model, [a, b])
+        if np.issubdtype(dtype, np.integer):
+            compare_outputs(actual, expected, atol=0)
+        else:
+            atol = 1e-3 if dtype == np.float16 else 1e-5
+            compare_outputs(actual, expected, atol=atol, rtol=1e-3)
+
 
 # ---------------------------------------------------------------------------
 # And : y = a & b, bool inputs / bool output

@@ -84,3 +84,76 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
                            gamma, bias, output, input_skip_bias_sum, num_rows,
                            hidden_dim, epsilon, hip_dtype);
 }
+
+static int floatDtypeForSize(int64_t element_size_bytes) {
+  if (element_size_bytes == 2)
+    return HIP_DTYPE_FLOAT16;
+  if (element_size_bytes == 4)
+    return HIP_DTYPE_FLOAT32;
+  return -1;
+}
+
+int wrap_skip_simplified_layer_norm_mixed(
+    RuntimeState *state, void *input, void *skip, void *gamma, void *bias,
+    void *output, void *input_skip_bias_sum, int64_t input_num_elements,
+    int64_t gamma_num_elements, int64_t input_element_size,
+    int64_t skip_element_size, int64_t gamma_element_size,
+    int64_t output_element_size, int64_t sum_element_size, float epsilon) {
+  OP_PROFILE(
+      "skip_layernorm",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "%lldx%lld,mixed",
+                 (long long)(gamma_num_elements > 0
+                                 ? input_num_elements / gamma_num_elements
+                                 : 0),
+                 (long long)gamma_num_elements);
+        return std::string(b);
+      },
+      state);
+
+  if (!state || !input || !skip || !gamma || !output) {
+    fprintf(stderr,
+            "wrap_skip_simplified_layer_norm_mixed: null required argument\n");
+    return -1;
+  }
+  if (gamma_num_elements <= 0) {
+    fprintf(stderr,
+            "wrap_skip_simplified_layer_norm_mixed: gamma_num_elements=%lld\n",
+            (long long)gamma_num_elements);
+    return -1;
+  }
+
+  const int in_dt = floatDtypeForSize(input_element_size);
+  const int skip_dt = floatDtypeForSize(skip_element_size);
+  const int gamma_dt = floatDtypeForSize(gamma_element_size);
+  const int out_dt = floatDtypeForSize(output_element_size);
+  const int sum_dt =
+      input_skip_bias_sum ? floatDtypeForSize(sum_element_size) : in_dt;
+  if (in_dt < 0 || skip_dt < 0 || gamma_dt < 0 || out_dt < 0 || sum_dt < 0) {
+    fprintf(stderr,
+            "wrap_skip_simplified_layer_norm_mixed: unsupported element sizes "
+            "in/skip/gamma/out/sum=%lld/%lld/%lld/%lld/%lld\n",
+            (long long)input_element_size, (long long)skip_element_size,
+            (long long)gamma_element_size, (long long)output_element_size,
+            (long long)sum_element_size);
+    return -1;
+  }
+
+  int64_t hidden_dim = gamma_num_elements;
+  int64_t num_rows = input_num_elements / hidden_dim;
+
+  RUNTIME_DEBUG_LOG(
+      "[REAL] wrap_skip_simplified_layer_norm_mixed: num_rows=%lld, "
+      "hidden_dim=%lld, elem bytes in/skip/gamma/out/sum=%lld/%lld/%lld/%lld/"
+      "%lld, bias=%s, input_skip_bias_sum=%s\n",
+      (long long)num_rows, (long long)hidden_dim, (long long)input_element_size,
+      (long long)skip_element_size, (long long)gamma_element_size,
+      (long long)output_element_size, (long long)sum_element_size,
+      bias ? "yes" : "no", input_skip_bias_sum ? "yes" : "no");
+
+  return hip_skip_rms_norm_mixed(hipdnn_ep_state_get_stream(state), input, skip,
+                                 gamma, bias, output, input_skip_bias_sum,
+                                 num_rows, hidden_dim, epsilon, in_dt, skip_dt,
+                                 gamma_dt, out_dt, sum_dt);
+}

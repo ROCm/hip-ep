@@ -10,13 +10,16 @@
 #include "llvm/Support/MathExtras.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/SymbolTable.h"
 
+#include "HipShapeUtilsInternal.h"
 #include "hip/Dialect/IR/HipShapeUtils.h"
 
+#include <cmath>
 #include <limits>
 
 using namespace mlir;
@@ -134,7 +137,7 @@ LogicalResult ConstantOp::verify() {
   unsigned elementBits = 0;
   if (auto floatType = dyn_cast<FloatType>(elementType)) {
     if (!elementType.isF16() && !elementType.isBF16() && !elementType.isF32() &&
-        !elementType.isF64())
+        !elementType.isF64() && !isa<Float8E4M3FNType>(elementType))
       return emitOpError("has unsupported floating-point element type ")
              << elementType;
     elementBits = floatType.getWidth();
@@ -325,6 +328,97 @@ LoopOp::inferReturnTypes(MLIRContext *context, std::optional<Location> location,
 }
 
 //===----------------------------------------------------------------------===//
+// ScanOp: outlined-body scan (DPS)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ScanOp::getDpsInitsMutable() { return getInitsMutable(); }
+
+void ScanOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  for (OpOperand &operand : getScanInputsMutable())
+    if (isa<MemRefType>(operand.get().getType()))
+      effects.emplace_back(MemoryEffects::Read::get(), &operand,
+                           SideEffects::DefaultResource::get());
+  for (OpOperand &operand : getCapturesMutable())
+    if (isa<MemRefType>(operand.get().getType()))
+      effects.emplace_back(MemoryEffects::Read::get(), &operand,
+                           SideEffects::DefaultResource::get());
+  for (OpOperand &operand : getStateScratchMutable())
+    if (isa<MemRefType>(operand.get().getType()))
+      effects.emplace_back(MemoryEffects::Write::get(), &operand,
+                           SideEffects::DefaultResource::get());
+  for (auto [i, operand] : llvm::enumerate(getInitsMutable())) {
+    if (!isa<MemRefType>(operand.get().getType()))
+      continue;
+    if (i < getNumStateVariables())
+      effects.emplace_back(MemoryEffects::Read::get(), &operand,
+                           SideEffects::DefaultResource::get());
+    effects.emplace_back(MemoryEffects::Write::get(), &operand,
+                         SideEffects::DefaultResource::get());
+  }
+}
+
+LogicalResult ScanOp::verify() {
+  uint32_t numState = getNumStateVariables();
+  uint32_t numScanInputs = getNumScanInputs();
+  uint32_t numScanOutputs = getNumScanOutputs();
+  if (numScanInputs == 0)
+    return emitOpError("requires at least one scan input");
+  if (numScanInputs != getScanInputs().size())
+    return emitOpError("num_scan_inputs (")
+           << numScanInputs << ") must equal the scan_inputs count ("
+           << getScanInputs().size() << ")";
+  if (numState + numScanOutputs != getInits().size())
+    return emitOpError("expected ")
+           << (numState + numScanOutputs) << " init operands, got "
+           << getInits().size();
+
+  bool tensorMode =
+      getInits().empty() || isa<RankedTensorType>(getInits().front().getType());
+  if (tensorMode) {
+    if (!getStateScratch().empty())
+      return emitOpError("tensor mode must not have state scratch operands");
+    if (getNumResults() != getInits().size())
+      return emitOpError("tensor mode result count must equal init count");
+    for (auto [result, init] : llvm::zip(getOutputs(), getInits()))
+      if (result.getType() != init.getType())
+        return emitOpError("result and init types must match");
+  } else {
+    if (getNumResults() != 0)
+      return emitOpError("memref mode must have no results");
+    if (!getStateScratch().empty() && getStateScratch().size() != numState)
+      return emitOpError("memref mode state scratch count must be zero or ")
+             << numState;
+    for (auto [scratch, init] :
+         llvm::zip(getStateScratch(), getInits().take_front(numState)))
+      if (scratch.getType() != init.getType())
+        return emitOpError("state scratch and state init types must match");
+  }
+  return success();
+}
+
+LogicalResult ScanOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  if (!symbolTable.lookupNearestSymbolFrom<func::FuncOp>(*this,
+                                                         getBodyFuncAttr()))
+    return emitOpError("body_func '")
+           << getBodyFunc() << "' does not reference a func.func";
+  return success();
+}
+
+LogicalResult
+ScanOp::inferReturnTypes(MLIRContext *context, std::optional<Location> location,
+                         ValueRange operands, DictionaryAttr attributes,
+                         PropertyRef properties, RegionRange regions,
+                         SmallVectorImpl<Type> &inferredReturnTypes) {
+  ScanOpAdaptor adaptor(operands, attributes, properties, regions);
+  for (Value init : adaptor.getInits())
+    if (isa<RankedTensorType>(init.getType()))
+      inferredReturnTypes.push_back(init.getType());
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // IfOp: outlined then/else conditional (DPS)
 //===----------------------------------------------------------------------===//
 
@@ -406,40 +500,6 @@ IfOp::inferReturnTypes(MLIRContext *context, std::optional<Location> location,
 //===----------------------------------------------------------------------===//
 // Helpers for DPS compute ops (custom parse/print, verify, interfaces)
 //===----------------------------------------------------------------------===//
-
-static bool isTensorMode(Value v) { return isa<RankedTensorType>(v.getType()); }
-
-/// Verify that all data operands (skipping ctx and Index args) are
-/// uniformly tensor or memref, and that results match the mode.
-static LogicalResult verifyDpsComputeOp(Operation *op,
-                                        ArrayRef<Value> dataOperands,
-                                        unsigned numInits) {
-  if (dataOperands.empty())
-    return op->emitOpError("expected at least one data operand");
-
-  bool tensorMode = isTensorMode(dataOperands.front());
-  for (Value v : dataOperands) {
-    if (isTensorMode(v) != tensorMode)
-      return op->emitOpError(
-          "all data operands must be the same kind (all tensor or all memref)");
-  }
-
-  unsigned numResults = op->getNumResults();
-  if (tensorMode) {
-    if (numResults != numInits)
-      return op->emitOpError("tensor mode requires ")
-             << numInits << " result(s), got " << numResults;
-    for (unsigned i = 0; i < numResults; ++i) {
-      if (!isa<RankedTensorType>(op->getResult(i).getType()))
-        return op->emitOpError("result #") << i << " must be a ranked tensor";
-    }
-  } else {
-    if (numResults != 0)
-      return op->emitOpError("memref mode must have zero results, got ")
-             << numResults;
-  }
-  return success();
-}
 
 /// Emit memory effects for a DPS compute op: memref inputs read, memref inits
 /// write. Non-memref operands (e.g. !hip.context, index scalars) are skipped.
@@ -615,11 +675,123 @@ static void printSingleInitDpsOp(OpAsmPrinter &p, Operation *op, Value ctx,
 }
 
 //===------------
-// RocMlirOp: ins(variadic) outs(output)
+// RocMlirOp: ins(variadic) outs(variadic)
 //===------------
 
 MutableOperandRange RocMlirOp::getDpsInitsMutable() {
-  return getOutputMutable();
+  return getOutputsMutable();
+}
+
+// The buffer that a memref reads, through the views that keep its bytes
+// (subview, cast, reinterpret_cast, expand_shape, collapse_shape). A
+// memref.view stops the walk: it is a pool slice, and PoolAllocs gives
+// buffers that are live at the same time disjoint byte ranges.
+static Value getViewedBuffer(Value value) {
+  while (Operation *def = value.getDefiningOp()) {
+    auto view = dyn_cast<ViewLikeOpInterface>(def);
+    if (!view || isa<memref::ViewOp>(def))
+      break;
+    value = view.getViewSource();
+  }
+  return value;
+}
+
+// A row-major buffer that starts at its base pointer: the form whose
+// alignedPtr and element count cover exactly the buffer.
+static bool isContiguousAtBase(MemRefType type) {
+  if (type.getLayout().isIdentity())
+    return true;
+  SmallVector<int64_t> strides;
+  int64_t offset;
+  if (failed(type.getStridesAndOffset(strides, offset)) || offset != 0)
+    return false;
+  int64_t expected = 1;
+  for (int64_t dim = type.getRank() - 1; dim >= 0; --dim) {
+    if (type.getDimSize(dim) != 1 && strides[dim] != expected)
+      return false;
+    expected *= type.getDimSize(dim);
+  }
+  return true;
+}
+
+LogicalResult RocMlirOp::verify() {
+  if (getOutputs().empty())
+    return emitOpError("requires at least one outs operand");
+  bool tensorOuts = isa<RankedTensorType>(getOutputs().front().getType());
+  if (llvm::any_of(getOutputs(), [&](Value out) {
+        return isa<RankedTensorType>(out.getType()) != tensorOuts;
+      }))
+    return emitOpError("requires all outs operands to be tensors or all to be "
+                       "memrefs");
+  // The lowering reads every input through a contiguous memref pointer, so an
+  // input of the other mode must not survive bufferization.
+  if (llvm::any_of(getInputs(), [&](Value in) {
+        return isa<RankedTensorType>(in.getType()) != tensorOuts;
+      }))
+    return emitOpError("requires ins operands of the same kind as its outs "
+                       "(all tensors or all memrefs)");
+  ArrayRef<int64_t> prefill = getPrefill();
+  if (prefill.size() % 3 != 0)
+    return emitOpError("prefill holds (index, bytes, pattern) triples");
+  int64_t numInputs = getInputs().size();
+  int64_t numArgs = numInputs + getOutputs().size();
+  llvm::SmallDenseSet<int64_t> filled;
+  for (size_t i = 0; i < prefill.size(); i += 3) {
+    int64_t index = prefill[i];
+    if (index < 0 || index >= numArgs)
+      return emitOpError("prefill argument index ")
+             << index << " is out of range";
+    // rocMLIR pre-fills only the output that its kernel accumulates into
+    // atomically. A fill of an input, or of an output that is also an input,
+    // would wipe data that the kernel reads, before every launch.
+    if (index < numInputs)
+      return emitOpError("prefill argument index ")
+             << index << " names an input; only an outs operand is pre-filled";
+    // A view of an input shares its bytes, so the fill would wipe them too.
+    Value arg = getOutputs()[index - numInputs];
+    Value buffer = isa<MemRefType>(arg.getType()) ? getViewedBuffer(arg) : arg;
+    if (llvm::any_of(getInputs(), [&](Value input) {
+          return input == arg || (isa<MemRefType>(input.getType()) &&
+                                  getViewedBuffer(input) == buffer);
+        }))
+      return emitOpError("pre-filled argument ")
+             << index << " is also an input, or a view of one";
+    if (!filled.insert(index).second)
+      return emitOpError("prefill argument index ")
+             << index << " is listed twice";
+    if (prefill[i + 1] != 1 && prefill[i + 1] != 2 && prefill[i + 1] != 4)
+      return emitOpError("prefill element size must be 1, 2 or 4 bytes");
+    // The lowering fills getNumElements() elements of this width from the
+    // buffer's base pointer, so the width must match the element type, the
+    // count must be static, and the buffer must start at its base.
+    auto shaped = cast<ShapedType>(arg.getType());
+    Type element = shaped.getElementType();
+    if (!element.isIntOrFloat() ||
+        element.getIntOrFloatBitWidth() != 8 * prefill[i + 1])
+      return emitOpError("prefill element size ")
+             << prefill[i + 1] << " does not match the element type " << element
+             << " of argument " << index;
+    if (!shaped.hasStaticShape())
+      return emitOpError("pre-filled argument ")
+             << index << " needs a static shape";
+    if (auto memref = dyn_cast<MemRefType>(arg.getType());
+        memref && !isContiguousAtBase(memref))
+      return emitOpError("pre-filled argument ")
+             << index << " needs a contiguous layout with no offset";
+  }
+  if (!tensorOuts) {
+    if (getNumResults() != 0)
+      return emitOpError("on memrefs has no results");
+    return success();
+  }
+  if (getNumResults() != getOutputs().size())
+    return emitOpError("requires one result per outs operand");
+  for (auto [result, init] : llvm::zip(getResults(), getOutputs()))
+    if (result.getType() != init.getType())
+      return emitOpError("result type ")
+             << result.getType() << " differs from its outs type "
+             << init.getType();
+  return success();
 }
 
 void RocMlirOp::getEffects(
@@ -714,14 +886,25 @@ static bool isEightBitInt(Type type) {
   return integer && integer.getWidth() == 8;
 }
 
-static LogicalResult verifyPositivePair(QLinearConvOp op, ArrayAttr attr,
+// The activation types the integer anchors lower: rocMLIR takes signless i8,
+// and HipToTosa rebiases ui8 to it. A signed si8 has no lowering.
+static bool isAnchorByte(Type type) {
+  return type.isSignlessInteger(8) || type.isUnsignedInteger(8);
+}
+
+// Two extents agree when either is dynamic or both are equal.
+static bool extentsAgree(int64_t a, int64_t b) {
+  return ShapedType::isDynamic(a) || ShapedType::isDynamic(b) || a == b;
+}
+
+static LogicalResult verifyPositivePair(Operation *op, ArrayAttr attr,
                                         StringRef name) {
   if (attr.size() != 2)
-    return op.emitOpError() << name << " must have 2 entries";
+    return op->emitOpError() << name << " must have 2 entries";
   for (Attribute entry : attr) {
     auto intAttr = dyn_cast<IntegerAttr>(entry);
     if (!intAttr || intAttr.getInt() <= 0)
-      return op.emitOpError() << name << " entries must be positive";
+      return op->emitOpError() << name << " entries must be positive";
   }
   return success();
 }
@@ -791,6 +974,83 @@ LogicalResult QLinearConvOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// QuantConvOp: i8 x i8 -> i32 grouped 2D convolution
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QuantConvOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void QuantConvOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult QuantConvOp::verify() {
+  if (failed(verifyDpsComputeOp(*this, {getInput(), getWeights(), getOutput()},
+                                /*numInits=*/1)))
+    return failure();
+  auto inputType = dyn_cast<ShapedType>(getInput().getType());
+  auto weightsType = dyn_cast<ShapedType>(getWeights().getType());
+  auto outputType = dyn_cast<ShapedType>(getOutput().getType());
+  if (!inputType || !weightsType || !outputType || !inputType.hasRank() ||
+      !weightsType.hasRank() || !outputType.hasRank() ||
+      inputType.getRank() != 4 || weightsType.getRank() != 4 ||
+      outputType.getRank() != 4)
+    return emitOpError("input, weights, and output must be rank 4");
+  if (!isAnchorByte(inputType.getElementType()))
+    return emitOpError("input must be i8 or ui8");
+  if (!weightsType.getElementType().isSignlessInteger(8))
+    return emitOpError("weights must be i8");
+  if (!outputType.getElementType().isSignlessInteger(32))
+    return emitOpError("output must be i32");
+  if (failed(verifyPositivePair(*this, getKernelShape(), "kernel_shape")) ||
+      failed(verifyPositivePair(*this, getStrides(), "strides")) ||
+      failed(verifyPositivePair(*this, getDilations(), "dilations")))
+    return failure();
+  if (getPads().size() != 4 || llvm::any_of(getPads(), [](Attribute entry) {
+        auto intAttr = dyn_cast<IntegerAttr>(entry);
+        return !intAttr || intAttr.getInt() < 0;
+      }))
+    return emitOpError("pads must have 4 non-negative entries");
+  int64_t group = getGroup();
+  if (group < 1)
+    return emitOpError("group must be positive");
+
+  // The rules of the HipToTosa lowering, for the extents that are static.
+  ArrayRef<int64_t> in = inputType.getShape();
+  ArrayRef<int64_t> w = weightsType.getShape();
+  ArrayRef<int64_t> out = outputType.getShape();
+  auto divides = [&](int64_t extent) {
+    return ShapedType::isDynamic(extent) || extent % group == 0;
+  };
+  if (!divides(in[1]) || !divides(out[1]))
+    return emitOpError("input and output channels must be divisible by group");
+  if (!ShapedType::isDynamic(in[1]) && !extentsAgree(w[1], in[1] / group))
+    return emitOpError("weight input channels must equal C / group");
+  if (!extentsAgree(in[0], out[0]) || !extentsAgree(w[0], out[1]))
+    return emitOpError("batch or output channels disagree");
+  for (int64_t dim : llvm::seq<int64_t>(2)) {
+    int64_t kernel = cast<IntegerAttr>(getKernelShape()[dim]).getInt();
+    if (!extentsAgree(w[dim + 2], kernel))
+      return emitOpError("kernel_shape disagrees with the weight tensor");
+    if (ShapedType::isDynamic(in[dim + 2]) ||
+        ShapedType::isDynamic(out[dim + 2]))
+      continue;
+    int64_t stride = cast<IntegerAttr>(getStrides()[dim]).getInt();
+    int64_t dilation = cast<IntegerAttr>(getDilations()[dim]).getInt();
+    int64_t span = in[dim + 2] - 1 +
+                   cast<IntegerAttr>(getPads()[dim]).getInt() +
+                   cast<IntegerAttr>(getPads()[dim + 2]).getInt() -
+                   (kernel - 1) * dilation;
+    if (span < 0 || span / stride + 1 != out[dim + 2])
+      return emitOpError("output shape disagrees with the convolution window");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // QLinearMatMulOp: onnx.QLinearMatMul, rank-2 8-bit
 //===----------------------------------------------------------------------===//
 
@@ -804,9 +1064,11 @@ void QLinearMatMulOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
-static LogicalResult verifyPerTensorParam(QLinearMatMulOp op, Value scale,
-                                          Value zp, Type storage,
-                                          StringRef name) {
+// `axisExtent` is 1 for a per-tensor parameter. For B it is N, so the scale
+// and zero point may each be one element or one value per output column.
+static LogicalResult verifyQuantParam(QLinearMatMulOp op, Value scale, Value zp,
+                                      Type storage, StringRef name,
+                                      int64_t axisExtent) {
   auto scaleType = dyn_cast<ShapedType>(scale.getType());
   auto zpType = dyn_cast<ShapedType>(zp.getType());
   if (!scaleType || !zpType || !scaleType.hasRank() || !zpType.hasRank() ||
@@ -819,10 +1081,20 @@ static LogicalResult verifyPerTensorParam(QLinearMatMulOp op, Value scale,
     return op.emitOpError()
            << name
            << " zero point element type must match the quantized tensor";
+  auto fits = [&](int64_t count) { return count == 1 || count == axisExtent; };
+  if (axisExtent == 1) {
+    if (!scaleType.hasStaticShape() || !zpType.hasStaticShape() ||
+        scaleType.getNumElements() != 1 || zpType.getNumElements() != 1)
+      return op.emitOpError()
+             << name << " scale and zero point must be a single element";
+    return success();
+  }
   if (!scaleType.hasStaticShape() || !zpType.hasStaticShape() ||
-      scaleType.getNumElements() != 1 || zpType.getNumElements() != 1)
+      !fits(scaleType.getNumElements()) || !fits(zpType.getNumElements()))
     return op.emitOpError()
-           << name << " scale and zero point must be a single element";
+           << name
+           << " scale and zero point must be one element or one value per "
+              "column";
   return success();
 }
 
@@ -853,13 +1125,52 @@ LogicalResult QLinearMatMulOp::verify() {
       !isEightBitInt(yType.getElementType()))
     return emitOpError("a, b, and output must be 8-bit integers");
 
-  if (failed(verifyPerTensorParam(*this, getAScale(), getAZeroPoint(),
-                                  aType.getElementType(), "a")) ||
-      failed(verifyPerTensorParam(*this, getBScale(), getBZeroPoint(),
-                                  bType.getElementType(), "b")) ||
-      failed(verifyPerTensorParam(*this, getYScale(), getYZeroPoint(),
-                                  yType.getElementType(), "y")))
+  if (failed(verifyQuantParam(*this, getAScale(), getAZeroPoint(),
+                              aType.getElementType(), "a", /*axisExtent=*/1)) ||
+      failed(verifyQuantParam(*this, getBScale(), getBZeroPoint(),
+                              bType.getElementType(), "b", n)) ||
+      failed(verifyQuantParam(*this, getYScale(), getYZeroPoint(),
+                              yType.getElementType(), "y", /*axisExtent=*/1)))
     return failure();
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// QuantMatmulOp: i8 x i8 -> i32 rank-2 matrix product
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QuantMatmulOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void QuantMatmulOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult QuantMatmulOp::verify() {
+  if (failed(verifyDpsComputeOp(*this, {getA(), getB(), getOutput()},
+                                /*numInits=*/1)))
+    return failure();
+  auto aType = dyn_cast<ShapedType>(getA().getType());
+  auto bType = dyn_cast<ShapedType>(getB().getType());
+  auto outputType = dyn_cast<ShapedType>(getOutput().getType());
+  if (!aType || !bType || !outputType || !aType.hasRank() || !bType.hasRank() ||
+      !outputType.hasRank() || aType.getRank() != 2 || bType.getRank() != 2 ||
+      outputType.getRank() != 2)
+    return emitOpError("a, b, and output must be rank 2");
+  if (!isAnchorByte(aType.getElementType()))
+    return emitOpError("a must be i8 or ui8");
+  if (!bType.getElementType().isSignlessInteger(8))
+    return emitOpError("b must be i8");
+  if (!outputType.getElementType().isSignlessInteger(32))
+    return emitOpError("output must be i32");
+  if (!extentsAgree(bType.getDimSize(0), aType.getDimSize(1)))
+    return emitOpError("b rows must equal a columns");
+  if (!extentsAgree(outputType.getDimSize(0), aType.getDimSize(0)) ||
+      !extentsAgree(outputType.getDimSize(1), bType.getDimSize(1)))
+    return emitOpError("output shape must be [M, N]");
   return success();
 }
 
@@ -910,37 +1221,19 @@ void MatmulOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
-/// Read the shape of `v` if it is a `RankedTensorType` or `MemRefType`;
-/// returns an empty ArrayRef otherwise (caller must guard against this with
-/// `verifyDpsComputeOp`, which already rejects non-shaped data operands).
-static ArrayRef<int64_t> getShapeOf(Value v) {
-  if (auto t = dyn_cast<RankedTensorType>(v.getType()))
-    return t.getShape();
-  if (auto m = dyn_cast<MemRefType>(v.getType()))
-    return m.getShape();
-  return {};
-}
-
 LogicalResult MatmulOp::verify() {
   // First the cross-cutting DPS contract (all-tensor-or-all-memref +
   // result-count parity); failures here also rule out bogus operand types,
-  // so the matmul shape check below can rely on getShapeOf().
+  // so the matmul shape check below can rely on detail::getShapeOf().
   if (failed(verifyDpsComputeOp(*this, {getA(), getB(), getOutput()},
                                 /*numInits=*/1)))
     return failure();
 
-  // Static shape check via the shared matmul helper. The lambda is
-  // invoked once; it returns `{outputShape}` on success or `{}` on shape
-  // mismatch (in which case it has already issued a diagnostic on `*this`).
-  return mlir::hip::verifyHipOpShape(
-      *this, [&]() -> SmallVector<SmallVector<int64_t>> {
-        SmallVector<int64_t> outShape = mlir::hip::inferMatmulShape(
-            getShapeOf(getA()), getShapeOf(getB()),
-            [&]() { return this->emitOpError(); }, getTransA(), getTransB());
-        if (outShape.empty())
-          return {};
-        return {std::move(outShape)};
-      });
+  return mlir::hip::verifyHipOpShape(*this, [&] {
+    return mlir::hip::inferMatmulShape(
+        detail::getShapeOf(getA()), detail::getShapeOf(getB()),
+        [&]() { return this->emitOpError(); }, getTransA(), getTransB());
+  });
 }
 
 // `MatmulOp::reifyResultShapes` lives in
@@ -1050,15 +1343,11 @@ LogicalResult QMatMulOp::verify() {
       return failure();
   }
 
-  return mlir::hip::verifyHipOpShape(
-      *this, [&]() -> SmallVector<SmallVector<int64_t>> {
-        SmallVector<int64_t> outShape = mlir::hip::inferMatmulShape(
-            getShapeOf(getA()), getShapeOf(getB()),
-            [&]() { return this->emitOpError(); }, getTransA(), getTransB());
-        if (outShape.empty())
-          return {};
-        return {std::move(outShape)};
-      });
+  return mlir::hip::verifyHipOpShape(*this, [&] {
+    return mlir::hip::inferMatmulShape(
+        detail::getShapeOf(getA()), detail::getShapeOf(getB()),
+        [&]() { return this->emitOpError(); }, getTransA(), getTransB());
+  });
 }
 
 // `QMatMulOp::reifyResultShapes` lives in
@@ -1089,12 +1378,12 @@ LogicalResult QGemmOp::verify() {
   if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
     return failure();
 
-  ArrayRef<int64_t> aShape = getShapeOf(getA());
-  ArrayRef<int64_t> bShape = getShapeOf(getB());
+  ArrayRef<int64_t> aShape = detail::getShapeOf(getA());
+  ArrayRef<int64_t> bShape = detail::getShapeOf(getB());
   if (aShape.size() != 2 || bShape.size() != 2)
     return emitOpError("expected rank-2 A and B operands");
   if (Value c = getC()) {
-    if (getShapeOf(c).size() > 2)
+    if (detail::getShapeOf(c).size() > 2)
       return emitOpError("expected C to be broadcastable to [M, N]");
   }
 
@@ -1115,8 +1404,8 @@ LogicalResult QGemmOp::verify() {
 
   if (Value bScales = getBScales()) {
     Value bZeroPoints = getBZeroPoints();
-    ArrayRef<int64_t> scaleShape = getShapeOf(bScales);
-    ArrayRef<int64_t> zpShape = getShapeOf(bZeroPoints);
+    ArrayRef<int64_t> scaleShape = detail::getShapeOf(bScales);
+    ArrayRef<int64_t> zpShape = detail::getShapeOf(bZeroPoints);
     if (scaleShape.size() != 1 || zpShape.size() != 1)
       return emitOpError("expected rank-1 B_scales and B_zero_points");
     if (!cast<ShapedType>(bScales.getType()).getElementType().isF32())
@@ -1138,8 +1427,9 @@ LogicalResult QGemmOp::verify() {
   }
 
   return mlir::hip::verifyHipOpShape(
-      *this, [&]() -> SmallVector<SmallVector<int64_t>> {
-        return {{aShape[getTransA() ? 1 : 0], bShape[getTransB() ? 0 : 1]}};
+      *this, [&]() -> FailureOr<SmallVector<int64_t>> {
+        return SmallVector<int64_t>{aShape[getTransA() ? 1 : 0],
+                                    bShape[getTransB() ? 0 : 1]};
       });
 }
 
@@ -1376,6 +1666,375 @@ LogicalResult GroupNormOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// GatedRmsNormOp: ins(input, scale, gate), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GatedRmsNormOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void GatedRmsNormOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult GatedRmsNormOp::verify() {
+  if (failed(verifyDpsComputeOp(
+          *this, {getInput(), getScale(), getGate(), getOutput()},
+          /*numInits=*/1))) {
+    return failure();
+  }
+  if (getActivation() != "silu" && getActivation() != "sigmoid") {
+    return emitOpError("activation must be \"silu\" or \"sigmoid\", got \"")
+           << getActivation() << "\"";
+  }
+
+  auto inputType = dyn_cast<ShapedType>(getInput().getType());
+  auto scaleType = dyn_cast<ShapedType>(getScale().getType());
+  if (!inputType || !inputType.hasRank() || inputType.getRank() < 1) {
+    return emitOpError("expected a ranked input of rank >= 1");
+  }
+  if (!scaleType || !scaleType.hasRank() || scaleType.getRank() != 1) {
+    return emitOpError("expected 1-D scale");
+  }
+  auto gateType = dyn_cast<ShapedType>(getGate().getType());
+  if (!gateType || !gateType.hasRank() ||
+      gateType.getShape() != inputType.getShape() ||
+      gateType.getElementType() != inputType.getElementType()) {
+    return emitOpError("gate shape and element type must match the input");
+  }
+  int64_t last = inputType.getDimSize(inputType.getRank() - 1);
+  int64_t groupWidth = scaleType.getDimSize(0);
+  if (!ShapedType::isDynamic(last) && !ShapedType::isDynamic(groupWidth) &&
+      (groupWidth <= 0 || last % groupWidth != 0)) {
+    return emitOpError("input last dimension ")
+           << last << " is not a multiple of the scale length " << groupWidth;
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// EngramGateOp: ins(key, query, value, kscale, qscale, [cscale])
+//               outs(output, [normed])
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange EngramGateOp::getDpsInitsMutable() {
+  return getOutputsMutable();
+}
+
+void EngramGateOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult EngramGateOp::verify() {
+  size_t numOutputs = getOutputs().size();
+  if (numOutputs != 1 && numOutputs != 2) {
+    return emitOpError("expected 1 or 2 outputs, got ") << numOutputs;
+  }
+  if (numOutputs == 2 && !getConvNormScale()) {
+    return emitOpError("the second output requires conv_norm_scale");
+  }
+  auto keyType = dyn_cast<ShapedType>(getKey().getType());
+  auto queryType = dyn_cast<ShapedType>(getQuery().getType());
+  auto valueType = dyn_cast<ShapedType>(getValue().getType());
+  if (!keyType || !keyType.hasRank() || keyType.getRank() != 4) {
+    return emitOpError("expected key of rank 4 (B, S, hc, H)");
+  }
+  if (!queryType || !queryType.hasRank() ||
+      queryType.getShape() != keyType.getShape()) {
+    return emitOpError("query shape must match key");
+  }
+  if (!valueType || !valueType.hasRank() || valueType.getRank() != 3) {
+    return emitOpError("expected value of rank 3 (B, S, H)");
+  }
+
+  auto compatible = [](int64_t a, int64_t b) {
+    return ShapedType::isDynamic(a) || ShapedType::isDynamic(b) || a == b;
+  };
+  ArrayRef<int64_t> key = keyType.getShape();
+  ArrayRef<int64_t> value = valueType.getShape();
+  if (!compatible(value[0], key[0]) || !compatible(value[1], key[1]) ||
+      !compatible(value[2], key[3])) {
+    return emitOpError("value shape must be (B, S, H) of key (B, S, hc, H)");
+  }
+  SmallVector<Value> scales = {getKeyNormScale(), getQueryNormScale()};
+  if (getConvNormScale()) {
+    scales.push_back(getConvNormScale());
+  }
+  for (Value scale : scales) {
+    auto scaleType = dyn_cast<ShapedType>(scale.getType());
+    if (!scaleType || !scaleType.hasRank() || scaleType.getRank() != 2 ||
+        !compatible(scaleType.getDimSize(0), key[2]) ||
+        !compatible(scaleType.getDimSize(1), key[3])) {
+      return emitOpError("norm scales must have shape (hc, H)");
+    }
+  }
+  for (Value output : getOutputs()) {
+    auto outputType = dyn_cast<ShapedType>(output.getType());
+    if (!outputType || !outputType.hasRank() || outputType.getRank() != 4 ||
+        !llvm::all_of(llvm::seq<int64_t>(0, 4), [&](int64_t i) {
+          return compatible(outputType.getDimSize(i), key[i]);
+        })) {
+      return emitOpError("outputs must have the key shape");
+    }
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// HyperConnectionPreMixOp: ins(streams, pre_mix) outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange HyperConnectionPreMixOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void HyperConnectionPreMixOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult HyperConnectionPreMixOp::verify() {
+  if (failed(verifyDpsComputeOp(*this, {getStreams(), getPreMix(), getOutput()},
+                                /*numInits=*/1)))
+    return failure();
+
+  int64_t branches = getBranches();
+  int64_t hidden = getHidden();
+  int64_t flattened = getFlattened();
+  if (branches <= 0 || hidden <= 0)
+    return emitOpError("branches and hidden must be positive");
+  if (flattened != 0 && flattened != 1)
+    return emitOpError("flattened must be 0 or 1");
+  if (getGateSigmoid() != 0 && getGateSigmoid() != 1)
+    return emitOpError("gate_sigmoid must be 0 or 1");
+  auto streams = dyn_cast<ShapedType>(getStreams().getType());
+  if (!streams || !streams.hasRank())
+    return emitOpError("expected ranked streams");
+  if (!streams.getElementType().isF16() && !streams.getElementType().isF32())
+    return emitOpError("streams must be f16 or f32");
+  if (flattened) {
+    if (streams.getRank() < 1)
+      return emitOpError("flattened streams need rank >= 1");
+    int64_t width = streams.getDimSize(streams.getRank() - 1);
+    if (!ShapedType::isDynamic(width) && width != branches * hidden)
+      return emitOpError("flattened stream width must be branches * hidden");
+  } else {
+    if (streams.getRank() < 2)
+      return emitOpError("grouped streams need rank >= 2");
+    int64_t rank = streams.getRank();
+    int64_t branchDim = streams.getDimSize(rank - 2);
+    int64_t hiddenDim = streams.getDimSize(rank - 1);
+    if (!ShapedType::isDynamic(branchDim) && branchDim != branches ||
+        !ShapedType::isDynamic(hiddenDim) && hiddenDim != hidden)
+      return emitOpError("grouped streams must end in (branches, hidden)");
+  }
+
+  if (getGateLayout() != "branch" && getGateLayout() != "feature")
+    return emitOpError("gate_layout must be \"branch\" or \"feature\"");
+  auto gate = dyn_cast<ShapedType>(getPreMix().getType());
+  if (!gate || !gate.hasRank())
+    return emitOpError("expected a ranked gate");
+  if (gate.getElementType() != streams.getElementType())
+    return emitOpError("gate element type must match streams");
+  size_t prefix = flattened ? streams.getRank() - 1 : streams.getRank() - 2;
+  if (gate.getRank() < static_cast<int64_t>(prefix))
+    return emitOpError("gate rank is shorter than the stream prefix");
+  for (size_t i = 0; i < prefix; ++i) {
+    if (!ShapedType::isDynamic(gate.getDimSize(i)) &&
+        !ShapedType::isDynamic(streams.getDimSize(i)) &&
+        gate.getDimSize(i) != streams.getDimSize(i))
+      return emitOpError("gate leading dimensions must match streams");
+  }
+
+  auto output = dyn_cast<ShapedType>(getOutput().getType());
+  if (!output || !output.hasRank() || output.getRank() < 1)
+    return emitOpError("expected a ranked output");
+  if (output.getElementType() != streams.getElementType())
+    return emitOpError("output element type must match streams");
+  int64_t outputHidden = output.getDimSize(output.getRank() - 1);
+  if (!ShapedType::isDynamic(outputHidden) && outputHidden != hidden)
+    return emitOpError("output must end in hidden");
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// HyperConnectionPostMixOp: ins(streams, block_output, post_mix, [stream_mix])
+//                           outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange HyperConnectionPostMixOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void HyperConnectionPostMixOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult HyperConnectionPostMixOp::verify() {
+  SmallVector<Value> dataOperands{getStreams(), getBlockOutput(), getPostMix()};
+  if (getStreamMix())
+    dataOperands.push_back(getStreamMix());
+  dataOperands.push_back(getOutput());
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
+    return failure();
+
+  int64_t branches = getBranches();
+  int64_t hidden = getHidden();
+  int64_t flattened = getFlattened();
+  if (branches <= 0 || hidden <= 0)
+    return emitOpError("branches and hidden must be positive");
+  if (flattened != 0 && flattened != 1)
+    return emitOpError("flattened must be 0 or 1");
+  auto streams = dyn_cast<ShapedType>(getStreams().getType());
+  if (!streams || !streams.hasRank())
+    return emitOpError("expected ranked streams");
+  if (!streams.getElementType().isF16() && !streams.getElementType().isF32())
+    return emitOpError("streams must be f16 or f32");
+  if (flattened) {
+    if (streams.getRank() < 1)
+      return emitOpError("flattened streams need rank >= 1");
+    int64_t width = streams.getDimSize(streams.getRank() - 1);
+    if (!ShapedType::isDynamic(width) && width != branches * hidden)
+      return emitOpError("flattened stream width must be branches * hidden");
+  } else {
+    if (streams.getRank() < 2)
+      return emitOpError("grouped streams need rank >= 2");
+    int64_t rank = streams.getRank();
+    int64_t branchDim = streams.getDimSize(rank - 2);
+    int64_t hiddenDim = streams.getDimSize(rank - 1);
+    if (!ShapedType::isDynamic(branchDim) && branchDim != branches ||
+        !ShapedType::isDynamic(hiddenDim) && hiddenDim != hidden)
+      return emitOpError("grouped streams must end in (branches, hidden)");
+  }
+
+  auto block = dyn_cast<ShapedType>(getBlockOutput().getType());
+  if (!block || !block.hasRank() || block.getRank() < 1)
+    return emitOpError("expected a ranked block_output");
+  if (block.getElementType() != streams.getElementType())
+    return emitOpError("block_output element type must match streams");
+  int64_t blockHidden = block.getDimSize(block.getRank() - 1);
+  if (!ShapedType::isDynamic(blockHidden) && blockHidden != hidden)
+    return emitOpError("block_output must end in hidden");
+
+  if (getGateLayout() != "branch" && getGateLayout() != "feature")
+    return emitOpError("gate_layout must be \"branch\" or \"feature\"");
+  auto gate = dyn_cast<ShapedType>(getPostMix().getType());
+  if (!gate || !gate.hasRank())
+    return emitOpError("expected a ranked gate");
+  if (gate.getElementType() != streams.getElementType())
+    return emitOpError("gate element type must match streams");
+  size_t prefix = flattened ? streams.getRank() - 1 : streams.getRank() - 2;
+  if (gate.getRank() < static_cast<int64_t>(prefix))
+    return emitOpError("gate rank is shorter than the stream prefix");
+  for (size_t i = 0; i < prefix; ++i) {
+    if (!ShapedType::isDynamic(gate.getDimSize(i)) &&
+        !ShapedType::isDynamic(streams.getDimSize(i)) &&
+        gate.getDimSize(i) != streams.getDimSize(i))
+      return emitOpError("gate leading dimensions must match streams");
+  }
+
+  auto output = dyn_cast<ShapedType>(getOutput().getType());
+  if (!output || !output.hasRank() || output.getShape() != streams.getShape() ||
+      output.getElementType() != streams.getElementType())
+    return emitOpError("output shape and element type must match streams");
+  if (Value mix = getStreamMix()) {
+    auto mixType = dyn_cast<ShapedType>(mix.getType());
+    if (!mixType || !mixType.hasRank() ||
+        mixType.getElementType() != streams.getElementType())
+      return emitOpError("stream_mix element type must match streams");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// HyperConnectionPostMixNormOp:
+//   ins(streams, block_output, gate, norm_scale, [stream_mix])
+//   outs(residual, normed)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange HyperConnectionPostMixNormOp::getDpsInitsMutable() {
+  return getOutputsMutable();
+}
+
+void HyperConnectionPostMixNormOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult HyperConnectionPostMixNormOp::verify() {
+  if (getOutputs().size() != 2)
+    return emitOpError("expected residual and normed outputs");
+  SmallVector<Value> dataOperands{getStreams(), getBlockOutput(), getGate(),
+                                  getNormScale()};
+  if (getStreamMix())
+    dataOperands.push_back(getStreamMix());
+  dataOperands.push_back(getOutputs()[0]);
+  dataOperands.push_back(getOutputs()[1]);
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/2)))
+    return failure();
+  if (getBranches() <= 0 || getHidden() <= 0)
+    return emitOpError("branches and hidden must be positive");
+  if (getFlattened() != 0 && getFlattened() != 1)
+    return emitOpError("flattened must be 0 or 1");
+  if (getGateActivation() != 0 && getGateActivation() != 1)
+    return emitOpError("gate_activation must be 0 or 1");
+  if (getGateLayout() != "branch" && getGateLayout() != "feature")
+    return emitOpError("gate_layout must be \"branch\" or \"feature\"");
+  auto streams = dyn_cast<ShapedType>(getStreams().getType());
+  auto scale = dyn_cast<ShapedType>(getNormScale().getType());
+  if (!streams || !streams.hasRank() || !scale || !scale.hasRank() ||
+      scale.getRank() != 1)
+    return emitOpError("expected ranked streams and a 1-D norm scale");
+  if (!streams.getElementType().isF16() && !streams.getElementType().isF32())
+    return emitOpError("streams must be f16 or f32");
+  int64_t branches = getBranches();
+  int64_t hidden = getHidden();
+  if (getFlattened()) {
+    if (streams.getRank() < 1)
+      return emitOpError("flattened streams need rank >= 1");
+    int64_t width = streams.getDimSize(streams.getRank() - 1);
+    if (!ShapedType::isDynamic(width) && width != branches * hidden)
+      return emitOpError("flattened stream width must be branches * hidden");
+  } else {
+    if (streams.getRank() < 2)
+      return emitOpError("grouped streams need rank >= 2");
+    int64_t rank = streams.getRank();
+    int64_t branchDim = streams.getDimSize(rank - 2);
+    int64_t hiddenDim = streams.getDimSize(rank - 1);
+    if (!ShapedType::isDynamic(branchDim) && branchDim != branches ||
+        !ShapedType::isDynamic(hiddenDim) && hiddenDim != hidden)
+      return emitOpError("grouped streams must end in (branches, hidden)");
+  }
+  auto gateType = dyn_cast<ShapedType>(getGate().getType());
+  if (!gateType || gateType.getElementType() != streams.getElementType())
+    return emitOpError("gate must match the streams element type");
+  if (Value mix = getStreamMix()) {
+    auto mixType = dyn_cast<ShapedType>(mix.getType());
+    if (!mixType || mixType.getElementType() != streams.getElementType())
+      return emitOpError("stream_mix must match the streams element type");
+  }
+  int64_t scaleLen = scale.getDimSize(0);
+  if (!ShapedType::isDynamic(scaleLen) &&
+      scaleLen != getBranches() * getHidden())
+    return emitOpError("norm scale length must be branches * hidden");
+  for (Value out : getOutputs()) {
+    auto outType = dyn_cast<ShapedType>(out.getType());
+    if (!outType || outType.getShape() != streams.getShape() ||
+        outType.getElementType() != streams.getElementType())
+      return emitOpError("outputs must match the streams shape and type");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // RopeOp: ins(input, [position_ids], cos_cache, sin_cache), outs(output)
 //===----------------------------------------------------------------------===//
 
@@ -1389,6 +2048,115 @@ void RopeOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// MRotaryEmbeddingOp: ins(input, position_ids, cos_cache, sin_cache),
+//                     outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange MRotaryEmbeddingOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void MRotaryEmbeddingOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult MRotaryEmbeddingOp::verify() {
+  if (failed(verifyDpsComputeOp(*this,
+                                {getInput(), getPositionIds(), getCosCache(),
+                                 getSinCache(), getOutput()},
+                                1))) {
+    return failure();
+  }
+
+  auto inputType = cast<ShapedType>(getInput().getType());
+  Type elem = inputType.getElementType();
+  if (!elem.isF16() && !elem.isF32()) {
+    return emitOpError("input must be f16 or f32, got ") << elem;
+  }
+  if (inputType.getRank() != 3) {
+    return emitOpError("input must be rank 3, got rank ")
+           << inputType.getRank();
+  }
+  if (inputType.isDynamicDim(2)) {
+    return emitOpError("input dim 2 must be static");
+  }
+  const int64_t hidden = inputType.getDimSize(2);
+  const int64_t numHeads = getNumHeads();
+  if (numHeads <= 0 || hidden % numHeads != 0) {
+    return emitOpError("input dim 2 (")
+           << hidden << ") must be a positive multiple of num_heads ("
+           << numHeads << ")";
+  }
+  const int64_t headSize = hidden / numHeads;
+  const int64_t rotaryDim = getRotaryEmbeddingDim();
+  if (rotaryDim <= 0 || rotaryDim % 2 != 0 || rotaryDim > headSize) {
+    return emitOpError("rotary_embedding_dim must be positive, even and at "
+                       "most the head size ")
+           << headSize << ", got " << rotaryDim;
+  }
+  const int64_t half = rotaryDim / 2;
+
+  ArrayAttr section = getMropeSection();
+  if (section.size() != 3) {
+    return emitOpError("mrope_section must have 3 elements, got ")
+           << section.size();
+  }
+  int64_t sectionSum = 0;
+  for (Attribute a : section) {
+    int64_t v = cast<IntegerAttr>(a).getInt();
+    if (v < 0) {
+      return emitOpError("mrope_section values must be non-negative");
+    }
+    sectionSum += v;
+  }
+  if (sectionSum != half) {
+    return emitOpError("mrope_section must sum to rotary_embedding_dim / 2 = ")
+           << half << ", got " << sectionSum;
+  }
+  if (getMropeLayout() != 0 && getMropeLayout() != 1) {
+    return emitOpError("mrope_layout must be 0 or 1, got ") << getMropeLayout();
+  }
+
+  auto dimMismatch = [](int64_t got, int64_t want) {
+    return !ShapedType::isDynamic(got) && !ShapedType::isDynamic(want) &&
+           got != want;
+  };
+
+  auto posType = cast<ShapedType>(getPositionIds().getType());
+  if (!posType.getElementType().isInteger(64) || posType.getRank() != 3 ||
+      posType.getDimSize(0) != 3 ||
+      dimMismatch(posType.getDimSize(1), inputType.getDimSize(0)) ||
+      dimMismatch(posType.getDimSize(2), inputType.getDimSize(1))) {
+    return emitOpError("position_ids must be i64 [3, B, S], got ") << posType;
+  }
+
+  for (Value cache : {getCosCache(), getSinCache()}) {
+    auto cacheType = cast<ShapedType>(cache.getType());
+    if (cacheType.getElementType() != elem || cacheType.getRank() != 2 ||
+        cacheType.getDimSize(1) != half) {
+      return emitOpError("cos_cache and sin_cache must be ")
+             << elem << " [max_position, " << half << "], got " << cacheType;
+    }
+  }
+  if (dimMismatch(cast<ShapedType>(getCosCache().getType()).getDimSize(0),
+                  cast<ShapedType>(getSinCache().getType()).getDimSize(0))) {
+    return emitOpError("cos_cache and sin_cache must have the same shape");
+  }
+
+  auto outputType = cast<ShapedType>(getOutput().getType());
+  if (outputType.getElementType() != elem || outputType.getRank() != 3 ||
+      dimMismatch(outputType.getDimSize(0), inputType.getDimSize(0)) ||
+      dimMismatch(outputType.getDimSize(1), inputType.getDimSize(1)) ||
+      dimMismatch(outputType.getDimSize(2), hidden)) {
+    return emitOpError("output must match the input shape and type, got ")
+           << outputType;
+  }
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
@@ -1654,6 +2422,21 @@ void RandomNormalLikeOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// ArgMaxOp: ins(data), outs(output)
+//===----------------------------------------------------------------------===//
+
+// Operand order is (ctx, data, output); the DPS init is the trailing output.
+MutableOperandRange ArgMaxOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ArgMaxOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // RangeOp: ins(start, limit, delta), outs(output)
 //===----------------------------------------------------------------------===//
 
@@ -1905,6 +2688,22 @@ void ResizeOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+LogicalResult ResizeOp::verify() {
+  if (getRuntimeScales().empty())
+    return success();
+  // Runtime scales are indexed by window axis, so the launch split cannot be
+  // replanned from compile-time scales during lowering.
+  if (getScalesAttr())
+    return emitOpError("runtime_scales and scales are mutually exclusive");
+  auto spatialAttr = (*this)->getAttrOfType<IntegerAttr>("spatial_rank");
+  if (!spatialAttr || !(*this)->hasAttr("prefix_count"))
+    return emitOpError("runtime_scales requires prefix_count and spatial_rank");
+  if (static_cast<int64_t>(getRuntimeScales().size()) != spatialAttr.getInt())
+    return emitOpError("expected one runtime scale per window axis (")
+           << spatialAttr.getInt() << "), got " << getRuntimeScales().size();
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // GridSampleOp: ins(input, grid), outs(output)
 //===----------------------------------------------------------------------===//
@@ -1954,6 +2753,76 @@ LogicalResult GridSampleOp::verify() {
   int64_t align = getAlignCorners();
   if (align != 0 && align != 1)
     return emitOpError("align_corners must be 0 or 1, got ") << align;
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// RoiAlignOp: ins(input, rois, batch_indices), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange RoiAlignOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void RoiAlignOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult RoiAlignOp::verify() {
+  SmallVector<Value> dataOperands{getInput(), getRois(), getBatchIndices(),
+                                  getOutput()};
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
+    return failure();
+
+  auto inputShape = detail::getShapeOf(getInput());
+  auto roisShape = detail::getShapeOf(getRois());
+  auto indicesShape = detail::getShapeOf(getBatchIndices());
+  auto outputShape = detail::getShapeOf(getOutput());
+  if (inputShape.size() != 4)
+    return emitOpError("expected 4-D input (N, C, H, W)");
+  if (roisShape.size() != 2 ||
+      (!ShapedType::isDynamic(roisShape[1]) && roisShape[1] != 4))
+    return emitOpError("expected rois of shape (num_rois, 4)");
+  if (indicesShape.size() != 1)
+    return emitOpError("expected 1-D batch_indices (num_rois)");
+  if (outputShape.size() != 4)
+    return emitOpError(
+        "expected 4-D output (num_rois, C, output_height, output_width)");
+
+  Type elemTy = getElementTypeOrSelf(getInput().getType());
+  if (getElementTypeOrSelf(getRois().getType()) != elemTy ||
+      getElementTypeOrSelf(getOutput().getType()) != elemTy)
+    return emitOpError("input, rois and output must share an element type");
+  if (!getElementTypeOrSelf(getBatchIndices().getType()).isInteger(64))
+    return emitOpError("batch_indices must be i64");
+
+  int64_t mode = getMode();
+  if (mode != 0 && mode != 1)
+    return emitOpError("mode must be 0 (avg) or 1 (max), got ") << mode;
+  if (getOutputHeight() < 1 || getOutputWidth() < 1)
+    return emitOpError("output_height and output_width must be >= 1");
+  if (getSamplingRatio() < 0)
+    return emitOpError("sampling_ratio must be >= 0");
+  int64_t halfPixel = getHalfPixel();
+  if (halfPixel != 0 && halfPixel != 1)
+    return emitOpError("half_pixel must be 0 or 1, got ") << halfPixel;
+
+  auto checkDim = [&](int64_t outDim, int64_t expected,
+                      StringRef what) -> LogicalResult {
+    if (ShapedType::isDynamic(outDim) || ShapedType::isDynamic(expected) ||
+        outDim == expected)
+      return success();
+    return emitOpError("output ")
+           << what << " " << outDim << " does not match expected " << expected;
+  };
+  if (failed(checkDim(outputShape[0], roisShape[0], "num_rois")) ||
+      failed(checkDim(outputShape[0], indicesShape[0], "num_rois")) ||
+      failed(checkDim(outputShape[1], inputShape[1], "channels")) ||
+      failed(checkDim(outputShape[2], getOutputHeight(), "height")) ||
+      failed(checkDim(outputShape[3], getOutputWidth(), "width")))
+    return failure();
   return success();
 }
 
@@ -2139,11 +3008,132 @@ void MatMulNBitsOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+MutableOperandRange UnpackInt4Op::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void UnpackInt4Op::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult UnpackInt4Op::verify() {
+  if (failed(verifyDpsComputeOp(*this, {getPacked(), getOutput()},
+                                /*numInits=*/1)))
+    return failure();
+
+  auto packedType = cast<ShapedType>(getPacked().getType());
+  auto outputType = cast<ShapedType>(getOutput().getType());
+  if (!packedType.getElementType().isUnsignedInteger(8) ||
+      !outputType.getElementType().isUnsignedInteger(8))
+    return emitOpError("packed input and output must be ui8");
+  if (!packedType.hasStaticShape() || !outputType.hasStaticShape())
+    return emitOpError("packed input and output must have static shapes");
+  if (packedType.getRank() < 1 || packedType.getRank() != outputType.getRank())
+    return emitOpError("packed input and output ranks must match");
+  if (packedType.getShape().drop_back() != outputType.getShape().drop_back())
+    return emitOpError("only the last dimension changes when unpacking int4");
+  int64_t packedK = packedType.getShape().back();
+  int64_t unpackedK = outputType.getShape().back();
+  if (packedK <= 0 || unpackedK != packedK * 2)
+    return emitOpError("last dimension must double");
+  return success();
+}
+
+MutableOperandRange DequantBnb4Op::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void DequantBnb4Op::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult DequantBnb4Op::verify() {
+  if (failed(verifyDpsComputeOp(*this, {getPacked(), getAbsmax(), getOutput()},
+                                /*numInits=*/1)))
+    return failure();
+
+  auto shaped = [](Value value) { return cast<ShapedType>(value.getType()); };
+  ShapedType packedType = shaped(getPacked());
+  ShapedType absmaxType = shaped(getAbsmax());
+  ShapedType outputType = shaped(getOutput());
+  if (!packedType.getElementType().isUnsignedInteger(8))
+    return emitOpError("packed weights must be ui8");
+  if (!absmaxType.getElementType().isF32() ||
+      !outputType.getElementType().isF32())
+    return emitOpError("absmax and output must be f32");
+  if (!packedType.hasStaticShape() || !absmaxType.hasStaticShape() ||
+      !outputType.hasStaticShape())
+    return emitOpError("packed, absmax, and output must have static shapes");
+  if (outputType.getRank() != 2)
+    return emitOpError("output must be rank 2 [N, K]");
+
+  int64_t n = getN();
+  int64_t k = getK();
+  int64_t blockSize = getBlockSize();
+  int64_t quantType = getQuantType();
+  if (quantType != 0 && quantType != 1)
+    return emitOpError("quant_type must be 0 (FP4) or 1 (NF4)");
+  if (blockSize != 16 && blockSize != 32 && blockSize != 64 &&
+      blockSize != 128 && blockSize != 256)
+    return emitOpError("block_size must be 16, 32, 64, 128, or 256");
+  if (n <= 0 || k <= 0)
+    return emitOpError("N and K must be positive");
+  if (n > std::numeric_limits<int64_t>::max() / k)
+    return emitOpError("N * K overflows");
+  int64_t numel = n * k;
+  if (numel % 2 != 0 || numel % blockSize != 0)
+    return emitOpError("N * K must fill nibble pairs and whole blocks");
+  if (outputType.getDimSize(0) != n || outputType.getDimSize(1) != k)
+    return emitOpError("output shape must be [N, K]");
+  if (packedType.getNumElements() != numel / 2)
+    return emitOpError("packed length must be N * K / 2");
+  if (absmaxType.getNumElements() != numel / blockSize)
+    return emitOpError("absmax length must be N * K / block_size");
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // QMoEOp
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange QMoEOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+LogicalResult QMoEOp::verify() {
+  StringRef routing = getRoutingType();
+  if (routing == "softmax") {
+    if (getCorrectionBias())
+      return emitOpError("correction_bias requires routing_type sigmoid_bias");
+    return success();
+  }
+  if (routing != "sigmoid_bias")
+    return emitOpError("routing_type must be softmax or sigmoid_bias, got ")
+           << routing;
+  if (getRouterWeights())
+    return emitOpError("sigmoid_bias routing computes its own weights; "
+                       "router_weights must be absent");
+  auto logitsTy = dyn_cast<ShapedType>(getRouterProbs().getType());
+  auto biasTy = getCorrectionBias()
+                    ? dyn_cast<ShapedType>(getCorrectionBias().getType())
+                    : ShapedType();
+  if (!logitsTy || !logitsTy.getElementType().isF32())
+    return emitOpError("sigmoid_bias routing needs fp32 router logits");
+  if (!biasTy || biasTy.getRank() != 1 || !biasTy.getElementType().isF32())
+    return emitOpError("sigmoid_bias routing needs a rank-1 fp32 "
+                       "correction_bias");
+  if (logitsTy.hasRank() && logitsTy.getRank() > 0) {
+    int64_t experts = logitsTy.getDimSize(logitsTy.getRank() - 1);
+    int64_t biasLen = biasTy.getDimSize(0);
+    if (!ShapedType::isDynamic(experts) && !ShapedType::isDynamic(biasLen) &&
+        experts != biasLen)
+      return emitOpError("correction_bias length ")
+             << biasLen << " does not match " << experts << " experts";
+  }
+  return success();
+}
 
 void QMoEOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
@@ -2205,6 +3195,175 @@ void CausalConvWithStateOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+LogicalResult CausalConvWithStateOp::verify() {
+  auto dilation = static_cast<int64_t>(getDilation());
+  if (dilation < 1) {
+    return emitOpError("dilation must be at least 1, got ") << dilation;
+  }
+  if (getStateChannelsLast() && !getChannelsLast()) {
+    return emitOpError("state_channels_last requires channels_last");
+  }
+  if (dilation != 1 && !getStateChannelsLast()) {
+    return emitOpError("dilation > 1 requires state_channels_last");
+  }
+  if (!getStateChannelsLast()) {
+    return success();
+  }
+
+  auto inputType = cast<ShapedType>(getInput().getType());
+  auto weightType = cast<ShapedType>(getWeight().getType());
+  if (inputType.getRank() != 3 || weightType.getRank() != 3) {
+    return emitOpError("state_channels_last requires rank-3 input and weight");
+  }
+  if (weightType.isDynamicDim(2)) {
+    return emitOpError("state_channels_last requires a static kernel size");
+  }
+  int64_t stateLen = (weightType.getDimSize(2) - 1) * dilation;
+  int64_t channels = inputType.getDimSize(2);
+  SmallVector<Value, 2> states = {getPresentState()};
+  if (getPastState()) {
+    states.push_back(getPastState());
+  }
+  for (Value state : states) {
+    auto stateType = cast<ShapedType>(state.getType());
+    if (stateType.getRank() != 3) {
+      return emitOpError("state must be rank 3, got rank ")
+             << stateType.getRank();
+    }
+    if (!stateType.isDynamicDim(1) && stateType.getDimSize(1) != stateLen) {
+      return emitOpError("state dim 1 must be (kernel_size - 1) * dilation = ")
+             << stateLen << ", got " << stateType.getDimSize(1);
+    }
+    if (!ShapedType::isDynamic(channels) && !stateType.isDynamicDim(2) &&
+        stateType.getDimSize(2) != channels) {
+      return emitOpError("state dim 2 must match the input channels ")
+             << channels << ", got " << stateType.getDimSize(2);
+    }
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// NGramHashMappingOp: ins(input_ids, multipliers, vocab_sizes, [past_ids],
+//                         [head_offsets], [eos_token_id], [segment_ids])
+//                     outs(hash_ids, [present_ids])
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange NGramHashMappingOp::getDpsInitsMutable() {
+  return getOutputsMutable();
+}
+
+void NGramHashMappingOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult NGramHashMappingOp::verify() {
+  SmallVector<Value> data = {getInputIds(), getMultipliers(), getVocabSizes()};
+  for (Value v :
+       {getPastIds(), getHeadOffsets(), getEosTokenId(), getSegmentIds()}) {
+    if (v) {
+      data.push_back(v);
+    }
+  }
+  llvm::append_range(data, getOutputs());
+  if (getOutputs().empty() || getOutputs().size() > 2) {
+    return emitOpError("expects 1 or 2 outputs, got ") << getOutputs().size();
+  }
+  if (failed(verifyDpsComputeOp(*this, data, getOutputs().size()))) {
+    return failure();
+  }
+
+  const int64_t ngram = getMaxNgramSize();
+  const int64_t headsPerNgram = getNHeadPerNgram();
+  if (ngram < 2) {
+    return emitOpError("max_ngram_size must be >= 2, got ") << ngram;
+  }
+  if (headsPerNgram < 1) {
+    return emitOpError("n_head_per_ngram must be >= 1, got ") << headsPerNgram;
+  }
+  const int64_t history = ngram - 1;
+  const int64_t numHeads = history * headsPerNgram;
+  constexpr int64_t kAny = ShapedType::kDynamic;
+
+  auto ids = cast<ShapedType>(getInputIds().getType());
+  Type elem = ids.getElementType();
+  if (!elem.isSignlessInteger(32) && !elem.isSignlessInteger(64)) {
+    return emitOpError("input_ids must be i32 or i64, got ") << elem;
+  }
+  const auto padId = static_cast<int64_t>(getPadId());
+  if (elem.isSignlessInteger(32) &&
+      (padId < std::numeric_limits<int32_t>::min() ||
+       padId > std::numeric_limits<int32_t>::max())) {
+    return emitOpError("pad_id ") << padId << " does not fit in i32";
+  }
+  if (ids.getRank() != 2) {
+    return emitOpError("input_ids must be rank 2, got rank ") << ids.getRank();
+  }
+  const int64_t batch = ids.getDimSize(0);
+  const int64_t seq = ids.getDimSize(1);
+
+  auto check = [&](Value v, StringRef name, Type expectedElem,
+                   ArrayRef<int64_t> expected) -> LogicalResult {
+    auto type = cast<ShapedType>(v.getType());
+    if (type.getElementType() != expectedElem) {
+      return emitOpError() << name << " must have element type " << expectedElem
+                           << ", got " << type.getElementType();
+    }
+    if (type.getRank() != static_cast<int64_t>(expected.size())) {
+      return emitOpError() << name << " must be rank " << expected.size()
+                           << ", got rank " << type.getRank();
+    }
+    for (auto [i, want] : llvm::enumerate(expected)) {
+      int64_t got = type.getDimSize(i);
+      if (want != kAny && got != ShapedType::kDynamic && got != want) {
+        return emitOpError() << name << " dim " << i << " must be " << want
+                             << ", got " << got;
+      }
+    }
+    return success();
+  };
+
+  auto mult = cast<ShapedType>(getMultipliers().getType());
+  if (failed(check(getMultipliers(), "multipliers", elem, {kAny}))) {
+    return failure();
+  }
+  if (!mult.isDynamicDim(0) && mult.getDimSize(0) < ngram) {
+    return emitOpError("multipliers must have at least ")
+           << ngram << " elements, got " << mult.getDimSize(0);
+  }
+  if (failed(check(getVocabSizes(), "vocab_sizes", elem, {numHeads}))) {
+    return failure();
+  }
+  if (getPastIds() &&
+      failed(check(getPastIds(), "past_ids", elem, {batch, history}))) {
+    return failure();
+  }
+  if (getHeadOffsets() &&
+      failed(check(getHeadOffsets(), "head_offsets", elem, {numHeads}))) {
+    return failure();
+  }
+  if (getEosTokenId() &&
+      failed(check(getEosTokenId(), "eos_token_id", elem, {}))) {
+    return failure();
+  }
+  if (getSegmentIds() &&
+      failed(check(getSegmentIds(), "segment_ids",
+                   IntegerType::get(getContext(), 32), {batch, seq}))) {
+    return failure();
+  }
+  if (failed(
+          check(getOutputs()[0], "hash_ids", elem, {batch, seq, numHeads}))) {
+    return failure();
+  }
+  if (getOutputs().size() == 2 &&
+      failed(check(getOutputs()[1], "present_ids", elem, {batch, history}))) {
+    return failure();
+  }
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // GemmOp
 //===----------------------------------------------------------------------===//
@@ -2247,6 +3406,504 @@ void LinearAttentionOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// GatedDeltaNetOp: ins(qkv, decay, beta, initial_state, a_log, dt_bias)
+//                  outs(output, final_state)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GatedDeltaNetOp::getDpsInitsMutable() {
+  return MutableOperandRange(
+      *this, /*start=*/getOutputMutable().getOperandNumber(), /*length=*/2);
+}
+
+void GatedDeltaNetOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult GatedDeltaNetOp::verify() {
+  SmallVector<Value> data = {getQkv(),          getDecay(),     getBeta(),
+                             getInitialState(), getALog(),      getDtBias(),
+                             getOutput(),       getFinalState()};
+  if (failed(verifyDpsComputeOp(*this, data, 2))) {
+    return failure();
+  }
+
+  constexpr int64_t kAny = ShapedType::kDynamic;
+  Type f32 = Float32Type::get(getContext());
+
+  auto qkvType = cast<ShapedType>(getQkv().getType());
+  Type elem = qkvType.getElementType();
+  if (!elem.isF16() && !elem.isF32()) {
+    return emitOpError("qkv must be f16 or f32, got ") << elem;
+  }
+  if (qkvType.getRank() != 3) {
+    return emitOpError("qkv must be rank 3, got rank ") << qkvType.getRank();
+  }
+  if (qkvType.isDynamicDim(2)) {
+    return emitOpError("qkv dim 2 must be static");
+  }
+
+  auto stateType = cast<ShapedType>(getInitialState().getType());
+  if (stateType.getElementType() != f32) {
+    return emitOpError("initial_state must be f32, got ")
+           << stateType.getElementType();
+  }
+  if (stateType.getRank() != 4) {
+    return emitOpError("initial_state must be rank 4, got rank ")
+           << stateType.getRank();
+  }
+  for (int64_t i = 1; i < 4; ++i) {
+    if (stateType.isDynamicDim(i)) {
+      return emitOpError("initial_state dim ") << i << " must be static";
+    }
+  }
+
+  const int64_t batch = qkvType.getDimSize(0);
+  const int64_t seq = qkvType.getDimSize(1);
+  const int64_t packed = qkvType.getDimSize(2);
+  const int64_t numHeadsV = stateType.getDimSize(1);
+  const int64_t headSizeV = stateType.getDimSize(2);
+  const int64_t headSizeQk = stateType.getDimSize(3);
+  if (headSizeQk != 32 && headSizeQk != 64 && headSizeQk != 128 &&
+      headSizeQk != 256) {
+    return emitOpError("head size dk must be 32, 64, 128 or 256, got ")
+           << headSizeQk;
+  }
+  const int64_t qkWidth = packed - numHeadsV * headSizeV;
+  if (qkWidth <= 0 || qkWidth % (2 * headSizeQk) != 0) {
+    return emitOpError("qkv dim 2 (")
+           << packed << ") minus Hv*dv (" << numHeadsV * headSizeV
+           << ") must be a positive multiple of 2*dk (" << 2 * headSizeQk
+           << ")";
+  }
+  const int64_t numHeadsQk = qkWidth / (2 * headSizeQk);
+  if (numHeadsV % numHeadsQk != 0) {
+    return emitOpError("Hv (")
+           << numHeadsV << ") must be a multiple of Hqk (" << numHeadsQk << ")";
+  }
+
+  auto check = [&](Value v, StringRef name, Type expectedElem,
+                   ArrayRef<int64_t> expected) -> LogicalResult {
+    auto type = cast<ShapedType>(v.getType());
+    if (type.getElementType() != expectedElem) {
+      return emitOpError() << name << " must have element type " << expectedElem
+                           << ", got " << type.getElementType();
+    }
+    if (type.getRank() != static_cast<int64_t>(expected.size())) {
+      return emitOpError() << name << " must be rank " << expected.size()
+                           << ", got rank " << type.getRank();
+    }
+    for (auto [i, want] : llvm::enumerate(expected)) {
+      int64_t got = type.getDimSize(i);
+      if (want != kAny && got != ShapedType::kDynamic && got != want) {
+        return emitOpError() << name << " dim " << i << " must be " << want
+                             << ", got " << got;
+      }
+    }
+    return success();
+  };
+
+  if (failed(check(getInitialState(), "initial_state", f32,
+                   {batch, numHeadsV, headSizeV, headSizeQk})) ||
+      failed(check(getDecay(), "decay", f32, {batch, seq, numHeadsV})) ||
+      failed(check(getBeta(), "beta", f32, {batch, seq, numHeadsV})) ||
+      failed(check(getALog(), "a_log", f32, {numHeadsV})) ||
+      failed(check(getDtBias(), "dt_bias", f32, {numHeadsV})) ||
+      failed(check(getOutput(), "output", elem,
+                   {batch, seq, numHeadsV, headSizeV})) ||
+      failed(
+          check(getFinalState(), "final_state", f32,
+                {stateType.getDimSize(0), numHeadsV, headSizeV, headSizeQk}))) {
+    return failure();
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// DynamicSparseAttentionOp:
+//   ins(query) [kv(key, value)] cache(past_key, past_value)
+//   select(selected_indices, selected_counts, seqlens_k) [gate(gate)]
+//   [prologue(q_norm_weight, k_norm_weight, position_ids, cos_cache,
+//             sin_cache)] [pair(past_sequence_length)]
+//   outs(output, present_key, present_value)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange DynamicSparseAttentionOp::getDpsInitsMutable() {
+  return MutableOperandRange(
+      *this, /*start=*/getOutputMutable().getOperandNumber(), /*length=*/3);
+}
+
+void DynamicSparseAttentionOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult DynamicSparseAttentionOp::verify() {
+  if (static_cast<bool>(getKey()) != static_cast<bool>(getValue())) {
+    return emitOpError("key and value must be both given or both absent");
+  }
+  const SmallVector<Value> prologue = {getQNormWeight(), getKNormWeight(),
+                                       getPositionIds(), getCosCache(),
+                                       getSinCache()};
+  const int64_t prologueParts =
+      llvm::count_if(prologue, [](Value v) { return static_cast<bool>(v); });
+  const int64_t prologueAttrs = static_cast<int64_t>(bool(getNormEpsilon())) +
+                                bool(getMropeSection()) +
+                                bool(getMropeLayout());
+  const bool hasPrologue = prologueParts == 5 && prologueAttrs == 3;
+  if (!hasPrologue && (prologueParts != 0 || prologueAttrs != 0)) {
+    return emitOpError("q_norm_weight, k_norm_weight, position_ids, "
+                       "cos_cache, sin_cache, norm_epsilon, mrope_section and "
+                       "mrope_layout must be given together");
+  }
+  SmallVector<Value> data = {getQuery()};
+  if (getKey()) {
+    data.append({getKey(), getValue()});
+  }
+  data.append({getPastKey(), getPastValue(), getSelectedIndices(),
+               getSelectedCounts(), getSeqlensK()});
+  if (getGate()) {
+    data.push_back(getGate());
+  }
+  if (hasPrologue) {
+    data.append(prologue.begin(), prologue.end());
+  }
+  if (getPastSequenceLength()) {
+    data.push_back(getPastSequenceLength());
+  }
+  data.append({getOutput(), getPresentKey(), getPresentValue()});
+  if (failed(verifyDpsComputeOp(*this, data, 3))) {
+    return failure();
+  }
+
+  const int64_t numHeads = getNumHeads();
+  const int64_t kvNumHeads = getKvNumHeads();
+  if (numHeads <= 0 || kvNumHeads <= 0 || numHeads % kvNumHeads != 0) {
+    return emitOpError("num_heads (")
+           << numHeads << ") must be a positive multiple of kv_num_heads ("
+           << kvNumHeads << ")";
+  }
+  if (numHeads / kvNumHeads > 16) {
+    return emitOpError("num_heads / kv_num_heads must be at most 16, got ")
+           << numHeads / kvNumHeads;
+  }
+
+  const float scale = getScale().convertToFloat();
+  if (!std::isfinite(scale) || scale < 0.0f) {
+    return emitOpError("scale must be finite and non-negative");
+  }
+
+  constexpr int64_t kAny = ShapedType::kDynamic;
+  auto queryType = cast<ShapedType>(getQuery().getType());
+  const bool packed = !getKey();
+  const int64_t queryHeads = packed ? numHeads + 2 * kvNumHeads : numHeads;
+  if (queryType.getRank() != 3 || queryType.isDynamicDim(2) ||
+      queryType.getDimSize(2) % queryHeads != 0) {
+    return emitOpError("query must be rank 3 with a static last dim that is a "
+                       "multiple of ")
+           << (packed ? "num_heads + 2 * kv_num_heads" : "num_heads");
+  }
+  const int64_t headSize = queryType.getDimSize(2) / queryHeads;
+  if (headSize != 128 && headSize != 256) {
+    return emitOpError("head size must be 128 or 256, got ") << headSize;
+  }
+  int64_t halfRotary = kAny;
+  if (hasPrologue) {
+    ArrayRef<int64_t> section = *getMropeSection();
+    const float eps = getNormEpsilon()->convertToFloat();
+    if (section.size() != 3 ||
+        llvm::any_of(section, [](int64_t s) { return s < 0; })) {
+      return emitOpError("mrope_section must be three non-negative entries");
+    }
+    halfRotary = section[0] + section[1] + section[2];
+    if (halfRotary <= 0 || 2 * halfRotary > headSize) {
+      return emitOpError("rotary width 2 * sum(mrope_section) must be in "
+                         "(0, head size], got ")
+             << 2 * halfRotary;
+    }
+    if (*getMropeLayout() != 0 && *getMropeLayout() != 1) {
+      return emitOpError("mrope_layout must be 0 or 1");
+    }
+    if (!std::isfinite(eps) || eps < 0.0f) {
+      return emitOpError("norm_epsilon must be finite and non-negative");
+    }
+  }
+  auto pastType = cast<ShapedType>(getPastKey().getType());
+  if (pastType.getRank() != 4) {
+    return emitOpError("past_key must be rank 4, got rank ")
+           << pastType.getRank();
+  }
+  const int64_t batch = queryType.getDimSize(0);
+  const int64_t seq = queryType.getDimSize(1);
+  const int64_t rows =
+      ShapedType::isDynamic(batch) || ShapedType::isDynamic(seq) ? kAny
+                                                                 : batch * seq;
+  const int64_t cap = pastType.getDimSize(2);
+
+  Type f16 = Float16Type::get(getContext());
+  Type i32 = IntegerType::get(getContext(), 32);
+  auto check = [&](Value v, StringRef name, Type expectedElem,
+                   ArrayRef<int64_t> expected) -> LogicalResult {
+    auto type = cast<ShapedType>(v.getType());
+    if (type.getElementType() != expectedElem) {
+      return emitOpError() << name << " must have element type " << expectedElem
+                           << ", got " << type.getElementType();
+    }
+    if (type.getRank() != static_cast<int64_t>(expected.size())) {
+      return emitOpError() << name << " must be rank " << expected.size()
+                           << ", got rank " << type.getRank();
+    }
+    for (auto [i, want] : llvm::enumerate(expected)) {
+      int64_t got = type.getDimSize(i);
+      if (want != kAny && got != ShapedType::kDynamic && got != want) {
+        return emitOpError() << name << " dim " << i << " must be " << want
+                             << ", got " << got;
+      }
+    }
+    return success();
+  };
+
+  const SmallVector<int64_t> cacheShape = {batch, kvNumHeads, cap, headSize};
+  const int64_t qWidth = numHeads * headSize;
+  const int64_t kvWidth = kvNumHeads * headSize;
+  if (failed(check(getQuery(), "query", f16,
+                   {batch, seq, queryHeads * headSize})) ||
+      (!packed &&
+       (failed(check(getKey(), "key", f16, {batch, seq, kvWidth})) ||
+        failed(check(getValue(), "value", f16, {batch, seq, kvWidth})))) ||
+      (getGate() &&
+       failed(check(getGate(), "gate", f16, {batch, seq, qWidth}))) ||
+      (hasPrologue &&
+       (failed(check(getQNormWeight(), "q_norm_weight", f16, {headSize})) ||
+        failed(check(getKNormWeight(), "k_norm_weight", f16, {headSize})) ||
+        failed(check(getPositionIds(), "position_ids",
+                     IntegerType::get(getContext(), 64), {3, batch, seq})) ||
+        failed(check(getCosCache(), "cos_cache", f16, {kAny, halfRotary})) ||
+        failed(check(getSinCache(), "sin_cache", f16, {kAny, halfRotary})))) ||
+      failed(check(getPastKey(), "past_key", f16, cacheShape)) ||
+      failed(check(getPastValue(), "past_value", f16, cacheShape)) ||
+      failed(
+          check(getSelectedIndices(), "selected_indices", i32, {rows, kAny})) ||
+      failed(check(getSelectedCounts(), "selected_counts", i32, {rows})) ||
+      failed(check(getSeqlensK(), "seqlens_k", i32, {batch})) ||
+      (getPastSequenceLength() &&
+       failed(
+           check(getPastSequenceLength(), "past_sequence_length", i32, {1}))) ||
+      failed(check(getOutput(), "output", f16, {batch, seq, qWidth})) ||
+      failed(check(getPresentKey(), "present_key", f16, cacheShape)) ||
+      failed(check(getPresentValue(), "present_value", f16, cacheShape))) {
+    return failure();
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// SparseAttentionIndexerOp:
+//   ins(query, query_norm_weight, key_norm_weight, cos_cache, sin_cache,
+//       past_key) [mask(mask)] [past_sequence_length(past_sequence_length)]
+//       [rotary_position_ids(rotary_position_ids)]
+//   outs(selected_indices, present_key) [counts(selected_counts)]
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SparseAttentionIndexerOp::getDpsInitsMutable() {
+  return MutableOperandRange(
+      *this, /*start=*/getSelectedIndicesMutable().getOperandNumber(),
+      /*length=*/getSelectedCounts() ? 3 : 2);
+}
+
+void SparseAttentionIndexerOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult SparseAttentionIndexerOp::verify() {
+  SmallVector<Value> data = {getQuery(),         getQueryNormWeight(),
+                             getKeyNormWeight(), getCosCache(),
+                             getSinCache(),      getPastKey()};
+  if (getMask()) {
+    data.push_back(getMask());
+  }
+  if (getPastSequenceLength()) {
+    data.push_back(getPastSequenceLength());
+  }
+  if (getRotaryPositionIds()) {
+    data.push_back(getRotaryPositionIds());
+  }
+  data.push_back(getSelectedIndices());
+  data.push_back(getPresentKey());
+  if (getSelectedCounts()) {
+    data.push_back(getSelectedCounts());
+  }
+  if (failed(verifyDpsComputeOp(*this, data, getSelectedCounts() ? 3 : 2))) {
+    return failure();
+  }
+  const bool gathered = static_cast<bool>(getRotaryPositionIds());
+  if (gathered != getRotarySections().has_value()) {
+    return emitOpError(
+        "rotary_position_ids and rotary_sections must be given together");
+  }
+  if (getPairFormat() &&
+      (getMask() || !getPastSequenceLength() || !getSelectedCounts())) {
+    return emitOpError("pair_format needs past_sequence_length and "
+                       "selected_counts and no mask");
+  }
+
+  const int64_t ratio = getCompressRatio();
+  const int64_t budget = getTokenBudget();
+  if (ratio <= 0 || budget <= 0 || budget % ratio != 0) {
+    return emitOpError("token_budget (")
+           << budget << ") must be a positive multiple of compress_ratio ("
+           << ratio << ")";
+  }
+  if (budget / ratio > 512) {
+    return emitOpError("token_budget / compress_ratio must be at most 512, "
+                       "got ")
+           << budget / ratio;
+  }
+  const float epsilon = getEpsilon().convertToFloat();
+  if (!std::isfinite(epsilon) || epsilon < 0.0f) {
+    return emitOpError("epsilon must be finite and non-negative");
+  }
+
+  constexpr int64_t kAny = ShapedType::kDynamic;
+  constexpr int64_t kHeadSize = 128;
+  auto queryType = cast<ShapedType>(getQuery().getType());
+  Type elem = queryType.getElementType();
+  if (!elem.isF16() && !elem.isF32()) {
+    return emitOpError("query element type must be f16 or f32, got ") << elem;
+  }
+  if (queryType.getRank() != 3 || queryType.isDynamicDim(2)) {
+    return emitOpError("query must be rank 3 with a static width");
+  }
+  const int64_t width = queryType.getDimSize(2);
+  const int64_t numHeads = width / kHeadSize - 1;
+  if (width % kHeadSize != 0 || numHeads < 1 || numHeads > 8) {
+    return emitOpError("query width must be (N + 1) * 128 with 1 <= N <= 8, "
+                       "got ")
+           << width;
+  }
+  const int64_t batch = queryType.getDimSize(0);
+  const int64_t seq = queryType.getDimSize(1);
+
+  auto cosType = cast<ShapedType>(getCosCache().getType());
+  const int64_t cosRank = cosType.getRank();
+  if ((cosRank != 2 && cosRank != 3) || cosType.isDynamicDim(cosRank - 1)) {
+    return emitOpError("cos_cache must be rank 2 or 3 with a static width");
+  }
+  if (gathered && cosRank != 2) {
+    return emitOpError("cos_cache must be a rank 2 base table with "
+                       "rotary_position_ids");
+  }
+  const int64_t rotary = cosType.getDimSize(cosRank - 1) * (gathered ? 2 : 1);
+  if (rotary <= 0 || rotary % 2 != 0 || rotary > kHeadSize) {
+    return emitOpError("rotary width must be even and in (0, 128], got ")
+           << rotary;
+  }
+
+  auto pastType = cast<ShapedType>(getPastKey().getType());
+  if (pastType.getRank() != 3) {
+    return emitOpError("past_key must be rank 3, got rank ")
+           << pastType.getRank();
+  }
+  auto selectedType = cast<ShapedType>(getSelectedIndices().getType());
+  auto presentType = cast<ShapedType>(getPresentKey().getType());
+  if (pastType.isDynamicDim(2) ||
+      (presentType.getRank() == 3 && presentType.isDynamicDim(2)) ||
+      (selectedType.getRank() == 3 && selectedType.isDynamicDim(2))) {
+    return emitOpError("past_key, present_key and selected_indices must have "
+                       "a static last dim");
+  }
+  const bool shared = static_cast<bool>(getPastSequenceLength());
+  const int64_t past = pastType.getDimSize(1);
+  const int64_t total =
+      shared || ShapedType::isDynamic(past) || ShapedType::isDynamic(seq)
+          ? kAny
+          : past + seq;
+  const int64_t presentRows = shared ? past : total;
+
+  Type i32 = IntegerType::get(getContext(), 32);
+  Type i64 = IntegerType::get(getContext(), 64);
+  auto check = [&](Value v, StringRef name, Type expectedElem,
+                   ArrayRef<int64_t> expected) -> LogicalResult {
+    auto type = cast<ShapedType>(v.getType());
+    if (type.getElementType() != expectedElem) {
+      return emitOpError() << name << " must have element type " << expectedElem
+                           << ", got " << type.getElementType();
+    }
+    if (type.getRank() != static_cast<int64_t>(expected.size())) {
+      return emitOpError() << name << " must be rank " << expected.size()
+                           << ", got rank " << type.getRank();
+    }
+    for (auto [i, want] : llvm::enumerate(expected)) {
+      int64_t got = type.getDimSize(i);
+      if (want != kAny && got != ShapedType::kDynamic && got != want) {
+        return emitOpError() << name << " dim " << i << " must be " << want
+                             << ", got " << got;
+      }
+    }
+    return success();
+  };
+
+  SmallVector<int64_t> cacheShape = {kAny, gathered ? rotary / 2 : rotary};
+  if (cosRank == 3) {
+    cacheShape.insert(cacheShape.begin(), batch);
+  }
+  if (gathered) {
+    Value ids = getRotaryPositionIds();
+    if (failed(check(ids, "rotary_position_ids", i64, {kAny, batch, kAny}))) {
+      return failure();
+    }
+    ArrayRef<int32_t> sections = *getRotarySections();
+    if (static_cast<int64_t>(sections.size()) != rotary / 2) {
+      return emitOpError("rotary_sections must have ")
+             << rotary / 2 << " entries, got " << sections.size();
+    }
+    // The kernels store the section map as bytes.
+    constexpr int64_t kMaxRotarySections = 256;
+    const int64_t numSections = cast<ShapedType>(ids.getType()).getDimSize(0);
+    const int64_t limit =
+        ShapedType::isDynamic(numSections)
+            ? kMaxRotarySections
+            : std::min<int64_t>(numSections, kMaxRotarySections);
+    for (int32_t s : sections) {
+      if (s < 0 || s >= limit) {
+        return emitOpError("rotary_sections entries must be in [0, ")
+               << limit << "), got " << s;
+      }
+    }
+  }
+  if (failed(check(getQueryNormWeight(), "query_norm_weight", elem,
+                   {kHeadSize})) ||
+      failed(check(getKeyNormWeight(), "key_norm_weight", elem, {kHeadSize})) ||
+      failed(check(getCosCache(), "cos_cache", elem, cacheShape)) ||
+      failed(check(getSinCache(), "sin_cache", elem, cacheShape)) ||
+      failed(check(getPastKey(), "past_key", elem, {batch, kAny, kHeadSize})) ||
+      (getMask() && failed(check(getMask(), "mask", i64, {batch, total}))) ||
+      (shared && failed(check(getPastSequenceLength(), "past_sequence_length",
+                              i32, {1}))) ||
+      failed(check(getSelectedIndices(), "selected_indices", i32,
+                   {batch, seq, budget + ratio - 1})) ||
+      failed(check(getPresentKey(), "present_key", elem,
+                   {batch, presentRows, kHeadSize})) ||
+      (getSelectedCounts() &&
+       failed(
+           check(getSelectedCounts(), "selected_counts", i32, {batch, seq})))) {
+    return failure();
+  }
+  auto sinType = cast<ShapedType>(getSinCache().getType());
+  for (int64_t i = 0; i < cosRank; ++i) {
+    if (!cosType.isDynamicDim(i) && !sinType.isDynamicDim(i) &&
+        cosType.getDimSize(i) != sinType.getDimSize(i)) {
+      return emitOpError("sin_cache must have the shape of cos_cache");
+    }
+  }
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
@@ -2475,6 +4132,8 @@ MutableOperandRange GqaOp::getDpsInitsMutable() {
     ++numInputs;
   if (getVScale())
     ++numInputs;
+  if (getKeyBias())
+    ++numInputs;
 
   // DPS inits: output, present_key, present_value, [output_qk]
   unsigned numInits = 3;
@@ -2560,6 +4219,21 @@ LogicalResult GqaOp::verify() {
                        "(found key=")
            << (hasKey ? "present" : "absent")
            << ", value=" << (hasValue ? "present" : "absent") << ")";
+  }
+
+  // key_bias is one fp16 row per batch entry, [B, T]. It refines the mask the
+  // runtime already applies, so it cannot stand in for a full attention_bias.
+  if (Value keyBias = getKeyBias()) {
+    auto type = dyn_cast<ShapedType>(keyBias.getType());
+    if (!type || !type.hasRank() || type.getRank() != 2 ||
+        !type.getElementType().isF16())
+      return emitOpError("key_bias must be a rank-2 f16 [batch, total_seq_len]"
+                         " tensor or memref");
+    if (getAttentionBias())
+      return emitOpError("key_bias and attention_bias are mutually exclusive");
+    if (getNoCausal())
+      return emitOpError("key_bias requires causal attention (no_causal must "
+                         "be false)");
   }
 
   return success();
@@ -2964,6 +4638,16 @@ MutableOperandRange NonZeroOp::getDpsInitsMutable() {
 }
 
 void NonZeroOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+MutableOperandRange NonMaxSuppressionOp::getDpsInitsMutable() {
+  return MutableOperandRange(*this, /*start=*/6, /*length=*/2);
+}
+
+void NonMaxSuppressionOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);

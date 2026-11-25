@@ -63,9 +63,10 @@ module {
 
   // ===========================================================================
   // Regression: pre-surgery decoder self-attn (8-input WITH past_key/past_value
-  // non-empty) MUST keep lowering to hip.multi_head_attention — Task 8 only
-  // changes the empty-past 8-input case.  The post-surgery 9-input form is
-  // covered by test_whisper_self_mha_with_past.mlir.
+  // non-empty) whose present concatenates the past now lowers to causal
+  // hip.gqa (test_whisper_oga_mha.mlir covers the dynamic form). The
+  // post-surgery 9-input form is covered by
+  // test_whisper_self_mha_with_past.mlir.
   // ===========================================================================
   func.func @decoder_self_pre_surgery(
       %q:        tensor<1x1x1280xf16>,
@@ -91,10 +92,14 @@ module {
            none, none, none, tensor<1x20x447x64xf16>, tensor<1x20x447x64xf16>)
         -> (tensor<1x1x1280xf16>, tensor<1x20x448x64xf16>, tensor<1x20x448x64xf16>)
 
-    // 8-input WITH past_key/past_value present and no past_sequence_length
-    // → existing hip.multi_head_attention lowering (NOT hip.gqa).
-    // CHECK: hip.multi_head_attention
-    // CHECK-NOT: hip.gqa
+    // 8-input WITH past_key/past_value present and no past_sequence_length,
+    // present = concat(past, this step) (447 + 1 = 448) → causal hip.gqa
+    // (onnxruntime-genai's unshared self-attention), seqlens_k = P + S - 1.
+    // CHECK: arith.addi
+    // Positional operands: query, key, value, past_key, past_value, seqlens_k, total.
+    // CHECK: hip.gqa(%{{.*}}) ins(%{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}} :
+    // CHECK-NOT: no_causal = true
+    // CHECK-NOT: hip.multi_head_attention
 
     return %out#0, %out#1, %out#2
       : tensor<1x1x1280xf16>, tensor<1x20x448x64xf16>, tensor<1x20x448x64xf16>

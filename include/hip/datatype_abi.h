@@ -30,16 +30,17 @@
 //   4. Update each backend mapping function
 //===----------------------------------------------------------------------===//
 
-#define HIPDNN_EP_DATATYPE_FLOAT 0    // f32, 4 bytes
-#define HIPDNN_EP_DATATYPE_HALF 1     // f16, 2 bytes
-#define HIPDNN_EP_DATATYPE_BFLOAT16 2 // bf16, 2 bytes
-#define HIPDNN_EP_DATATYPE_INT32 3    // i32, 4 bytes
-#define HIPDNN_EP_DATATYPE_INT64 4    // i64, 8 bytes
-#define HIPDNN_EP_DATATYPE_INT8 5     // i8, 1 byte
-#define HIPDNN_EP_DATATYPE_DOUBLE 6   // f64, 8 bytes
-#define HIPDNN_EP_DATATYPE_UINT8 7    // ui8, 1 byte
-#define HIPDNN_EP_DATATYPE_INT16 8    // i16, 2 byte
-#define HIPDNN_EP_DATATYPE_UINT16 9   // ui16, 2 byte
+#define HIPDNN_EP_DATATYPE_FLOAT 0         // f32, 4 bytes
+#define HIPDNN_EP_DATATYPE_HALF 1          // f16, 2 bytes
+#define HIPDNN_EP_DATATYPE_BFLOAT16 2      // bf16, 2 bytes
+#define HIPDNN_EP_DATATYPE_INT32 3         // i32, 4 bytes
+#define HIPDNN_EP_DATATYPE_INT64 4         // i64, 8 bytes
+#define HIPDNN_EP_DATATYPE_INT8 5          // i8, 1 byte
+#define HIPDNN_EP_DATATYPE_DOUBLE 6        // f64, 8 bytes
+#define HIPDNN_EP_DATATYPE_UINT8 7         // ui8, 1 byte
+#define HIPDNN_EP_DATATYPE_INT16 8         // i16, 2 byte
+#define HIPDNN_EP_DATATYPE_UINT16 9        // ui16, 2 byte
+#define HIPDNN_EP_DATATYPE_FLOAT8E4M3FN 10 // f8E4M3FN, 1 byte
 
 // Returned by the compiler-side mappings for an element type with no runtime
 // identifier, so a caller fails conversion explicitly instead of passing a

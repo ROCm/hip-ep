@@ -112,14 +112,22 @@ endfunction()
 #   1. CMake cache variable: -DTHEROCK_DIST=/path/to/therock
 #   2. Environment variable:  THEROCK_DIST=/path/to/therock
 #   3. Auto-downloaded from the pinned TheRock release when neither is set.
+#      The download lands in <build>/_therock and is replaced when the pin in
+#      cmake/deps.txt changes.
 # The resolved path is added to CMAKE_PREFIX_PATH so find_package(hip) finds it.
 if(NOT BUILD_MOCK_RUNTIME)
   set(THEROCK_DIST "" CACHE PATH "TheRock ROCm SDK distribution path")
+  set(_therock_root "${CMAKE_BINARY_DIR}/_therock")
   set(_therock_dist_resolved "${THEROCK_DIST}")
   if(_therock_dist_resolved)
     string(STRIP "${_therock_dist_resolved}" _therock_dist_resolved)
   elseif(DEFINED ENV{THEROCK_DIST})
     string(STRIP "$ENV{THEROCK_DIST}" _therock_dist_resolved)
+  endif()
+  # The auto-download caches its own path in THEROCK_DIST; re-check that copy
+  # against the pin instead of treating it as a user-provided SDK.
+  if(_therock_dist_resolved STREQUAL _therock_root)
+    set(_therock_dist_resolved "")
   endif()
   if(_therock_dist_resolved AND NOT EXISTS "${_therock_dist_resolved}/bin")
     message(WARNING
@@ -131,10 +139,34 @@ if(NOT BUILD_MOCK_RUNTIME)
     set(THEROCK_DIST "${_therock_dist_resolved}"
         CACHE PATH "TheRock ROCm SDK distribution path" FORCE)
   else()
-    set(_therock_root "${CMAKE_BINARY_DIR}/_therock")
+    if(WIN32)
+      set(_therock_base "${DEP_HASH_therock_windows}")
+      set(_therock_url "${DEP_URL_therock_windows}/${_therock_base}.tar.gz")
+    else()
+      set(_therock_base "${DEP_HASH_therock_linux}")
+      set(_therock_url "${DEP_URL_therock_linux}/${_therock_base}.tar.gz")
+    endif()
+    set(_therock_stamp "${_therock_root}/.hip-ep-therock-pin")
+    set(_therock_have "")
+    if(EXISTS "${_therock_stamp}")
+      file(READ "${_therock_stamp}" _therock_have)
+      string(STRIP "${_therock_have}" _therock_have)
+    endif()
+    if(EXISTS "${_therock_root}/bin" AND NOT _therock_have STREQUAL _therock_base)
+      message(STATUS "TheRock SDK in ${_therock_root} is not ${_therock_base} "
+        "(found '${_therock_have}'); replacing it")
+      file(REMOVE_RECURSE "${_therock_root}")
+      if(_therock_have)
+        file(REMOVE "${CMAKE_BINARY_DIR}/${_therock_have}.tar.gz")
+      endif()
+      # The HIP compiler ships inside the SDK at the same path, so CMake would
+      # keep the old clang's version and implicit include/link dirs. Dropping
+      # the cached detection makes enable_language(HIP) probe the new one.
+      file(REMOVE "${CMAKE_PLATFORM_INFO_DIR}/CMakeHIPCompiler.cmake")
+    endif()
     if(NOT EXISTS "${_therock_root}/bin")
       if(WIN32)
-        set(_therock_windows_archs gfx1150 gfx1151 gfx1152 gfx1153 gfx11-generic gfx1170)
+        set(_therock_windows_archs gfx1150 gfx1151 gfx1152 gfx1153 gfx11-generic gfx1170 gfx11-7-generic)
         foreach(_arch IN LISTS HIP_ARCHITECTURES)
           if(NOT _arch IN_LIST _therock_windows_archs)
             message(FATAL_ERROR
@@ -143,11 +175,6 @@ if(NOT BUILD_MOCK_RUNTIME)
               "your own SDK with -DTHEROCK_DIST=/path/to/therock.")
           endif()
         endforeach()
-        set(_therock_base "${DEP_HASH_therock_windows}")
-        set(_therock_url "${DEP_URL_therock_windows}/${_therock_base}.tar.gz")
-      else()
-        set(_therock_base "${DEP_HASH_therock_linux}")
-        set(_therock_url "${DEP_URL_therock_linux}/${_therock_base}.tar.gz")
       endif()
       set(_therock_tgz "${CMAKE_BINARY_DIR}/${_therock_base}.tar.gz")
       if(NOT EXISTS "${_therock_tgz}")
@@ -177,6 +204,7 @@ if(NOT BUILD_MOCK_RUNTIME)
       if(NOT _therock_tar_rc EQUAL 0)
         message(FATAL_ERROR "TheRock extraction failed (tar rc=${_therock_tar_rc}).")
       endif()
+      file(WRITE "${_therock_stamp}" "${_therock_base}\n")
     endif()
     set(THEROCK_DIST "${_therock_root}"
         CACHE PATH "TheRock ROCm SDK distribution path" FORCE)
@@ -215,11 +243,12 @@ set(BUILD_SHARED_LIBS ${_saved_bsl_cpptrace})
 #   unset, so the standard LLVM_*/MLIR_* consumer variables come from the
 #   package configs.
 # Tier 2 (fallback): build LLVM/MLIR/LLD from source as a FetchContent
-#   subdirectory. The source is the llvm-project subtree vendored inside
-#   rocmlirTriton (external/llvm-project); we clone rocmlirTriton and configure
-#   only that nested llvm-project via SOURCE_SUBDIR -- no rocMLIR/Triton targets
-#   are built here. The build tree has no consumable package config during the
-#   same configure, so we set the consumer variables by hand and rely on the
+#   subdirectory. Both ENABLE_ROCMLIRTRITON settings clone deps.txt llvm_project
+#   (ROCm/llvm-project at the rmt-core branch tip). rocmlirTriton is cloned only
+#   when RMT is on, and only for the Rock/Triton sources; its vendored
+#   external/llvm-project is not built. No rocMLIR/Triton targets are built in
+#   this step. The build tree has no consumable package config during
+#   the same configure, so we set the consumer variables by hand and rely on the
 #   in-tree-defined helper functions (mlir_tablegen, llvm_map_components_to_libnames,
 #   add_mlir_dialect, ...). See llvm/docs/CMake.rst + the FOSDEM MLIR-dialect talk.
 #
@@ -240,18 +269,24 @@ endif()
 if(MLIR_FOUND AND NOT HIPDNN_LLVM_EMBEDDED)
   find_package(LLVM REQUIRED CONFIG)
 else()
-  message(STATUS "LLVM/MLIR not found; building from rocmlirTriton's external/llvm-project (${DEP_HASH_rocmlirtriton})")
   # clang is built in-tree so a from-source bootstrap is fully self-contained:
   # lib/Runtime gets a version-matched clang for runtime bitcode with no
-  # external dependency. Kept identical to the CI LLVM build so the prefix that
-  # CI caches (find_package path) and this fallback produce equivalent toolsets.
-  set(LLVM_ENABLE_PROJECTS "clang;mlir;lld" CACHE STRING "" FORCE)
+  # external dependency. lld is only needed for the opt-in native artifact
+  # path (HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS) and for rocmlirTriton's LLD
+  # package lookup. Kept identical to the CI LLVM build, aside from that lld
+  # gate, so the prefix that CI caches (find_package path) and this fallback
+  # produce equivalent toolsets.
   # rocMLIR/Triton needs the AMDGPU backend. When ENABLE_ROCMLIRTRITON is on,
   # the single in-tree LLVM must be a superset that satisfies both hip-ep and
   # rocmlirTriton (which is added as a subdirectory later and reuses these
   # targets instead of building its own LLVM). Assertions are left at the
   # build-type default (OFF for Release) to match the CI prebuilt LLVM prefix,
   # so the from-source and find_package paths produce equivalent toolsets.
+  if(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS OR ENABLE_ROCMLIRTRITON)
+    set(LLVM_ENABLE_PROJECTS "clang;mlir;lld" CACHE STRING "" FORCE)
+  else()
+    set(LLVM_ENABLE_PROJECTS "clang;mlir" CACHE STRING "" FORCE)
+  endif()
   if(ENABLE_ROCMLIRTRITON)
     set(LLVM_TARGETS_TO_BUILD "X86;AMDGPU" CACHE STRING "" FORCE)
     # rocMLIR's Rock libraries link Triton targets and get registered into
@@ -278,29 +313,18 @@ else()
   set(LLVM_INCLUDE_EXAMPLES OFF CACHE BOOL "" FORCE)
   set(LLVM_INCLUDE_BENCHMARKS OFF CACHE BOOL "" FORCE)
   set(LLVM_INSTALL_UTILS ON CACHE BOOL "" FORCE)  # FileCheck/not/count for LIT
-  # rocmlirTriton vendors llvm-project as a git subtree (not a submodule), so a
-  # plain shallow clone already carries external/llvm-project -- no submodule
-  # init needed. Two-step fetch: (1) populate the rocmlirTriton checkout without
-  # configuring it -- SOURCE_SUBDIR points at external/, which has no
-  # CMakeLists.txt, so MakeAvailable clones but skips add_subdirectory, leaving
-  # rocMLIR/Triton untouched; (2) declare the vendored llvm-project under its own
-  # name so add_subdirectory builds only LLVM/MLIR/LLD/clang. Keeping the second
-  # name "llvm-project" matters: morphizen's subtree redeclares llvm-project and
-  # relies on FetchContent's first-populated-wins to reuse this build, and the
-  # _deps/llvm-project-build tree is referenced by name downstream.
-  FetchContent_Declare(rocmlirtriton
-    GIT_REPOSITORY ${DEP_URL_rocmlirtriton}
-    GIT_TAG ${DEP_HASH_rocmlirtriton}
-    # GIT_SHALLOW cannot check out a non-tip pinned commit; the rocmlirtriton
-    # pin is an ancestor of develop, not its current tip, so a full fetch is
-    # required or git reports "reference is not a tree".
-    GIT_SHALLOW FALSE
-    SOURCE_SUBDIR external
-    EXCLUDE_FROM_ALL)
-  FetchContent_MakeAvailable(rocmlirtriton)
-  _apply_rocmlirtriton_patch("${rocmlirtriton_SOURCE_DIR}")
+  # The FetchContent name stays "llvm-project": morphizen's subtree redeclares
+  # it and relies on first-populated-wins, and _deps/llvm-project-build is
+  # referenced by name downstream. SOURCE_SUBDIR llvm selects the LLVM cmake
+  # project; the repository root is not itself a buildable CMake project.
+  # DEP_HASH_llvm_project is a branch name, so the clone and later update step
+  # follow that branch's tip. rocmlirTriton, when enabled, is populated below
+  # and reuses this build; it is not cloned here.
+  message(STATUS "LLVM/MLIR not found; building from ${DEP_URL_llvm_project} branch ${DEP_HASH_llvm_project}")
   FetchContent_Declare(llvm-project
-    SOURCE_DIR "${rocmlirtriton_SOURCE_DIR}/external/llvm-project"
+    GIT_REPOSITORY ${DEP_URL_llvm_project}
+    GIT_TAG ${DEP_HASH_llvm_project}
+    GIT_SHALLOW TRUE
     SOURCE_SUBDIR llvm
     EXCLUDE_FROM_ALL)
   # Build the in-tree LLVM/MLIR/clang with hidden ELF visibility (source
@@ -357,8 +381,9 @@ else()
   set(MLIR_CMAKE_DIR "${llvm-project_SOURCE_DIR}/mlir/cmake/modules" CACHE PATH "" FORCE)
   # Tool dirs so downstream find_program (e.g. lib/Runtime's llvm-link/opt
   # lookup) resolves against the in-tree LLVM build. clang is always built
-  # in-tree (clang;mlir;lld), so lib/Runtime's runtime-bitcode step uses the
-  # version-matched in-tree clang target.
+  # in-tree, so lib/Runtime's runtime-bitcode step uses the version-matched
+  # in-tree clang target. lld is included only when native artifacts or
+  # rocmlirTriton are enabled.
   set(LLVM_BINARY_DIR "${llvm-project_BINARY_DIR}" CACHE PATH "" FORCE)
   set(LLVM_TOOLS_BINARY_DIR "${llvm-project_BINARY_DIR}/bin" CACHE PATH "" FORCE)
   # LLD headers (lld/Common/Driver.h) live in a separate source tree; the
@@ -381,13 +406,11 @@ endif()
 # sets up the MLIR CMake module path and includes (TableGen/AddMLIR/AddLLVM),
 # so it does not need the top-level module setup that runs later.
 #
-# The from-source LLVM path above already populated the checkout; the
-# find_package path did not, so populate it here with the SAME populate-only
-# declaration (SOURCE_SUBDIR external, so MakeAvailable clones/patches but does
-# not configure rocMLIR/Triton). Either way, add_subdirectory then configures
-# the rocMLIR/Triton targets as a separate step -- decoupling population from
-# configuration keeps the FetchContent declaration identical across configures
-# so the patch step never re-runs.
+# LLVM is the rmt-core clone above, so this block is what clones rocmlirTriton.
+# SOURCE_SUBDIR external makes MakeAvailable clone and patch without
+# configuring rocMLIR/Triton. add_subdirectory then configures the targets.
+# The SOURCE_DIR guard skips the patch on a reconfigure once the checkout
+# exists, so the patch step does not re-run.
 # ===========================================================================
 if(ENABLE_ROCMLIRTRITON)
   # We link rocMLIR/Triton libraries directly and provide LLVM/MLIR ourselves,
@@ -412,8 +435,8 @@ if(ENABLE_ROCMLIRTRITON)
       GIT_REPOSITORY ${DEP_URL_rocmlirtriton}
       GIT_TAG ${DEP_HASH_rocmlirtriton}
       # Full fetch: the pin is a non-tip commit (a shallow clone cannot check
-      # it out). SOURCE_SUBDIR external keeps this populate-only, identical to
-      # the from-source LLVM declaration above.
+      # it out). SOURCE_SUBDIR external keeps this populate-only; LLVM is a
+      # separate clone and is not taken from this checkout.
       GIT_SHALLOW FALSE
       SOURCE_SUBDIR external
       EXCLUDE_FROM_ALL)
@@ -467,6 +490,29 @@ if(ENABLE_ROCMLIRTRITON)
 
   add_subdirectory("${rocmlirtriton_SOURCE_DIR}"
                    "${CMAKE_BINARY_DIR}/rocmlirTriton" EXCLUDE_FROM_ALL)
+
+  # TritonToHsaco dlopens triton_amd_codegen by bare name. rocmlirTriton copies
+  # it into the build lib dir and does not install it (that rule is on the
+  # disabled fat-library path). Windows resolves the name next to the exe;
+  # Linux resolves it through LD_LIBRARY_PATH, which the RMT package sets to
+  # the install lib dir.
+  if(WIN32)
+    set(_triton_amd_codegen_name "triton_amd_codegen.dll")
+    set(_triton_amd_codegen_dest "bin")
+  else()
+    set(_triton_amd_codegen_name "libtriton_amd_codegen.so")
+    set(_triton_amd_codegen_dest "lib")
+  endif()
+  set(_triton_amd_codegen_path
+      "${CMAKE_BINARY_DIR}/lib/${_triton_amd_codegen_name}")
+  install(CODE "
+    if(NOT EXISTS \"${_triton_amd_codegen_path}\")
+      message(FATAL_ERROR
+        \"triton_amd_codegen was not built: ${_triton_amd_codegen_path}\")
+    endif()
+    file(INSTALL \"${_triton_amd_codegen_path}\"
+      DESTINATION \"\${CMAKE_INSTALL_PREFIX}/${_triton_amd_codegen_dest}\")
+  ")
 
   set_directory_properties(PROPERTIES COMPILE_OPTIONS "${_hipep_copts_before}")
 
