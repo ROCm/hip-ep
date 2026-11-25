@@ -594,14 +594,19 @@ conv_tiled_kernel(const T *__restrict__ x, const T *__restrict__ w,
     cur ^= 1;
   }
 
-  // Store, folding in the bias.
+  // Store, folding in the bias. Both loops are unrolled so that acc[i][j] is
+  // indexed statically: with the early-exit `break`s the compiler otherwise
+  // keeps the loops rolled, addresses the accumulator tile dynamically, and
+  // moves all of it to scratch memory.
   const int64_t yBatchBase = nbatch * pr.Cout * pr.Nout;
+#pragma unroll
   for (int i = 0; i < TM; ++i) {
     const int64_t m = m0 + aOff + i;
     if (m >= pr.MPerGroup) break;
     const int64_t oc = g * pr.MPerGroup + m;
     const float bv = bias ? to_float<T>(bias[oc]) : 0.0f;
     T *row = y + yBatchBase + oc * pr.Nout;
+#pragma unroll
     for (int j = 0; j < TN; ++j) {
       const int64_t o = n0 + bOff + j;
       if (o >= pr.Nout) break;
