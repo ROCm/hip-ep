@@ -46,6 +46,7 @@ LEAVES := cast/Xany_Yany_bf16 \
 	matmul_nbits/Xfp32_Wu2_Yfp32 matmul_nbits/Xfp32_Wu3_Yfp32 \
 	matmul_nbits/Xfp32_Wu4_Yfp32 matmul_nbits/Xfp32_Wi8_Yfp32 \
 	paged_attention/decode/Xfp16_Wfp16_Yfp16 paged_attention/prefill/Xfp16_Wfp16_Yfp16 \
+	paged_attention/decode/Xfp32_Wfp16_Yfp16_mrope paged_attention/prefill/Xfp32_Wfp16_Yfp16_mrope \
 	qmoe/Xfp16_Wu4_Yfp16 \
 	group_norm/Xfp16_Wfp16_Yfp16 group_norm/Xbf16_Wbf16_Ybf16 \
 	group_norm/Xfp32_Wfp32_Yfp32 group_norm/Xfp64_Wfp64_Yfp64 \

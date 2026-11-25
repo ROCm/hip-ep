@@ -353,9 +353,15 @@ static LogicalResult materializePassthroughOutput(func::ReturnOp returnOp,
   SmallVector<OpOperand *> pagePools;
   Operation *firstWriter = nullptr;
   bool incompatiblePageView = false;
-  returnOp->getParentOfType<func::FuncOp>().walk([&](PagedAttentionOp page) {
-    for (OpOperand *pool :
-         {&page.getKeyPoolMutable(), &page.getValuePoolMutable()}) {
+  returnOp->getParentOfType<func::FuncOp>().walk([&](Operation *operation) {
+    SmallVector<OpOperand *> pools;
+    if (auto page = dyn_cast<PagedAttentionOp>(operation))
+      pools = {&page.getKeyPoolMutable(), &page.getValuePoolMutable()};
+    else if (auto page = dyn_cast<PagedMropeAttentionOp>(operation))
+      pools = {&page.getKeyPoolMutable(), &page.getValuePoolMutable()};
+    else
+      return;
+    for (OpOperand *pool : pools) {
       if (skipViews(pool->get()) != skipViews(source))
         continue;
       if (pool->get().getType() != source.getType() ||
@@ -364,7 +370,7 @@ static LogicalResult materializePassthroughOutput(func::ReturnOp returnOp,
         continue;
       }
       pagePools.push_back(pool);
-      Operation *writer = page;
+      Operation *writer = operation;
       while (writer->getBlock() != returnOp->getBlock() &&
              writer->getParentOp())
         writer = writer->getParentOp();

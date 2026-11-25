@@ -32,9 +32,12 @@ int failures = 0;
 struct Capture {
   int streamGets = 0, copies = 0, syncs = 0, queries = 0;
   int allocations = 0, launches = 0, prepares = 0;
+  int mropeQueries = 0, mropeLaunches = 0, mropePrepares = 0;
   int hostErrors = 0, nativeReturn = 0, nativeStatus = 0;
-  bool copyFails = false;
+  bool copyFails = false, lookupHit = true;
+  std::string lookupKey;
   hip_paged_attention_f16_desc desc{};
+  hip_paged_attention_mrope_f16_desc mrope{};
 };
 Capture cap;
 int32_t sessionError = 0;
@@ -48,8 +51,11 @@ struct Fixture {
   std::array<uint16_t, 8> q{}, k{}, v{}, kp{}, vp{}, output{};
   std::array<int32_t, 3> cum{{0, 1, 2}}, metadata{{1, 1, 0}};
   std::array<int32_t, 2> past{{0, 0}}, table{{0, 1}};
+  std::array<float, 8> mq{}, mk{}, cos{}, sin{};
+  std::array<int64_t, 6> positions{{5, 2, 17, 11, 3, 0}};
   int64_t tokens = 2, outputTokens = 2, valuePageSize = 256;
   bool data = true, withMetadata = true;
+  int64_t window = -1, doRotary = 0, dimension = 256;
   Fixture() {
     q.fill(0x1111);
     k.fill(0x2222);
@@ -62,15 +68,26 @@ struct Fixture {
     return reinterpret_cast<RuntimeState *>(&stateToken);
   }
   int call() {
-    return wrap_paged_attention(
+    return wrap_paged_attention_v2(
         state(), 0, data ? q.data() : nullptr, data ? k.data() : nullptr,
         data ? v.data() : nullptr, data ? kp.data() : nullptr,
         data ? vp.data() : nullptr, data ? cum.data() : nullptr,
-        data ? past.data() : nullptr, data ? table.data() : nullptr, nullptr,
-        nullptr, withMetadata ? metadata.data() : nullptr,
+        data ? past.data() : nullptr, data ? table.data() : nullptr,
+        doRotary ? q.data() : nullptr, doRotary ? k.data() : nullptr,
+        withMetadata ? metadata.data() : nullptr,
         data ? output.data() : nullptr, tokens, tokens, tokens, outputTokens, 2,
-        2, 2, 256, valuePageSize, 256, 2, 1, 3, withMetadata ? 3 : 0, 0, 0, 24,
-        4, -1, 0, 0, 0.0625f, 0.0f);
+        2, 2, 256, valuePageSize, dimension, 2, 1, 3, withMetadata ? 3 : 0,
+        doRotary ? 32 : 0, doRotary ? 32 : 0, 24, 4, window, doRotary, 0,
+        0.0625f);
+  }
+  int mropeCall(int64_t positionTokens = 2, int64_t layout = 1,
+                int64_t rotary = 64) {
+    return wrap_paged_attention_mrope_v2(
+        state(), 0, mq.data(), mk.data(), v.data(), kp.data(), vp.data(),
+        cum.data(), past.data(), table.data(), cos.data(), sin.data(),
+        metadata.data(), output.data(), 2, 2, 2, 2, 2, 2, 2, 256, 256,
+        dimension, 2, 1, 3, 3, 32, 32, 24, 4, window, 0, 0, 0.0625f,
+        positions.data(), positionTokens, rotary, 11, 11, 10, layout, 0.5f);
   }
   bool unchanged() const {
     for (size_t i = 0; i < q.size(); ++i)
@@ -82,6 +99,11 @@ struct Fixture {
 };
 
 void reset() {
+  if (opState)
+    opState->deletor(opState);
+  opState = nullptr;
+  CHECK(hipdnn_ep_op_state_construct_paged_attention(
+            reinterpret_cast<RuntimeState *>(&stateToken), 0) == 0);
   cap = Capture{};
   sessionError = 0;
   scratch.fill(0);
@@ -192,6 +214,122 @@ void testRequestPhaseAndBounds() {
   CHECK(cap.launches == 0 && f.unchanged());
 }
 
+void testRotaryWindowForwarding() {
+  for (bool prefill : {false, true})
+    for (int64_t window : {-1, 0, 1, 37, 4096})
+      for (int64_t rotary : {0, 1}) {
+        reset();
+        Fixture f;
+        f.window = window;
+        f.doRotary = rotary;
+        f.dimension = 128;
+        if (prefill) {
+          f.cum = {{0, 2, 2}};
+          f.metadata = {{2, 2, 0}};
+        }
+        CHECK(f.call() == 0);
+        CHECK(cap.desc.local_window_size == window &&
+              cap.desc.do_rotary == rotary);
+        CHECK(cap.desc.softcap ==
+              0); // Legacy native descriptor stays zero-initialized.
+        CHECK(cap.desc.phase == (prefill ? HIP_PAGED_ATTENTION_PREFILL
+                                         : HIP_PAGED_ATTENTION_DECODE));
+        CHECK(f.unchanged());
+        reset();
+        CHECK(f.mropeCall() == 0);
+        CHECK(cap.mrope.page.local_window_size == window &&
+              cap.mrope.page.do_rotary == 0);
+        CHECK(cap.mrope.page.softcap == 0);
+      }
+}
+
+void testMropeBoundary() {
+  reset();
+  Fixture f;
+  CHECK(f.mropeCall() == 0);
+  CHECK(cap.mropeQueries == 1 && cap.mropeLaunches == 1);
+  CHECK(cap.lookupKey.rfind(
+            "decode_mrope_f32_f16_r64_sections11-11-10_layout1_rscale0.5_",
+            0) == 0);
+  CHECK(cap.mrope.q == f.mq.data() && cap.mrope.k_new == f.mk.data());
+  CHECK(cap.mrope.cos_cache == f.cos.data() &&
+        cap.mrope.sin_cache == f.sin.data());
+  CHECK(cap.mrope.position_ids == f.positions.data());
+  CHECK(cap.mrope.rotary_dim == 64 && cap.mrope.max_position == 32);
+  CHECK(cap.mrope.section_t == 11 && cap.mrope.section_h == 11 &&
+        cap.mrope.section_w == 10);
+  CHECK(cap.mrope.mrope_layout == 1 && cap.mrope.rotary_scale == 0.5f);
+  CHECK(cap.mrope.page.do_rotary == 0 && cap.mrope.page.k_pool == f.kp.data());
+  CHECK(cap.mrope.page.phase == HIP_PAGED_ATTENTION_DECODE && f.unchanged());
+  reset();
+  CHECK(f.mropeCall(1) == HIP_PAGED_ATTENTION_INVALID_ARGUMENT);
+  CHECK(cap.streamGets == 0 && cap.queries == 0 && cap.mropeLaunches == 0);
+  reset();
+  CHECK(f.mropeCall(2, 2) == HIP_PAGED_ATTENTION_INVALID_ARGUMENT);
+  CHECK(cap.streamGets == 0 && cap.queries == 0);
+  reset();
+  CHECK(f.mropeCall(2, 1, 32) == HIP_PAGED_ATTENTION_INVALID_ARGUMENT);
+  CHECK(cap.streamGets == 0 && cap.queries == 0);
+  reset();
+  sessionError = 77;
+  CHECK(f.mropeCall() == 77);
+  CHECK(cap.queries == 0 && cap.mropeLaunches == 0 && f.unchanged());
+  reset();
+  cap.nativeStatus = HIP_PAGED_ATTENTION_BAD_PAGE;
+  CHECK(f.mropeCall() == HIP_PAGED_ATTENTION_BAD_PAGE);
+  CHECK(sessionError == HIP_PAGED_ATTENTION_BAD_PAGE && f.unchanged());
+  reset();
+  f.cum = {{0, 2, 2}};
+  f.metadata = {{2, 2, 0}};
+  CHECK(f.mropeCall() == 0);
+  CHECK(cap.lookupKey.rfind("prefill_mrope_f32_f16_r64_", 0) == 0);
+  CHECK(cap.mrope.page.phase == HIP_PAGED_ATTENTION_PREFILL);
+  reset();
+  cap.lookupHit = false;
+  CHECK(f.mropeCall() == 0);
+  CHECK(cap.mropePrepares == 1 && cap.mropeLaunches == 0);
+  CHECK(cap.mrope.position_ids == f.positions.data() && f.unchanged());
+}
+
+void testPreparedCompletionAndDynamicLengths() {
+  for (bool fused : {false, true}) {
+    reset();
+    Fixture f;
+    cap.lookupHit = false;
+    auto call = [&] { return fused ? f.mropeCall() : f.call(); };
+    CHECK(call() == 0);
+    CHECK(cap.syncs == 2 && cap.copies == 5);
+    CHECK(cap.prepares + cap.mropePrepares == 1);
+    CHECK(call() == 0);
+    CHECK(cap.syncs == 4 && cap.copies == 10);
+    CHECK(cap.prepares + cap.mropePrepares == 1);
+    CHECK(cap.launches + cap.mropeLaunches == 1);
+    // Reuse storage but read new request values before phase/config selection.
+    f.cum = {{0, 2, 2}};
+    f.metadata = {{2, 2, 0}};
+    CHECK(call() == 0);
+    CHECK(cap.prepares + cap.mropePrepares == 2);
+    CHECK(cap.lookupKey.rfind("prefill_", 0) == 0);
+    f.cum = {{0, 3, 2}};
+    CHECK(call() == HIP_PAGED_ATTENTION_BAD_CUM);
+    CHECK(cap.prepares + cap.mropePrepares == 2);
+
+    reset();
+    f = Fixture{};
+    cap.lookupHit = false;
+    cap.nativeStatus = HIP_PAGED_ATTENTION_BAD_PAGE;
+    CHECK(call() == HIP_PAGED_ATTENTION_BAD_PAGE);
+    CHECK(cap.syncs == 2 && cap.copies == 5);
+    // A failed device status must not publish the prepared configuration.
+    sessionError = 0;
+    cap.nativeStatus = 0;
+    CHECK(call() == 0);
+    CHECK(cap.prepares + cap.mropePrepares == 2);
+    CHECK(cap.launches + cap.mropeLaunches == 0);
+    CHECK(f.unchanged());
+  }
+}
+
 } // namespace
 
 extern "C" void *hipdnn_ep_state_get_stream(RuntimeState *) {
@@ -258,6 +396,11 @@ hip_paged_attention_f16_workspace_size(const hip_paged_attention_f16_desc *d,
   *bytes = d->tokens ? 256 : 0;
   return 0;
 }
+extern "C" int hip_paged_attention_mrope_f16_workspace_size(
+    const hip_paged_attention_mrope_f16_desc *d, size_t *bytes) {
+  ++cap.mropeQueries;
+  return hip_paged_attention_f16_workspace_size(&d->page, bytes);
+}
 extern "C" int hip_paged_attention_f16_configured_v2(
     void *, const hip_paged_attention_f16_desc *d, void *workspace, size_t,
     const GqaPagedConfig *, size_t) {
@@ -266,17 +409,36 @@ extern "C" int hip_paged_attention_f16_configured_v2(
   *static_cast<int32_t *>(workspace) = cap.nativeStatus;
   return cap.nativeReturn;
 }
+extern "C" int hip_paged_attention_mrope_f16_configured_v1(
+    void *, const hip_paged_attention_mrope_f16_desc *d, void *workspace,
+    size_t, const GqaPagedConfig *, size_t) {
+  ++cap.mropeLaunches;
+  cap.mrope = *d;
+  *static_cast<int32_t *>(workspace) = cap.nativeStatus;
+  return cap.nativeReturn;
+}
+extern "C" int hip_paged_attention_mrope_f16_prepare_v1(
+    void *, const hip_paged_attention_mrope_f16_desc *d, void *workspace,
+    size_t, GqaPagedConfig *, size_t) {
+  ++cap.mropePrepares;
+  cap.mrope = *d;
+  *static_cast<int32_t *>(workspace) = cap.nativeStatus;
+  return cap.nativeReturn;
+}
 
 namespace hipdnn_ep {
 PagedAttentionResult resolvePagedAttention(const hip_paged_attention_f16_desc &,
-                                           const std::string &) {
-  return {{}, "lookup:cpu-contract"};
+                                           const std::string &key) {
+  cap.lookupKey = key;
+  return {{}, cap.lookupHit ? "lookup:cpu-contract" : "fallback:absent"};
 }
-int preparePagedAttention(void *, const hip_paged_attention_f16_desc &, void *,
-                          size_t, const std::string &, bool,
+int preparePagedAttention(void *, const hip_paged_attention_f16_desc &d,
+                          void *workspace, size_t, const std::string &, bool,
                           PagedAttentionResult *) {
   ++cap.prepares;
-  return -1;
+  cap.desc = d;
+  *static_cast<int32_t *>(workspace) = cap.nativeStatus;
+  return cap.nativeReturn;
 }
 } // namespace hipdnn_ep
 int main() {
@@ -294,6 +456,9 @@ int main() {
   testZeroTokens();
   testRoutingAndStatus();
   testRequestPhaseAndBounds();
+  testMropeBoundary();
+  testRotaryWindowForwarding();
+  testPreparedCompletionAndDynamicLengths();
   if (opState)
     opState->deletor(opState);
   if (failures)

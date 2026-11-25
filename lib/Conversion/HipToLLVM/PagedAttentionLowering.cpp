@@ -6,13 +6,15 @@
 
 namespace mlir::hip {
 namespace {
-struct PagedAttentionOpLowering : ConvertOpToLLVMPattern<PagedAttentionOp> {
-  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+template <typename PageOp, bool Mrope = false>
+struct PagedAttentionOpLowering : ConvertOpToLLVMPattern<PageOp> {
+  using ConvertOpToLLVMPattern<PageOp>::ConvertOpToLLVMPattern;
+  using OpAdaptor = typename PageOp::Adaptor;
   LogicalResult
-  matchAndRewrite(PagedAttentionOp op, OpAdaptor adaptor,
+  matchAndRewrite(PageOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
-    Type ptr = getPtrType(), i64 = rewriter.getI64Type(),
+    Type ptr = this->getPtrType(), i64 = rewriter.getI64Type(),
          f32 = rewriter.getF32Type();
     auto c = [&](int64_t value) -> Value {
       return LLVM::ConstantOp::create(rewriter, loc, i64,
@@ -26,6 +28,11 @@ struct PagedAttentionOpLowering : ConvertOpToLLVMPattern<PagedAttentionOp> {
       return getMemRefDimSize(cast<MemRefType>(original.getType()), axis,
                               converted, rewriter, loc);
     };
+    int64_t doRotary = 0, interleaved = 0;
+    if constexpr (!Mrope) {
+      doRotary = op.getDoRotary();
+      interleaved = op.getRotaryInterleaved();
+    }
     SmallVector<Value> args = {
         adaptor.getCtx(),
         getOpStateSlotValue(op, rewriter, loc),
@@ -64,21 +71,35 @@ struct PagedAttentionOpLowering : ConvertOpToLLVMPattern<PagedAttentionOp> {
         c(op.getNumHeads()),
         c(op.getKvNumHeads()),
         c(op.getLocalWindowSizeAttr().getInt()),
-        c(op.getDoRotary()),
-        c(op.getRotaryInterleaved()),
+        c(doRotary),
+        c(interleaved),
         LLVM::ConstantOp::create(
             rewriter, loc, f32,
-            rewriter.getF32FloatAttr(op.getScale().convertToFloat())),
-        LLVM::ConstantOp::create(
-            rewriter, loc, f32,
-            rewriter.getF32FloatAttr(op.getSoftcap().convertToFloat()))};
+            rewriter.getF32FloatAttr(op.getScale().convertToFloat()))};
     SmallVector<Type> types{ptr, rewriter.getI32Type()};
     types.append(12, ptr);
     types.append(21, i64);
-    types.append(2, f32);
-    auto fn = LLVM::lookupOrCreateFn(rewriter, op->getParentOfType<ModuleOp>(),
-                                     "wrap_paged_attention", types,
-                                     rewriter.getI32Type());
+    types.append(1, f32);
+    if constexpr (Mrope) {
+      args.push_back(data(adaptor.getPositionIds()));
+      types.push_back(ptr);
+      auto positions = cast<MemRefType>(op.getPositionIds().getType());
+      args.push_back(dim(op.getPositionIds(), adaptor.getPositionIds(),
+                         positions.getRank() - 1));
+      args.push_back(c(op.getRotaryDimAttr().getInt()));
+      for (Attribute a : op.getMropeSection())
+        args.push_back(c(cast<IntegerAttr>(a).getInt()));
+      args.push_back(c(op.getMropeLayout()));
+      types.append(6, i64);
+      args.push_back(LLVM::ConstantOp::create(
+          rewriter, loc, f32,
+          rewriter.getF32FloatAttr(op.getMropeScale().convertToFloat())));
+      types.push_back(f32);
+    }
+    auto fn = LLVM::lookupOrCreateFn(
+        rewriter, op->template getParentOfType<ModuleOp>(),
+        Mrope ? "wrap_paged_attention_mrope_v2" : "wrap_paged_attention_v2",
+        types, rewriter.getI32Type());
     if (failed(fn))
       return failure();
     LLVM::CallOp::create(rewriter, loc, *fn, args);
@@ -89,6 +110,8 @@ struct PagedAttentionOpLowering : ConvertOpToLLVMPattern<PagedAttentionOp> {
 } // namespace
 void populatePagedAttentionLoweringPatterns(const LLVMTypeConverter &converter,
                                             RewritePatternSet &patterns) {
-  patterns.add<PagedAttentionOpLowering>(converter);
+  patterns.add<PagedAttentionOpLowering<PagedAttentionOp>,
+               PagedAttentionOpLowering<PagedMropeAttentionOp, true>>(
+      converter);
 }
 } // namespace mlir::hip

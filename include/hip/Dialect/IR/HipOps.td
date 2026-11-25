@@ -4531,7 +4531,6 @@ def Hip_PagedAttentionOp : Hip_DpsOp_AutoReify<"paged_attention", [AttrSizedOper
     I64Attr:$num_heads, I64Attr:$kv_num_heads,
     DefaultValuedAttr<F32Attr,"0.0f">:$scale,
     DefaultValuedAttr<I64Attr,"-1">:$local_window_size,
-    DefaultValuedAttr<F32Attr,"0.0f">:$softcap,
     DefaultValuedAttr<I64Attr,"0">:$do_rotary,
     DefaultValuedAttr<I64Attr,"0">:$rotary_interleaved);
   let assemblyFormat = [{
@@ -4555,6 +4554,51 @@ def Hip_PagedAttentionOp : Hip_DpsOp_AutoReify<"paged_attention", [AttrSizedOper
 }
 
 
+
+def Hip_PagedMropeAttentionOp : Hip_DpsOp_AutoReify<"paged_mrope_attention", [OpStateOpInterface]> {
+  let summary = "Packed FP32 MRoPE, FP16 conversion and paged KV attention";
+  let description = [{
+    Compiler-internal fusion of two single-use FP32 MRotaryEmbedding chains
+    and separate FP16 PagedAttention. Explicit position_ids [3,T] or [3,1,T]
+    select the temporal/height/width rows; cumulative lengths/past/page table
+    independently select append locations. FP32 rotation completes before
+    conversion to FP16. Partial rotary dimensions and MRoPE layouts 0/1 are
+    preserved. The attention computation is shared with ordinary Page/GQA.
+    Pool results alias their read/write DPS inits, including graph outputs.
+  }];
+  let arguments = (ins Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$query, Hip_TensorOrMemRef:$key, Hip_TensorOrMemRef:$value,
+    Hip_TensorOrMemRef:$cu_seqlens, Hip_TensorOrMemRef:$past_seqlens,
+    Hip_TensorOrMemRef:$block_table, Hip_TensorOrMemRef:$cos_cache,
+    Hip_TensorOrMemRef:$sin_cache, Hip_TensorOrMemRef:$position_ids,
+    Optional<Hip_TensorOrMemRef>:$attention_metadata,
+    Hip_TensorOrMemRef:$output, Hip_TensorOrMemRef:$key_pool,
+    Hip_TensorOrMemRef:$value_pool,
+    I64Attr:$num_heads, I64Attr:$kv_num_heads,
+    I64Attr:$rotary_dim, I64ArrayAttr:$mrope_section,
+    DefaultValuedAttr<I64Attr,"0">:$mrope_layout,
+    DefaultValuedAttr<F32Attr,"1.0f">:$mrope_scale,
+    DefaultValuedAttr<F32Attr,"0.0f">:$scale,
+    DefaultValuedAttr<I64Attr,"-1">:$local_window_size);
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $query `,` $key `,` $value `,` $cu_seqlens `,`
+      $past_seqlens `,` $block_table `:` type($query) `,` type($key) `,`
+      type($value) `,` type($cu_seqlens) `,` type($past_seqlens) `,` type($block_table) `)`
+    `rotary` `(` $cos_cache `,` $sin_cache `,` $position_ids `:`
+      type($cos_cache) `,` type($sin_cache) `,` type($position_ids) `)`
+    (`metadata` `(` $attention_metadata^ `:` type($attention_metadata) `)`)?
+    `outs` `(` $output `,` $key_pool `,` $value_pool `:` type($output) `,`
+      type($key_pool) `,` type($value_pool) `)` attr-dict (`:` type($result_tensors)^)?
+  }];
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+        ::mlir::Location loc, ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(builder, loc, statePtr, slot,
+          "hipdnn_ep_op_state_construct_paged_attention", {});
+    }
+  }];
+  let hasVerifier = 1;
+}
 
 // ===== hipDNN Graph Outlining + Execution ====================================
 

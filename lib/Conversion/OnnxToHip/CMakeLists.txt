@@ -42,6 +42,7 @@ add_library(OnnxToHip STATIC
   OnnxAttentionConversion.cpp
   HipGqaBuilder.cpp
   PagedAttentionConversion.cpp
+  PagedMropeFusion.cpp
   GatherConversion.cpp
   GatherElementsConversion.cpp
   TopKConversion.cpp
