@@ -732,8 +732,8 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
   const bool dp4a_u8 = bits == 8 && M == 1 &&
                        hipdnn_ep_matmul_dp4a_u8_enabled() &&
                        (!zero_points || zp_elem_size == 1);
-  const bool dp4a_u4 = bits == 4 &&
-                       (!zero_points || (zp_elem_size == 1 && pre_zp_u8));
+  const bool dp4a_u4 =
+      bits == 4 && (!zero_points || (zp_elem_size == 1 && pre_zp_u8));
   if (hipdnn_ep_matmul_dp4a_enabled() && M >= 1 &&
       M <= hipdnn_ep_matmul_dp4a_max_m() && batch_count == 1 &&
       block_size > 0 && (K % 32 == 0) && elem_size == 2 &&
@@ -752,12 +752,13 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
       if (base) {
         void *a_qb = base;
         void *a_scale = base + scale_off;
-        int rc = dp4a_u8 ? hip_matmul_nbits_dp4a_u8(stream, A, B, scales,
-                                                    zero_points, bias, output, N,
-                                                    K, block_size, a_qb, a_scale)
-                         : hip_matmul_nbits_dp4a(stream, A, B, scales, pre_zp_u8,
-                                                 bias, output, M, N, K,
-                                                 block_size, a_qb, a_scale);
+        int rc = dp4a_u8
+                     ? hip_matmul_nbits_dp4a_u8(stream, A, B, scales,
+                                                zero_points, bias, output, N, K,
+                                                block_size, a_qb, a_scale)
+                     : hip_matmul_nbits_dp4a(stream, A, B, scales, pre_zp_u8,
+                                             bias, output, M, N, K, block_size,
+                                             a_qb, a_scale);
         if (rc == 0) {
           result = 0;
           goto cleanup;
