@@ -1631,24 +1631,20 @@ static int launch(hipStream_t stream, const void *x, const void *w,
     // against a sweep taken with a kernel that does not spill.
     if (pass == 1) {
       // No tile covers the device, so the widest-first order above would leave
-      // most of it idle: a 256-channel 14x14 output is 4 blocks at 128x128 and
-      // 16 at 64x64. Take the tile that makes the most blocks, the wider one on
-      // a tie.
-      const int64_t blocks128x128 =
-          tileFits(pr, 128, 128, 1) ? tileBlocks(pr, 128, 128) : 0;
-      const int64_t blocks64x64 =
-          tileFits(pr, 64, 64, 1) ? tileBlocks(pr, 64, 64) : 0;
+      // most of it idle: a 256-channel 14x14 output is 4 blocks at 128x128 but
+      // 56 at 32x32. Take the 32x128 tile, or the 32x32 tile when it makes more
+      // than twice as many blocks, since its register tile does half the FMAs
+      // per LDS read. A 64x64 or 128x128 tile never makes more blocks than both
+      // of these (checked for M <= 4096 and Nout <= 2048), so they are not
+      // candidates here.
       const int64_t blocks32x128 =
           (pr.MPerGroup >= 24 && tileFits(pr, 32, 128, 1))
               ? tileBlocks(pr, 32, 128)
               : 0;
-      if (blocks128x128 > 0 && blocks128x128 >= blocks64x64 &&
-          blocks128x128 >= blocks32x128) {
-        launchTile<T, 128, 128, 8, 8>(stream, x, w, bias, y, pr);
-        break;
-      }
-      if (blocks64x64 > 0 && blocks64x64 >= blocks32x128) {
-        launchTile<T, 64, 64, 4, 4>(stream, x, w, bias, y, pr);
+      const int64_t blocks32x32 =
+          tileFits(pr, 32, 32, 1) ? tileBlocks(pr, 32, 32) : 0;
+      if (blocks32x32 > 0 && blocks32x32 > 2 * blocks32x128) {
+        launchTile<T, 32, 32, 2, 2>(stream, x, w, bias, y, pr);
         break;
       }
       if (blocks32x128 > 0) {
