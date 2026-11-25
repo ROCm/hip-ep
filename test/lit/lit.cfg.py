@@ -100,3 +100,11 @@ config.substitutions.append(("%python", sys.executable))
 # covered GPU-free by the StaticPlugins unit test (test/plugin/test_static_plugins).
 if getattr(config, "hip_static_plugins", False):
     config.available_features.add("hip_static_plugins")
+
+# The ggml-to-hip pipeline (HIPDNN_EP_BUILD_GGML): its tests, and the tools
+# they read the compiled code and the ggml analyses with.
+if getattr(config, "hip_ggml", False):
+    config.available_features.add("hip_ggml")
+    llvm_config.add_tool_substitutions(
+        ["llvm-dis", "ggml-analyses"], hip_tools_dirs + [config.llvm_tools_dir]
+    )

@@ -31,6 +31,9 @@ config.hip_build_mode = "@LLVM_BUILD_MODE@"
 # `hip_static_plugins` feature that gates the Plugin/ pass tests. Works on every
 # platform (static linking needs no symbol export).
 config.hip_static_plugins = @HIPDNN_STATIC_PLUGINS_LIT_FEATURE@
+# Whether the ggml-to-hip pipeline was built (HIPDNN_EP_BUILD_GGML); lit.cfg.py
+# turns this into the `hip_ggml` feature.
+config.hip_ggml = @HIPDNN_GGML_LIT_FEATURE@
 
 if "@HIP_EP_RING_ENABLED@" == "1":
     config.available_features.add("ring-gqa")

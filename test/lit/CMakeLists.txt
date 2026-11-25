@@ -60,6 +60,13 @@ if("sample" IN_LIST HIPDNN_EP_COMPILER_PLUGINS)
 else()
     set(HIPDNN_STATIC_PLUGINS_LIT_FEATURE "False")
 endif()
+# The ggml-to-hip pipeline's tests run when it is built (HIPDNN_EP_BUILD_GGML):
+# the `hip_ggml` lit feature.
+if(HIPDNN_EP_BUILD_GGML)
+    set(HIPDNN_GGML_LIT_FEATURE "True")
+else()
+    set(HIPDNN_GGML_LIT_FEATURE "False")
+endif()
 if(CMAKE_CONFIGURATION_TYPES)
     # Multi-config (MSVC): mark the mode as a Python format placeholder so
     # lit.site.cfg.py resolves it at runtime from --param build_mode=<cfg>.
@@ -87,6 +94,9 @@ set(LIT_ARGS "-sv" CACHE STRING "Extra arguments passed to lit (e.g. -j4 --no-pr
 # executables in the prefix (not targets), already on disk, so only depend on
 # the ones that exist as targets here.
 set(_lit_deps hip-mlir-opt hip-compiler)
+if(HIPDNN_EP_BUILD_GGML)
+    list(APPEND _lit_deps ggml-analyses)
+endif()
 foreach(_lit_tool FileCheck not count split-file)
     if(TARGET ${_lit_tool})
         list(APPEND _lit_deps ${_lit_tool})

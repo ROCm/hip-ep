@@ -121,3 +121,8 @@ target_link_libraries(HipDialectTransforms PUBLIC
   MLIRParser
   flatbuffers::flatbuffers
 )
+
+# The ggml-to-hip pipeline (HIPDNN_EP_BUILD_GGML).
+if(HIPDNN_EP_BUILD_GGML)
+  target_link_libraries(HipDialectTransforms PUBLIC GgmlToHip)
+endif()

@@ -105,6 +105,15 @@ void buildHipTensorToBufferizedPipeline(
     OpPassManager &pm, const HipTensorToBufferizedPipelineOptions &options,
     morphizen::FileSystem *fs = nullptr);
 
+#ifdef HIPDNN_EP_BUILD_GGML
+/// ggml graphs (HIPDNN_EP_BUILD_GGML): a module of the ggml dialect, as a
+/// ggml backend's split is captured (docs/design/ggml-backend.md), converted
+/// to tensor-form HIP IR and taken to bufferized HIP IR as ONNX is.
+void buildGgmlToHipPipeline(OpPassManager &pm,
+                            const HipTensorToBufferizedPipelineOptions &options,
+                            morphizen::FileSystem *fs = nullptr);
+#endif
+
 /// Pipeline options for the HIP-to-LLVM lowering pipeline.
 /// Controls the GenerateInterface pass at the end of the pipeline.
 struct HipToLLVMPipelineOptions
