@@ -543,8 +543,11 @@ struct LayerNormMulFusion : public mlir::OpRewritePattern<mlir::hip::MulOp> {
 bool canUseSkip(Value input, Value skip, Value gamma, Value beta,
                 mlir::Type outputType) {
   auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
-  if (!inputType || inputType.getRank() < 1 || skip.getType() != inputType ||
-      outputType != inputType)
+  if (!inputType || inputType.getRank() < 1 || outputType != inputType)
+    return false;
+  // Equal dynamic types do not prove equal extents: [3, 8] and [1, 8] are both
+  // tensor<?x8xf32>, and the Add would broadcast where the kernel reads rows.
+  if (!sameRuntimeShape(input, skip))
     return false;
   mlir::Type elemType = inputType.getElementType();
   if (!elemType.isF16() && !elemType.isF32())
@@ -590,11 +593,9 @@ struct ResidualLayerNormFusion
     Value rhs = definingCompute(add.getRhs(), pack, seen);
     if (lhs.getType() != resultType || rhs.getType() != resultType)
       return rewriter.notifyMatchFailure(ln, "Add broadcasts");
-    if (!sameRuntimeShape(lhs, rhs))
-      return rewriter.notifyMatchFailure(
-          ln, "dynamic dimensions are not known to match");
     if (!canUseSkip(lhs, rhs, ln.getScale(), ln.getBias(), resultType))
-      return rewriter.notifyMatchFailure(ln, "unsupported types");
+      return rewriter.notifyMatchFailure(
+          ln, "unsupported types, or dynamic extents not known to match");
 
     bool withSum = false;
     for (mlir::OpOperand &use : sumValue.getUses()) {

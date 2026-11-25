@@ -797,15 +797,15 @@ createSkipLayerNorm(mlir::PatternRewriter &rewriter, mlir::Location loc,
 /// maps to hip.skip_rms_norm). When the operands fit hip.skip_layer_norm
 /// (see canUseSkipLayerNorm) the whole op is one kernel; otherwise we
 /// compose:
-///   biased = input + bias               (hip.add, only when bias is present)
-///   sum    = biased + skip              (hip.add)
+///   sum    = input + skip               (hip.add)
+///   sum    = sum + bias                 (hip.add, only when bias is present)
 ///   output = LayerNorm(sum, gamma, beta, epsilon)   (hip.layer_norm)
 ///   output[3] (input_skip_bias_sum) = sum           (the pre-norm residual)
 ///
 /// MS spec (com.microsoft.SkipLayerNormalization):
 ///   inputs (3-5): input, skip, gamma, [beta], [bias-on-input].
-///                 The optional bias is added to input before the skip, and
-///                 that sum is input_skip_bias_sum. Whisper uses exactly 4
+///                 ORT computes input + skip + bias in that order, and that
+///                 sum is input_skip_bias_sum. Whisper uses exactly 4
 ///                 inputs (no bias), so the sum is input + skip. Stable
 ///                 Diffusion's text encoder uses all 5.
 ///   outputs (1-4): output, [mean], [inv_std_var], [input_skip_bias_sum].
@@ -858,8 +858,8 @@ SkipLayerNormToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value gamma = op->getOperand(2);
   // beta (output bias for the LayerNorm) is optional.
   mlir::Value beta = getOptionalOperand(op, 3);
-  // 5th input is an optional bias added to `input` BEFORE the skip add, so it
-  // also feeds input_skip_bias_sum. It broadcasts on the trailing axis.
+  // 5th input is an optional bias added after the skip; it also feeds
+  // input_skip_bias_sum. It broadcasts on the trailing axis.
   mlir::Value inputBias = getOptionalOperand(op, 4);
 
   // Epsilon (default 1e-5 per MS spec).
@@ -888,20 +888,21 @@ SkipLayerNormToHip::matchAndRewrite(mlir::Operation *op,
     return mlir::success();
   }
 
-  // === 1. sum = (input + bias) + skip. This is output[3]. ==================
-  // Dynamic extents live on `input`; the bias is a static trailing vector, so
-  // the empty tensor is sized from the input.
-  mlir::Value biasedInput = input;
-  if (inputBias) {
-    mlir::Value biasInit = createEmptyTensor(rewriter, loc, inputType, input);
-    biasedInput = mlir::hip::AddOp::create(rewriter, loc, inputType, context,
-                                           input, inputBias, biasInit)
-                      .getResult(0);
-  }
+  // === 1. sum = (input + skip) + bias. This is output[3]. ==================
+  // ORT's order, which the fused kernel also uses. Each hip.add rounds, so an
+  // f16 sum can differ from ORT's single rounding in the last bit. Dynamic
+  // extents live on `input`; skip and bias broadcast to it, so the empty
+  // tensors are sized from the input.
   mlir::Value sumInit = createEmptyTensor(rewriter, loc, inputType, input);
   mlir::Value sum = mlir::hip::AddOp::create(rewriter, loc, inputType, context,
-                                             biasedInput, skip, sumInit)
+                                             input, skip, sumInit)
                         .getResult(0);
+  if (inputBias) {
+    mlir::Value biasInit = createEmptyTensor(rewriter, loc, inputType, input);
+    sum = mlir::hip::AddOp::create(rewriter, loc, inputType, context, sum,
+                                   inputBias, biasInit)
+              .getResult(0);
+  }
 
   // === 2. output = LayerNorm(sum, gamma, beta, epsilon) =====================
   auto outputType =

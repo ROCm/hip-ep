@@ -99,6 +99,24 @@ module {
         -> tensor<2x16x768xf32>
     return %0 : tensor<2x16x768xf32>
   }
+
+  // ===== Test 5: broadcast skip with input bias -> (input + skip) + bias =====
+
+  func.func @broadcast_skip_bias(%input: tensor<2x16x768xf32>,
+                                 %skip: tensor<16x768xf32>,
+                                 %gamma: tensor<768xf32>,
+                                 %beta: tensor<768xf32>,
+                                 %bias: tensor<768xf32>)
+      -> tensor<2x16x768xf32> {
+    %0 = "onnx.Custom"(%input, %skip, %gamma, %beta, %bias) {
+      function_name = "SkipLayerNormalization",
+      domain_name = "com.microsoft",
+      epsilon = 9.99999974E-6 : f32
+    } : (tensor<2x16x768xf32>, tensor<16x768xf32>,
+         tensor<768xf32>, tensor<768xf32>, tensor<768xf32>)
+        -> tensor<2x16x768xf32>
+    return %0 : tensor<2x16x768xf32>
+  }
 }
 
 // CHECK-LABEL: func.func @main_graph
@@ -126,4 +144,12 @@ module {
 // CHECK-NOT: hip.skip_layer_norm
 // CHECK: %[[SUM4:.*]] = hip.add(%{{.*}}) ins(%{{.*}}, %{{.*}} : tensor<2x16x768xf32>, tensor<16x768xf32>)
 // CHECK: hip.layer_norm(%{{.*}}) ins(%[[SUM4]], {{.*}})
+// CHECK-NOT: onnx.Custom
+
+// CHECK-LABEL: func.func @broadcast_skip_bias
+// CHECK-SAME: (%{{.*}}: !hip.context, %[[IN5:.*]]: tensor<2x16x768xf32>, %[[SKIP5:.*]]: tensor<16x768xf32>, %{{.*}}: tensor<768xf32>, %{{.*}}: tensor<768xf32>, %[[BIAS5:.*]]: tensor<768xf32>)
+// CHECK-NOT: hip.skip_layer_norm
+// CHECK: %[[SUM5:.*]] = hip.add(%{{.*}}) ins(%[[IN5]], %[[SKIP5]] : tensor<2x16x768xf32>, tensor<16x768xf32>)
+// CHECK: %[[BIASED5:.*]] = hip.add(%{{.*}}) ins(%[[SUM5]], %[[BIAS5]] : tensor<2x16x768xf32>, tensor<768xf32>)
+// CHECK: hip.layer_norm(%{{.*}}) ins(%[[BIASED5]], {{.*}})
 // CHECK-NOT: onnx.Custom
