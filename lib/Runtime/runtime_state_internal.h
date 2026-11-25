@@ -217,6 +217,13 @@ struct RuntimeState {
   void *la_scratch;
   size_t la_scratch_size;
 
+  // Per-session scratch for hip_paged_attention: int32 metadata staging plus
+  // the context-split partials of the per-token kernel. Same grow-on-demand /
+  // never-shrink policy as la_scratch; freed in hipdnn_ep_state_cleanup. One
+  // buffer serves every attention layer because the HIP stream is serialised.
+  void *paged_attention_scratch;
+  size_t paged_attention_scratch_size;
+
   // NOTE: the GQA GEMM descriptor cache (GqaGemmCache) formerly lived here as
   // gqa_gemm_cache. It is now per-op-instance: each gqa instance owns one in
   // its GqaState op-state slot (see op_states below and
