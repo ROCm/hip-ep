@@ -29,10 +29,10 @@
 // CHECK-NEXT:    %[[SRC_5:.+]] = llvm.insertvalue %[[SRC_STRIDE0]], %[[SRC_4]][4, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
 // CHECK-NEXT:    %[[SRC_6:.+]] = llvm.insertvalue %[[SRC_SIZE1]], %[[SRC_5]][3, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
 // CHECK-NEXT:    %[[SRC_DESC:.+]] = llvm.insertvalue %[[SRC_STRIDE1]], %[[SRC_6]][4, 1] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[DIM0:.+]] = llvm.mlir.constant(4 : index) : i64
-// CHECK-NEXT:    %[[DIM1:.+]] = llvm.mlir.constant(8 : index) : i64
-// CHECK-NEXT:    %[[ONE:.+]] = llvm.mlir.constant(1 : index) : i64
-// CHECK-NEXT:    %[[NUM_ELEMS:.+]] = llvm.mlir.constant(32 : index) : i64
+// CHECK-NEXT:    %[[DIM0:.+]] = llvm.mlir.constant(4 : i64) : i64
+// CHECK-NEXT:    %[[DIM1:.+]] = llvm.mlir.constant(8 : i64) : i64
+// CHECK-NEXT:    %[[ONE:.+]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK-NEXT:    %[[NUM_ELEMS:.+]] = llvm.mlir.constant(32 : i64) : i64
 // CHECK-NEXT:    %[[MALLOC_NULL:.+]] = llvm.mlir.zero : !llvm.ptr
 // CHECK-NEXT:    %[[MALLOC_GEP:.+]] = llvm.getelementptr %[[MALLOC_NULL]]{{\[}}%[[NUM_ELEMS]]] : (!llvm.ptr, i64) -> !llvm.ptr, i64
 // CHECK-NEXT:    %[[MALLOC_BYTES:.+]] = llvm.ptrtoint %[[MALLOC_GEP]] : !llvm.ptr to i64
@@ -40,7 +40,7 @@
 // CHECK-NEXT:    %[[DST_0:.+]] = llvm.mlir.poison : !llvm.struct<(ptr, ptr, i64, array<2 x i64>, array<2 x i64>)>
 // CHECK-NEXT:    %[[DST_1:.+]] = llvm.insertvalue %[[DST_BUF]], %[[DST_0]][0] : !llvm.struct<(ptr, ptr, i64, array<2 x i64>, array<2 x i64>)>
 // CHECK-NEXT:    %[[DST_2:.+]] = llvm.insertvalue %[[DST_BUF]], %[[DST_1]][1] : !llvm.struct<(ptr, ptr, i64, array<2 x i64>, array<2 x i64>)>
-// CHECK-NEXT:    %[[ZERO:.+]] = llvm.mlir.constant(0 : index) : i64
+// CHECK-NEXT:    %[[ZERO:.+]] = llvm.mlir.constant(0 : i64) : i64
 // CHECK-NEXT:    %[[DST_3:.+]] = llvm.insertvalue %[[ZERO]], %[[DST_2]][2] : !llvm.struct<(ptr, ptr, i64, array<2 x i64>, array<2 x i64>)>
 // CHECK-NEXT:    %[[DST_4:.+]] = llvm.insertvalue %[[DIM0]], %[[DST_3]][3, 0] : !llvm.struct<(ptr, ptr, i64, array<2 x i64>, array<2 x i64>)>
 // CHECK-NEXT:    %[[DST_5:.+]] = llvm.insertvalue %[[DIM1]], %[[DST_4]][3, 1] : !llvm.struct<(ptr, ptr, i64, array<2 x i64>, array<2 x i64>)>
@@ -87,9 +87,9 @@ func.func @copy_d2h_static(
 // CHECK-NEXT:    %[[SRC_3:.+]] = llvm.insertvalue %[[SRC_OFFSET]], %[[SRC_2]][2] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
 // CHECK-NEXT:    %[[SRC_4:.+]] = llvm.insertvalue %[[SRC_SIZE0]], %[[SRC_3]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
 // CHECK-NEXT:    %[[SRC_DESC:.+]] = llvm.insertvalue %[[SRC_STRIDE0]], %[[SRC_4]][4, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[AXIS:.+]] = llvm.mlir.constant(0 : index) : i64
+// CHECK-NEXT:    %[[AXIS:.+]] = llvm.mlir.constant(0 : i64) : i64
 // CHECK-NEXT:    %[[EXTENT:.+]] = llvm.extractvalue %[[SRC_DESC]][3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[ONE:.+]] = llvm.mlir.constant(1 : index) : i64
+// CHECK-NEXT:    %[[ONE:.+]] = llvm.mlir.constant(1 : i64) : i64
 // CHECK-NEXT:    %[[MALLOC_NULL:.+]] = llvm.mlir.zero : !llvm.ptr
 // CHECK-NEXT:    %[[MALLOC_GEP:.+]] = llvm.getelementptr %[[MALLOC_NULL]]{{\[}}%[[EXTENT]]] : (!llvm.ptr, i64) -> !llvm.ptr, f16
 // CHECK-NEXT:    %[[MALLOC_BYTES:.+]] = llvm.ptrtoint %[[MALLOC_GEP]] : !llvm.ptr to i64
@@ -97,7 +97,7 @@ func.func @copy_d2h_static(
 // CHECK-NEXT:    %[[DST_0:.+]] = llvm.mlir.poison : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
 // CHECK-NEXT:    %[[DST_1:.+]] = llvm.insertvalue %[[DST_BUF]], %[[DST_0]][0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
 // CHECK-NEXT:    %[[DST_2:.+]] = llvm.insertvalue %[[DST_BUF]], %[[DST_1]][1] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
-// CHECK-NEXT:    %[[ZERO:.+]] = llvm.mlir.constant(0 : index) : i64
+// CHECK-NEXT:    %[[ZERO:.+]] = llvm.mlir.constant(0 : i64) : i64
 // CHECK-NEXT:    %[[DST_3:.+]] = llvm.insertvalue %[[ZERO]], %[[DST_2]][2] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
 // CHECK-NEXT:    %[[DST_4:.+]] = llvm.insertvalue %[[EXTENT]], %[[DST_3]][3, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
 // CHECK-NEXT:    %[[DST_DESC:.+]] = llvm.insertvalue %[[ONE]], %[[DST_4]][4, 0] : !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
