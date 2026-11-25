@@ -599,29 +599,12 @@ conv_tiled_kernel(const T *__restrict__ x, const T *__restrict__ w,
     const bool hasNext = s + 1 < nSlices;
     if (hasNext) loadSlice((s + 1) * BK, cur ^ 1);
 
-    // Unrolled by four, not fully. The bound is a compile-time BK=16, so the
-    // default here was a full unroll -- and that is what made the widest tile
-    // the slowest one.
-    //
-    // Each unrolled step needs TM+TN live LDS reads, and the scheduler hoists
-    // them to cover the ds_read latency, so peak pressure is the unroll factor
-    // times TM+TN on top of the TM*TN accumulator. At 8x8 a full unroll asks
-    // for 16*(8+8) + 64 values at once, which does not fit: the tile compiled
-    // to 256 VGPRs with 100 of them spilled to 396 bytes of scratch per lane,
-    // and 5 waves/SIMD. Every multiply-add in the hottest loop of the kernel
-    // was then a private-memory round trip.
-    //
-    // Four steps is enough to hide LDS latency and cheap enough to keep the
-    // accumulator resident: <float,128,128,16,8,8> becomes 135 VGPRs, no
-    // scratch and 10 waves/SIMD. Measured across the whole shape census,
-    // simplebev's convolution goes from 875 ms to 340 ms.
-    //
-    // The factor is measured, not assumed. Two costs a little throughput for
-    // registers nothing needs (345 ms). Eight leaves the 8x8 tile exactly where
-    // four does, but pushes the narrow tiles that were comfortable -- 64x64
-    // from 71 VGPRs to 103, 32x128 from 79 to 119, both dropping from 16
-    // waves/SIMD to 12 -- and measures worst of the three (398 ms).
-#pragma unroll 4
+    // Unrolled by eight, not fully. Each unrolled step needs TM+TN live LDS
+    // reads, and the scheduler hoists them to cover the ds_read latency, so
+    // peak pressure is the unroll factor times TM+TN on top of the TM*TN
+    // accumulator and the prefetch registers. A full unroll of the 8x8 tile
+    // does not fit and spills the accumulator to scratch.
+#pragma unroll 8
     for (int kk = 0; kk < BK; ++kk) {
       float a[TM], b[TN];
 #pragma unroll
