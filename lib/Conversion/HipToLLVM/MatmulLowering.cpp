@@ -203,7 +203,7 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
                                    createI64Const(transA),
                                    createI64Const(transB)};
 
-    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    markFallibleRuntimeCall(LLVM::CallOp::create(rewriter, loc, *funcOp, args));
     rewriter.eraseOp(op);
     return success();
   }

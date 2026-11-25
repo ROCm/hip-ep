@@ -80,7 +80,7 @@ struct CastOpLowering : public ConvertOpToLLVMPattern<CastOp> {
     SmallVector<Value, 6> args = {statePtr,    inputPtr,       outputPtr,
                                   numElements, srcDataTypeVal, dstDataTypeVal};
 
-    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    markFallibleRuntimeCall(LLVM::CallOp::create(rewriter, loc, *funcOp, args));
     rewriter.eraseOp(op);
     return success();
   }

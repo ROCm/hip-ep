@@ -7,6 +7,7 @@
 #define HIP_CONVERSION_HIPTOLLVM_UTILS_H
 
 #include "RuntimeAccess.h"
+#include "hip/Conversion/HipToLLVM/RuntimeCallUtils.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 #include "hip/datatype_abi.h"

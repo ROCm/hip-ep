@@ -5,6 +5,7 @@
 
 #include "HipToLLVMUtils.h"
 #include "hip/Conversion/HipToLLVM/Passes.h"
+#include "hip/Conversion/HipToLLVM/RuntimeCallUtils.h"
 #include "hip/Dialect/IR/RuntimeAccessOpInterface.h"
 
 #include "mlir/Conversion/ConvertToLLVM/ToLLVMInterface.h"
@@ -13,6 +14,9 @@
 #include "mlir/IR/Dialect.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/STLExtras.h"
+
+#include <iterator>
 
 namespace mlir {
 namespace hip {
@@ -111,8 +115,76 @@ private:
   //     %_  = llvm.call @main_graph_internal(%ctx, %a, %al, %o, %s0, %t0)
   //     llvm.return %c0_i32
   //   }
+  // With runtime statuses (RuntimeCallUtils.h), @main_graph returns the first
+  // nonzero status of a marked call, at once, and zero otherwise: later
+  // kernels do not consume a failed call's result. The status ABI is
+  // @main_graph's alone, so a marked call elsewhere is an error.
+  /// Whether @main_graph now returns a status.
+  FailureOr<bool> propagateRuntimeStatus(ModuleOp module,
+                                         LLVM::LLVMFuncOp mainFunc) {
+    SmallVector<LLVM::CallOp> calls;
+    WalkResult outside = module.walk([&](LLVM::CallOp call) {
+      if (!isFallibleRuntimeCall(call))
+        return WalkResult::advance();
+      if (call->getParentOfType<LLVM::LLVMFuncOp>() != mainFunc) {
+        call.emitError("fallible runtime call outside @main_graph");
+        return WalkResult::interrupt();
+      }
+      if (call.getNumResults() != 1 ||
+          !call.getResult().getType().isInteger(32)) {
+        call.emitError("fallible runtime call must return one i32 status");
+        return WalkResult::interrupt();
+      }
+      calls.push_back(call);
+      return WalkResult::advance();
+    });
+    if (outside.wasInterrupted())
+      return failure();
+    if (calls.empty())
+      return false;
+
+    OpBuilder builder(module.getContext());
+    Location loc = mainFunc.getLoc();
+    Type i32Type = builder.getI32Type();
+    builder.setInsertionPointToStart(&mainFunc.getBody().front());
+    Value zero = LLVM::ConstantOp::create(builder, loc, i32Type,
+                                          builder.getI32IntegerAttr(0));
+    SmallVector<LLVM::ReturnOp> returns;
+    mainFunc.walk([&](LLVM::ReturnOp op) { returns.push_back(op); });
+    for (LLVM::ReturnOp op : returns) {
+      builder.setInsertionPoint(op);
+      LLVM::ReturnOp::create(builder, op.getLoc(), ValueRange{zero});
+      op.erase();
+    }
+    LLVM::LLVMFunctionType type = mainFunc.getFunctionType();
+    mainFunc.setFunctionType(LLVM::LLVMFunctionType::get(
+        i32Type, type.getParams(), type.isVarArg()));
+    mainFunc.removeResAttrsAttr();
+
+    Block *failed = mainFunc.addBlock();
+    Value status = failed->addArgument(i32Type, loc);
+    builder.setInsertionPointToStart(failed);
+    LLVM::ReturnOp::create(builder, loc, ValueRange{status});
+    // From the last call back: a split moves everything after the call into
+    // the new block, so going forward would move the rest of the graph once a
+    // call; backward each operation moves once.
+    for (LLVM::CallOp call : llvm::reverse(calls)) {
+      Block *block = call->getBlock();
+      Block *next = block->splitBlock(std::next(call->getIterator()));
+      builder.setInsertionPointToEnd(block);
+      Value nonzero =
+          LLVM::ICmpOp::create(builder, call.getLoc(), LLVM::ICmpPredicate::ne,
+                               call.getResult(), zero);
+      LLVM::CondBrOp::create(builder, call.getLoc(), nonzero, failed,
+                             ValueRange{call.getResult()}, next, ValueRange{});
+    }
+    return true;
+  }
+
   LogicalResult transformMainFunction(ModuleOp module) {
     auto mainFunc = module.lookupSymbol<LLVM::LLVMFuncOp>("main_graph");
+    if (!mainFunc && requiresRuntimeStatus(module))
+      return module.emitError("runtime statuses require @main_graph");
     if (!mainFunc)
       return success();
 
@@ -127,6 +199,9 @@ private:
 
     if (!inputCountAttr || !outputCountAttr || !inputShapesAttr ||
         !outputShapesAttr) {
+      if (requiresRuntimeStatus(module))
+        return module.emitError(
+            "runtime statuses require the hipdnn input/output metadata");
       COMPILER_DEBUG_LOG(
           "[HipToLLVM] Warning: No metadata found, skipping @main_graph "
           "transformation\n");
@@ -157,6 +232,10 @@ private:
              << "[HipToLLVM] @main_graph parameter count mismatch: expected "
              << expectedParams << ", got " << actualParams;
     }
+
+    FailureOr<bool> returnsStatus = propagateRuntimeStatus(module, mainFunc);
+    if (failed(returnsStatus))
+      return failure();
 
     OpBuilder builder(module.getContext());
     Location loc = mainFunc.getLoc();
@@ -205,15 +284,18 @@ private:
                                      mainInternalArgs);
     }
 
-    // Call the internal graph and return 0. Outputs are not out-params: the
-    // graph allocates them via hip.alloc_output and returns them by value, so
-    // any returned descriptor is ignored (the output reaches the EP through the
-    // callback). A zero-output graph returns void, so there is nothing to
-    // ignore.
-    builder.create<LLVM::CallOp>(loc, mainFunc, mainInternalArgs);
-    Value zero = builder.create<LLVM::ConstantOp>(loc, i32Type,
-                                                  builder.getI32IntegerAttr(0));
-    builder.create<LLVM::ReturnOp>(loc, zero);
+    // Call the internal graph and return 0, or its status with runtime
+    // statuses. Outputs are not out-params: the graph allocates them via
+    // hip.alloc_output and returns them by value, so any returned descriptor
+    // is ignored (the output reaches the EP through the callback). A
+    // zero-output graph returns void, so there is nothing to ignore.
+    auto internalCall =
+        builder.create<LLVM::CallOp>(loc, mainFunc, mainInternalArgs);
+    Value status = *returnsStatus
+                       ? internalCall.getResult()
+                       : builder.create<LLVM::ConstantOp>(
+                             loc, i32Type, builder.getI32IntegerAttr(0));
+    builder.create<LLVM::ReturnOp>(loc, status);
 
     COMPILER_DEBUG_LOG("[HipToLLVM] Transformed @main_graph signature: "
                        << actualParams << " params -> " << newParamTypes.size()
