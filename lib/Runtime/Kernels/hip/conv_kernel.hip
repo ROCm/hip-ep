@@ -474,6 +474,24 @@ static inline ConvParams withWindowGrid(ConvParams pr, int64_t bm, int64_t th,
 // loop wants: a fixed k, contiguous in the tile index, so TM and TN reads
 // vectorise.
 
+// One im2col element with no data-dependent branch: the load is always issued
+// (the address is clamped to 0 when the tap is padding or the column is past
+// the end) and the result selected, so a group of these can be in flight
+// together instead of each waiting on its own bounds test.
+template <typename T>
+__device__ __forceinline__ float
+gatherMasked(const T *__restrict__ xChan, const ConvParams &pr,
+             const PosOrigin &org, const KSlice &ks, bool colValid) {
+  const int32_t x0 = org.x0 + ks.c0;
+  const int32_t x1 = org.x1 + ks.c1;
+  const int32_t x2 = org.x2 + ks.c2;
+  const bool ok = colValid & (x0 >= 0) & (x0 < pr.in0i) & (x1 >= 0) &
+                  (x1 < pr.in1i) & (x2 >= 0) & (x2 < pr.in2i);
+  const int64_t addr = ok ? (org.lin + ks.off) : 0;
+  const float v = to_float<T>(xChan[addr]);
+  return ok ? v : 0.0f;
+}
+
 template <typename T, int BM, int BN, int BK, int TM, int TN>
 __global__ __launch_bounds__((BM / TM) * (BN / TN)) void
 conv_tiled_kernel(const T *__restrict__ x, const T *__restrict__ w,
@@ -543,15 +561,16 @@ conv_tiled_kernel(const T *__restrict__ x, const T *__restrict__ w,
     const int64_t wBase = wRowBase + kBase + kOffA;
     const int64_t kRem = pr.K - kBase - kOffA; // taps left in this thread's run
 #pragma unroll
-    for (int i = 0; i < kVecA; ++i)
-      As[kOffA + i][rowA] =
-          (rowValidA && i < kRem) ? to_float<T>(w[wBase + i]) : 0.0f;
+    for (int i = 0; i < kVecA; ++i) {
+      const bool ok = rowValidA && i < kRem;
+      const float v = to_float<T>(w[ok ? wBase + i : 0]);
+      As[kOffA + i][rowA] = ok ? v : 0.0f;
+    }
 
 #pragma unroll
     for (int l = 0; l < kLoadsB; ++l) {
       const int kk = kkB + l * kStepB;
-      Bs[kk][colB] =
-          colValid ? gatherSplit<T>(xChan, pr, org, ks[cur][kk]) : 0.0f;
+      Bs[kk][colB] = gatherMasked<T>(xChan, pr, org, ks[cur][kk], colValid);
     }
     __syncthreads();
 
