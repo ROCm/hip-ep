@@ -1597,6 +1597,15 @@ bool launchWmmaIfProfitable<__half>(hipStream_t stream, const void *x,
   return true;
 }
 
+// Whether a convolution too narrow for every scalar tile is big enough for a
+// tile to beat conv_direct. Below about a million multiply-accumulates the
+// whole problem is a few microseconds and launch overhead decides, so the
+// simple kernel stays.
+static bool smallMTileWorthwhile(const ConvParams &pr) {
+  constexpr int64_t kMinMacs = int64_t(1) << 20;
+  return pr.N * pr.Cout * pr.Nout * pr.K >= kMinMacs;
+}
+
 template <typename T>
 static int launch(hipStream_t stream, const void *x, const void *w,
                   const void *bias, void *y, const ConvParams &pr) {
@@ -1689,6 +1698,13 @@ static int launch(hipStream_t stream, const void *x, const void *w,
     }
     if (pr.MPerGroup >= 24 && tileFits(pr, 32, 128, need)) {
       launchTile<T, 32, 128, 2, 8>(stream, x, w, bias, y, pr);
+      break;
+    }
+    if (pass == 1 && smallMTileWorthwhile(pr)) {
+      // Fewer output channels than the smallest tile has rows. The tile still
+      // reuses each staged input slice across its block, which conv_direct does
+      // not, and its dead rows are zero-filled on load and skipped on store.
+      launchTile<T, 64, 64, 4, 4>(stream, x, w, bias, y, pr);
       break;
     }
     if (pass == 1) {
