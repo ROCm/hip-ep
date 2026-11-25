@@ -199,6 +199,13 @@ struct ConvParams {
   // has to split back into a row and a column of that 2-D grid.
   int32_t nBlkW;
   FastDiv rBlkW;
+
+  // Split-K: the reduction is cut into kSplit slices of kChunk taps (a
+  // multiple of the tile's BK), one per blockIdx.y. Each writes a partial sum
+  // to the workspace and conv_splitk_reduce_kernel adds them. 0 or 1 = no
+  // split. Honoured by conv_tiled_kernel only.
+  int32_t kSplit;
+  int64_t kChunk;
 };
 
 // The input coordinate that kernel tap (0,0,0) of an output position reads.
@@ -496,7 +503,7 @@ template <typename T, int BM, int BN, int BK, int TM, int TN>
 __global__ __launch_bounds__((BM / TM) * (BN / TN)) void
 conv_tiled_kernel(const T *__restrict__ x, const T *__restrict__ w,
                   const T *__restrict__ bias, T *__restrict__ y,
-                  ConvParams pr) {
+                  float *__restrict__ ws, ConvParams pr) {
   constexpr int kThreads = (BM / TM) * (BN / TN);
   static_assert(kThreads % BN == 0, "B column tiling");
   static_assert((BK * BM) % kThreads == 0 && (BK * BN) % kThreads == 0,
@@ -526,6 +533,13 @@ conv_tiled_kernel(const T *__restrict__ x, const T *__restrict__ w,
   const int64_t m0 = static_cast<int64_t>(blkM) * BM; // first channel
   int64_t nbatch, g;
   blockBases(pr, blockIdx.z, nbatch, g);
+  // The slice of the reduction this block covers. Chunks are multiples of BK,
+  // so no slice straddles two blocks' ranges and nothing is summed twice.
+  const bool split = pr.kSplit > 1;
+  const int splitIdx = split ? static_cast<int>(blockIdx.y) : 0;
+  const int64_t kBeg = split ? splitIdx * pr.kChunk : 0;
+  const int64_t kEnd =
+      split ? (kBeg + pr.kChunk < pr.K ? kBeg + pr.kChunk : pr.K) : pr.K;
 
   // Filter staging: one contiguous run of K per thread, resolved once.
   const int rowA = tid / kRowThreadsA;
@@ -562,7 +576,7 @@ conv_tiled_kernel(const T *__restrict__ x, const T *__restrict__ w,
   // are masked rather than skipped (see gatherMasked), so they carry no branch.
   float aReg[kVecA];
   float bReg[kLoadsB];
-  const int64_t nSlices = (pr.K + BK - 1) / BK;
+  const int64_t nSlices = (kEnd - kBeg + BK - 1) / BK;
 
   const auto loadSlice = [&](int64_t kBase, int ksBuf) {
     const int64_t wBase = wRowBase + kBase + kOffA;
@@ -586,18 +600,18 @@ conv_tiled_kernel(const T *__restrict__ x, const T *__restrict__ w,
   };
 
   if (tid < BK) {
-    ks[0][tid] = makeKSlice(pr, tid);
-    ks[1][tid] = makeKSlice(pr, BK + tid);
+    ks[0][tid] = makeKSlice(pr, kBeg + tid);
+    ks[1][tid] = makeKSlice(pr, kBeg + BK + tid);
   }
   __syncthreads();
-  loadSlice(0, 0);
+  loadSlice(kBeg, 0);
   storeSlice(0);
   __syncthreads();
 
   for (int64_t s = 0; s < nSlices; ++s) {
     const int cur = static_cast<int>(s & 1);
     const bool hasNext = s + 1 < nSlices;
-    if (hasNext) loadSlice((s + 1) * BK, cur ^ 1);
+    if (hasNext) loadSlice(kBeg + (s + 1) * BK, cur ^ 1);
 
     // Unrolled by eight, not fully. Each unrolled step needs TM+TN live LDS
     // reads, and the scheduler hoists them to cover the ds_read latency, so
@@ -616,9 +630,29 @@ conv_tiled_kernel(const T *__restrict__ x, const T *__restrict__ w,
 #pragma unroll
         for (int j = 0; j < TN; ++j) acc[i][j] += a[i] * b[j];
     }
-    if (tid < BK) ks[cur][tid] = makeKSlice(pr, (s + 2) * BK + tid);
+    if (tid < BK) ks[cur][tid] = makeKSlice(pr, kBeg + (s + 2) * BK + tid);
     if (hasNext) storeSlice(cur ^ 1);
     __syncthreads();
+  }
+
+  if (split) {
+    // Partial sum, no bias: ws is [split][N][Cout][Nout]. The reduce kernel
+    // adds the slices in a fixed order, so the result is deterministic.
+    const int64_t total = pr.N * pr.Cout * pr.Nout;
+    float *wsb = ws + splitIdx * total + nbatch * pr.Cout * pr.Nout;
+#pragma unroll
+    for (int i = 0; i < TM; ++i) {
+      const int64_t m = m0 + aOff + i;
+      if (m >= pr.MPerGroup) break;
+      float *row = wsb + (g * pr.MPerGroup + m) * pr.Nout;
+#pragma unroll
+      for (int j = 0; j < TN; ++j) {
+        const int64_t o = n0 + bOff + j;
+        if (o >= pr.Nout) break;
+        row[o] = acc[i][j];
+      }
+    }
+    return;
   }
 
   // Store, folding in the bias. Both loops are unrolled so that acc[i][j] is
@@ -1533,17 +1567,47 @@ struct WorkspaceSource {
   }
 };
 
+// y = bias + sum over the split-K slices, one thread per output element so the
+// reads and the write are coalesced. The slices are added in index order, so the
+// result does not depend on which block finished first.
+template <typename T>
+__global__ void conv_splitk_reduce_kernel(const float *__restrict__ ws,
+                                          const T *__restrict__ bias,
+                                          T *__restrict__ y, int64_t total,
+                                          int split, int64_t Cout,
+                                          int64_t Nout) {
+  const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (i >= total) return;
+  float acc = 0.0f;
+  for (int s = 0; s < split; ++s) acc += ws[s * total + i];
+  if (bias) acc += to_float<T>(bias[(i / Nout) % Cout]);
+  y[i] = from_float<T>(acc);
+}
+
+// Launches one scalar tile. With split > 1 the reduction is cut across
+// blockIdx.y into slices of `chunk` taps whose partial sums go to `ws`, and a
+// reduce kernel finishes the job.
 template <typename T, int BM, int BN, int TM, int TN>
 static void launchTile(hipStream_t stream, const void *x, const void *w,
-                       const void *bias, void *y, const ConvParams &base) {
-  const ConvParams pr = withTileGrid(base, BM, BN);
-  logPick("tiled", pr);
-  dim3 grid(swizzledGridX(pr), 1u,
+                       const void *bias, void *y, const ConvParams &base,
+                       int split = 0, int64_t chunk = 0, float *ws = nullptr) {
+  ConvParams pr = withTileGrid(base, BM, BN);
+  pr.kSplit = split;
+  pr.kChunk = chunk;
+  logPick(split > 1 ? "tiled+splitk" : "tiled", pr);
+  dim3 grid(swizzledGridX(pr), split > 1 ? static_cast<unsigned>(split) : 1u,
             static_cast<unsigned>(pr.N * pr.group));
   hipLaunchKernelGGL((conv_tiled_kernel<T, BM, BN, kBK, TM, TN>), grid,
                      dim3((BM / TM) * (BN / TN)), 0, stream,
                      static_cast<const T *>(x), static_cast<const T *>(w),
-                     static_cast<const T *>(bias), static_cast<T *>(y), pr);
+                     static_cast<const T *>(bias), static_cast<T *>(y), ws, pr);
+  if (split > 1) {
+    const int64_t total = pr.N * pr.Cout * pr.Nout;
+    hipLaunchKernelGGL(conv_splitk_reduce_kernel<T>,
+                       dim3(static_cast<unsigned>((total + 255) / 256)),
+                       dim3(256), 0, stream, ws, static_cast<const T *>(bias),
+                       static_cast<T *>(y), total, split, pr.Cout, pr.Nout);
+  }
 }
 
 template <int BM, int BN, int WM, int WN>
