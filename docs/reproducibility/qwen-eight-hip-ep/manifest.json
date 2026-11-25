@@ -26,7 +26,7 @@
       "bytes": 207
     },
     "documentation.json": {
-      "sha256": "dc65a919a381bcdc16d71aad3f5b911235ebb08e38bbfc7ca773c5ddfe640e1d",
+      "sha256": "89a1f2b026a308c50619b2487e59f22b16e045cf16c76f8b4ae00afc6c5ffc7d",
       "bytes": 2637
     },
     "eight-140w-archive.json": {
@@ -76,6 +76,10 @@
     "pause-receipt.json": {
       "sha256": "fda47e6137ba0e6213b3d4a3a932fe95f126640e5b84c2961d3cea4b8e480c3c",
       "bytes": 3002
+    },
+    "pr-validation.json": {
+      "sha256": "558a4ebd2df60ff6e2870ddb4382f962ecadc3edb42ef50457dc3b8b330a38f8",
+      "bytes": 50629
     },
     "raw/bfcl-eight-v4-50/audit.json": {
       "sha256": "95065640a796fc0a1af936322ac524695c3ad0374eccde6f81804d392e51cea9",
@@ -698,8 +702,8 @@
       "bytes": 864
     },
     "README.md": {
-      "sha256": "a4df20b990925ab669bf074bf76de3cbcbb388ad7cd3ae9d15147247796e1fb4",
-      "bytes": 18758
+      "sha256": "6c0dff6da4c4ef7a96e240502d0cc103ab3d61e1eadbf3bac77b399364a65c1e",
+      "bytes": 18967
     },
     "status.json": {
       "sha256": "fb50e1a7454a198d5d3507131906243c2afcad4bbe92603aedfffd069eabb78d",

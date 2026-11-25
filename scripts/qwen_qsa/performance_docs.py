@@ -197,7 +197,7 @@ def update_documents():
         "docs/experiments/qwen-qsa-native-gqa-results.md": "The historical four-selector campaign and its quality tables remain below.",
         "docs/reproducibility/qwen-hip-ep/README.md": "This packet's identities, performance, accuracy and memory files remain the historical four-selector evidence; the eight-selector evidence is a separate packet.",
         "docs/reproducibility/qwen-hip-ep/AUDIT.md": "The audit below describes the historical implementation/merge checks. Eight reuses the measured native build; no new merged-candidate throughput campaign is claimed.",
-        "docs/reproducibility/qwen-hip-ep/PR_DESCRIPTION.md": "This performance addendum belongs to local branch `codex/qwen-eight-qsa-perf`; the historical four-selector merge-candidate validation below remains separately identified.",
+        "docs/reproducibility/qwen-hip-ep/PR_DESCRIPTION.md": "This performance addendum belongs to branch `rajeevp/qsa`; the historical four-selector merge-candidate validation below remains separately identified.",
         "docs/design/qwen-qsa-native-gqa.md": "The same native operator/math/cache contract now has four- and eight-selector exports. The eight-selector variant reuses the measured kernels and compiler.",
         "docs/experiments/qwen-qsa-bfcl-v4-50.md": "All accuracy results below belong to the historical four-selector checkpoint. The Eight-only pilot is tracked separately in the latest paper handoff.",
         "docs/experiments/qwen-qsa-memory.md": "All memory measurements below belong to four selectors. Host RAM guards in the eight-selector performance run are not a new GPU-memory comparison.",
@@ -219,7 +219,7 @@ def update_documents():
     root_readme = ROOT / "README.md"
     put_block(
         root_readme,
-        f"- [Qwen eight-selector QSA: latest 4K/16K/32K performance]({link(root_readme, REPORT)})\n- [Qwen eight-selector paper packet and raw measurements]({link(root_readme, eight_readme)})",
+        f"- [QSA support: OLMo four and Qwen four/eight selectors]({link(root_readme, ROOT / 'docs/design/qsa-support.md')})\n- [Qwen eight-selector QSA: latest 4K/16K/32K performance]({link(root_readme, REPORT)})\n- [Qwen eight-selector paper packet and raw measurements]({link(root_readme, eight_readme)})",
         "- [Qwen isolated default/QSA memory-only matrix]",
     )
     changed.append(root_readme)

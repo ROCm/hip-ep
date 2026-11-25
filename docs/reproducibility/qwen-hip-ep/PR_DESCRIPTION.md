@@ -7,7 +7,7 @@ Licensed under the MIT License.
 <!-- QWEN_EIGHT_PERFORMANCE_BEGIN -->
 ## Latest eight-selector performance
 
-This performance addendum belongs to local branch `codex/qwen-eight-qsa-perf`; the historical four-selector merge-candidate validation below remains separately identified.
+This performance addendum belongs to branch `rajeevp/qsa`; the historical four-selector merge-candidate validation below remains separately identified.
 
 **Decode throughput improved over four selectors at every measured length.** Prefill is slower at 4K/16K and slightly faster at 32K. All eight weights, including the overlapping four positions, come from checkpoint 640; this is not a layer-count-only change.
 
@@ -22,32 +22,42 @@ Eight uses one warmup and three measured requests at batch one, with 64 common t
 The fixed 50-case BFCL component pilot scores Eight 29/50 versus reused Original 26/50; no new Original generation was run. This is not the official overall BFCL score. Eight GSM8K and application-memory comparisons remain unmeasured. The source checkpoint still misses its fixed 32K PPL gate; this pilot does not establish accepted long-context quality. See the [eight-selector report](../../experiments/qwen-qsa-eight-selector-results.md) and [raw-data paper handoff](../qwen-eight-hip-ep/README.md).
 <!-- QWEN_EIGHT_PERFORMANCE_END -->
 
-Replace four selected full-attention nodes with native stateful QSA operations
-for the pinned OLMo and Qwen models. Selector projection, features, stable ranking
-and selected-address attention run on the EP stream inside the existing full-model
-session. Dense GQA remains available and provides Qwen's full-support path. Add
-BF16 selector import, compiler/runtime validation and matched evaluation tools.
+Frozen QSA now executes inside the existing full-model HIP-EP session instead
+of crossing Python/Torch or extra ONNX-session boundaries at selected attention
+layers. This one PR contains both native model specializations, BF16 selector
+import, compiler lowering/verifiers, stateful runtime/cache handling, GPU kernels,
+export tools, validation and reproducible performance/quality evidence.
 
-The Qwen W4A16 comparison measures batch1 at4K/16K/32K: decode throughput changes
-by+0.50%/+1.23%/+1.60%, while prefill decreases4.13%/4.47%/8.83%. PPL changes
-5.96868807 to5.97127044; GSM8K is111/128 for both, with identical short-context
-generations. Full KV storage is retained and QSA adds workspace. These measurements
-belong to the preserved pre-merge binaries, not the new merge build.
+| Model | Selector configurations in this PR |
+|---|---|
+| OLMo-3-1025-7B | Four: layers 7/11/15/23 |
+| Qwen3.8-27B | Four: 27/31/35/39; Eight: 3/7/23/27/31/35/39/63 |
 
-The paired50-case BFCLv4 component pilot scores default26/50 versus QSA24/50. The report records actual prompt/response lengths, turns, generation steps, cap counts and sparse-pruning coverage; it is not the official BFCLv4 overall score.
+Layer indices are zero-based. OLMo Eight is not implemented. Both Qwen exports
+use the same Qwen native operation; the Eight export loads every updated
+checkpoint-640 selector, including the overlapping four positions. Selector
+count is chosen by graph export. Both prefill and decode use QSA, with one EP
+dispatch per forward; full KV storage remains allocated.
 
-Include a portable JSON/CSV paper packet, compressed raw quality rows, raw paired
-timings, checksum manifest and local raw archive descriptor. Explicitly record
-memory coverage, the failed/canceled64K attempt, limited accuracy coverage and
-precision/generation/statistics differences from the MI355X source campaign.
+The qualified target is gfx1151/wave32 with the pinned native W4A16 group128
+models, FP16 activations/KV, BF16 selectors and Qwen FP32 recurrent state. OLMo
+is batch one; measured Qwen throughput is batch one at4K/16K/32K. Broader hardware,
+continuous batching and arbitrary model geometries are not qualified. See the
+[combined support scope](../../design/qsa-support.md).
 
-Validation: 736 compiler lit tests pass (nine unsupported), eight CPU unit tests
-pass, six CPU export tests pass, and the expanded kernel/operator/full-model
-controls pass on the merged candidate. Full-support equality and replay are
-exact; both variants retain one EP dispatch per forward and stable cache
-pointers. See [AUDIT.md](AUDIT.md),[candidate-validation.json](candidate-validation.json)
-and the hashed historical receipts. The implementation is qualified for gfx1151/wave32; shape
-guards do not establish full-model performance or memory support at all bounds.
-The local PR branch resolves conflicts against local`origin/main` while preserving
-upstream GQA host-length/bias handling, FP8 import and ROCTx tracing. No branch,
-pull request or results have been pushed or published by this work.
+The linked evidence retains Original/Four paired timing and the later Eight
+across-run comparison, independent prefill/decode timers, raw rows and hashes.
+The fixed BFCL50 component pilot scores Original26/50, Four24/50 and Eight29/50;
+it is not the official overall BFCLv4 score. Eight GSM8K, native PPL and
+application-memory comparisons remain unmeasured. Checkpoint640 still misses
+the source fixed32K PPL gate; this PR does not claim accepted long-context quality.
+
+The historical merged candidate passed736 compiler lit tests (nine unsupported),
+eight CPU unit tests, six export tests and expanded GPU kernel/operator/full-model
+controls; [AUDIT.md](AUDIT.md) and [candidate-validation.json](candidate-validation.json)
+bind those checks to their exact source/binaries. The branch includes current
+upstream main and the previously audited integration fixes. The final cleanup
+checks are recorded separately in the [PR validation receipt](../qwen-eight-hip-ep/pr-validation.json).
+Historical performance/accuracy remains attached to the preserved measured build.
+Large model weights, compiled binaries/caches and local ZIP archives are not
+part of the branch; the portable Markdown/JSON/CSV/raw evidence is included.
