@@ -14,10 +14,12 @@
 //
 // mean = [1, 0], var = [3, 0], epsilon = 1, so s = 1 / sqrt(var + epsilon) =
 // [0.5, 1] and t = -mean * s = [-0.5, 0], which becomes the convolution's bias.
+// The weights are all 1, so output channel c of the folded weights is s[c].
 
 // CHECK-LABEL: IR Dump Before ExternalizeConstantsPass
+// CHECK:         %[[WEIGHTS:.*]] = hip.constant {{.*}}value = dense<{{\[}}[{{\[}}[5.000000e-01, 5.000000e-01, 5.000000e-01], [5.000000e-01, 5.000000e-01, 5.000000e-01], [5.000000e-01, 5.000000e-01, 5.000000e-01]], {{\[}}[5.000000e-01, 5.000000e-01, 5.000000e-01], [5.000000e-01, 5.000000e-01, 5.000000e-01], [5.000000e-01, 5.000000e-01, 5.000000e-01]]], {{\[}}{{\[}}[1.000000e+00, 1.000000e+00, 1.000000e+00], [1.000000e+00, 1.000000e+00, 1.000000e+00], [1.000000e+00, 1.000000e+00, 1.000000e+00]], {{\[}}[1.000000e+00, 1.000000e+00, 1.000000e+00], [1.000000e+00, 1.000000e+00, 1.000000e+00], [1.000000e+00, 1.000000e+00, 1.000000e+00]]]]> : tensor<2x2x3x3xf32>
 // CHECK:         %[[BIAS:.*]] = hip.constant {{.*}}value = dense<[-5.000000e-01, 0.000000e+00]> : tensor<2xf32>
-// CHECK:         hip.conv(%{{.*}}) ins(%{{.*}}, %{{.*}}, %[[BIAS]] : tensor<1x2x4x4xf32>, tensor<2x2x3x3xf32>, tensor<2xf32>)
+// CHECK:         hip.conv(%{{.*}}) ins(%{{.*}}, %[[WEIGHTS]], %[[BIAS]] : tensor<1x2x4x4xf32>, tensor<2x2x3x3xf32>, tensor<2xf32>)
 module {
   func.func @main_graph(%x: tensor<1x2x4x4xf32>) -> tensor<1x2x4x4xf32> {
     %weights = "onnx.Constant"() {value = dense<1.0> : tensor<2x2x3x3xf32>}
