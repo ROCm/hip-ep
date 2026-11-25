@@ -508,13 +508,15 @@ conv_tiled_kernel(const T *__restrict__ x, const T *__restrict__ w,
   constexpr int kRowThreadsA = BK / kVecA;
   static_assert(kVecA <= BK && BK % kVecA == 0, "filter run divides BK");
 
-  // 16-byte aligned so the inner loop's TM/TN-wide reads compile to
-  // ds_load_b128 rather than pairs of ds_load_2addr_b32.
-  __shared__ __attribute__((aligned(16))) float As[BK][BM]; // filter slice, k-major
-  __shared__ __attribute__((aligned(16))) float Bs[BK][BN]; // im2col slice
+  // Both tiles are double-buffered: one half is read by the arithmetic while the
+  // other is written with the next slice, so a slice costs one barrier. 16-byte
+  // aligned so the inner loop's TM/TN-wide reads compile to ds_load_b128 rather
+  // than pairs of ds_load_2addr_b32.
+  __shared__ __attribute__((aligned(16))) float As[2][BK][BM]; // filter, k-major
+  __shared__ __attribute__((aligned(16))) float Bs[2][BK][BN]; // im2col
   // The contraction half of the im2col address, one entry per k in the slice,
-  // decoded once for the whole block. Double-buffered so the next slice's
-  // decode overlaps this slice's arithmetic and costs no extra barrier.
+  // decoded once for the whole block. Slice s uses ks[s & 1], so the decode of
+  // the slice after next overlaps this slice's arithmetic.
   __shared__ KSlice ks[2][BK];
 
   const int tid = threadIdx.x;
@@ -553,26 +555,49 @@ conv_tiled_kernel(const T *__restrict__ x, const T *__restrict__ w,
 #pragma unroll
     for (int j = 0; j < TN; ++j) acc[i][j] = 0.0f;
 
-  int cur = 0;
-  if (tid < BK) ks[0][tid] = makeKSlice(pr, tid);
-  __syncthreads();
+  // Software pipeline. The next slice is fetched into registers before the
+  // arithmetic on this one starts and written to the other half of LDS after
+  // it, so the global-load latency that used to sit exposed at the top of every
+  // iteration overlaps the multiply-adds. Loads past the end of the reduction
+  // are masked rather than skipped (see gatherMasked), so they carry no branch.
+  float aReg[kVecA];
+  float bReg[kLoadsB];
+  const int64_t nSlices = (pr.K + BK - 1) / BK;
 
-  for (int64_t kBase = 0; kBase < pr.K; kBase += BK) {
+  const auto loadSlice = [&](int64_t kBase, int ksBuf) {
     const int64_t wBase = wRowBase + kBase + kOffA;
     const int64_t kRem = pr.K - kBase - kOffA; // taps left in this thread's run
 #pragma unroll
     for (int i = 0; i < kVecA; ++i) {
       const bool ok = rowValidA && i < kRem;
       const float v = to_float<T>(w[ok ? wBase + i : 0]);
-      As[kOffA + i][rowA] = ok ? v : 0.0f;
+      aReg[i] = ok ? v : 0.0f;
     }
-
 #pragma unroll
-    for (int l = 0; l < kLoadsB; ++l) {
-      const int kk = kkB + l * kStepB;
-      Bs[kk][colB] = gatherMasked<T>(xChan, pr, org, ks[cur][kk], colValid);
-    }
-    __syncthreads();
+    for (int l = 0; l < kLoadsB; ++l)
+      bReg[l] = gatherMasked<T>(xChan, pr, org, ks[ksBuf][kkB + l * kStepB],
+                                colValid);
+  };
+  const auto storeSlice = [&](int buf) {
+#pragma unroll
+    for (int i = 0; i < kVecA; ++i) As[buf][kOffA + i][rowA] = aReg[i];
+#pragma unroll
+    for (int l = 0; l < kLoadsB; ++l) Bs[buf][kkB + l * kStepB][colB] = bReg[l];
+  };
+
+  if (tid < BK) {
+    ks[0][tid] = makeKSlice(pr, tid);
+    ks[1][tid] = makeKSlice(pr, BK + tid);
+  }
+  __syncthreads();
+  loadSlice(0, 0);
+  storeSlice(0);
+  __syncthreads();
+
+  for (int64_t s = 0; s < nSlices; ++s) {
+    const int cur = static_cast<int>(s & 1);
+    const bool hasNext = s + 1 < nSlices;
+    if (hasNext) loadSlice((s + 1) * BK, cur ^ 1);
 
     // Unrolled by four, not fully. The bound is a compile-time BK=16, so the
     // default here was a full unroll -- and that is what made the widest tile
@@ -600,17 +625,17 @@ conv_tiled_kernel(const T *__restrict__ x, const T *__restrict__ w,
     for (int kk = 0; kk < BK; ++kk) {
       float a[TM], b[TN];
 #pragma unroll
-      for (int i = 0; i < TM; ++i) a[i] = As[kk][aOff + i];
+      for (int i = 0; i < TM; ++i) a[i] = As[cur][kk][aOff + i];
 #pragma unroll
-      for (int j = 0; j < TN; ++j) b[j] = Bs[kk][bOff + j];
+      for (int j = 0; j < TN; ++j) b[j] = Bs[cur][kk][bOff + j];
 #pragma unroll
       for (int i = 0; i < TM; ++i)
 #pragma unroll
         for (int j = 0; j < TN; ++j) acc[i][j] += a[i] * b[j];
     }
-    if (tid < BK) ks[cur ^ 1][tid] = makeKSlice(pr, kBase + BK + tid);
+    if (tid < BK) ks[cur][tid] = makeKSlice(pr, (s + 2) * BK + tid);
+    if (hasNext) storeSlice(cur ^ 1);
     __syncthreads();
-    cur ^= 1;
   }
 
   // Store, folding in the bias. Both loops are unrolled so that acc[i][j] is
