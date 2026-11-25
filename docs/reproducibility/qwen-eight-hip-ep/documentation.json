@@ -1,6 +1,6 @@
 {
   "source_performance_sha256": "bed3190aca4590fcc1ad85d566a7442e630e5dbbe348a0193400f554f762ff49",
-  "generator_sha256": "60702192ffdb7f759ca622ed9ca05e657918d4acd6026cf06aff0ccb1c193e3d",
+  "generator_sha256": "e297d97807172f0eb58c8265df1581517b0bde32f0cbb7c6f7e4962779cff0d3",
   "document_hash_normalization": "UTF-8 text with LF line endings",
   "documents": {
     "docs/experiments/qwen-qsa-eight-selector-results.md": {
@@ -8,8 +8,8 @@
       "normalized_utf8_bytes": 3723
     },
     "docs/reproducibility/qwen-eight-hip-ep/README.md": {
-      "normalized_lf_sha256": "4dd4f6c73f20081196fe86cb714f11d977ec1699ca62c6a6471fc165a6df1f23",
-      "normalized_utf8_bytes": 18833
+      "normalized_lf_sha256": "6b4fdbdfb132546a46bb52dd66a82202648632ebd207e9a74bd5ca2176ad244a",
+      "normalized_utf8_bytes": 18845
     },
     "docs/experiments/qwen-qsa-native-gqa-results.md": {
       "normalized_lf_sha256": "e8cc591c76388c888123711818f7ac63506a1eea3ba98049df4995e9d0e2e02e",
@@ -24,8 +24,8 @@
       "normalized_utf8_bytes": 11716
     },
     "docs/reproducibility/qwen-hip-ep/PR_DESCRIPTION.md": {
-      "normalized_lf_sha256": "bf42823788967c43914bab8a7f99d31dab37db2e15bb4d09a21d22a732cac375",
-      "normalized_utf8_bytes": 4292
+      "normalized_lf_sha256": "f6620b1fcd4deae9519fbcb50ea0aa942e809d4159ac4cabbd0eb7c861d66142",
+      "normalized_utf8_bytes": 4298
     },
     "docs/design/qwen-qsa-native-gqa.md": {
       "normalized_lf_sha256": "104da92f62de0bf24fce51bf5eed0a3e9bd3e8ab3268aa9999542315ba3b9eb5",
@@ -44,8 +44,8 @@
       "normalized_utf8_bytes": 9965
     },
     "docs/experiments/qwen-qsa-eight-bfcl-v4-50.md": {
-      "normalized_lf_sha256": "d3597c1afe2807bd8feb63b7e2d67ead63f53f32435e314fab0f8e3fcbc61b58",
-      "normalized_utf8_bytes": 4876
+      "normalized_lf_sha256": "ab2a2651612935ff18f0e6b98f5659b70cf01069c017ba51e4237f460033b157",
+      "normalized_utf8_bytes": 4882
     }
   },
   "bfcl_eight_summary_sha256": "32cb614f73ce96537af93e4a27bdd91bea876be25e2ea4969387c33e26ee8414",

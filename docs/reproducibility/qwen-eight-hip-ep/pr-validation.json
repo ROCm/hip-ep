@@ -1,7 +1,7 @@
 {
   "state": "passed",
   "recorded_utc": "2026-11-25T05:17:34.174335+00:00",
-  "branch": "rajeevp/qsa",
+  "branch": "users/rajeevp/qsa",
   "remote": "https://github.com/ROCm/hip-ep.git",
   "scope": "Combined OLMo Four + Qwen Four/Eight PR cleanup; no new accuracy or performance campaign",
   "merge_source_commit": "21c2877a24b1b80b77e9055e4f56ab7ddd6bba86",
@@ -727,5 +727,12 @@
   "rebuilt_compiler_sha256": {
     "hip-mlir-opt.exe": "b3e1cd918c6817f84b8d573782de902911e3096d0154c3bb415928113d2fa847",
     "hip-compiler.exe": "b6150e51593c9bcaa18a53acd1fff5ad1c108125b59c761ac4d9a8ca11b2e17d"
+  },
+  "requested_branch": "rajeevp/qsa",
+  "branch_name_adjustment": {
+    "reason": "GitHub GH013 rejects the requested name; repository requires an approved prefix",
+    "allowed_pattern": "^(feat|ci|docs|fix|perf|pr|release|test|users|gpuep)/.*",
+    "rules_url": "https://github.com/ROCm/hip-ep/rules",
+    "implementation_and_measured_evidence_unchanged": true
   }
 }

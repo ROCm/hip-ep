@@ -5,8 +5,10 @@ Licensed under the MIT License.
 # QSA scope for the combined HIP-EP PR
 
 All QSA compiler, runtime, kernel, export, validation and experiment work is
-consolidated on [`rajeevp/qsa`](https://github.com/ROCm/hip-ep/tree/rajeevp/qsa).
-The older local branches preserve historical work and are not separate PRs.
+consolidated on [`users/rajeevp/qsa`](https://github.com/ROCm/hip-ep/tree/users/rajeevp/qsa).
+The repository requires an approved prefix, so the requested `rajeevp/qsa` name
+uses the compliant `users/rajeevp/qsa` namespace. The older local branches
+preserve historical work and are not separate PRs.
 
 | Model | Frozen selector configuration | Native operation | Export entry point |
 |---|---|---|---|

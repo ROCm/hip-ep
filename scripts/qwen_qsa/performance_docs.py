@@ -197,7 +197,7 @@ def update_documents():
         "docs/experiments/qwen-qsa-native-gqa-results.md": "The historical four-selector campaign and its quality tables remain below.",
         "docs/reproducibility/qwen-hip-ep/README.md": "This packet's identities, performance, accuracy and memory files remain the historical four-selector evidence; the eight-selector evidence is a separate packet.",
         "docs/reproducibility/qwen-hip-ep/AUDIT.md": "The audit below describes the historical implementation/merge checks. Eight reuses the measured native build; no new merged-candidate throughput campaign is claimed.",
-        "docs/reproducibility/qwen-hip-ep/PR_DESCRIPTION.md": "This performance addendum belongs to branch `rajeevp/qsa`; the historical four-selector merge-candidate validation below remains separately identified.",
+        "docs/reproducibility/qwen-hip-ep/PR_DESCRIPTION.md": "This performance addendum belongs to branch `users/rajeevp/qsa`; the historical four-selector merge-candidate validation below remains separately identified.",
         "docs/design/qwen-qsa-native-gqa.md": "The same native operator/math/cache contract now has four- and eight-selector exports. The eight-selector variant reuses the measured kernels and compiler.",
         "docs/experiments/qwen-qsa-bfcl-v4-50.md": "All accuracy results below belong to the historical four-selector checkpoint. The Eight-only pilot is tracked separately in the latest paper handoff.",
         "docs/experiments/qwen-qsa-memory.md": "All memory measurements below belong to four selectors. Host RAM guards in the eight-selector performance run are not a new GPU-memory comparison.",

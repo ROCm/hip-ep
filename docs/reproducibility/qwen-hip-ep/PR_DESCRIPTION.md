@@ -7,7 +7,7 @@ Licensed under the MIT License.
 <!-- QWEN_EIGHT_PERFORMANCE_BEGIN -->
 ## Latest eight-selector performance
 
-This performance addendum belongs to branch `rajeevp/qsa`; the historical four-selector merge-candidate validation below remains separately identified.
+This performance addendum belongs to branch `users/rajeevp/qsa`; the historical four-selector merge-candidate validation below remains separately identified.
 
 **Decode throughput improved over four selectors at every measured length.** Prefill is slower at 4K/16K and slightly faster at 32K. All eight weights, including the overlapping four positions, come from checkpoint 640; this is not a layer-count-only change.
 
