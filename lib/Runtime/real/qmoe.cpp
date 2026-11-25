@@ -358,12 +358,11 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   // stream, so the k-slot buffers are reused across iterations.
   if (num_tokens <= hipdnn_ep_qmoe_fused_max_tokens() && swiglu) {
     // 2-bit experts: W2A8 dp4a, the whole burst in one set of launches.
-    const bool dp4a_u2 = expert_weight_bits == 2 &&
-                         hipdnn_ep_matmul_dp4a_enabled() &&
-                         hipdnn_ep_qmoe_dp4a_u2_enabled() && elem_size == 2 &&
-                         block_size >= 64 && block_size <= 512 &&
-                         hidden_size % block_size == 0 &&
-                         inter_size % block_size == 0;
+    const bool dp4a_u2 =
+        expert_weight_bits == 2 && hipdnn_ep_matmul_dp4a_enabled() &&
+        hipdnn_ep_qmoe_dp4a_u2_enabled() && elem_size == 2 &&
+        block_size >= 64 && block_size <= 512 &&
+        hidden_size % block_size == 0 && inter_size % block_size == 0;
     if (dp4a_u2) {
       OP_ROCTX_MARK("hip_ep.op.qmoe.decode.dp4a_u2");
       HIP_CHECK(hip_qmoe_decode_fused_dp4a_u2(
