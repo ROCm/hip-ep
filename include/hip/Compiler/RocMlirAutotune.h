@@ -53,7 +53,8 @@ namespace hip {
 // Breadth of the perfConfig search. Mirrors rock::TuningParamSetKind without
 // pulling a rocMLIR header into this interface; `Full` and `Exhaustive` are
 // supersets of `Quick` by rocMLIR's own contract. A tuning type skips the
-// shipped problem-cache LUT. An external --problem-cache still takes priority.
+// shipped problem-cache LUT. An external --enable-problem-cache-rw file still
+// takes priority.
 enum class AutotuneSpace { Quick, Full, Exhaustive };
 
 // Parses "quick", "full", or "exhaustive". Returns false and leaves \p out
@@ -103,11 +104,19 @@ struct AutotuneOptions {
   // `log` because the per-candidate lines are one per config per kernel --
   // useful when tuning by hand, far too much for a normal compile.
   bool verbose = false;
-  // External rocMLIR LUT FlatBuffer (.fb). hip-rocmlir-compiler sets this
-  // from --problem-cache or HIP_ROCMLIR_PROBLEM_CACHE. When set, this file
-  // takes priority over the search and the shipped table is not consulted.
-  // When empty, the shipped LUT is consulted unless tuningTypeProvided.
+  // External rocMLIR LUT JSON, the document dumpProblemCache writes (not a
+  // .fb; only the shipped tables are FlatBuffers). hip-rocmlir-compiler sets
+  // this from --enable-problem-cache-rw or HIP_ROCMLIR_PROBLEM_CACHE. When
+  // set, this file takes priority over the search and the shipped table is not
+  // consulted. When empty, the shipped LUT is consulted unless
+  // tuningTypeProvided.
   std::string problemCachePath;
+  // Write this compile's benchmarked winners back into `problemCachePath`
+  // itself. Set by --enable-problem-cache-rw; HIP_ROCMLIR_PROBLEM_CACHE leaves
+  // it false, so that path is only read. The autotuner does not write the file
+  // itself; hip-rocmlir-compiler calls updateProblemCacheFile once the embed
+  // has succeeded. A missing or empty file is a new table, not an error.
+  bool problemCacheRewrite = false;
   // Where to write this compile's winners. Empty skips the dump. The autotuner
   // does not write the file itself; hip-rocmlir-compiler calls
   // dumpProblemCache when this is set.
@@ -153,6 +162,19 @@ public:
   // False when the device cannot be queried or the file cannot be written.
   bool dumpProblemCache(StringRef path) const;
 
+  // Merges this compile's search winners into AutotuneOptions::problemCachePath
+  // and replaces that file, so the next compile (this tool or another run)
+  // reads them back. A no-op returning true unless options.problemCacheRewrite
+  // is set. Only winners of a search are written: a perfConfig borrowed from
+  // the cache, or from the shipped LUT, is not a measurement and never goes
+  // into the file, and neither does any problem the search did not run for.
+  // The file is read again at write time, so winners another compile added in
+  // between are kept, and every point already in it is kept, including ones
+  // this build cannot use. Replaced atomically via a temporary file. False,
+  // with the file untouched, when it cannot be read, is not a LUT, is for
+  // another gpu_arch, or cannot be written.
+  bool updateProblemCacheFile() const;
+
 private:
   struct Impl;
   std::unique_ptr<Impl> impl;
@@ -167,8 +189,8 @@ bool rocMlirSkipBenchmarking();
 // Reads HIPDNN_EP_ROCMLIR_AUTOTUNE for the search space only. Unset or empty
 // selects quick. "quick", "full", and "exhaustive" are the only accepted
 // values. Anything else warns and selects quick. A tuning type skips the
-// shipped problem-cache LUT. An external --problem-cache still takes
-// priority. Skipping the search is rocMlirSkipBenchmarking(), not a
+// shipped problem-cache LUT. An external --enable-problem-cache-rw file still
+// takes priority. Skipping the search is rocMlirSkipBenchmarking(), not a
 // value of this variable.
 // Returns false, leaving \p out alone, only when that skip flag is set.
 //

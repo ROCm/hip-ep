@@ -11,8 +11,18 @@
 
 #include "flatbuffers/flatbuffers.h"
 
+#include "llvm/Support/JSON.h"
+#include "llvm/Support/raw_ostream.h"
+
+#include <algorithm>
+#include <cstdint>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <map>
 #include <string>
+#include <system_error>
 #include <vector>
 
 namespace {
@@ -288,6 +298,424 @@ int main() {
   expect(
       !mlir::hip::loadProblemCacheLut(garbage, sizeof(garbage), loaded, error),
       "a non-RCAL buffer is rejected");
+
+  // The external table is the JSON that --dump-problem-cache writes. Build the
+  // same document as the RCAL buffer above, in the dump's own shape (points
+  // carry m/n/k, which the loader ignores).
+  const auto jsonText = [&](llvm::json::Object root) {
+    std::string text;
+    llvm::raw_string_ostream os(text);
+    os << llvm::json::Value(std::move(root));
+    return text;
+  };
+  const auto dumpDoc = [&] {
+    llvm::json::Array jsonConfigs;
+    for (const char *perf : {tile32.c_str(), "{\"algo\":\"block\"}",
+                             gemmTile.c_str()})
+      jsonConfigs.push_back(llvm::json::Object{{"perf_config", perf}});
+    llvm::json::Array jsonPoints;
+    jsonPoints.push_back(llvm::json::Object{{"problem", exact},
+                                            {"config", 0},
+                                            {"m", 32},
+                                            {"n", 4096},
+                                            {"k", 144}});
+    jsonPoints.push_back(llvm::json::Object{{"problem", "{\"lens\":[1,2]}"},
+                                            {"config", 1},
+                                            {"m", 0},
+                                            {"n", 0},
+                                            {"k", 0}});
+    jsonPoints.push_back(llvm::json::Object{{"problem", gemmKey},
+                                            {"config", 2},
+                                            {"m", 0},
+                                            {"n", 0},
+                                            {"k", 0}});
+    return llvm::json::Object{{"schema_version", 1},
+                              {"gpu_arch", "gfx1151"},
+                              {"rocm_version", 0},
+                              {"kernel_abi", "rocmlir-conv-v1"},
+                              {"model_key", ""},
+                              {"weight_m", 1.0},
+                              {"weight_n", 1.0},
+                              {"weight_k", 1.0},
+                              {"configs", std::move(jsonConfigs)},
+                              {"points", std::move(jsonPoints)},
+                              {"fallbacks", llvm::json::Array()}};
+  };
+
+  // `loaded` was reset by the rejected buffer above, so reload the RCAL table
+  // to compare against.
+  mlir::hip::ProblemCacheLut fromRcal;
+  expect(mlir::hip::loadProblemCacheLut(builder.GetBufferPointer(),
+                                        builder.GetSize(), fromRcal, error) &&
+             fromRcal.entries.size() == 2,
+         "the RCAL buffer reloads for the parity check");
+  mlir::hip::ProblemCacheLut fromJson;
+  expect(mlir::hip::loadProblemCacheLutJson(jsonText(dumpDoc()), fromJson,
+                                            error),
+         "a dumped LUT JSON loads");
+  expect(fromJson.entries.size() == fromRcal.entries.size() &&
+             fromJson.entries.size() == 2 &&
+             fromJson.entries[0].problem == fromRcal.entries[0].problem &&
+             fromJson.entries[0].solution == fromRcal.entries[0].solution &&
+             fromJson.entries[1].problem == fromRcal.entries[1].problem &&
+             fromJson.entries[1].solution == fromRcal.entries[1].solution &&
+             fromJson.gpuArch == fromRcal.gpuArch &&
+             fromJson.weightM == fromRcal.weightM &&
+             fromJson.weightN == fromRcal.weightN &&
+             fromJson.weightK == fromRcal.weightK,
+         "the JSON loader matches the RCAL loader on the same table");
+
+  {
+    llvm::json::Object doc = dumpDoc();
+    doc["weight_m"] = 2.0;
+    doc["weight_n"] = 0.5;
+    mlir::hip::ProblemCacheLut weighted;
+    expect(mlir::hip::loadProblemCacheLutJson(jsonText(std::move(doc)),
+                                              weighted, error) &&
+               weighted.weightM == 2.0f && weighted.weightN == 0.5f &&
+               weighted.weightK == 1.0f,
+           "JSON weights are read, and an absent one stays 1");
+  }
+  {
+    llvm::json::Object doc = dumpDoc();
+    doc.erase("schema_version");
+    doc.erase("weight_m");
+    doc.erase("weight_n");
+    doc.erase("weight_k");
+    doc.erase("gpu_arch");
+    mlir::hip::ProblemCacheLut defaulted;
+    expect(mlir::hip::loadProblemCacheLutJson(jsonText(std::move(doc)),
+                                              defaulted, error) &&
+               defaulted.weightM == 1.0f && defaulted.gpuArch.empty() &&
+               defaulted.entries.size() == 2,
+           "absent schema_version, weights, and gpu_arch take the defaults");
+  }
+  {
+    // A point naming a config that does not exist is skipped, not an error,
+    // as in the RCAL loader.
+    llvm::json::Object doc = dumpDoc();
+    llvm::json::Array &pts = *doc.getArray("points");
+    pts.push_back(llvm::json::Object{{"problem", "out-of-range"},
+                                     {"config", 99}});
+    pts.push_back(llvm::json::Object{{"problem", "negative"}, {"config", -1}});
+    mlir::hip::ProblemCacheLut skipped;
+    expect(mlir::hip::loadProblemCacheLutJson(jsonText(std::move(doc)),
+                                              skipped, error) &&
+               skipped.entries.size() == 2,
+           "points with a bad config index are skipped");
+  }
+
+  const auto rejects = [&](llvm::json::Object doc, const char *message) {
+    mlir::hip::ProblemCacheLut bad;
+    expect(!mlir::hip::loadProblemCacheLutJson(jsonText(std::move(doc)), bad,
+                                               error) &&
+               bad.entries.empty(),
+           message);
+  };
+  {
+    llvm::json::Object doc = dumpDoc();
+    doc["schema_version"] = 2;
+    rejects(std::move(doc), "an unsupported JSON schema_version is rejected");
+  }
+  {
+    llvm::json::Object doc = dumpDoc();
+    doc["schema_version"] = "1";
+    rejects(std::move(doc), "a non-integer schema_version is rejected");
+  }
+  {
+    llvm::json::Object doc = dumpDoc();
+    doc["kernel_abi"] = "other-abi";
+    rejects(std::move(doc), "a different kernel_abi is rejected");
+  }
+  {
+    llvm::json::Object doc = dumpDoc();
+    doc.erase("kernel_abi");
+    rejects(std::move(doc), "a missing kernel_abi is rejected");
+  }
+  {
+    llvm::json::Object doc = dumpDoc();
+    doc["weight_k"] = 0.0;
+    rejects(std::move(doc), "a non-positive JSON weight is rejected");
+  }
+  {
+    llvm::json::Object doc = dumpDoc();
+    doc["weight_n"] = "heavy";
+    rejects(std::move(doc), "a non-numeric JSON weight is rejected");
+  }
+  {
+    mlir::hip::ProblemCacheLut bad;
+    expect(!mlir::hip::loadProblemCacheLutJson("", bad, error),
+           "empty JSON text is rejected");
+    expect(!mlir::hip::loadProblemCacheLutJson("{not json", bad, error),
+           "malformed JSON text is rejected");
+    expect(!mlir::hip::loadProblemCacheLutJson("[1, 2]", bad, error),
+           "a JSON array at the top level is rejected");
+  }
+
+  // The path overload. A real dump round-trips, and a FlatBuffer written to the
+  // same path is no longer an accepted external file.
+  {
+    const std::filesystem::path dir = std::filesystem::temp_directory_path();
+    const std::string stem = "test_nearest_conv_tune_" +
+                             std::to_string(reinterpret_cast<uintptr_t>(&dir));
+    const std::string jsonPath = (dir / (stem + ".json")).string();
+    const std::string fbPath = (dir / (stem + ".fb")).string();
+    {
+      std::ofstream out(jsonPath, std::ios::binary);
+      out << jsonText(dumpDoc());
+    }
+    {
+      std::ofstream out(fbPath, std::ios::binary);
+      out.write(reinterpret_cast<const char *>(builder.GetBufferPointer()),
+                static_cast<std::streamsize>(builder.GetSize()));
+    }
+    mlir::hip::ProblemCacheLut fromFile;
+    expect(mlir::hip::loadProblemCacheLutJsonFile(jsonPath, fromFile, error) &&
+               fromFile.entries.size() == 2,
+           "the JSON path overload loads a dumped file");
+    expect(!mlir::hip::loadProblemCacheLutJsonFile(fbPath, fromFile, error) &&
+               error.find(fbPath) != std::string::npos,
+           "a .fb file is rejected as an external problem cache");
+    expect(!mlir::hip::loadProblemCacheLutJsonFile(dir.string() + "/no-such-" +
+                                                       stem + ".json",
+                                                   fromFile, error) &&
+               fromFile.entries.empty(),
+           "a missing external problem cache reports an error");
+    std::error_code ignored;
+    std::filesystem::remove(jsonPath, ignored);
+    std::filesystem::remove(fbPath, ignored);
+  }
+
+  // Rewriting the external file: merge winners into the LUT JSON, keep what is
+  // there, and replace the file without losing the old one on a failure.
+  using mlir::hip::ProblemCacheWinner;
+  const std::string tile16 = "gemm:mPerBlock=16,nPerBlock=16,kPerBlock=8";
+  const std::string tileBig = "gemm:mPerBlock=128,nPerBlock=64,kPerBlock=8";
+  const auto gemmAt = [](int m) {
+    return "gfx1151\t2\t1\t-t f32 -m " + std::to_string(m) +
+           " -n 1000 -k 1280";
+  };
+  const auto parseDoc = [](const std::string &text) {
+    llvm::Expected<llvm::json::Value> parsed = llvm::json::parse(text);
+    if (!parsed) {
+      llvm::consumeError(parsed.takeError());
+      return llvm::json::Value(nullptr);
+    }
+    return std::move(*parsed);
+  };
+  // problem -> perf_config for every point of a LUT JSON document.
+  const auto pointMap = [&](const std::string &text) {
+    std::map<std::string, std::string> rows;
+    llvm::json::Value doc = parseDoc(text);
+    const llvm::json::Object *root = doc.getAsObject();
+    if (!root || !root->getArray("points") || !root->getArray("configs"))
+      return rows;
+    const llvm::json::Array &cfgs = *root->getArray("configs");
+    for (const llvm::json::Value &p : *root->getArray("points")) {
+      const llvm::json::Object *o = p.getAsObject();
+      auto problem = o->getString("problem");
+      auto index = o->getInteger("config");
+      if (problem && index && *index >= 0 &&
+          static_cast<size_t>(*index) < cfgs.size())
+        rows[problem->str()] =
+            cfgs[static_cast<size_t>(*index)]
+                .getAsObject()
+                ->getString("perf_config")
+                .value_or("")
+                .str();
+    }
+    return rows;
+  };
+
+  {
+    // A new document for the device, with the dump's own fields.
+    std::string merged;
+    expect(mlir::hip::mergeProblemCacheJson(
+               "", "gfx1151", {{exact, tile32}, {gemmAt(8), tile16}}, merged,
+               error),
+           "merging into nothing starts a new table");
+    llvm::json::Value doc = parseDoc(merged);
+    const llvm::json::Object *root = doc.getAsObject();
+    expect(root != nullptr && root->getString("gpu_arch") == "gfx1151" &&
+               root->getString("kernel_abi") == "rocmlir-conv-v1" &&
+               root->getInteger("schema_version") == 1 &&
+               root->getArray("fallbacks") != nullptr,
+           "a new table carries the LUT header fields");
+    mlir::hip::ProblemCacheLut reread;
+    expect(mlir::hip::loadProblemCacheLutJson(merged, reread, error) &&
+               reread.entries.size() == 2 && reread.gpuArch == "gfx1151",
+           "the merged table loads with the same loader");
+    int64_t dm = 0, dn = 0, dk = 0;
+    mlir::hip::implicitGemmDims(exact, dm, dn, dk);
+    bool dimsMatch = false;
+    if (root && root->getArray("points"))
+      for (const llvm::json::Value &p : *root->getArray("points")) {
+        const llvm::json::Object *o = p.getAsObject();
+        if (o->getString("problem") == exact)
+          dimsMatch = o->getInteger("m") == dm && o->getInteger("n") == dn &&
+                      o->getInteger("k") == dk;
+      }
+    expect(dimsMatch, "a winner is stored with its implicit GEMM dims");
+
+    std::string again;
+    expect(mlir::hip::mergeProblemCacheJson(
+               merged, "gfx1151", {{exact, tile32}, {gemmAt(8), tile16}}, again,
+               error) &&
+               again == merged,
+           "merging the same winners again changes nothing");
+  }
+  {
+    // Existing data is kept: a point the loader would skip, other top-level
+    // fields, and points the winners do not touch.
+    llvm::json::Object doc = dumpDoc();
+    doc["weight_m"] = 2.0;
+    doc["model_key"] = "keep-me";
+    const std::string base = jsonText(std::move(doc));
+
+    std::string merged;
+    expect(mlir::hip::mergeProblemCacheJson(
+               base, "gfx1151",
+               {{exact, tileBig}, {gemmAt(24), tile32}, {gemmAt(48), tile32}},
+               merged, error),
+           "merging into an existing table works");
+    const auto rows = pointMap(merged);
+    expect(rows.size() == 5, "winners add two new problems to the three kept");
+    expect(rows.count(exact) && rows.at(exact) == tileBig,
+           "a winner replaces the perfConfig of the same problem");
+    expect(rows.count(gemmKey) && rows.at(gemmKey) == gemmTile,
+           "an untouched point is kept");
+    expect(rows.count("{\"lens\":[1,2]}") &&
+               rows.at("{\"lens\":[1,2]}") == "{\"algo\":\"block\"}",
+           "a point the loader skips is not deleted by a rewrite");
+    expect(rows.count(gemmAt(24)) && rows.at(gemmAt(24)) == tile32,
+           "a new winner is added");
+    llvm::json::Value out = parseDoc(merged);
+    const llvm::json::Object *root = out.getAsObject();
+    expect(root && root->getString("model_key") == "keep-me" &&
+               root->getNumber("weight_m") == 2.0,
+           "weights and model_key are carried over");
+    // tile32 is used by two new winners and tileBig by one: still one entry each.
+    size_t tile32Configs = 0;
+    if (root && root->getArray("configs"))
+      for (const llvm::json::Value &c : *root->getArray("configs"))
+        if (c.getAsObject()->getString("perf_config") == tile32)
+          ++tile32Configs;
+    expect(tile32Configs == 1, "a perfConfig shared by points is stored once");
+    // Points are written sorted by problem, as --dump-problem-cache does.
+    std::vector<std::string> order;
+    if (root && root->getArray("points"))
+      for (const llvm::json::Value &p : *root->getArray("points"))
+        order.push_back(p.getAsObject()->getString("problem").value_or("").str());
+    expect(std::is_sorted(order.begin(), order.end()),
+           "points are written sorted by problem");
+  }
+  {
+    std::string merged;
+    expect(!mlir::hip::mergeProblemCacheJson(jsonText(dumpDoc()), "gfx942",
+                                             {{exact, tile32}}, merged, error) &&
+               merged.empty() && error.find("gfx1151") != std::string::npos,
+           "a table for another gpu_arch is not rewritten");
+    expect(!mlir::hip::mergeProblemCacheJson("{not json", "gfx1151",
+                                             {{exact, tile32}}, merged, error) &&
+               merged.empty(),
+           "an unparsable existing table is not replaced");
+    llvm::json::Object bad = dumpDoc();
+    bad["kernel_abi"] = "other-abi";
+    expect(!mlir::hip::mergeProblemCacheJson(jsonText(std::move(bad)), "gfx1151",
+                                             {{exact, tile32}}, merged, error),
+           "an unsupported existing table is not replaced");
+    expect(mlir::hip::mergeProblemCacheJson("  \n", "gfx1151",
+                                            {{exact, tile32}}, merged, error) &&
+               pointMap(merged).size() == 1,
+           "a blank existing file is treated as a new table");
+    expect(mlir::hip::mergeProblemCacheJson(
+               "", "gfx1151", {{"", tile32}, {exact, ""}}, merged, error) &&
+               pointMap(merged).empty(),
+           "a winner with no problem or no perfConfig is ignored");
+  }
+  {
+    // The file overload across compiles: create, accumulate, replace, and keep
+    // the old file when the rewrite is refused.
+    const std::filesystem::path dir =
+        std::filesystem::temp_directory_path() /
+        ("test_nearest_conv_tune_rw_" +
+         std::to_string(reinterpret_cast<uintptr_t>(&error)));
+    std::error_code ignored;
+    std::filesystem::remove_all(dir, ignored);
+    const std::string file = (dir / "nested" / "cache.json").string();
+
+    expect(mlir::hip::updateProblemCacheJsonFile(file, "gfx1151",
+                                                 {{exact, tile32}}, error),
+           "the first compile creates the file and its directory");
+    expect(mlir::hip::updateProblemCacheJsonFile(
+               file, "gfx1151", {{gemmAt(8), tile16}, {gemmAt(16), tile16}},
+               error),
+           "a second compile updates the same file");
+    expect(mlir::hip::updateProblemCacheJsonFile(file, "gfx1151",
+                                                 {{exact, tileBig}}, error),
+           "a third compile replaces one of its entries");
+
+    mlir::hip::ProblemCacheLut reloaded;
+    expect(mlir::hip::loadProblemCacheLutJsonFile(file, reloaded, error) &&
+               reloaded.entries.size() == 3 && reloaded.gpuArch == "gfx1151",
+           "the rewritten file loads and holds every compile's winners");
+    std::string text;
+    {
+      std::ifstream in(file, std::ios::binary);
+      text.assign(std::istreambuf_iterator<char>(in),
+                  std::istreambuf_iterator<char>());
+    }
+    const auto rows = pointMap(text);
+    expect(rows.size() == 3 && rows.at(exact) == tileBig &&
+               rows.at(gemmAt(8)) == tile16 && rows.at(gemmAt(16)) == tile16,
+           "later compiles keep the earlier entries and replace by problem");
+
+    size_t leftovers = 0;
+    for (const auto &entry :
+         std::filesystem::directory_iterator(dir / "nested"))
+      if (entry.path().filename() != "cache.json")
+        ++leftovers;
+    expect(leftovers == 0, "no temporary file is left beside the cache");
+
+    // A table for another device is refused and the file is left as it was.
+    expect(!mlir::hip::updateProblemCacheJsonFile(file, "gfx942",
+                                                  {{gemmAt(99), tile32}}, error),
+           "a file for another gpu_arch is not rewritten");
+    std::string after;
+    {
+      std::ifstream in(file, std::ios::binary);
+      after.assign(std::istreambuf_iterator<char>(in),
+                   std::istreambuf_iterator<char>());
+    }
+    expect(after == text, "a refused rewrite leaves the file untouched");
+
+    // An existing file that is not a LUT is not clobbered.
+    const std::string junk = (dir / "junk.json").string();
+    {
+      std::ofstream out(junk, std::ios::binary);
+      out << "this is not json";
+    }
+    expect(!mlir::hip::updateProblemCacheJsonFile(junk, "gfx1151",
+                                                  {{exact, tile32}}, error) &&
+               error.find(junk) != std::string::npos,
+           "a file that is not a LUT is not overwritten");
+    {
+      std::ifstream in(junk, std::ios::binary);
+      std::string kept((std::istreambuf_iterator<char>(in)),
+                       std::istreambuf_iterator<char>());
+      expect(kept == "this is not json", "the rejected file keeps its text");
+    }
+
+    // An empty file, as `touch` makes it, is a fresh table.
+    const std::string blank = (dir / "blank.json").string();
+    { std::ofstream out(blank, std::ios::binary); }
+    expect(mlir::hip::updateProblemCacheJsonFile(blank, "gfx1151",
+                                                 {{exact, tile32}}, error) &&
+               mlir::hip::loadProblemCacheLutJsonFile(blank, reloaded, error) &&
+               reloaded.entries.size() == 1,
+           "an empty file is filled in as a new table");
+    std::filesystem::remove_all(dir, ignored);
+  }
 
   if (gFailures != 0) {
     std::fprintf(stderr, "%d nearest-conv-tune checks failed\n", gFailures);

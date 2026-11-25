@@ -150,7 +150,8 @@ if(ENABLE_ROCMLIRTRITON)
       set(HIPDNN_EP_ROCMLIR_AUTOTUNE_AVAILABLE ON CACHE INTERNAL
           "RocMlirAutotune.cpp compiled its real implementation, not its stub")
       # Embed every checked-in tools/problem-cache/lut/<arch>.fb. A tuning type
-      # skips these. An external --problem-cache is loaded separately and still
+      # skips these. An external --enable-problem-cache-rw file is loaded
+      # separately and still
       # takes priority over the search. An empty lut directory still builds:
       # the registry count is 0.
       file(GLOB _rocmlir_problem_cache_fbs CONFIGURE_DEPENDS

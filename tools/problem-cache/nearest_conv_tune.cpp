@@ -9,11 +9,18 @@
 
 #include "flatbuffers/flatbuffers.h"
 
+#include "llvm/Support/Error.h"
+#include "llvm/Support/FormatVariadic.h"
+#include "llvm/Support/JSON.h"
+
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <utility>
 
 namespace mlir {
@@ -809,20 +816,341 @@ bool loadProblemCacheLut(const uint8_t *data, size_t size, ProblemCacheLut &lut,
   return true;
 }
 
-bool loadProblemCacheLut(const std::string &path, ProblemCacheLut &lut,
-                         std::string &error) {
+namespace {
+
+// Parses \p text as a LUT JSON object. On success \p root points into
+// \p document, which must outlive it.
+bool parseLutObject(std::string_view text, llvm::json::Value &document,
+                    const llvm::json::Object *&root, std::string &error) {
+  llvm::Expected<llvm::json::Value> parsed =
+      llvm::json::parse(llvm::StringRef(text.data(), text.size()));
+  if (!parsed) {
+    error = "problem cache is not valid JSON: " +
+            llvm::toString(parsed.takeError());
+    return false;
+  }
+  document = std::move(*parsed);
+  root = document.getAsObject();
+  if (root == nullptr) {
+    error = "problem cache JSON must be an object";
+    return false;
+  }
+  return true;
+}
+
+// Same checks as the FlatBuffer overload, on the fields every LUT carries. An
+// absent schema_version or weight takes the problem_cache.fbs default; a
+// present one of the wrong type is an error rather than a silent default.
+// Fills the header fields of \p lut (arch and weights), not its entries.
+bool readLutHeaderJson(const llvm::json::Object &root, ProblemCacheLut &lut,
+                       std::string &error) {
+  int64_t schemaVersion = 1;
+  if (root.get("schema_version") != nullptr) {
+    std::optional<int64_t> value = root.getInteger("schema_version");
+    if (!value) {
+      error = "rocmlir LUT schema_version is not an integer";
+      return false;
+    }
+    schemaVersion = *value;
+  }
+  if (schemaVersion != 1) {
+    error = "unsupported rocmlir LUT schema version " +
+            std::to_string(schemaVersion);
+    return false;
+  }
+  std::optional<llvm::StringRef> kernelAbi = root.getString("kernel_abi");
+  if (!kernelAbi || *kernelAbi != "rocmlir-conv-v1") {
+    error = "unsupported rocmlir LUT kernel_abi";
+    return false;
+  }
+  const auto readWeight = [&](const char *name, float &out) {
+    if (root.get(name) == nullptr)
+      return true;
+    std::optional<double> value = root.getNumber(name);
+    if (!value || !(*value > 0.0))
+      return false;
+    out = static_cast<float>(*value);
+    return true;
+  };
+  float weightM = 1.0f, weightN = 1.0f, weightK = 1.0f;
+  if (!readWeight("weight_m", weightM) || !readWeight("weight_n", weightN) ||
+      !readWeight("weight_k", weightK)) {
+    error = "rocmlir LUT has a non-positive distance weight";
+    return false;
+  }
+  if (std::optional<llvm::StringRef> arch = root.getString("gpu_arch"))
+    lut.gpuArch = arch->str();
+  lut.weightM = weightM;
+  lut.weightN = weightN;
+  lut.weightK = weightK;
+  return true;
+}
+
+} // namespace
+
+bool loadProblemCacheLutJson(std::string_view text, ProblemCacheLut &lut,
+                             std::string &error) {
+  lut = {};
+  if (text.empty()) {
+    error = "problem cache is empty";
+    return false;
+  }
+  llvm::json::Value document(nullptr);
+  const llvm::json::Object *root = nullptr;
+  if (!parseLutObject(text, document, root, error))
+    return false;
+  if (!readLutHeaderJson(*root, lut, error)) {
+    lut = {};
+    return false;
+  }
+
+  const llvm::json::Array *configs = root->getArray("configs");
+  const llvm::json::Array *points = root->getArray("points");
+  if (configs == nullptr || points == nullptr)
+    return true;
+
+  // perf_config per config index. A config with no string stays empty, and the
+  // points that name it are skipped, as in the FlatBuffer overload.
+  std::vector<std::string> perfConfigs;
+  perfConfigs.reserve(configs->size());
+  for (const llvm::json::Value &config : *configs) {
+    const llvm::json::Object *object = config.getAsObject();
+    std::optional<llvm::StringRef> perfConfig =
+        object != nullptr ? object->getString("perf_config") : std::nullopt;
+    perfConfigs.push_back(perfConfig ? perfConfig->str() : std::string());
+  }
+
+  for (const llvm::json::Value &point : *points) {
+    const llvm::json::Object *object = point.getAsObject();
+    if (object == nullptr)
+      continue;
+    std::optional<llvm::StringRef> problem = object->getString("problem");
+    std::optional<int64_t> index = object->getInteger("config");
+    if (!problem || !index || *index < 0 ||
+        static_cast<size_t>(*index) >= perfConfigs.size())
+      continue;
+    const std::string &solution = perfConfigs[static_cast<size_t>(*index)];
+    if (solution.empty() || !isConvSolution(solution))
+      continue;
+    lut.entries.push_back({problem->str(), solution});
+  }
+  return true;
+}
+
+bool loadProblemCacheLutJsonFile(const std::string &path, ProblemCacheLut &lut,
+                                 std::string &error) {
   std::ifstream in(path, std::ios::binary);
   if (!in) {
+    lut = {};
     error = "problem cache not found: " + path;
     return false;
   }
-  std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)),
-                             std::istreambuf_iterator<char>());
-  if (!in && !in.eof()) {
+  std::string text((std::istreambuf_iterator<char>(in)),
+                   std::istreambuf_iterator<char>());
+  if (in.bad()) {
+    lut = {};
     error = "failed reading problem cache: " + path;
     return false;
   }
-  return loadProblemCacheLut(bytes.data(), bytes.size(), lut, error);
+  if (!loadProblemCacheLutJson(text, lut, error)) {
+    error = path + ": " + error;
+    return false;
+  }
+  return true;
+}
+
+namespace {
+
+// One row of the table being rewritten.
+struct StoredPoint {
+  std::string perfConfig;
+  int64_t m = 0;
+  int64_t n = 0;
+  int64_t k = 0;
+};
+
+bool isBlank(std::string_view text) {
+  return std::all_of(text.begin(), text.end(), [](unsigned char c) {
+    return std::isspace(c) != 0;
+  });
+}
+
+} // namespace
+
+bool mergeProblemCacheJson(std::string_view existing, std::string_view gpuArch,
+                           const std::vector<ProblemCacheWinner> &winners,
+                           std::string &out, std::string &error) {
+  out.clear();
+  // Sorted by problem, which is also the output order.
+  std::map<std::string, StoredPoint> table;
+  llvm::json::Object root;
+
+  if (isBlank(existing)) {
+    root["schema_version"] = static_cast<int64_t>(1);
+    root["gpu_arch"] = std::string(gpuArch);
+    root["rocm_version"] = static_cast<int64_t>(0);
+    root["kernel_abi"] = "rocmlir-conv-v1";
+    root["model_key"] = "";
+    root["weight_m"] = 1.0;
+    root["weight_n"] = 1.0;
+    root["weight_k"] = 1.0;
+    root["fallbacks"] = llvm::json::Array();
+  } else {
+    llvm::json::Value document(nullptr);
+    const llvm::json::Object *parsedRoot = nullptr;
+    if (!parseLutObject(existing, document, parsedRoot, error))
+      return false;
+    ProblemCacheLut header;
+    if (!readLutHeaderJson(*parsedRoot, header, error))
+      return false;
+    if (!header.gpuArch.empty() && !gpuArch.empty() &&
+        header.gpuArch != gpuArch) {
+      error = "problem cache is for " + header.gpuArch + ", not " +
+              std::string(gpuArch) + "; refusing to rewrite it";
+      return false;
+    }
+    root = *parsedRoot;
+
+    // Keep every well-formed point. The loader skips points whose perfConfig is
+    // not gemm:/attn:, but a rewrite must not delete them.
+    const llvm::json::Array *configs = parsedRoot->getArray("configs");
+    const llvm::json::Array *points = parsedRoot->getArray("points");
+    if (configs != nullptr && points != nullptr) {
+      std::vector<std::string> perfConfigs;
+      perfConfigs.reserve(configs->size());
+      for (const llvm::json::Value &config : *configs) {
+        const llvm::json::Object *object = config.getAsObject();
+        std::optional<llvm::StringRef> perfConfig =
+            object != nullptr ? object->getString("perf_config") : std::nullopt;
+        perfConfigs.push_back(perfConfig ? perfConfig->str() : std::string());
+      }
+      for (const llvm::json::Value &point : *points) {
+        const llvm::json::Object *object = point.getAsObject();
+        if (object == nullptr)
+          continue;
+        std::optional<llvm::StringRef> problem = object->getString("problem");
+        std::optional<int64_t> index = object->getInteger("config");
+        if (!problem || !index || *index < 0 ||
+            static_cast<size_t>(*index) >= perfConfigs.size() ||
+            perfConfigs[static_cast<size_t>(*index)].empty())
+          continue;
+        StoredPoint stored;
+        stored.perfConfig = perfConfigs[static_cast<size_t>(*index)];
+        std::optional<int64_t> m = object->getInteger("m");
+        std::optional<int64_t> n = object->getInteger("n");
+        std::optional<int64_t> k = object->getInteger("k");
+        if (m && n && k) {
+          stored.m = *m;
+          stored.n = *n;
+          stored.k = *k;
+        } else {
+          implicitGemmDims(problem->str(), stored.m, stored.n, stored.k);
+        }
+        table[problem->str()] = std::move(stored);
+      }
+    }
+  }
+
+  // The winners replace a point of the same problem and add the rest. A later
+  // winner for the same problem wins over an earlier one.
+  for (const ProblemCacheWinner &winner : winners) {
+    if (winner.problem.empty() || winner.perfConfig.empty())
+      continue;
+    StoredPoint stored;
+    stored.perfConfig = winner.perfConfig;
+    implicitGemmDims(winner.problem, stored.m, stored.n, stored.k);
+    table[winner.problem] = std::move(stored);
+  }
+
+  llvm::json::Array outConfigs;
+  llvm::json::Array outPoints;
+  std::map<std::string, int64_t> configIndex;
+  for (const auto &row : table) {
+    const std::string &problem = row.first;
+    const StoredPoint &stored = row.second;
+    auto found = configIndex.find(stored.perfConfig);
+    if (found == configIndex.end()) {
+      found = configIndex
+                  .emplace(stored.perfConfig,
+                           static_cast<int64_t>(outConfigs.size()))
+                  .first;
+      outConfigs.push_back(llvm::json::Object{{"perf_config", stored.perfConfig}});
+    }
+    outPoints.push_back(llvm::json::Object{{"problem", problem},
+                                           {"config", found->second},
+                                           {"m", stored.m},
+                                           {"n", stored.n},
+                                           {"k", stored.k}});
+  }
+  root["configs"] = std::move(outConfigs);
+  root["points"] = std::move(outPoints);
+
+  out = llvm::formatv("{0:2}", llvm::json::Value(std::move(root))).str();
+  out += "\n";
+  return true;
+}
+
+bool updateProblemCacheJsonFile(const std::string &path,
+                                std::string_view gpuArch,
+                                const std::vector<ProblemCacheWinner> &winners,
+                                std::string &error) {
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  // Rewrite the file a symlink points at, not the link.
+  fs::path target = fs::weakly_canonical(fs::path(path), ec);
+  if (ec)
+    target = path;
+
+  std::string existing;
+  if (fs::exists(target, ec) && !ec) {
+    std::ifstream in(target, std::ios::binary);
+    if (!in) {
+      error = "cannot read problem cache: " + path;
+      return false;
+    }
+    existing.assign(std::istreambuf_iterator<char>(in),
+                    std::istreambuf_iterator<char>());
+    if (in.bad()) {
+      error = "failed reading problem cache: " + path;
+      return false;
+    }
+  }
+
+  std::string merged;
+  if (!mergeProblemCacheJson(existing, gpuArch, winners, merged, error)) {
+    error = path + ": " + error;
+    return false;
+  }
+
+  if (target.has_parent_path())
+    fs::create_directories(target.parent_path(), ec);
+
+  // Write beside the target and rename over it, so the old file survives a
+  // failed or interrupted write.
+  fs::path temporary = target;
+  temporary += ".tmp" + std::to_string(
+                           std::chrono::steady_clock::now()
+                               .time_since_epoch()
+                               .count());
+  {
+    std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+    out.write(merged.data(), static_cast<std::streamsize>(merged.size()));
+    out.flush();
+    if (!out) {
+      out.close();
+      fs::remove(temporary, ec);
+      error = "failed writing problem cache: " + temporary.string();
+      return false;
+    }
+  }
+  fs::rename(temporary, target, ec);
+  if (ec) {
+    const std::string reason = ec.message();
+    fs::remove(temporary, ec);
+    error = "cannot replace problem cache " + path + ": " + reason;
+    return false;
+  }
+  return true;
 }
 
 bool implicitGemmDims(std::string_view problem, int64_t &m, int64_t &n,

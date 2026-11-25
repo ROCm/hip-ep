@@ -117,8 +117,20 @@ again. The compiled binary is not reused, because each outlined kernel has its
 own symbol. `--autotune[=quick|full|exhaustive]`
 overrides the search space. A given tuning type skips the shipped
 problem-cache LUT; with none given, the shipped LUT is consulted before the
-search. `--problem-cache` / `HIP_ROCMLIR_PROBLEM_CACHE` still takes priority over
-the search and replaces the shipped table. A repeated problem in the same
+search. `--enable-problem-cache-rw <file.json>` / `HIP_ROCMLIR_PROBLEM_CACHE`
+still takes priority over the search and replaces the shipped table. It names a
+LUT JSON file, such as one `--dump-problem-cache` wrote; a `.fb` file is not
+accepted. The flag also writes back: after a successful compile the winners the
+search picked are merged into that file, so a later compile reads them. Only
+winners of a search are written. A tile taken from the file, even a nearest
+neighbour's, is not a measurement and is not stored as one. Points already in the
+file are kept, including ones this build cannot use. A missing or empty file is
+created; a file that is not a LUT, or is for another `gpu_arch`, makes the compile
+fail with the file untouched. The file is replaced atomically, but two compiles
+writing it at once can lose one set of winners. `HIP_ROCMLIR_PROBLEM_CACHE` only
+reads. The provider does the same through
+`HIPDNN_EP_ROCMLIR_PROBLEM_CACHE_RW=<file.json>`, except that a file it cannot
+update is reported and the compile still succeeds. A repeated problem in the same
 compile reuses the in-session winner, then a miss searches the selected space.
 A provider artifact records `+autotune=<space>` only.
 `--dump-problem-cache <file.json>` writes that JSON after autotune, one
@@ -132,7 +144,8 @@ Set `HIP_ROCMLIR_SKIP_BENCHMARKING=1` (any present value other than `0`,
 including empty) to skip the GPU search and affix the first enumerated
 perfConfig. Neither the shipped LUT nor an external problem cache is consulted
 in that mode. When benchmarking is enabled, a provided tuning type skips the
-shipped LUT, but an external `--problem-cache` is consulted before the search.
+shipped LUT, but an external `--enable-problem-cache-rw` file is consulted before
+the search.
 The log names the space (`quick`, `full`, or `exhaustive`) and the
 number of configs in each pool. At the end it prints three wall times:
 perfConfig compile (pool wait, summed across the two pools), serial GPU

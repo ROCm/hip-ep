@@ -623,6 +623,8 @@ bool CompilerDriver::runMLIRPasses(
     // function_refs into it.
     std::optional<mlir::hip::RocMlirAutotuner> autotuner;
     mlir::hip::AutotuneSpace autotuneSpace;
+    const std::string problemCacheRw =
+        hip_get_env("HIPDNN_EP_ROCMLIR_PROBLEM_CACHE_RW");
     if (mlir::hip::rocMlirAutotuneFromEnv(autotuneSpace)) {
       mlir::hip::AutotuneOptions autotuneOpts;
       autotuneOpts.space = autotuneSpace;
@@ -632,8 +634,16 @@ bool CompilerDriver::runMLIRPasses(
       // HIPDNN_EP_ROCMLIR_VERBOSE also turns on the per-candidate lines, one
       // per config per kernel, which hip-rocmlir-compiler --verbose prints.
       autotuneOpts.verbose = embedOpts.log != nullptr;
-      // problemCachePath stays empty here. The shipped LUT is skipped only
-      // when HIPDNN_EP_ROCMLIR_AUTOTUNE is set explicitly.
+      // HIPDNN_EP_ROCMLIR_PROBLEM_CACHE_RW=<file.json>: the provider's
+      // counterpart of hip-rocmlir-compiler --enable-problem-cache-rw. The
+      // file is read as the external problem cache, and this compile's
+      // benchmarked winners are merged back into it once the kernels are
+      // embedded. Without it problemCachePath stays empty, and the shipped
+      // LUT is skipped only when HIPDNN_EP_ROCMLIR_AUTOTUNE is set explicitly.
+      if (!problemCacheRw.empty()) {
+        autotuneOpts.problemCachePath = problemCacheRw;
+        autotuneOpts.problemCacheRewrite = true;
+      }
       autotuneOpts.tuningTypeProvided =
           !hip_get_env("HIPDNN_EP_ROCMLIR_AUTOTUNE").empty();
       autotuner.emplace(embedOpts.arch, autotuneOpts);
@@ -652,6 +662,10 @@ bool CompilerDriver::runMLIRPasses(
       }
       autotuner->installInto(embedOpts);
     }
+    if (!autotuner && !problemCacheRw.empty())
+      llvm::errs() << "[CompilerDriver] HIPDNN_EP_ROCMLIR_PROBLEM_CACHE_RW "
+                      "ignored: rocMLIR autotune is off, so "
+                   << problemCacheRw << " is not read or updated\n";
 
     const bool embedOk =
         mlir::hip::compileAndEmbedRocMlirKernels(module, embedOpts).succeeded();
@@ -672,6 +686,16 @@ bool CompilerDriver::runMLIRPasses(
       error_message = "rocMLIR kernel compilation failed";
       return false;
     }
+
+    // HIPDNN_EP_ROCMLIR_PROBLEM_CACHE_RW=<file.json>: merge the winners this
+    // compile benchmarked into the file, after a successful embed so a failed
+    // compile adds nothing. The file is one table across compiles, so unlike
+    // the dumps it is not numbered. A failure to update it is reported and
+    // does not fail the compile, as with the dumps.
+    if (autotuner && !problemCacheRw.empty() &&
+        !autotuner->updateProblemCacheFile())
+      llvm::errs() << "[CompilerDriver] failed to update problem cache "
+                   << problemCacheRw << "\n";
 
     // HIPDNN_EP_ROCMLIR_DUMP_PROBLEM_CACHE=<file.json>: the winners this
     // compile tuned, as --dump-problem-cache writes them. Written only after a

@@ -445,6 +445,14 @@ and `int4-weights` are the fusion switches.
   compile inserts a sequence number before the extension (`hip.mlir` becomes
   `hip.0.mlir`) and the three dumps of one compile share it. A dump that cannot
   be written is reported and the compile goes on.
+- `HIPDNN_EP_ROCMLIR_PROBLEM_CACHE_RW=<file.json>` is the provider's
+  counterpart of `hip-rocmlir-compiler --enable-problem-cache-rw`. The file is
+  the external problem cache for the compile's autotune, and once the kernels
+  are embedded the winners the search benchmarked are merged into it (tiles
+  borrowed from the file are not written back). It is one table across
+  compiles, so unlike the dumps its path is not numbered. It needs autotune on;
+  with `HIP_ROCMLIR_SKIP_BENCHMARKING` it is ignored and says so. A file that
+  cannot be updated is reported and the compile goes on.
 - `HIPDNN_EP_ROCMLIR_FUSION_REPORT=<file>` (pipeline option `report`)
   appends one JSON line for each kernel and each host function. Two runs make
   the same kernels when their records are equal as multisets.

@@ -34,6 +34,7 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/JSON.h"
@@ -506,6 +507,11 @@ struct RocMlirAutotuner::Impl {
   // the kind is part of the key. The binary is not reused: each outlined kernel
   // has its own symbol and must be compiled.
   llvm::StringMap<std::string> winnerCache;
+  // The subset of winnerCache that a search produced, by the same key. A lookup
+  // hit goes into winnerCache too (a tile borrowed from the problem cache, which
+  // may be a neighbor's), but not here: only these are measurements, and only
+  // these are written back by updateProblemCacheFile.
+  llvm::StringMap<std::string> measuredWinners;
   // perfConfigs from the problem cache that failed to compile for this
   // problem. The next lookup skips them and takes the next nearest tile.
   llvm::StringMap<std::vector<std::string>> rejectedSolutions;
@@ -594,6 +600,7 @@ struct RocMlirAutotuner::Impl {
   lookupProblemCache(StringRef problem,
                      const std::vector<std::string> &rejected);
   bool dumpProblemCache(StringRef path) const;
+  bool updateProblemCacheFile() const;
   bool finish(llvm::StringMap<CompiledKernel> &byKernel) {
     return compileAndBenchmarkSearches(byKernel) &&
            compileDeferredCacheHits(byKernel);
@@ -939,7 +946,7 @@ static const std::vector<ProblemCacheLut> &shippedProblemCaches() {
 }
 
 bool RocMlirAutotuner::Impl::problemCacheActive() const {
-  // An external --problem-cache always applies. The shipped LUT applies only
+  // An external problem cache always applies. The shipped LUT applies only
   // when no tuning type was provided.
   if (!options.problemCachePath.empty())
     return true;
@@ -1018,7 +1025,7 @@ bool RocMlirAutotuner::Impl::autotuneKernel(ModuleOp module,
     return ok;
   }
 
-  // An external --problem-cache is checked first. With no external table, a
+  // An external problem cache is checked first. With no external table, a
   // tuning type skips the shipped LUT. A repeated problem then checks this
   // compile's winner cache, then the selected tuning space.
   // A known winner is compiled in the second pool. A problem already queued
@@ -1066,6 +1073,11 @@ bool RocMlirAutotuner::Impl::autotuneKernel(ModuleOp module,
                      << " space\n";
       rejectedSolutions[cacheKey].push_back(std::move(chosen));
       winnerCache.erase(cacheKey);
+      // A tile that failed to compile is not a winner, measured or not.
+      if (auto measured = measuredWinners.find(cacheKey);
+          measured != measuredWinners.end() &&
+          measured->getValue() == rejectedSolutions[cacheKey].back())
+        measuredWinners.erase(measured);
       if (cacheActive)
         retryNearest = true;
     }
@@ -1134,8 +1146,10 @@ bool RocMlirAutotuner::Impl::autotuneKernel(ModuleOp module,
   std::string bestConfig;
   if (!pickWinner(candidates, kernelName, module, bestConfig, out))
     return false;
-  if (!cacheKey.empty())
+  if (!cacheKey.empty()) {
     winnerCache[cacheKey] = bestConfig;
+    measuredWinners[cacheKey] = bestConfig;
+  }
   return true;
 }
 
@@ -1192,8 +1206,10 @@ bool RocMlirAutotuner::Impl::compileAndBenchmarkSearches(
       if (!pickWinner(search.candidates, search.kernelName, *parsed, bestConfig,
                       winner))
         return false;
-      if (!search.cacheKey.empty())
+      if (!search.cacheKey.empty()) {
         winnerCache[search.cacheKey] = bestConfig;
+        measuredWinners[search.cacheKey] = bestConfig;
+      }
       byKernel[search.kernelName] = std::move(winner);
       search.candidates.clear();
     }
@@ -1272,6 +1288,10 @@ bool RocMlirAutotuner::Impl::compileDeferredCacheHits(
     if (auto cached = winnerCache.find(hit.cacheKey);
         cached != winnerCache.end() && cached->getValue() == hit.perfConfig)
       winnerCache.erase(cached);
+    if (auto measured = measuredWinners.find(hit.cacheKey);
+        measured != measuredWinners.end() &&
+        measured->getValue() == hit.perfConfig)
+      measuredWinners.erase(measured);
     MLIRContext context(autotuneRegistry(), MLIRContext::Threading::DISABLED);
     context.loadAllAvailableDialects();
     ParserConfig parserConfig(&context);
@@ -1292,8 +1312,18 @@ const ProblemCacheLut &RocMlirAutotuner::Impl::loadedProblemCache() {
   problemCacheLoaded = true;
   if (options.problemCachePath.empty())
     return problemCache;
+  if (options.problemCacheRewrite) {
+    // A first run, or a file created empty: there is nothing to read yet and
+    // the compile will write it, so this is not worth a warning.
+    uint64_t size = 0;
+    if (llvm::sys::fs::file_size(options.problemCachePath, size) || size == 0)
+      return problemCache;
+  }
   std::string error;
-  if (!loadProblemCacheLut(options.problemCachePath, problemCache, error)) {
+  // The external table is the LUT JSON that --dump-problem-cache writes. Only
+  // the shipped tables above are FlatBuffers.
+  if (!loadProblemCacheLutJsonFile(options.problemCachePath, problemCache,
+                                   error)) {
     llvm::errs() << "warning: " << error << "\n";
     problemCache = {};
   } else if (log()) {
@@ -1426,6 +1456,38 @@ bool RocMlirAutotuner::dumpProblemCache(StringRef path) const {
   return impl->dumpProblemCache(path);
 }
 
+bool RocMlirAutotuner::Impl::updateProblemCacheFile() const {
+  if (!options.problemCacheRewrite || options.problemCachePath.empty())
+    return true;
+  // Only what a search produced. winnerCache also holds tiles borrowed from the
+  // problem cache, which are not measurements for this problem; writing those
+  // back would turn a neighbor's tile into an exact entry.
+  std::vector<ProblemCacheWinner> winners;
+  winners.reserve(measuredWinners.size());
+  for (const auto &entry : measuredWinners) {
+    StringRef problem = problemOfCacheKey(entry.getKey());
+    if (problem.empty() || entry.getValue().empty())
+      continue;
+    winners.push_back({problem.str(), entry.getValue()});
+  }
+  std::string error;
+  if (!updateProblemCacheJsonFile(options.problemCachePath, deviceGfx, winners,
+                                  error)) {
+    llvm::errs() << "error: cannot update problem cache: " << error << "\n";
+    return false;
+  }
+  if (log())
+    *log() << options.logPrefix << " updated problem cache "
+           << options.problemCachePath << " with " << winners.size()
+           << " benchmarked winner" << (winners.size() == 1 ? "" : "s")
+           << "\n";
+  return true;
+}
+
+bool RocMlirAutotuner::updateProblemCacheFile() const {
+  return impl->updateProblemCacheFile();
+}
+
 void RocMlirAutotuner::installInto(RocMlirEmbedOptions &opts) {
   if (!impl->usable)
     return;
@@ -1459,6 +1521,7 @@ const AutotunePhaseTimes &RocMlirAutotuner::phaseTimes() const {
   return impl->times;
 }
 bool RocMlirAutotuner::dumpProblemCache(StringRef) const { return false; }
+bool RocMlirAutotuner::updateProblemCacheFile() const { return false; }
 void RocMlirAutotuner::installInto(RocMlirEmbedOptions &) {}
 
 #endif

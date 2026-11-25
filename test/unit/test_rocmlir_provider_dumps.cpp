@@ -21,7 +21,9 @@
 //     skipped.
 //
 // Writing the problem cache itself needs a device, so that file is covered by
-// the numeric tests instead.
+// the numeric tests instead. HIPDNN_EP_ROCMLIR_PROBLEM_CACHE_RW is covered
+// here only for the no-device case: it is ignored, with a message, when
+// autotune is skipped.
 
 #include "compilation_options_generated.h"
 #include "hip/Compiler/CompilerDriver.h"
@@ -336,6 +338,27 @@ int main() {
   check(after.ok && hipAfter.size() == hipBefore.size() + 1 &&
             hipBefore.count(*hipAfter.rbegin()) == 0,
         "a dump after failed ones gets a number not used before");
+
+  // HIPDNN_EP_ROCMLIR_PROBLEM_CACHE_RW without a device: autotune is skipped,
+  // so the file is neither read nor created, the driver says so, and the
+  // compile succeeds. Its read and update paths need a device and are covered
+  // by test-nearest-conv-tune (the merge) and the numeric tests.
+  clearDumpVars();
+  const fs::path rwFile = root / "rw" / "cache.json";
+  setEnv("HIPDNN_EP_ROCMLIR_PROBLEM_CACHE_RW", rwFile.string());
+  CompileResult rw = compileOnce(scratch);
+  check(rw.ok && rw.outputWritten,
+        "problem cache rw, autotune skipped: the compile succeeds");
+  check(contains(rw.log, "HIPDNN_EP_ROCMLIR_PROBLEM_CACHE_RW ignored") &&
+            contains(rw.log, rwFile.string()),
+        "problem cache rw, autotune skipped: the driver says the file is "
+        "ignored");
+  check(!fs::exists(rwFile) && !fs::exists(rwFile.parent_path()),
+        "problem cache rw, autotune skipped: nothing is created");
+  unsetEnv("HIPDNN_EP_ROCMLIR_PROBLEM_CACHE_RW");
+  CompileResult rwOff = compileOnce(scratch);
+  check(rwOff.ok && !contains(rwOff.log, "PROBLEM_CACHE_RW"),
+        "problem cache rw unset: the driver says nothing about it");
 
   clearDumpVars();
   unsetEnv("HIP_ROCMLIR_SKIP_BENCHMARKING");

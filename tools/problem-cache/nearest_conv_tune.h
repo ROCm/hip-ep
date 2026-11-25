@@ -6,7 +6,7 @@
 // Nearest rocMLIR tile from a problem-cache table.
 //
 // Same shape as the MatMulNBits LUT: a hard group, then one weighted log2
-// distance. The weights live in the .fb (`weight_m/n/k`), defaulting to 1.
+// distance. The weights live in the table (`weight_m/n/k`), defaulting to 1.
 // A miss only searches rows of the same kernel kind.
 //
 // Conv. Arch, conv kind, -F, layouts, stride, dilation, and the fusion
@@ -48,8 +48,8 @@ struct ProblemCacheConvEntry {
   std::string solution;
 };
 
-// One loaded .fb. `entries` are the gemm:/attn: points; other perfConfigs are
-// dropped. Weights are the table's log-space metric. `gpuArch` is the table's
+// One loaded table, from a shipped .fb or an external JSON file. `entries` are
+// the gemm:/attn: points; other perfConfigs are dropped. Weights are the table's log-space metric. `gpuArch` is the table's
 // gpu_arch; empty means the table is not restricted to one device.
 struct ProblemCacheLut {
   std::string gpuArch;
@@ -75,11 +75,61 @@ bool implicitGemmDims(std::string_view problem, int64_t &m, int64_t &n,
                       int64_t &k);
 
 // Rows whose perfConfig is gemm:/attn:. Anything else is skipped.
+//
+// The shipped tables: a verified RCAL FlatBuffer (`tools/problem-cache/lut/
+// <arch>.fb`) embedded in the library.
 bool loadProblemCacheLut(const uint8_t *data, size_t size, ProblemCacheLut &lut,
                          std::string &error);
 
-bool loadProblemCacheLut(const std::string &path, ProblemCacheLut &lut,
-                         std::string &error);
+// An external table: the LUT JSON document that `hip-rocmlir-compiler
+// --dump-problem-cache` writes (`schema_version`, `gpu_arch`, `kernel_abi`,
+// `weight_m/n/k`, `configs`, `points`, `fallbacks`). It applies the same
+// checks and skips the same rows as the FlatBuffer overload, so a dump loads
+// without a `.fb` conversion. Absent `schema_version` and weights take the
+// `.fbs` defaults (1, 1.0). `kernel_abi` is required.
+bool loadProblemCacheLutJson(std::string_view text, ProblemCacheLut &lut,
+                             std::string &error);
+
+// Reads \p path and parses it with loadProblemCacheLutJson. A `.fb` file is
+// not accepted here and reports a JSON parse error.
+bool loadProblemCacheLutJsonFile(const std::string &path, ProblemCacheLut &lut,
+                                 std::string &error);
+
+// A problem string and the perfConfig the search picked for it.
+struct ProblemCacheWinner {
+  std::string problem;
+  std::string perfConfig;
+};
+
+// Merges \p winners into the LUT JSON document \p existing and returns the new
+// document in \p out. Blank \p existing starts a new document for \p gpuArch.
+//
+// Every well-formed point already in \p existing is kept, whatever kind of
+// perfConfig it names, so a rewrite never drops data the loader would skip. A
+// winner replaces the point of the same problem string, and a new problem is
+// added. `configs` is rebuilt without duplicates and `points` is sorted by
+// problem, as `--dump-problem-cache` writes it, so the output is deterministic.
+// Top-level fields other than `configs` and `points` (weights, `model_key`,
+// `fallbacks`, ...) are carried over untouched.
+//
+// Fails, leaving \p out empty, without producing a document when \p existing is
+// not a supported LUT (invalid JSON, wrong `schema_version` or `kernel_abi`, a
+// bad weight) or names a different non-empty `gpu_arch` than \p gpuArch.
+bool mergeProblemCacheJson(std::string_view existing, std::string_view gpuArch,
+                           const std::vector<ProblemCacheWinner> &winners,
+                           std::string &out, std::string &error);
+
+// Reads \p path (a missing or empty file starts a new table), merges
+// \p winners with mergeProblemCacheJson, and replaces \p path with the result.
+// The new contents go to a sibling temporary file that is renamed over \p path,
+// so a failed or interrupted write leaves the old file intact. The file is read
+// again at write time, not taken from an earlier load, so entries another
+// compile added in between are kept. Missing parent directories are created. A
+// symlinked \p path is rewritten at its target.
+bool updateProblemCacheJsonFile(const std::string &path,
+                                std::string_view gpuArch,
+                                const std::vector<ProblemCacheWinner> &winners,
+                                std::string &error);
 
 std::optional<NearestConvTuneHit>
 findNearestConvTune(std::string_view problemKey,
