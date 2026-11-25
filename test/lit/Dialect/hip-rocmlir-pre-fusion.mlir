@@ -10,6 +10,40 @@
 // RUN:   --hip-rocmlir-pre-fusion %s | FileCheck %s
 // RUN: hip-mlir-opt --split-input-file --hip-rocmlir-fusion %s \
 // RUN:   | FileCheck %s --check-prefix=FUSE
+// RUN: hip-mlir-opt --split-input-file \
+// RUN:   --hip-rocmlir-fusion="standalone-elementwise=false" %s \
+// RUN:   | FileCheck %s --check-prefix=NOEW
+
+// Two ops inside one module read the gather. The module takes it as one
+// input, but inlined back each op would copy the slice, so the gather stays.
+// The NOEW run inlines the module and checks that no slice is left.
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK-NOT: tensor.extract_slice
+// CHECK: hip.gather
+
+// NOEW-LABEL: func.func @main_graph
+// NOEW-NOT: tensor.extract_slice
+// NOEW: hip.gather
+// NOEW: hip.add
+// NOEW: hip.mul
+
+func.func @main_graph(%ctx: !hip.context, %x: tensor<3x64x32xf32>,
+                      %b: tensor<64x32xf32>) -> tensor<64x32xf32> {
+  %i = hip.constant {value = dense<1> : tensor<i64>} : tensor<i64>
+  %e = tensor.empty() : tensor<64x32xf32>
+  %g = hip.gather(%ctx) ins(%x, %i : tensor<3x64x32xf32>, tensor<i64>)
+      outs(%e : tensor<64x32xf32>) {axis = 0 : i64} : tensor<64x32xf32>
+  %ae = tensor.empty() : tensor<64x32xf32>
+  %a = hip.add(%ctx) ins(%g, %b : tensor<64x32xf32>, tensor<64x32xf32>)
+      outs(%ae : tensor<64x32xf32>) -> tensor<64x32xf32>
+  %me = tensor.empty() : tensor<64x32xf32>
+  %y = hip.mul(%ctx) ins(%g, %a : tensor<64x32xf32>, tensor<64x32xf32>)
+      outs(%me : tensor<64x32xf32>) -> tensor<64x32xf32>
+  return %y : tensor<64x32xf32>
+}
+
+// -----
 
 // An anchor reader: the slice goes into the matmul kernel.
 
@@ -72,6 +106,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<2x64x32xf32>,
 }
 
 // -----
+
 
 // A lone pointwise op with no anchor stays a HIP op, so the gather stays.
 

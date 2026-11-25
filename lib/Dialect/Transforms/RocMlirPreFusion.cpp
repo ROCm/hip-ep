@@ -72,6 +72,20 @@ bool likelyInKernel(RocMlirElementwiseOp module) {
   return computeOps >= 2;
 }
 
+// A module takes each input once, however many of its ops read it. Inlined
+// back, each of those ops would copy the slice, so the module's block
+// argument for `use` must have one reader, through fusable views.
+bool hasOneReaderInside(RocMlirElementwiseOp module, OpOperand &use) {
+  Value arg = module.getBody().front().getArgument(use.getOperandNumber());
+  while (arg.hasOneUse()) {
+    Operation *reader = *arg.getUsers().begin();
+    if (!getFusableViewKind(reader) || reader->getNumResults() != 1)
+      return true;
+    arg = reader->getResult(0);
+  }
+  return false;
+}
+
 // Whether `value` has one reader and that reader will likely run in a rocMLIR
 // kernel: an anchor, a module the fusion takes, or a fusable view whose
 // result in turn qualifies. A slice the fusion still declines then costs one
@@ -79,11 +93,12 @@ bool likelyInKernel(RocMlirElementwiseOp module) {
 bool feedsFusionCandidate(Value value) {
   if (!value.hasOneUse())
     return false;
-  Operation *reader = *value.getUsers().begin();
+  OpOperand &use = *value.use_begin();
+  Operation *reader = use.getOwner();
   if (isAnchorOp(reader))
     return true;
   if (auto module = dyn_cast<RocMlirElementwiseOp>(reader))
-    return likelyInKernel(module);
+    return likelyInKernel(module) && hasOneReaderInside(module, use);
   return getFusableViewKind(reader) && reader->getNumResults() == 1 &&
          feedsFusionCandidate(reader->getResult(0));
 }

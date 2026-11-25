@@ -213,7 +213,8 @@ def RocMlirPreFusionPass
       tensor.collapse_shape that drops the axis for a scalar index, when its
       result has one reader that will likely run in a rocMLIR kernel: an
       anchor, a module next to an anchor, a module of two or more compute
-      ops, or a fusable view whose result in turn has such a reader. The
+      ops, or a fusable view whose result in turn has such a reader. A module
+      takes each input once, so one op inside it must read the input. The
       fusion absorbs the view into that kernel, so the gather launch goes
       away. A slice that a kernel reads through several readers, or that the
       fusion declines, would become a copy for each HIP reader; a gather with

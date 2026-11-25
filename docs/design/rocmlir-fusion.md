@@ -167,7 +167,10 @@ reader will likely run in a rocMLIR kernel:
   kernel of its own when no plan takes it;
 - a fusable view whose result in turn has such a reader.
 
-A gather with an identical sibling is skipped, because a later CSE would merge
+A module takes each input once, however many of its ops read it, so for a
+module reader one op inside the module must read the gather, through views.
+Two readers inside a module that the anchor pass then inlines would each copy
+the slice. A gather with an identical sibling is skipped, because a later CSE would merge
 the two slices into one value with two readers. When the anchor pass still
 declines the reader, the slice costs one copy for its one reader, about what
 the gather cost. Integer data, a runtime index and an out-of-range index keep
