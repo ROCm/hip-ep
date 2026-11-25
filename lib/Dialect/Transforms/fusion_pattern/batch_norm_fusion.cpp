@@ -153,6 +153,17 @@ bool isChannelVectorOp(mlir::Operation *op, mlir::RankedTensorType data) {
   return isChannelVector(op->getResult(0).getType(), data);
 }
 
+/// hip.batch_norm carries epsilon as an f32 attribute. Rounding to f32 is
+/// fine, but an epsilon that underflows or overflows f32 changes the result,
+/// e.g. a zero variance then divides by zero.
+bool fitsF32(llvm::APFloat value) {
+  bool losesInfo = false;
+  llvm::APFloat::opStatus status =
+      value.convert(llvm::APFloat::IEEEsingle(),
+                    llvm::APFloat::rmNearestTiesToEven, &losesInfo);
+  return !(status & (llvm::APFloat::opUnderflow | llvm::APFloat::opOverflow));
+}
+
 /// `sum` is variance + epsilon. Sets the chain's variance and epsilon.
 bool matchVarianceSum(mlir::Value sum, mlir::RankedTensorType data,
                       Chain &chain) {
@@ -165,7 +176,8 @@ bool matchVarianceSum(mlir::Value sum, mlir::RankedTensorType data,
         std::pair(add.getRhs(), add.getLhs())}) {
     std::optional<llvm::APFloat> epsilon =
         getScalarFloatConstantValue(epsilonValue);
-    if (!epsilon || !isChannelVector(variance.getType(), data))
+    if (!epsilon || !fitsF32(*epsilon) ||
+        !isChannelVector(variance.getType(), data))
       continue;
     chain.variance = variance;
     chain.epsilon = epsilon;

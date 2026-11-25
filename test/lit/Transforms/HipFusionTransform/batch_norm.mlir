@@ -379,6 +379,33 @@ func.func @batch_norm_epsilon_rounding_mode(%ctx: !hip.context, %x: !full,
   return %y : !full
 }
 
+// An f64 epsilon that f32 cannot represent exactly is rounded.
+
+// CHECK-LABEL: func.func @batch_norm_f64_epsilon
+// CHECK:         hip.batch_norm
+// CHECK-SAME:    {epsilon = 1.000000e-03 : f32}
+func.func @batch_norm_f64_epsilon(%ctx: !hip.context, %x: tensor<1x4x2x2xf64>,
+                                  %mean: tensor<4xf64>, %var: tensor<4xf64>)
+    -> tensor<1x4x2x2xf64> {
+  %eps_f64 = arith.constant 1.000000e-03 : f64
+  %eps = tensor.splat %eps_f64 : tensor<f64>
+  %e0 = tensor.empty() : tensor<4xf64>
+  %vpe = hip.add(%ctx) ins(%var, %eps : tensor<4xf64>, tensor<f64>) outs(%e0 : tensor<4xf64>) -> tensor<4xf64>
+  %e1 = tensor.empty() : tensor<4xf64>
+  %sd = hip.sqrt(%ctx) ins(%vpe : tensor<4xf64>) outs(%e1 : tensor<4xf64>) : tensor<4xf64>
+  %e2 = tensor.empty() : tensor<4xf64>
+  %inv = hip.reciprocal(%ctx) ins(%sd : tensor<4xf64>) outs(%e2 : tensor<4xf64>) : tensor<4xf64>
+
+  %mean_v = tensor.expand_shape %mean [[0, 1, 2]] output_shape [4, 1, 1] : tensor<4xf64> into tensor<4x1x1xf64>
+  %inv_v = tensor.expand_shape %inv [[0, 1, 2]] output_shape [4, 1, 1] : tensor<4xf64> into tensor<4x1x1xf64>
+
+  %e3 = tensor.empty() : tensor<1x4x2x2xf64>
+  %c = hip.sub(%ctx) ins(%x, %mean_v : tensor<1x4x2x2xf64>, tensor<4x1x1xf64>) outs(%e3 : tensor<1x4x2x2xf64>) : tensor<1x4x2x2xf64>
+  %e4 = tensor.empty() : tensor<1x4x2x2xf64>
+  %y = hip.mul(%ctx) ins(%c, %inv_v : tensor<1x4x2x2xf64>, tensor<4x1x1xf64>) outs(%e4 : tensor<1x4x2x2xf64>) -> tensor<1x4x2x2xf64>
+  return %y : tensor<1x4x2x2xf64>
+}
+
 // The batch dimension is dynamic, and the destination of the last op is sized
 // from a tensor.dim of an intermediate. The fusion erases that intermediate, so
 // the query is retargeted to x.
@@ -551,6 +578,38 @@ func.func @no_fusion_runtime_epsilon(%ctx: !hip.context, %x: !full, %mean: !vec,
   %e4 = tensor.empty() : !full
   %y = hip.mul(%ctx) ins(%c, %inv_v : !full, !view) outs(%e4 : !full) -> !full
   return %y : !full
+}
+
+// An f64 epsilon of 1e-50 underflows the f32 attribute to zero, which turns the
+// result for a zero variance from finite into infinity.
+
+// CHECK-LABEL: func.func @no_fusion_epsilon_underflows_f32
+// CHECK-NOT:     hip.batch_norm
+// CHECK:         hip.sub
+// CHECK-NOT:     hip.batch_norm
+// CHECK:         return
+func.func @no_fusion_epsilon_underflows_f32(%ctx: !hip.context,
+                                            %x: tensor<1x4x2x2xf64>,
+                                            %mean: tensor<4xf64>,
+                                            %var: tensor<4xf64>)
+    -> tensor<1x4x2x2xf64> {
+  %eps_f64 = arith.constant 1.000000e-50 : f64
+  %eps = tensor.splat %eps_f64 : tensor<f64>
+  %e0 = tensor.empty() : tensor<4xf64>
+  %vpe = hip.add(%ctx) ins(%var, %eps : tensor<4xf64>, tensor<f64>) outs(%e0 : tensor<4xf64>) -> tensor<4xf64>
+  %e1 = tensor.empty() : tensor<4xf64>
+  %sd = hip.sqrt(%ctx) ins(%vpe : tensor<4xf64>) outs(%e1 : tensor<4xf64>) : tensor<4xf64>
+  %e2 = tensor.empty() : tensor<4xf64>
+  %inv = hip.reciprocal(%ctx) ins(%sd : tensor<4xf64>) outs(%e2 : tensor<4xf64>) : tensor<4xf64>
+
+  %mean_v = tensor.expand_shape %mean [[0, 1, 2]] output_shape [4, 1, 1] : tensor<4xf64> into tensor<4x1x1xf64>
+  %inv_v = tensor.expand_shape %inv [[0, 1, 2]] output_shape [4, 1, 1] : tensor<4xf64> into tensor<4x1x1xf64>
+
+  %e3 = tensor.empty() : tensor<1x4x2x2xf64>
+  %c = hip.sub(%ctx) ins(%x, %mean_v : tensor<1x4x2x2xf64>, tensor<4x1x1xf64>) outs(%e3 : tensor<1x4x2x2xf64>) : tensor<1x4x2x2xf64>
+  %e4 = tensor.empty() : tensor<1x4x2x2xf64>
+  %y = hip.mul(%ctx) ins(%c, %inv_v : tensor<1x4x2x2xf64>, tensor<4x1x1xf64>) outs(%e4 : tensor<1x4x2x2xf64>) -> tensor<1x4x2x2xf64>
+  return %y : tensor<1x4x2x2xf64>
 }
 
 // An exponent of -0.3 is not an inverse standard deviation.
