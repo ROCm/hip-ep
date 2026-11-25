@@ -4,6 +4,7 @@
 // RUN: hip-mlir-opt %s --convert-hip-to-llvm | FileCheck %s
 
 // CHECK-LABEL: llvm.func @gated_rms_norm_sigmoid_f16
+// CHECK-COUNT-4: llvm.call @malloc
 // CHECK: llvm.mlir.constant(128 : i64) : i64
 // CHECK: %[[ELEM:.*]] = llvm.mlir.constant(2 : i64) : i64
 // CHECK-NEXT: %[[ACT:.*]] = llvm.mlir.constant(0 : i64) : i64

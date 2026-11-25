@@ -122,7 +122,7 @@ func.func @or(%ctx: !hip.context, %x: tensor<2x8xi1>, %y: tensor<2x8xi1>,
 // `!x` is `x ^ true`, because neither tosa.logical_not nor tosa.bitwise_not
 // has a rocMLIR lowering while tosa.bitwise_xor does.
 // CHECK-LABEL: func.func @not
-// CHECK: %[[ONES:.*]] = "tosa.const"() <{values = dense<true> : tensor<2x8xi1>}>
+// CHECK: %[[ONES:.*]] = tosa.const values(dense<true> : tensor<2x8xi1>)
 // CHECK: tosa.bitwise_xor %arg1, %[[ONES]] : (tensor<2x8xi1>, tensor<2x8xi1>) -> tensor<2x8xi1>
 // CHECK-NOT: hip.not
 // CHECK-NOT: tosa.logical_not
@@ -174,12 +174,12 @@ func.func @equal_broadcast_rank(%ctx: !hip.context, %x: tensor<2x8xf32>,
 // The checks follow emission order, in which each constant is materialized at
 // its first use and so is interleaved with the comparisons.
 // CHECK-LABEL: func.func @sign
-// CHECK: %[[ZERO:.*]] = "tosa.const"() <{values = dense<0.000000e+00> : tensor<2x8xf32>}>
+// CHECK: %[[ZERO:.*]] = tosa.const values(dense<0.000000e+00> : tensor<2x8xf32>)
 // CHECK: %[[POS:.*]] = tosa.greater %arg1, %[[ZERO]]
 // CHECK: %[[ISNEG:.*]] = tosa.greater %[[ZERO]], %arg1
-// CHECK: %[[NEG:.*]] = "tosa.const"() <{values = dense<-1.000000e+00> : tensor<2x8xf32>}>
+// CHECK: %[[NEG:.*]] = tosa.const values(dense<-1.000000e+00> : tensor<2x8xf32>)
 // CHECK: %[[INNER:.*]] = tosa.select %[[ISNEG]], %[[NEG]], %[[ZERO]]
-// CHECK: %[[ONE:.*]] = "tosa.const"() <{values = dense<1.000000e+00> : tensor<2x8xf32>}>
+// CHECK: %[[ONE:.*]] = tosa.const values(dense<1.000000e+00> : tensor<2x8xf32>)
 // CHECK: %[[SIGNUM:.*]] = tosa.select %[[POS]], %[[ONE]], %[[INNER]]
 // Both comparisons above are false for NaN, so the selects alone would return
 // zero. ONNX defines sign(NaN) = NaN and lib/Runtime/real/sign.cpp propagates
@@ -200,12 +200,12 @@ func.func @sign(%ctx: !hip.context, %x: tensor<2x8xf32>,
 // integer rather than float splats. Integers have no NaN, so the self-compare
 // guard is float-only and must not appear here.
 // CHECK-LABEL: func.func @sign_i32
-// CHECK: %[[ZERO:.*]] = "tosa.const"() <{values = dense<0> : tensor<4xi32>}>
+// CHECK: %[[ZERO:.*]] = tosa.const values(dense<0> : tensor<4xi32>)
 // CHECK: %[[POS:.*]] = tosa.greater %arg1, %[[ZERO]]
 // CHECK: %[[ISNEG:.*]] = tosa.greater %[[ZERO]], %arg1
-// CHECK: %[[NEG:.*]] = "tosa.const"() <{values = dense<-1> : tensor<4xi32>}>
+// CHECK: %[[NEG:.*]] = tosa.const values(dense<-1> : tensor<4xi32>)
 // CHECK: %[[INNER:.*]] = tosa.select %[[ISNEG]], %[[NEG]], %[[ZERO]]
-// CHECK: %[[ONE:.*]] = "tosa.const"() <{values = dense<1> : tensor<4xi32>}>
+// CHECK: %[[ONE:.*]] = tosa.const values(dense<1> : tensor<4xi32>)
 // CHECK: tosa.select %[[POS]], %[[ONE]], %[[INNER]]
 // CHECK-NOT: tosa.equal
 func.func @sign_i32(%ctx: !hip.context, %x: tensor<4xi32>,

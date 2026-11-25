@@ -63,7 +63,9 @@ module {
                          {keepdims = 0 : i64, noop_with_empty_axes = 0 : i64}
 
     // dtype, keepdims, and noop are 0. The next constant is inner_size.
-    // CHECK: llvm.mlir.constant(0 : i64) : i64
+    // They follow the input, output and axes element counts (one mul per dim).
+    // CHECK-COUNT-8: llvm.mul
+    // CHECK-NEXT: llvm.mlir.constant(0 : i64) : i64
     // CHECK-NEXT: llvm.mlir.constant(0 : i64) : i64
     // CHECK-NEXT: llvm.mlir.constant(0 : i64) : i64
     // CHECK-NEXT: %[[INNER:.*]] = llvm.mlir.constant(1 : i64) : i64
@@ -85,7 +87,8 @@ module {
                          outs(%output : memref<4x4xf32, 1>)
                          {keepdims = 0 : i64, noop_with_empty_axes = 0 : i64}
 
-    // CHECK: llvm.mlir.constant(0 : i64) : i64
+    // CHECK-COUNT-6: llvm.mul
+    // CHECK-NEXT: llvm.mlir.constant(0 : i64) : i64
     // CHECK-NEXT: llvm.mlir.constant(0 : i64) : i64
     // CHECK-NEXT: llvm.mlir.constant(0 : i64) : i64
     // CHECK-NEXT: %[[INNER:.*]] = llvm.mlir.constant(4 : i64) : i64
