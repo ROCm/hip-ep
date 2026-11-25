@@ -18,6 +18,11 @@ def Hip_Dialect : Dialect {
   }];
   let cppNamespace = "::mlir::hip";
   let useDefaultTypePrinterParser = 1;
+
+  // Most op formats print inherent attributes through attr-dict. LLVM marks
+  // this opt-out deprecated, so those formats need explicit bindings or
+  // prop-dict before it is removed.
+  let useStrictPropertiesInAssemblyFormat = 0;
 }
 
 #endif // HIP_DIALECT

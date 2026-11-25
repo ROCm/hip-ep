@@ -2788,6 +2788,56 @@ LogicalResult SwigluOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// ScaledMaskedSoftmaxOp: ins(input, row_ids, col_ids), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ScaledMaskedSoftmaxOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ScaledMaskedSoftmaxOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult ScaledMaskedSoftmaxOp::verify() {
+  if (failed(verifyDpsComputeOp(
+          *this, {getInput(), getRowIds(), getColIds(), getOutput()},
+          /*numInits=*/1)))
+    return failure();
+  auto inputType = dyn_cast<ShapedType>(getInput().getType());
+  auto outputType = dyn_cast<ShapedType>(getOutput().getType());
+  if (!inputType || !outputType || !inputType.hasRank() ||
+      inputType.getRank() < 2)
+    return emitOpError("input must be ranked with rank >= 2");
+  Type elemType = inputType.getElementType();
+  if (!elemType.isF16() && !elemType.isF32())
+    return emitOpError("input must be f16 or f32");
+  if (!outputType.hasRank() || outputType.getElementType() != elemType ||
+      failed(
+          verifyCompatibleShape(inputType.getShape(), outputType.getShape())))
+    return emitOpError("output must match the input shape and element type");
+  int64_t rank = inputType.getRank();
+  for (auto [ids, axis] :
+       {std::pair(getRowIds(), rank - 2), std::pair(getColIds(), rank - 1)}) {
+    auto idsType = dyn_cast<ShapedType>(ids.getType());
+    if (!idsType || !idsType.hasRank() || idsType.getRank() != 1 ||
+        !idsType.getElementType().isInteger(64))
+      return emitOpError("row_ids and col_ids must be rank-1 i64");
+    // Where's broadcast rule: an id vector spans its scores axis or is 1 long.
+    int64_t len = idsType.getDimSize(0);
+    int64_t extent = inputType.getDimSize(axis);
+    if (!ShapedType::isDynamic(len) && !ShapedType::isDynamic(extent) &&
+        len != 1 && len != extent)
+      return emitOpError("id vector of length ")
+             << len << " neither broadcasts nor matches scores axis " << axis
+             << " of size " << extent;
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // PoolOp: ins(input), outs([output] or [output, indices])
 //===----------------------------------------------------------------------===//
 
