@@ -26,9 +26,9 @@ func.func @static_lower(
     %ctx: !hip.context,
     %a: memref<2x64x64xf32, strided<[?, ?, ?], offset: ?>>,
     %b: memref<64x64xf32, strided<[?, ?], offset: ?>>) -> memref<2x64x64xf32> {
-  %alloc0 = memref.alloc() {alignment = 64 : i64} : memref<2x64x64xf32>
+  %alloc0 = memref.alloc() alignment = 64 : memref<2x64x64xf32>
   hip.matmul(%ctx) ins(%a, %b : memref<2x64x64xf32, strided<[?, ?, ?], offset: ?>>, memref<64x64xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<2x64x64xf32>)
-  %alloc1 = memref.alloc() {alignment = 64 : i64} : memref<2x64x64xf32>
+  %alloc1 = memref.alloc() alignment = 64 : memref<2x64x64xf32>
   hip.miopen.softmax(%ctx) ins(%alloc0 : memref<2x64x64xf32>) outs(%alloc1 : memref<2x64x64xf32>)
   return %alloc1 : memref<2x64x64xf32>
 }
@@ -76,11 +76,11 @@ func.func @multiple_frees(
     %ctx: !hip.context,
     %input: memref<2x64x64xf32, strided<[?, ?, ?], offset: ?>>,
     %w: memref<64x64xf32, strided<[?, ?], offset: ?>>) -> memref<2x64x64xf32> {
-  %alloc0 = memref.alloc() {alignment = 64 : i64} : memref<2x64x64xf32>
+  %alloc0 = memref.alloc() alignment = 64 : memref<2x64x64xf32>
   hip.matmul(%ctx) ins(%input, %w : memref<2x64x64xf32, strided<[?, ?, ?], offset: ?>>, memref<64x64xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<2x64x64xf32>)
-  %alloc1 = memref.alloc() {alignment = 64 : i64} : memref<2x64x64xf32>
+  %alloc1 = memref.alloc() alignment = 64 : memref<2x64x64xf32>
   hip.miopen.softmax(%ctx) ins(%alloc0 : memref<2x64x64xf32>) outs(%alloc1 : memref<2x64x64xf32>)
-  %alloc2 = memref.alloc() {alignment = 64 : i64} : memref<2x64x64xf32>
+  %alloc2 = memref.alloc() alignment = 64 : memref<2x64x64xf32>
   hip.miopen.softmax(%ctx) ins(%alloc1 : memref<2x64x64xf32>) outs(%alloc2 : memref<2x64x64xf32>)
   return %alloc2 : memref<2x64x64xf32>
 }
@@ -144,7 +144,7 @@ func.func @view_alias_chain_free_placement(
     %ctx: !hip.context,
     %b: memref<64x64xf32, strided<[?, ?], offset: ?>>,
     %out: memref<1x64x64xf32>) -> memref<1x64x64xf32> {
-  %alloc0 = memref.alloc() {alignment = 64 : i64} : memref<2x64x64xf32>
+  %alloc0 = memref.alloc() alignment = 64 : memref<2x64x64xf32>
   %sv = memref.subview %alloc0[0, 0, 0][1, 64, 64][1, 1, 1]
       : memref<2x64x64xf32> to memref<1x64x64xf32, strided<[4096, 64, 1]>>
   %cast = memref.cast %sv

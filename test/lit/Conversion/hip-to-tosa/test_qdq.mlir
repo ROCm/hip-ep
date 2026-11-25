@@ -26,7 +26,7 @@
 
 // Per-tensor dequant, no zero_point: cast then mul.
 // CHECK-LABEL: func.func @dequantize_no_zp
-// CHECK: %[[CAST:.*]] = tosa.cast %arg1 : (tensor<2x8xi8>) -> tensor<2x8xf32>
+// CHECK: %[[CAST:.*]] = tosa.cast %arg1 input_unsigned(false) : (tensor<2x8xi8>) -> tensor<2x8xf32>
 // CHECK: tosa.mul %[[CAST]]
 // CHECK-NOT: hip.dequantize_linear
 func.func @dequantize_no_zp(%ctx: !hip.context, %x: tensor<2x8xi8>,
@@ -65,7 +65,7 @@ func.func @dequantize_per_axis(%ctx: !hip.context, %x: tensor<1x64x32xi8>,
 // CHECK: tosa.mul
 // CHECK-NOT: fp_to_int_cast
 // CHECK: tosa.cast {{.*}} -> tensor<2x8xi32>
-// CHECK: tosa.clamp {{.*}} {max_val = 127 : i32, min_val = -128 : i32
+// CHECK: tosa.clamp {{.*}} min_val(-128 : i32) max_val(127 : i32)
 // CHECK: tosa.cast {{.*}} -> tensor<2x8xi8>
 // CHECK-NOT: hip.quantize_linear
 func.func @quantize_no_zp(%ctx: !hip.context, %x: tensor<2x8xf32>,
@@ -158,7 +158,7 @@ func.func @dequantize_rank1_scale1_default_axis(%ctx: !hip.context,
 // CHECK-NOT: ui8
 // CHECK: tosa.const{{.*}}dense<-128>
 // CHECK-NOT: ui8
-// CHECK: tosa.custom {{.*}}operator_name = "unsigned_cast"
+// CHECK: tosa.custom {{.*}}operator_name("unsigned_cast")
 // CHECK-NOT: ui8
 // CHECK: return
 func.func @dequantize_ui8_signless(%x: tensor<2x8xui8>, %scale: tensor<f32>)
@@ -178,8 +178,8 @@ func.func @dequantize_ui8_signless(%x: tensor<2x8xui8>, %scale: tensor<f32>)
 // unsigned_cast after the [0, 255] clamp.
 // CHECK-LABEL: func.func @quantize_ui8_signless
 // CHECK-SAME: -> tensor<2x8xi8>
-// CHECK: tosa.clamp {{.*}} {max_val = 255 : i32, min_val = 0 : i32
-// CHECK: tosa.custom {{.*}}operator_name = "unsigned_cast"{{.*}} -> tensor<2x8xi8>
+// CHECK: tosa.clamp {{.*}} min_val(0 : i32) max_val(255 : i32)
+// CHECK: tosa.custom {{.*}}operator_name("unsigned_cast"){{.*}} -> tensor<2x8xi8>
 // CHECK-NOT: ui8
 // CHECK: return
 func.func @quantize_ui8_signless(%x: tensor<2x8xf32>, %scale: tensor<f32>)
@@ -278,7 +278,7 @@ func.func @quantize_no_saturate(%ctx: !hip.context, %x: tensor<2x8xf32>,
 // dequantize casts it with sitofp.
 // CHECK-LABEL: func.func @dequantize_packed_int4_argument
 // CHECK-SAME: %arg0: tensor<32x16x1x1xi4>
-// CHECK: tosa.cast %arg0 : (tensor<32x16x1x1xi4>) -> tensor<32x16x1x1xf32>
+// CHECK: tosa.cast %arg0 input_unsigned(false) : (tensor<32x16x1x1xi4>) -> tensor<32x16x1x1xf32>
 // CHECK: tosa.mul
 // CHECK-NOT: packed_int4
 func.func @dequantize_packed_int4_argument(%w: tensor<32x16x1x1xi8>,
@@ -300,7 +300,7 @@ func.func @dequantize_packed_int4_argument(%w: tensor<32x16x1x1xi8>,
 // is rocMLIR's zero-extending unsigned_cast, and the kernel then ends signless.
 // CHECK-LABEL: func.func @dequantize_packed_uint4_argument
 // CHECK-SAME: %arg0: tensor<64x32xi4>
-// CHECK: tosa.custom %arg0 {{.*}}operator_name = "unsigned_cast"{{.*}} : (tensor<64x32xi4>) -> tensor<64x32xf32>
+// CHECK: tosa.custom %arg0 {{.*}}operator_name("unsigned_cast"){{.*}} : (tensor<64x32xi4>) -> tensor<64x32xf32>
 // CHECK-NOT: packed_int4
 func.func @dequantize_packed_uint4_argument(%w: tensor<64x32xui8>,
                                             %init: tensor<64x32xf32>)
