@@ -490,8 +490,10 @@ conv_tiled_kernel(const T *__restrict__ x, const T *__restrict__ w,
   constexpr int kRowThreadsA = BK / kVecA;
   static_assert(kVecA <= BK && BK % kVecA == 0, "filter run divides BK");
 
-  __shared__ float As[BK][BM]; // filter slice, k-major for the inner loop
-  __shared__ float Bs[BK][BN]; // im2col slice
+  // 16-byte aligned so the inner loop's TM/TN-wide reads compile to
+  // ds_load_b128 rather than pairs of ds_load_2addr_b32.
+  __shared__ __attribute__((aligned(16))) float As[BK][BM]; // filter slice, k-major
+  __shared__ __attribute__((aligned(16))) float Bs[BK][BN]; // im2col slice
   // The contraction half of the im2col address, one entry per k in the slice,
   // decoded once for the whole block. Double-buffered so the next slice's
   // decode overlaps this slice's arithmetic and costs no extra barrier.
