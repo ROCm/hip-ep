@@ -65,6 +65,28 @@ func.func @audio_mask_chain(%ctx: !hip.context,
   return %layer0, %layer1 : tensor<1x1x169x169xf32>, tensor<1x1x169x169xf32>
 }
 
+// The evaluation budget is module-wide and charges failed attempts: placed
+// immediately after the audio chain, whose attempts all FAIL under
+// max-fold-total-elements=4 (the range attempt alone charges 169), so if
+// failures were not charged this 4-element fold would still fit the budget.
+// The default run folds it.
+// CHECK-LABEL: func.func @budget_cross_function
+// CHECK-NOT: hip.not
+// BUDGET-LABEL: func.func @budget_cross_function
+// BUDGET: hip.not
+func.func @budget_cross_function(%ctx: !hip.context, %x: tensor<4xf32>,
+                                 %y: tensor<4xf32>) -> tensor<4xf32> {
+  %input = hip.constant {value = dense<false> : tensor<4xi1>} : tensor<4xi1>
+  %not_init = tensor.empty() : tensor<4xi1>
+  %condition = hip.not(%ctx) ins(%input : tensor<4xi1>)
+      outs(%not_init : tensor<4xi1>) : tensor<4xi1>
+  %where_init = tensor.empty() : tensor<4xf32>
+  %result = hip.where(%ctx) ins(%condition, %x, %y :
+      tensor<4xi1>, tensor<4xf32>, tensor<4xf32>)
+      outs(%where_init : tensor<4xf32>) : tensor<4xf32>
+  return %result : tensor<4xf32>
+}
+
 // A non-splat broadcast is materialized element-exactly: expand [F,T] from
 // [1,2] to [2,2] duplicates the row.
 // CHECK-LABEL: func.func @fold_expand_non_splat
@@ -101,9 +123,9 @@ func.func @keep_expand_shape_mismatch(%ctx: !hip.context, %x: tensor<3x2xf32>,
   return %result : tensor<3x2xf32>
 }
 
-// Under max-fold-elements=1 the expand_shape see-through is refused before
-// its payload is reshaped, so an oversized intermediate is never
-// materialized and nothing folds. The default run folds the chain.
+// Under max-fold-elements=1 the two-element candidate is rejected by the
+// per-payload cap before anything is evaluated, so nothing folds. The
+// default run folds the chain.
 // CHECK-LABEL: func.func @capped_see_through
 // CHECK-NOT: hip.not
 // CAPPED-LABEL: func.func @capped_see_through
@@ -123,23 +145,28 @@ func.func @capped_see_through(%ctx: !hip.context, %x: tensor<1x2xf32>,
   return %result : tensor<1x2xf32>
 }
 
-// The evaluation budget is module-wide: with max-fold-total-elements=4 the
-// audio chain above exhausts it (its failed range attempt alone charges 169
-// elements), so this later function no longer folds even though it is only
-// 4 elements. The default run folds it.
-// CHECK-LABEL: func.func @budget_cross_function
-// CHECK-NOT: hip.not
-// BUDGET-LABEL: func.func @budget_cross_function
-// BUDGET: hip.not
-func.func @budget_cross_function(%ctx: !hip.context, %x: tensor<4xf32>,
-                                 %y: tensor<4xf32>) -> tensor<4xf32> {
-  %input = hip.constant {value = dense<false> : tensor<4xi1>} : tensor<4xi1>
-  %not_init = tensor.empty() : tensor<4xi1>
-  %condition = hip.not(%ctx) ins(%input : tensor<4xi1>)
-      outs(%not_init : tensor<4xi1>) : tensor<4xi1>
-  %where_init = tensor.empty() : tensor<4xf32>
-  %result = hip.where(%ctx) ins(%condition, %x, %y :
-      tensor<4xi1>, tensor<4xf32>, tensor<4xf32>)
-      outs(%where_init : tensor<4xf32>) : tensor<4xf32>
-  return %result : tensor<4xf32>
+// Specifically the expand_shape see-through cap: the reshape source (2
+// elements) exceeds max-fold-elements=1 while the expand RESULT is empty
+// (0 elements, passes the per-payload cap), so the only guard that can stop
+// this fold under CAPPED is the reshape materialization check. The default
+// run folds the expand to an empty carrier.
+// CHECK-LABEL: func.func @capped_reshape_guard
+// CHECK-NOT: hip.expand
+// CHECK: hip.constant {value = dense<> : tensor<0x2xi1>} : tensor<0x2xi1>
+// CAPPED-LABEL: func.func @capped_reshape_guard
+// CAPPED: tensor.expand_shape
+// CAPPED: hip.expand
+func.func @capped_reshape_guard(%ctx: !hip.context, %x: tensor<0x2xf32>,
+                                %y: tensor<0x2xf32>) -> tensor<0x2xf32> {
+  %input = hip.constant {value = dense<false> : tensor<2xi1>} : tensor<2xi1>
+  %reshaped = tensor.expand_shape %input [[0, 1]] output_shape [1, 2] : tensor<2xi1> into tensor<1x2xi1>
+  %shape = hip.constant {value = dense<[0, 2]> : tensor<2xi64>} : tensor<2xi64>
+  %expand_init = tensor.empty() : tensor<0x2xi1>
+  %mask = hip.expand(%ctx) ins(%reshaped, %shape : tensor<1x2xi1>, tensor<2xi64>)
+      outs(%expand_init : tensor<0x2xi1>) : tensor<0x2xi1>
+  %where_init = tensor.empty() : tensor<0x2xf32>
+  %result = hip.where(%ctx) ins(%mask, %x, %y :
+      tensor<0x2xi1>, tensor<0x2xf32>, tensor<0x2xf32>)
+      outs(%where_init : tensor<0x2xf32>) : tensor<0x2xf32>
+  return %result : tensor<0x2xf32>
 }

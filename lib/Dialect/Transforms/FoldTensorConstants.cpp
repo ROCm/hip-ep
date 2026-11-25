@@ -112,10 +112,13 @@ public:
   void forget(Value value) { memo.erase(value); }
 
   /// Evaluates one HIP op over resolved inputs; null when the op kind has no
-  /// evaluator, a contract is violated, or a budget is exhausted. Charges the
-  /// evaluation budget before computing so failed attempts count too.
+  /// evaluator, a contract is violated, or a budget is exhausted. The budget
+  /// is charged before computing so failed attempts count too, but only for
+  /// kinds that have an evaluator: foreign producers encountered while
+  /// resolving must not drain it.
   DenseElementsAttr evaluateOp(Operation *op, int depth) {
-    if (op->getNumResults() != 1)
+    if (!isa<NotOp, AndOp, OrOp, LessOp, RangeOp, ExpandOp>(op) ||
+        op->getNumResults() != 1)
       return nullptr;
     auto type = dyn_cast<RankedTensorType>(op->getResult(0).getType());
     if (!type || !type.hasStaticShape() || type.getNumElements() > maxElements)
@@ -438,6 +441,11 @@ struct FoldTensorConstantsPass final
       // through by the resolver.
       for (Operation &op : llvm::make_early_inc_range(block)) {
         if (!isReplaceableKind(&op))
+          continue;
+        // Memref-form (post-bufferization) variants have no results; the
+        // pipeline runs this pass pre-bufferization, but a standalone
+        // invocation on bufferized IR must be a no-op, not a crash.
+        if (op.getNumResults() != 1)
           continue;
         // A dead result is DCE work, not folding work.
         if (op.getResult(0).use_empty())

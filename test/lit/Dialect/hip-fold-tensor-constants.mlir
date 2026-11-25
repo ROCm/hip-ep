@@ -251,6 +251,80 @@ func.func @keep_range_zero_delta(%ctx: !hip.context, %x: tensor<4xf32>,
   return %result : tensor<4xf32>
 }
 
+// Signed comparison: negative operands order below positives (an unsigned
+// compare would invert these results). Covers both the scalar-rhs and the
+// scalar-lhs-with-dense-rhs orientations.
+// CHECK-LABEL: func.func @fold_less_signed
+// CHECK-NOT: hip.less
+// CHECK-DAG: hip.constant {value = dense<[true, true, false, false]> : tensor<4xi1>} : tensor<4xi1>
+// CHECK-DAG: hip.constant {value = dense<[false, true]> : tensor<2xi1>} : tensor<2xi1>
+func.func @fold_less_signed(%ctx: !hip.context,
+                            %x4: tensor<4xf32>, %y4: tensor<4xf32>,
+                            %x2: tensor<2xf32>, %y2: tensor<2xf32>)
+    -> (tensor<4xf32>, tensor<2xf32>) {
+  %values = hip.constant {value = dense<[-2, -1, 0, 1]> : tensor<4xi64>} : tensor<4xi64>
+  %zero = hip.constant {value = dense<0> : tensor<i64>} : tensor<i64>
+  %l4_init = tensor.empty() : tensor<4xi1>
+  %cond4 = hip.less(%ctx) ins(%values, %zero : tensor<4xi64>, tensor<i64>)
+      outs(%l4_init : tensor<4xi1>) : tensor<4xi1>
+  %w4_init = tensor.empty() : tensor<4xf32>
+  %r4 = hip.where(%ctx) ins(%cond4, %x4, %y4 :
+      tensor<4xi1>, tensor<4xf32>, tensor<4xf32>)
+      outs(%w4_init : tensor<4xf32>) : tensor<4xf32>
+  %minus_one = hip.constant {value = dense<-1> : tensor<i64>} : tensor<i64>
+  %pair = hip.constant {value = dense<[-2, 0]> : tensor<2xi64>} : tensor<2xi64>
+  %l2_init = tensor.empty() : tensor<2xi1>
+  %cond2 = hip.less(%ctx) ins(%minus_one, %pair : tensor<i64>, tensor<2xi64>)
+      outs(%l2_init : tensor<2xi1>) : tensor<2xi1>
+  %w2_init = tensor.empty() : tensor<2xf32>
+  %r2 = hip.where(%ctx) ins(%cond2, %x2, %y2 :
+      tensor<2xi1>, tensor<2xf32>, tensor<2xf32>)
+      outs(%w2_init : tensor<2xf32>) : tensor<2xf32>
+  return %r4, %r2 : tensor<4xf32>, tensor<2xf32>
+}
+
+// Unsupported element types bail before any payload access: less on i32,
+// range on i32, expand on f16.
+// CHECK-LABEL: func.func @keep_unsupported_dtypes
+// CHECK: hip.less
+// CHECK: hip.range
+// CHECK: hip.expand
+func.func @keep_unsupported_dtypes(%ctx: !hip.context, %x: tensor<2xf32>,
+                                   %y: tensor<2xf32>)
+    -> (tensor<2xf32>, tensor<2xi32>, tensor<2x2xf16>) {
+  %a32 = hip.constant {value = dense<[1, 2]> : tensor<2xi32>} : tensor<2xi32>
+  %zero32 = hip.constant {value = dense<0> : tensor<i32>} : tensor<i32>
+  %less_init = tensor.empty() : tensor<2xi1>
+  %cond = hip.less(%ctx) ins(%a32, %zero32 : tensor<2xi32>, tensor<i32>)
+      outs(%less_init : tensor<2xi1>) : tensor<2xi1>
+  %where_init = tensor.empty() : tensor<2xf32>
+  %r0 = hip.where(%ctx) ins(%cond, %x, %y :
+      tensor<2xi1>, tensor<2xf32>, tensor<2xf32>)
+      outs(%where_init : tensor<2xf32>) : tensor<2xf32>
+  %start32 = hip.constant {value = dense<0> : tensor<i32>} : tensor<i32>
+  %limit32 = hip.constant {value = dense<2> : tensor<i32>} : tensor<i32>
+  %delta32 = hip.constant {value = dense<1> : tensor<i32>} : tensor<i32>
+  %iota_init = tensor.empty() : tensor<2xi32>
+  %r1 = hip.range(%ctx) ins(%start32, %limit32, %delta32 : tensor<i32>, tensor<i32>, tensor<i32>)
+      outs(%iota_init : tensor<2xi32>) : tensor<2xi32>
+  %h = hip.constant {value = dense<1.0> : tensor<1x2xf16>} : tensor<1x2xf16>
+  %shape = hip.constant {value = dense<[2, 2]> : tensor<2xi64>} : tensor<2xi64>
+  %expand_init = tensor.empty() : tensor<2x2xf16>
+  %r2 = hip.expand(%ctx) ins(%h, %shape : tensor<1x2xf16>, tensor<2xi64>)
+      outs(%expand_init : tensor<2x2xf16>) : tensor<2x2xf16>
+  return %r0, %r1, %r2 : tensor<2xf32>, tensor<2xi32>, tensor<2x2xf16>
+}
+
+// Memref-form (post-bufferization) candidates have no results; a standalone
+// invocation on bufferized IR is a no-op, not a crash.
+// CHECK-LABEL: func.func @keep_memref_form
+// CHECK: hip.not
+func.func @keep_memref_form(%ctx: !hip.context, %x: memref<4xi1, 1>,
+                            %y: memref<4xi1, 1>) {
+  hip.not(%ctx) ins(%x : memref<4xi1, 1>) outs(%y : memref<4xi1, 1>)
+  return
+}
+
 // A broadcast form is refused: the exact-type gate requires every input to
 // match the result type, and dense<true> over tensor<1xi1> does not.
 // CHECK-LABEL: func.func @keep_broadcast_and
