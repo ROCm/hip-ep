@@ -1001,37 +1001,50 @@ static int run() {
 }  // namespace forced
 
 // ============================================================
-// W4A8 dp4a rows. hip_matmul_nbits_dp4a blocks M > 1 rows into row tiles, and
-// the sweep above never takes that entry. Its rule picks a tile that holds all
-// M rows whenever a table entry fits N. N = 1 is narrower than every entry, so
-// it falls back to the tile_m = 4 default and M = 5..7 runs on two row tiles:
-// Qwen3.8-Flash-Next's shared_expert_gate (K = 2560, N = 1) at the row counts
-// of a speculative-decoding verify call. The second row tile once read the
-// first tile's activation rows. So N = 1 runs on both sides of that boundary,
-// and N = 2560 runs the same kernel on one tile of 2, 4 and 8 rows and, at
-// M = 9, on two tiles of 8 (the EP sends that many rows only when
-// HIPDNN_EP_MATMUL_DP4A_MAX_M is raised). Each shape runs with every group
-// size, with and without zero points, at every tier, against the CPU
-// reference. Like the forced entries above, these are checked, not timed, and
-// write no results.csv row.
+// W4A8 dp4a rows. The sweep above never takes hip_matmul_nbits_dp4a, which
+// sends M > 1 rows to one of two kernels:
+//   - 2..8 rows of K <= 512, and 5..8 rows of K <= 640: one thread per output
+//     column (matmul_nbits_gemv_dp4a_smallk_kernel).
+//   - everything else: the K-parallel kernel on row tiles of 2, 4 or 8 rows.
+//     In lookup mode one tile holds all M rows up to 8. N = 1 is narrower
+//     than every tile and gets the narrowest one of that height (Qwen3.8-
+//     Flash-Next's shared_expert_gate, K = 2560, at the row counts of a
+//     speculative-decoding verify call); N >= 15360 at 5..8 rows gets the
+//     4-column tile of 8 rows. Above 8 rows there are two row tiles, and the
+//     second one once read the first tile's activation rows (the EP sends
+//     that many rows only when HIPDNN_EP_MATMUL_DP4A_MAX_M is raised).
+// The shapes below sit on both sides of each of those boundaries. Each runs
+// with every group size that divides K (32 takes the per-group activation
+// quantizer, 64 and 128 the block one), with and without zero points, at
+// every tier, against the CPU reference. Like the forced entries above, these
+// are checked, not timed, and write no results.csv row.
 // ============================================================
 namespace dp4a_rows {
 
 static int run() {
   static const sweep::Shape kShapes[] = {
-      {4, 2560, 1},     // N = 1: one row tile
-      {5, 2560, 1},     // N = 1: a second row tile holding one row
-      {7, 2560, 1},     // N = 1: a second row tile holding three rows
+      {2, 2560, 1},     // N = 1: the tile of 2 rows
+      {4, 2560, 1},     // N = 1: the tile of 4 rows
+      {5, 2560, 1},     // N = 1: the tile of 8 rows, 5 of them used
+      {7, 2560, 1},     // N = 1: the tile of 8 rows, 7 of them used
       {2, 2560, 2560},  // one tile of 2 rows
       {4, 2560, 2560},  // one tile of 4 rows
       {7, 2560, 2560},  // one tile of 8 rows, 7 of them used
       {9, 2560, 2560},  // more rows than the tallest tile: two row tiles
+      {2, 320, 10240},  // column per thread: the fewest rows
+      {8, 320, 10240},  // column per thread: the most rows
+      {3, 512, 1000},   // column per thread: the largest K below 5 rows, and
+                        // an N that ends inside a 64-column block
+      {4, 640, 2560},   // K = 640 below 5 rows: K-parallel
+      {5, 640, 2560},   // K = 640 from 5 rows: column per thread
+      {7, 768, 15360},  // N >= 15360 at 5..8 rows: the 4-column tile of 8 rows
   };
   hipStream_t stream;
   HIP_CHECK(hipStreamCreate(&stream));
   int cases = 0, fail = 0;
   for (const sweep::Shape& s : kShapes) {
     for (int gs : sweep::kGsArray) {
+      if (s.K % gs != 0) continue;  // K = 320 has no whole number of 128-groups
       for (bool zero : sweep::kZeroArray) {
         CaseData d;
         genCase(s.M, s.K, s.N, gs, zero, /*fp32=*/false,
