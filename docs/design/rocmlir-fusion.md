@@ -20,7 +20,7 @@ fusion for the EP, `hip-rocmlir-compiler`, `rocmlir-pipeline` and the
 func.func(hip-hoist-pointwise-over-views)
 func.func(hip-rocmlir-prepare-quant)
 func.func(hip-fuse-rocmlir-elementwise)
-func.func(hip-rocmlir-prepare-fusion)
+func.func(hip-rocmlir-pre-fusion)
 func.func(hip-fuse-rocmlir-anchor)
 duplicate-function-elimination
 hip-rocmlir-fusion-report        (only with a report file)
@@ -145,7 +145,7 @@ take a module whole:
   loads and stores take at most 32 bits.
 - A module of views alone is not made.
 
-## hip-rocmlir-prepare-fusion
+## hip-rocmlir-pre-fusion
 
 The pass holds rewrites that put `main_graph` into a form the anchor fusion
 can take. It runs after the grouping, so a pattern can tell a pointwise reader
@@ -459,7 +459,7 @@ and `int4-weights` are the fusion switches.
 - `test/lit/Dialect/hip-fuse-rocmlir*.mlir` check the kernels of the whole
   fusion. `hip-fuse-rocmlir-elementwise.mlir` checks one grouping rule in each
   test, and `hip-fuse-rocmlir-anchor.mlir` checks the planning rules.
-  `hip-rocmlir-prepare-fusion.mlir` checks each prepare-fusion rule, and that
+  `hip-rocmlir-pre-fusion.mlir` checks each pre-fusion rule, and that
   the fusion absorbs the slices it makes.
 - `HIPDNN_EP_ROCMLIR_PRE_FUSION_DUMP=<dir>` writes the IR that the fusion
   reads, with the fusion options on its first line, so that

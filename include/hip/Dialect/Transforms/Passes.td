@@ -198,11 +198,11 @@ def HoistPointwiseOverViewsPass
   let dependentDialects = ["mlir::tensor::TensorDialect"];
 }
 
-def RocMlirPrepareFusionPass
-    : Pass<"hip-rocmlir-prepare-fusion", "mlir::func::FuncOp"> {
+def RocMlirPreFusionPass
+    : Pass<"hip-rocmlir-pre-fusion", "mlir::func::FuncOp"> {
   let summary = "Rewrite main_graph into forms the rocMLIR fusion can take";
   let description = [{
-    Applies the prepare-fusion patterns to the ops of the top-level block of
+    Applies the pre-fusion patterns to the ops of the top-level block of
     main_graph, the block that the anchor fusion plans, without folding. It
     runs after hip-fuse-rocmlir-elementwise, so a pattern can see which
     pointwise readers are grouped into hip.rocmlir_elementwise modules. The

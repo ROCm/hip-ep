@@ -1,13 +1,13 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// hip-rocmlir-prepare-fusion turns a hip.gather of one constant index on
+// hip-rocmlir-pre-fusion turns a hip.gather of one constant index on
 // float data into a size-1 tensor.extract_slice, plus a tensor.collapse_shape
 // for a scalar index, when its one reader will likely run in a rocMLIR
 // kernel. The FUSE run checks that the rocMLIR fusion then absorbs the slice.
 
 // RUN: hip-mlir-opt --split-input-file --hip-fuse-rocmlir-elementwise \
-// RUN:   --hip-rocmlir-prepare-fusion %s | FileCheck %s
+// RUN:   --hip-rocmlir-pre-fusion %s | FileCheck %s
 // RUN: hip-mlir-opt --split-input-file --hip-rocmlir-fusion %s \
 // RUN:   | FileCheck %s --check-prefix=FUSE
 

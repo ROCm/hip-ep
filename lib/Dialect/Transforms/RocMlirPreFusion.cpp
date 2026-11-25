@@ -26,7 +26,7 @@
 #include <optional>
 
 namespace mlir::hip {
-#define GEN_PASS_DEF_ROCMLIRPREPAREFUSIONPASS
+#define GEN_PASS_DEF_ROCMLIRPREFUSIONPASS
 #include "hip/Dialect/Transforms/Passes.h.inc"
 
 namespace {
@@ -189,8 +189,8 @@ struct GatherAsSlice : OpRewritePattern<GatherOp> {
   }
 };
 
-struct RocMlirPrepareFusionPass
-    : public impl::RocMlirPrepareFusionPassBase<RocMlirPrepareFusionPass> {
+struct RocMlirPreFusionPass
+    : public impl::RocMlirPreFusionPassBase<RocMlirPreFusionPass> {
   void runOnOperation() override {
     func::FuncOp funcOp = getOperation();
     if (funcOp.getSymName() != "main_graph" || funcOp.isExternal())
