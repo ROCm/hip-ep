@@ -147,6 +147,51 @@ class TestConv:
         compare_outputs(actual, expected, atol=1e-2, rtol=1e-2, cos_threshold=0.999)
 
 
+class TestConvSplitK:
+    """Shapes whose tile grid is far short of the device: a long reduction over few
+    output positions. The kernel cuts the reduction across blocks and sums the
+    partial results in a second pass, so these check the partial sums, the bias
+    (added once, in the reduce, or absent) and the ragged edges of the last slice.
+
+    Every row has to split, or it only repeats the unsplit kernels' tests. They
+    do on the 40-CU gfx1151 (checked from the plan arithmetic and from the
+    kernels launched) and, for most rows, on smaller and larger devices too."""
+
+    @pytest.mark.parametrize("dtype", [TensorProto.FLOAT])
+    @pytest.mark.parametrize(
+        "n,in_c,hw,out_c,k,stride,group,bias",
+        [
+            (1, 512, 7, 512, 3, 1, 1, True),  # K = 4608 over 49 columns
+            (2, 256, 14, 256, 3, 1, 1, True),  # batch > 1
+            (1, 200, 9, 130, 3, 1, 1, True),  # ragged K and ragged M
+            (1, 128, 14, 128, 3, 1, 2, False),  # grouped, no bias
+            (1, 256, 28, 256, 3, 2, 1, True),  # stride 2
+            (1, 1020, 14, 256, 1, 1, 1, False),  # 1x1, K % 8 != 0, no bias
+            (1, 516, 7, 512, 1, 1, 1, True),  # 1x1, K % 8 != 0, narrow output
+        ],
+    )
+    def test_conv_splitk(
+        self, model_runner, dtype, n, in_c, hw, out_c, k, stride, group, bias
+    ):
+        model = _make_conv_model(
+            in_c,
+            out_c,
+            group,
+            k=k,
+            spatial=hw,
+            seed=11,
+            dtype=dtype,
+            n=n,
+            stride=stride,
+            bias=bias,
+        )
+        rng = np.random.default_rng(5)
+        x = rng.uniform(-1.0, 1.0, [n, in_c, hw, hw]).astype(_np_dtype(dtype))
+        actual, expected = model_runner.run_sample(model, [x])
+        tol = 1e-3 if dtype == TensorProto.FLOAT else 2e-2
+        compare_outputs(actual, expected, atol=tol, rtol=tol, cos_threshold=0.9999)
+
+
 class TestConvScalarTiles:
     """fp32 shapes that run on the scalar tiles with a grid far short of the
     device, plus the narrow-Cout fallback. fp16 is not covered here: it takes
