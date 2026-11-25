@@ -204,8 +204,9 @@ struct ConvParams {
   // Split-K: the reduction is cut into kSplit slices of kChunk taps (a
   // multiple of the tile's BK), one per blockIdx.y. Each writes a partial sum
   // to the workspace and conv_splitk_reduce_kernel adds them. 0 or 1 = no
-  // split. Honoured by conv_tiled_kernel and conv_wmma_kernel; for the latter a
-  // chunk is a multiple of the WMMA depth.
+  // split. Honoured by conv_tiled_kernel and conv_wmma_kernel, and by
+  // conv_window_kernel, whose chunk counts input channels (a multiple of the
+  // WMMA depth) rather than taps.
   int32_t kSplit;
   int64_t kChunk;
 };
@@ -1050,7 +1051,7 @@ __global__
 __launch_bounds__((BM / (WM * kWmma)) * ((TH * TW) / (WN * kWmma)) * 32) void
 conv_window_kernel(const __half *__restrict__ x, const __half *__restrict__ w,
                    const __half *__restrict__ bias, __half *__restrict__ y,
-                   ConvParams pr) {
+                   float *__restrict__ ws, ConvParams pr) {
   constexpr int BN = TH * TW;
   constexpr int kWavesM = BM / (WM * kWmma);
   constexpr int kWavesN = BN / (WN * kWmma);
@@ -1095,6 +1096,15 @@ conv_window_kernel(const __half *__restrict__ x, const __half *__restrict__ w,
   const int64_t ow0 = static_cast<int64_t>(bw) * TW;
   int64_t nbatch, g;
   blockBases(pr, blockIdx.z, nbatch, g);
+  // This block's slice of the reduction (split-K). The window kernel's outer
+  // loop runs over channel slices, so here kChunk counts input channels, in
+  // multiples of the 16-channel WMMA depth.
+  const bool split = pr.kSplit > 1;
+  const int64_t cBeg = split ? static_cast<int64_t>(blockIdx.y) * pr.kChunk : 0;
+  const int64_t cEnd = split ? (cBeg + pr.kChunk < pr.CinPerGroup
+                                    ? cBeg + pr.kChunk
+                                    : pr.CinPerGroup)
+                              : pr.CinPerGroup;
 
   // Input window origin. Unit stride and dilation, so an output at (oh, ow)
   // reads input rows oh - p0 + tr for tr in [0, k0), and the whole tile's
@@ -1131,7 +1141,7 @@ conv_window_kernel(const __half *__restrict__ x, const __half *__restrict__ w,
   const int32_t ww = TW + k1 - 1;
 
   int buf = 0;
-  for (int64_t c0 = 0; c0 < pr.CinPerGroup; c0 += kWmma) {
+  for (int64_t c0 = cBeg; c0 < cEnd; c0 += kWmma) {
     // Stage the window for this channel slice. Out-of-input elements are
     // written as zero, which is what padding means and what removes the bounds
     // test from every tap below.
@@ -1187,6 +1197,32 @@ conv_window_kernel(const __half *__restrict__ x, const __half *__restrict__ w,
               HIPDNN_WMMA_F32_16X16X16_F16(aFrag[i], bFrag[j], acc[i][j]);
       buf ^= 1; // next tap stages the buffer this one is not reading
     }
+  }
+
+  if (split) {
+    // Partial sum, no bias: ws is [split][N][Cout][Nout], added by
+    // conv_splitk_reduce_kernel.
+    const int64_t total = pr.N * pr.Cout * pr.Nout;
+    float *wsb = ws + static_cast<int64_t>(blockIdx.y) * total +
+                 nbatch * pr.Cout * pr.Nout;
+#pragma unroll
+    for (int j = 0; j < WN; ++j) {
+      const int n = waveN * WN * kWmma + j * kWmma + lane16;
+      const int64_t oh = oh0 + n / TW, ow = ow0 + (n % TW);
+      if (oh >= pr.out0 || ow >= pr.out1) continue;
+      const int64_t o = oh * pr.out1 + ow;
+#pragma unroll
+      for (int i = 0; i < WM; ++i) {
+#pragma unroll
+        for (int e = 0; e < 8; ++e) {
+          const int64_t m = m0 + waveM * WM * kWmma + i * kWmma +
+                            hipdnn_wmma_acc_row(pair, e);
+          if (m >= pr.MPerGroup) continue;
+          wsb[(g * pr.MPerGroup + m) * pr.Nout + o] = acc[i][j][e];
+        }
+      }
+    }
+    return;
   }
 
   const int64_t yBatchBase = nbatch * pr.Cout * pr.Nout;
@@ -1771,18 +1807,35 @@ static int cusPerUnit() { return hipdnn_device_is_wave64() ? 1 : 2; }
 
 template <int BM, int TH, int TW, int WM, int WN>
 static void launchWindow(hipStream_t stream, const void *x, const void *w,
-                         const void *bias, void *y, const ConvParams &base) {
+                         const void *bias, void *y, const ConvParams &base,
+                         const SplitEnv &env) {
   constexpr int threads =
       (BM / (WM * kWmma)) * ((TH * TW) / (WN * kWmma)) * 32;
-  const ConvParams pr = withWindowGrid(base, BM, TH, TW);
-  logPick("window", pr);
-  dim3 grid(swizzledGridX(pr), 1u, static_cast<unsigned>(pr.N * pr.group));
+  ConvParams pr = withWindowGrid(base, BM, TH, TW);
+  int split = 1;
+  int64_t chunk = 0;
+  float *ws = nullptr;
+  const int64_t blocks =
+      static_cast<int64_t>(swizzledGridX(pr)) * pr.N * pr.group;
+  // The window kernel's reduction is over input channels, 16 at a time; keep at
+  // least two such slices (32 channels) in a chunk.
+  if (planFp16Split(pr, blocks, pr.CinPerGroup, kWmma, 2 * kWmma, env.cus,
+                    split, chunk)) {
+    ws = env.wsrc.get(static_cast<size_t>(split) * pr.N * pr.Cout * pr.Nout * 4);
+    if (!ws) split = 1;
+  }
+  pr.kSplit = split;
+  pr.kChunk = chunk;
+  logPick(split > 1 ? "window+splitk" : "window", pr);
+  dim3 grid(swizzledGridX(pr), split > 1 ? static_cast<unsigned>(split) : 1u,
+            static_cast<unsigned>(pr.N * pr.group));
   hipLaunchKernelGGL((conv_window_kernel<BM, TH, TW, WM, WN, kWinKMax>), grid,
                      dim3(threads), 0, stream,
                      static_cast<const __half *>(x),
                      static_cast<const __half *>(w),
                      static_cast<const __half *>(bias),
-                     static_cast<__half *>(y), pr);
+                     static_cast<__half *>(y), ws, pr);
+  if (split > 1) launchFp16SplitReduce(stream, bias, y, ws, pr, split);
 }
 
 // Whether the window kernel can run this shape at all. Everything here is a
@@ -1897,11 +1950,11 @@ bool launchWmmaIfProfitable<__half>(hipStream_t stream, const void *x,
   // output tile makes few blocks on a 20x20 feature map.
   if (windowEligible(pr) && pr.CinPerGroup >= kWmma) {
     if (pr.MPerGroup >= 64 && windowCovers(pr, 64, 16, 16, cus)) {
-      launchWindow<64, 16, 16, 2, 4>(stream, x, w, bias, y, pr);
+      launchWindow<64, 16, 16, 2, 4>(stream, x, w, bias, y, pr, env);
       return true;
     }
     if (pr.MPerGroup >= 32) {
-      launchWindow<32, 8, 32, 2, 2>(stream, x, w, bias, y, pr);
+      launchWindow<32, 8, 32, 2, 2>(stream, x, w, bias, y, pr, env);
       return true;
     }
   }

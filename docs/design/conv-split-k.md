@@ -58,6 +58,9 @@ the fp16 ladder chose.
   than the parallelism returns.
 - The target is again two blocks per CU, a slice keeps at least `kSplitMinTaps`
   taps, and a chunk is a multiple of the WMMA depth (16).
+- The window kernel (stride-1, rank-2, kernel larger than 1x1) splits over input
+  channels instead of taps: a chunk is a multiple of 16 channels and a slice
+  keeps at least 32.
 - The dedicated fp16 1x1 kernel is dispatched before split planning and never
   splits. A 1x1 convolution reaches the WMMA split path only when the 1x1 kernel
   rejects it (for example a reduction that is not a multiple of 8, or stride 2).
