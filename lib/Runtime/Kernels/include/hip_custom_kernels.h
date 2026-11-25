@@ -583,10 +583,15 @@ HIP_KERNEL_API int hip_isnan(
  *
  * Div / Mod / Equal / Less were added for the Qwen3.5 vision path. Equal and
  * Less write bool (1 byte); their hip_dtype refers to the input element type.
- * Div and Mod preserve the input dtype.
+ * Div and Mod preserve the input dtype. Div supports f16, bf16, f32, i32 and
+ * i64.
  *
  * Broadcasting is not performed in these kernels. lhs and rhs must already
  * match in shape; upstream Expand / broadcast materialization is required.
+ * For Div, wrap_div (lib/Runtime/real/div.cpp) materialises broadcasts with
+ * hip_expand before calling hip_elementwise_div. The Div dtype list above
+ * is repeated in elementwise_binary_kernel.hip, the wrap_div error message
+ * and docs/supported-operations.md; change all four together.
  *
  * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure.
  */

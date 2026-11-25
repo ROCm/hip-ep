@@ -72,6 +72,7 @@ static const Leaf kLeaves[] = {
     {"gather_block_quantized", "Xi64_Wfp8_Yfp16",
      "hipdnn-kernel-ut-gather-block-quantized-xi64-wfp8-yfp16.exe"},
     {"cast", "Xany_Yany_bf16", "hipdnn-kernel-ut-cast-xany-yany-bf16.exe"},
+    {"div", "Xbf16_Wbf16_Ybf16", "hipdnn-kernel-ut-div-xbf16-wbf16-ybf16.exe"},
     {"group_norm", "Xfp16_Wfp16_Yfp16",
      "hipdnn-kernel-ut-group-norm-xfp16-wfp16-yfp16.exe"},
     {"group_norm", "Xbf16_Wbf16_Ybf16",

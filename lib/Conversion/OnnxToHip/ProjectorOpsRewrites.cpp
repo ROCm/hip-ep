@@ -359,18 +359,15 @@ struct AveragePoolToReshapeMean : public mlir::RewritePattern {
 //===----------------------------------------------------------------------===//
 // Broadcasting Div(x, y) -> Mul(x, Reciprocal(y))
 //
-// hip.div lowers to a plain element-wise kernel that does NOT broadcast:
-// it reads `num_elements` from the OUTPUT shape and indexes lhs/rhs with
-// the same linear index, which silently reads out-of-bounds (uninitialized
-// memory → NaN/Inf) when rhs is smaller than lhs. hip.mul (and other
-// ElementwiseOpLowering ops) DO broadcast via miopenOpTensor's 4D
-// descriptor API.
+// wrap_div broadcasts (rank <= 4): hip_expand expands whichever operand
+// differs to the output shape.
+// This rewrite runs first for f16, bf16 and f32, so a different-shape Div
+// such as lhs[1,512,896] / rhs[1,512,1] lowers to hip.reciprocal + hip.mul,
+// both of which support bf16. It rounds twice (Reciprocal, then Mul), so
+// results can differ from a same-shape Div by one ulp.
 //
-// The Gemma-3 multi-modal projector's RMSNorm shape divides
-// `x[1, 256, 1152]` by `sqrt(mean(x^2)+eps)[1, 256, 1]` — a textbook
-// broadcast. Without this rewrite the Div produces NaN for most output
-// rows and the projector's final MatMul cascades NaN to the output
-// `image_features`.
+// Example: the Gemma-3 multi-modal projector's RMSNorm divides
+// `x[1, 256, 1152]` by `sqrt(mean(x^2)+eps)[1, 256, 1]`.
 //
 // Rewrite is conservative: only fires when lhs and rhs have different
 // shapes (i.e. the broadcast case). Same-shape Div continues to use the
@@ -412,23 +409,11 @@ struct BroadcastDivToMulReciprocal : public mlir::RewritePattern {
     if (lhsType.getShape() == rhsType.getShape())
       return rewriter.notifyMatchFailure(op, "div.same_shape");
 
-    // Integer broadcast Div has no decomposition into Mul x Reciprocal:
-    // ONNX Reciprocal is fp-only, and hip.div in the runtime is a flat
-    // element-wise kernel that doesn't broadcast — on batch > 0 it
-    // reads past the end of the smaller operand and pulls garbage into
-    // the GEMM/RMSNorm chain downstream (NaN cascade visible only at
-    // model-output cosine, after the rewriter has long returned). Surface
-    // the unsupported case at compile time so it can't pass silently.
+    // ONNX Reciprocal is fp-only, so integer Div is not decomposed. It
+    // lowers to hip.div, and wrap_div broadcasts it via hip_expand.
     mlir::Type elemType = lhsType.getElementType();
-    if (elemType.isIntOrIndex()) {
-      op->emitWarning()
-          << "onnx.Div with mismatched integer-type operands has no "
-             "broadcasting decomposition; runtime hip.div will read OOB "
-             "on batch > 0. Extend BroadcastDivToMulReciprocal to integer "
-             "Div or add broadcast support to hip_elementwise_div.";
-      return rewriter.notifyMatchFailure(op,
-                                         "div.integer_broadcast_unsupported");
-    }
+    if (elemType.isIntOrIndex())
+      return rewriter.notifyMatchFailure(op, "div.integer_not_decomposed");
 
     // Only fp16/fp32/bf16 — Reciprocal supports the same set.
     if (!elemType.isF16() && !elemType.isF32() && !elemType.isBF16())

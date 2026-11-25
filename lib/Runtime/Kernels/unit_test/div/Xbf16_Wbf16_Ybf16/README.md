@@ -1,0 +1,81 @@
+# div / Xbf16_Wbf16_Ybf16
+
+Unit test for `hip_elementwise_div` (`hip/elementwise_binary_kernel.hip`) with
+bf16 lhs (`X`), rhs (`W`) and output (`Y`).
+
+## What it checks
+
+Every output is compared **bit-exactly** with a CPU reference written in the
+test: both operands are widened to fp32 (exact), divided in fp32 and rounded
+once to bf16 with round to nearest even, the same as the kernel and PyTorch.
+The bf16 <-> fp32 conversions use plain integer bit operations, not the HIP
+intrinsics. A NaN result matches any NaN.
+
+- Special values: every pair of +-0, +-inf, NaN, +-1, 2, 3, 7, 10, 0.1, the
+  largest finite bf16 and the smallest normal bf16 (both signs), so x / 0,
+  0 / 0, inf / inf, overflow to inf and results that need rounding are all
+  covered. The rest of each tensor is seeded random values.
+- Quotients that are fp32 subnormals are left out: whether the GPU keeps or
+  flushes them depends on the device's denormal mode, not on this kernel.
+  Random operands use exponents in [-60, 60] so their quotients stay normal.
+- Subnormal operands are out of scope for the same reason: whether the GPU
+  flushes subnormal inputs is a device denormal-mode property, so a bit-exact
+  expectation would not be portable (0x0001 / 0x0001 is 1 without flush and
+  NaN with it). Random operands are always normal. A negative NaN operand is
+  not listed either: a NaN result matches any NaN, so it would add no
+  coverage the positive NaN does not.
+- Every element is written and nothing outside the output: each case runs
+  twice with two different fill bytes and 64 guard elements on each side.
+- An unsupported dtype (u8) returns -1 and leaves the output untouched. The
+  kernel prints an "unsupported dtype" line for it; that is expected.
+
+Broadcasting is not part of this kernel: `wrap_div` materialises a broadcast
+operand with `hip_expand` first.
+
+## Coverage
+
+257 ends in a partial 256-thread block and holds every special pair, 256 is
+exactly one block. `--coverage N` (or `HIPDNN_UT_COVERAGE`, default 3) picks
+the sizes; the unsupported case runs at every tier.
+
+| Tier | Sizes |
+|---|---|
+| 1 | 257, 70001 |
+| 2 | + 256 |
+| 3 | + 1048579 |
+
+## Targets
+
+```
+make test        HIP_SDK=<sdk> [OFFLOAD=--offload-arch=<gfx>] [COVERAGE=1|2|3]
+make test_custom HIP_SDK=<sdk> N=<elements> [SEED=<seed>]
+make build ...
+make clean
+```
+
+`test_custom` runs one case through the same bit-exact check and timer as
+the suite:
+
+| Make | Exe flag | Default | Meaning |
+|---|---|---|---|
+| `N` | `--n` | 257 | Elements, >= 1. The first ~230 are the special pairs. |
+| `SEED` | `--seed` | `N` | Seed of the random values, >= 0. |
+
+Unknown or out-of-range arguments exit 2.
+
+## Timing
+
+Every passing case is timed with the shared UT timer
+(`common/hip_adaptive_timing.h`) and writes `UT_TIMING` /
+`UT_TIMING_BINDING` records; `time_ms` in `out/results.csv` is its mean.
+`TIMING=screen|standard|confirm` (default `standard`) selects the preset and
+`ADLX_INCLUDE=<dir>` optionally adds GPU clock sampling. The unsupported case
+is not timed.
+
+## Architectures and MODE
+
+`OFFLOAD` defaults to `--offload-arch=gfx11-generic` (gfx115x); pass
+`--offload-arch=gfx1151`, `gfx1170` or `gfx1171` for a chip build.
+
+The op has no autotune table and no tuner; `MODE` only labels
+`out/results.csv`, and every row's `config` is `fixed:elementwise`.

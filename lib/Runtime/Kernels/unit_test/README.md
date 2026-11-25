@@ -87,6 +87,7 @@ prefix gets one `kernel-tests/<arch>/`, named exactly like that entry's
     hipdnn-kernel-ut-gather-block-quantized-xi64-wu8-yfp16.exe
     hipdnn-kernel-ut-gather-block-quantized-xi64-wfp8-yfp16.exe
     hipdnn-kernel-ut-cast-xany-yany-bf16.exe
+    hipdnn-kernel-ut-div-xbf16-wbf16-ybf16.exe
 ```
 
 ### Run (on a machine with a supported AMD GPU)
@@ -212,6 +213,7 @@ unit_test/
   qmoe_ragged_mm/Xfp16_Wu4_Yfp16/
   gather_block_quantized/Xi64_W{u4,u8,fp8}_Yfp16/
   cast/Xany_Yany_bf16/
+  div/Xbf16_Wbf16_Ybf16/
   group_norm/X{fp16,bf16,fp32,fp64}_W<same>_Y<same>/
 ```
 

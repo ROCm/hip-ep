@@ -56,7 +56,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | Erf | Custom HIP kernel |
 | Sin | Custom HIP kernel |
 | Atan | Custom HIP kernel |
-| Div | Custom HIP kernel |
+| Div | Custom HIP kernel. f16, bf16, f32, i32, and i64; rank 0–4 with NumPy broadcast. Same-shape f16 and bf16 divide in f32 and round once; broadcast f16/bf16/f32 Div lowers to `Reciprocal` + `Mul`, which rounds twice (and in f16 the reciprocal can overflow where a direct divide would not). Only integer broadcast Div reaches the kernel, which expands the operands via `hip_expand` in `wrap_div`; integers truncate toward zero |
 | Mod | Custom HIP kernel |
 | Sign | Custom HIP kernel |
 | Where | Custom HIP kernel |
