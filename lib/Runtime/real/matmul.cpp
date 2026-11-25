@@ -497,9 +497,8 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
                       (long long)N, (long long)K,
                       elem_size == 2 ? "f16" : "f32");
     OP_ROCTX_MARK("hip_ep.op.matmul.run.gemv");
-    const int rc = elem_size == 2
-                       ? hip_gemv_f16_kn(stream, A, B, output, K, N)
-                       : hip_gemv_f32_kn(stream, A, B, output, K, N);
+    const int rc = elem_size == 2 ? hip_gemv_f16_kn(stream, A, B, output, K, N)
+                                  : hip_gemv_f32_kn(stream, A, B, output, K, N);
     return rc == 0 ? 0 : -1;
   }
 
