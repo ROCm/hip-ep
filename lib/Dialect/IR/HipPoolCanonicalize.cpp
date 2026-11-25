@@ -14,9 +14,6 @@ using namespace mlir::hip;
 
 namespace {
 
-// Pool modes; the values mirror HIPDNN_EP_POOL_* in hipdnn_ep_runtime.h.
-constexpr uint64_t kPoolAverage = 0;
-
 // An average pool whose one window covers the whole input is the mean over
 // the spatial dims.
 //
@@ -43,8 +40,8 @@ struct WholeInputAvgPoolToReduceMean : OpRewritePattern<PoolOp> {
 
   LogicalResult matchAndRewrite(PoolOp op,
                                 PatternRewriter &rewriter) const override {
-    if (op.getPoolMode() != kPoolAverage || op->getNumResults() != 1 ||
-        op.getOutputs().size() != 1)
+    if (static_cast<int64_t>(op.getPoolMode()) != kPoolAverage ||
+        op->getNumResults() != 1 || op.getOutputs().size() != 1)
       return rewriter.notifyMatchFailure(op, "not a tensor average pool");
     auto inputType = dyn_cast<RankedTensorType>(op.getInput().getType());
     auto resultType = dyn_cast<RankedTensorType>(op->getResult(0).getType());

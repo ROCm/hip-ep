@@ -142,8 +142,8 @@ static inline const char *hipdnn_ep_global_pool_mode_name(int64_t mode) {
 }
 
 //===----------------------------------------------------------------------===//
-// Window-pool reduction modes (must match kPool* in HipToLLVMUtils.h and the
-// pool_mode constants used in OnnxToHip/PoolConversion.cpp).
+// Window-pool reduction modes (must match kPool* in
+// include/hip/Dialect/IR/HipDialect.h).
 //===----------------------------------------------------------------------===//
 
 #define HIPDNN_EP_POOL_AVERAGE 0

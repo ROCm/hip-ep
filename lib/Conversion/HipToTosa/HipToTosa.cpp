@@ -2565,10 +2565,6 @@ struct ReduceL2Converter final : public OpConversionPattern<ReduceL2Op> {
   }
 };
 
-constexpr int64_t kPoolAverage = 0;
-constexpr int64_t kPoolMax = 1;
-constexpr int64_t kPoolLp = 2;
-
 Value emitTosaMul(ConversionPatternRewriter &rewriter, Location loc, Value lhs,
                   Value rhs, RankedTensorType resultType) {
   return tosa::MulOp::create(rewriter, loc, resultType, lhs, rhs,
