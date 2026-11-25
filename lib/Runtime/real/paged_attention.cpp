@@ -9,11 +9,15 @@
 #include "../op_state.h"
 #include "hip_custom_kernels.h"
 #include <climits>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iomanip>
+#include <limits>
 #include <map>
 #include <sstream>
+#include <type_traits>
 #include <vector>
 
 struct PagedAttentionState : OpStateT<PagedAttentionState> {
@@ -26,7 +30,14 @@ hipdnn_ep_op_state_construct_paged_attention(RuntimeState *state,
   return 0;
 }
 
-int wrap_paged_attention(
+struct PagedMropeOptions {
+  const int64_t *positions;
+  int64_t positionTokens, rotaryDim, sectionT, sectionH, sectionW, layout;
+  float scale;
+};
+struct NoPagedMrope {};
+template <bool Mrope>
+static int wrapPagedAttentionImpl(
     RuntimeState *state, int32_t op_state_slot, const void *q, const void *k,
     const void *v, void *k_pool, void *v_pool, const int32_t *cum,
     const int32_t *past, const int32_t *table, const void *cos_cache,
@@ -37,7 +48,8 @@ int wrap_paged_attention(
     int64_t table_batch, int64_t table_columns, int64_t cum_count,
     int64_t metadata_count, int64_t cos_rows, int64_t sin_rows,
     int64_t num_heads, int64_t kv_heads, int64_t window, int64_t do_rotary,
-    int64_t rotary_interleaved, float scale, float softcap) {
+    int64_t rotary_interleaved, float scale, float softcap,
+    const PagedMropeOptions *mrope) {
   auto fail = [&](int code) {
     if (state)
       (void)hipdnn_ep_state_set_error_flag(state, code);
@@ -57,6 +69,21 @@ int wrap_paged_attention(
       (metadata ? (metadata_count != 2 && metadata_count != 3)
                 : metadata_count != 0))
     return fail(HIP_PAGED_ATTENTION_INVALID_ARGUMENT);
+  if constexpr (Mrope) {
+    if (!mrope || mrope->positionTokens != tokens ||
+        (tokens && !mrope->positions) || do_rotary || rotary_interleaved ||
+        cos_rows < 1 || mrope->rotaryDim <= 0 || (mrope->rotaryDim & 1) ||
+        mrope->rotaryDim > head_dim || mrope->sectionT < 0 ||
+        mrope->sectionH < 0 || mrope->sectionW < 0 ||
+        mrope->sectionT > mrope->rotaryDim / 2 ||
+        mrope->sectionH > mrope->rotaryDim / 2 ||
+        mrope->sectionW > mrope->rotaryDim / 2 ||
+        mrope->sectionT + mrope->sectionH + mrope->sectionW !=
+            mrope->rotaryDim / 2 ||
+        (mrope->layout != 0 && mrope->layout != 1) ||
+        !std::isfinite(mrope->scale))
+      return fail(HIP_PAGED_ATTENTION_INVALID_ARGUMENT);
+  }
   if (tokens && (!q || !k || !v || !k_pool || !v_pool || !cum || !past ||
                  !table || !output))
     return fail(HIP_PAGED_ATTENTION_INVALID_ARGUMENT);
@@ -148,8 +175,34 @@ int wrap_paged_attention(
   desc.local_window_size = window;
   desc.scale = scale;
   desc.softcap = softcap;
+  // Separate template instances retain the old Page boundary and avoid
+  // adding any MRoPE arguments to the dense GQA or ordinary Page kernels.
+  [[maybe_unused]] std::conditional_t<Mrope, hip_paged_attention_mrope_f16_desc,
+                                      NoPagedMrope>
+      rotary{};
+  if constexpr (Mrope) {
+    rotary.page = desc;
+    rotary.page.q = rotary.page.k_new = nullptr;
+    rotary.page.cos_cache = rotary.page.sin_cache = nullptr;
+    rotary.q = static_cast<const float *>(q);
+    rotary.k_new = static_cast<const float *>(k);
+    rotary.cos_cache = static_cast<const float *>(cos_cache);
+    rotary.sin_cache = static_cast<const float *>(sin_cache);
+    rotary.position_ids = mrope->positions;
+    rotary.rotary_dim = mrope->rotaryDim;
+    rotary.max_position = cos_rows;
+    rotary.section_t = mrope->sectionT;
+    rotary.section_h = mrope->sectionH;
+    rotary.section_w = mrope->sectionW;
+    rotary.mrope_layout = mrope->layout;
+    rotary.rotary_scale = mrope->scale;
+  }
   size_t bytes = 0;
-  int rc = hip_paged_attention_f16_workspace_size(&desc, &bytes);
+  int rc;
+  if constexpr (Mrope)
+    rc = hip_paged_attention_mrope_f16_workspace_size(&rotary, &bytes);
+  else
+    rc = hip_paged_attention_f16_workspace_size(&desc, &bytes);
   if (rc)
     return fail(rc);
   if (!tokens)
@@ -166,8 +219,16 @@ int wrap_paged_attention(
       std::strcmp(mode, "auto"))
     return fail(HIP_PAGED_ATTENTION_INVALID_ARGUMENT);
   std::ostringstream key;
-  key << (desc.phase == HIP_PAGED_ATTENTION_DECODE ? "decode" : "prefill")
-      << "_model_b" << batch << "_t" << tokens << "_h" << num_heads << "_g"
+  // LUT points require phase + "_" as their leading discriminator. Keep
+  // ordinary Page keys unchanged and distinguish the FP32 MRoPE input path.
+  key << (desc.phase == HIP_PAGED_ATTENTION_DECODE ? "decode" : "prefill");
+  if constexpr (Mrope)
+    key << "_mrope_f32_f16_r" << mrope->rotaryDim << "_sections"
+        << mrope->sectionT << '-' << mrope->sectionH << '-' << mrope->sectionW
+        << "_layout" << mrope->layout << "_rscale"
+        << std::setprecision(std::numeric_limits<float>::max_digits10)
+        << mrope->scale;
+  key << "_model_b" << batch << "_t" << tokens << "_h" << num_heads << "_g"
       << kv_heads << "_d" << head_dim << "_p" << pages << "_s" << page_size
       << "_cols" << table_columns << "_qbound" << bounds[0] << "_kvbound"
       << bounds[1] << "_lower" << bounds[2] << "_maxq" << max_queries
@@ -175,28 +236,41 @@ int wrap_paged_attention(
       << "_scale" << scale << "_maxpos" << cos_rows << "_mode"
       << (online ? "online" : "lookup");
   OP_PROFILE(
-      "paged_attention", [&] { return key.str(); }, state);
+      Mrope ? "paged_mrope_attention" : "paged_attention",
+      [&] { return key.str(); }, state);
   // Session preparations belong to this compiler-assigned op slot and are
   // destroyed by the existing OpState cleanup. They never masquerade as LUT
   // hits.
   hipdnn_ep::PagedAttentionResult result;
+  auto configured = [&](const GqaPagedConfig &config) {
+    if constexpr (Mrope)
+      return hip_paged_attention_mrope_f16_configured_v1(
+          stream, &rotary, workspace, bytes, &config, sizeof(config));
+    else
+      return hip_paged_attention_f16_configured_v2(
+          stream, &desc, workspace, bytes, &config, sizeof(config));
+  };
   auto cached = opState->prepared.find(key.str());
   if (cached != opState->prepared.end()) {
     result = cached->second;
     result.source = "session:prepared:" + result.source;
-    rc = hip_paged_attention_f16_configured_v2(
-        stream, &desc, workspace, bytes, &result.config, sizeof(result.config));
+    rc = configured(result.config);
   } else {
     result = online ? hipdnn_ep::PagedAttentionResult{gqa_paged_default(desc),
                                                       "online"}
                     : hipdnn_ep::resolvePagedAttention(desc, key.str());
     if (result.source.rfind("lookup:", 0) == 0)
-      rc = hip_paged_attention_f16_configured_v2(stream, &desc, workspace,
-                                                 bytes, &result.config,
-                                                 sizeof(result.config));
+      rc = configured(result.config);
     else {
-      rc = hipdnn_ep::preparePagedAttention(stream, desc, workspace, bytes,
-                                            key.str(), online, &result);
+      if constexpr (Mrope) {
+        rc = hip_paged_attention_mrope_f16_prepare_v1(
+            stream, &rotary, workspace, bytes, &result.config,
+            sizeof(result.config));
+        result.source += "->autotune:mrope-production-prepare";
+      } else {
+        rc = hipdnn_ep::preparePagedAttention(stream, desc, workspace, bytes,
+                                              key.str(), online, &result);
+      }
       if (!rc) {
         int status = 0;
         if (hipMemcpyAsync(&status, workspace, sizeof(status),
@@ -232,4 +306,52 @@ int wrap_paged_attention(
                     result.config.qw, result.config.mt, result.config.nd,
                     bytes);
   return 0;
+}
+
+int wrap_paged_attention(
+    RuntimeState *state, int32_t op_state_slot, const void *q, const void *k,
+    const void *v, void *k_pool, void *v_pool, const int32_t *cum,
+    const int32_t *past, const int32_t *table, const void *cos_cache,
+    const void *sin_cache, const int32_t *metadata, void *output,
+    int64_t tokens, int64_t key_tokens, int64_t value_tokens,
+    int64_t output_tokens, int64_t batch, int64_t pages, int64_t value_pages,
+    int64_t page_size, int64_t value_page_size, int64_t head_dim,
+    int64_t table_batch, int64_t table_columns, int64_t cum_count,
+    int64_t metadata_count, int64_t cos_rows, int64_t sin_rows,
+    int64_t num_heads, int64_t kv_heads, int64_t window, int64_t do_rotary,
+    int64_t rotary_interleaved, float scale, float softcap) {
+  return wrapPagedAttentionImpl<false>(
+      state, op_state_slot, q, k, v, k_pool, v_pool, cum, past, table,
+      cos_cache, sin_cache, metadata, output, tokens, key_tokens, value_tokens,
+      output_tokens, batch, pages, value_pages, page_size, value_page_size,
+      head_dim, table_batch, table_columns, cum_count, metadata_count, cos_rows,
+      sin_rows, num_heads, kv_heads, window, do_rotary, rotary_interleaved,
+      scale, softcap, nullptr);
+}
+
+int wrap_paged_attention_mrope(
+    RuntimeState *state, int32_t op_state_slot, const void *q, const void *k,
+    const void *v, void *k_pool, void *v_pool, const int32_t *cum,
+    const int32_t *past, const int32_t *table, const void *cos_cache,
+    const void *sin_cache, const int32_t *metadata, void *output,
+    int64_t tokens, int64_t key_tokens, int64_t value_tokens,
+    int64_t output_tokens, int64_t batch, int64_t pages, int64_t value_pages,
+    int64_t page_size, int64_t value_page_size, int64_t head_dim,
+    int64_t table_batch, int64_t table_columns, int64_t cum_count,
+    int64_t metadata_count, int64_t cos_rows, int64_t sin_rows,
+    int64_t num_heads, int64_t kv_heads, int64_t window, int64_t do_rotary,
+    int64_t rotary_interleaved, float scale, float softcap,
+    const int64_t *position_ids, int64_t position_tokens, int64_t rotary_dim,
+    int64_t section_t, int64_t section_h, int64_t section_w,
+    int64_t mrope_layout, float mrope_scale) {
+  const PagedMropeOptions mrope{position_ids, position_tokens, rotary_dim,
+                                section_t,    section_h,       section_w,
+                                mrope_layout, mrope_scale};
+  return wrapPagedAttentionImpl<true>(
+      state, op_state_slot, q, k, v, k_pool, v_pool, cum, past, table,
+      cos_cache, sin_cache, metadata, output, tokens, key_tokens, value_tokens,
+      output_tokens, batch, pages, value_pages, page_size, value_page_size,
+      head_dim, table_batch, table_columns, cum_count, metadata_count, cos_rows,
+      sin_rows, num_heads, kv_heads, window, do_rotary, rotary_interleaved,
+      scale, softcap, &mrope);
 }

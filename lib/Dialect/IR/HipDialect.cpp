@@ -4507,41 +4507,50 @@ void PagedAttentionOp::getEffects(
     effects.emplace_back(MemoryEffects::Read::get(), operand,
                          SideEffects::DefaultResource::get());
 }
-LogicalResult PagedAttentionOp::verify() {
-  SmallVector<Value> data = {getQuery(),     getKey(),         getValue(),
-                             getCuSeqlens(), getPastSeqlens(), getBlockTable(),
-                             getOutput(),    getKeyPool(),     getValuePool()};
-  for (Value v : {getCosCache(), getSinCache(), getAttentionMetadata()})
+template <typename PageOp, bool Mrope>
+static LogicalResult verifyPagedAttention(PageOp op) {
+  SmallVector<Value> data = {
+      op.getQuery(),     op.getKey(),         op.getValue(),
+      op.getCuSeqlens(), op.getPastSeqlens(), op.getBlockTable(),
+      op.getOutput(),    op.getKeyPool(),     op.getValuePool()};
+  for (Value v :
+       {op.getCosCache(), op.getSinCache(), op.getAttentionMetadata()})
     if (v)
       data.push_back(v);
-  if (failed(verifyDpsComputeOp(*this, data, 3)))
+  if constexpr (Mrope)
+    data.push_back(op.getPositionIds());
+  if (failed(verifyDpsComputeOp(op, data, 3)))
     return failure();
   for (Value value : data)
     if (auto type = dyn_cast<MemRefType>(value.getType()))
       if (!type.getLayout().isIdentity())
-        return emitOpError("requires contiguous row-major memrefs");
-  auto q = cast<ShapedType>(getQuery().getType());
-  auto pool = cast<ShapedType>(getKeyPool().getType());
-  auto past = cast<ShapedType>(getPastSeqlens().getType());
+        return op.emitOpError("requires contiguous row-major memrefs");
+  auto q = cast<ShapedType>(op.getQuery().getType());
+  auto pool = cast<ShapedType>(op.getKeyPool().getType());
+  auto past = cast<ShapedType>(op.getPastSeqlens().getType());
   if (q.getRank() != 2 || pool.getRank() != 4 || past.getRank() != 1 ||
       q.isDynamicDim(1) || pool.isDynamicDim(2) || pool.isDynamicDim(3))
-    return emitOpError(
+    return op.emitOpError(
         "requires Q [T,H*D], PSHD pools with static H,D, and past [B]");
-  int64_t h = getNumHeads(), kv = getKvNumHeads(), d = pool.getDimSize(3);
+  int64_t h = op.getNumHeads(), kv = op.getKvNumHeads(), d = pool.getDimSize(3);
   if (h < 1 || kv < 1 || h > INT32_MAX || kv > INT32_MAX || h % kv ||
       (d != 64 && d != 96 && d != 128 && d != 256) ||
       (!pool.isDynamicDim(1) &&
        (pool.getDimSize(1) < 1 || pool.getDimSize(1) > INT32_MAX)) ||
       pool.getDimSize(2) != kv)
-    return emitOpError("unsupported head/page geometry");
+    return op.emitOpError("unsupported head/page geometry");
   // The generated I64Attr getter zero-extends; -1 disables the window.
-  int64_t window = getLocalWindowSizeAttr().getInt();
-  if ((getDoRotary() != 0 && getDoRotary() != 1) ||
-      getRotaryInterleaved() != 0 || window < -1 || window > INT32_MAX ||
-      getSoftcap().convertToFloat() != 0 ||
-      !std::isfinite(getScale().convertToFloat()) ||
-      getScale().convertToFloat() < 0)
-    return emitOpError("unsupported rotary/window/softcap/scale options");
+  int64_t window = op.getLocalWindowSizeAttr().getInt();
+  int64_t doRotary = 0, interleaved = 0;
+  if constexpr (!Mrope) {
+    doRotary = op.getDoRotary();
+    interleaved = op.getRotaryInterleaved();
+  }
+  if ((doRotary != 0 && doRotary != 1) || interleaved != 0 || window < -1 ||
+      window > INT32_MAX || op.getSoftcap().convertToFloat() != 0 ||
+      !std::isfinite(op.getScale().convertToFloat()) ||
+      op.getScale().convertToFloat() < 0)
+    return op.emitOpError("unsupported rotary/window/softcap/scale options");
   constexpr int64_t any = ShapedType::kDynamic;
   auto matches = [&](Value v, Type elem, ArrayRef<int64_t> dims) {
     auto t = cast<ShapedType>(v.getType());
@@ -4553,36 +4562,86 @@ LogicalResult PagedAttentionOp::verify() {
         return false;
     return true;
   };
-  Type f16 = Float16Type::get(getContext()),
-       i32 = IntegerType::get(getContext(), 32);
+  Type f16 = Float16Type::get(op.getContext()),
+       i32 = IntegerType::get(op.getContext(), 32);
   int64_t b = past.getDimSize(0), t = q.getDimSize(0);
-  if (!matches(getQuery(), f16, {t, h * d}) ||
-      !matches(getKey(), f16, {t, kv * d}) ||
-      !matches(getValue(), f16, {t, kv * d}) ||
-      !matches(getOutput(), f16, {t, h * d}) ||
-      !matches(getKeyPool(), f16, pool.getShape()) ||
-      !matches(getValuePool(), f16, pool.getShape()) ||
-      !matches(getPastSeqlens(), i32, {b}) ||
-      !matches(getCuSeqlens(), i32, {b == any ? any : b + 1}) ||
-      !matches(getBlockTable(), i32, {b, any}))
-    return emitOpError(
+  Type sourceElement = Mrope ? Type(Float32Type::get(op.getContext())) : f16;
+  if (!matches(op.getQuery(), sourceElement, {t, h * d}) ||
+      !matches(op.getKey(), sourceElement, {t, kv * d}) ||
+      !matches(op.getValue(), f16, {t, kv * d}) ||
+      !matches(op.getOutput(), f16, {t, h * d}) ||
+      !matches(op.getKeyPool(), f16, pool.getShape()) ||
+      !matches(op.getValuePool(), f16, pool.getShape()) ||
+      !matches(op.getPastSeqlens(), i32, {b}) ||
+      !matches(op.getCuSeqlens(), i32, {b == any ? any : b + 1}) ||
+      !matches(op.getBlockTable(), i32, {b, any}))
+    return op.emitOpError(
         "inconsistent Q/K/V/cache/request shapes or element types");
-  if (getAttentionMetadata()) {
-    auto m = cast<ShapedType>(getAttentionMetadata().getType());
+  if (op.getAttentionMetadata()) {
+    auto m = cast<ShapedType>(op.getAttentionMetadata().getType());
     if (m.getRank() != 1 || m.getElementType() != i32 ||
         (!m.isDynamicDim(0) && m.getDimSize(0) != 2 && m.getDimSize(0) != 3))
-      return emitOpError("attention_metadata must be i32[2 or 3]");
+      return op.emitOpError("attention_metadata must be i32[2 or 3]");
   }
-  if (static_cast<bool>(getCosCache()) != static_cast<bool>(getSinCache()) ||
-      (getDoRotary() && !getCosCache()))
-    return emitOpError("rotary requires both cos/sin caches");
-  if (getCosCache()) {
-    auto c = cast<ShapedType>(getCosCache().getType());
-    if (c.getRank() != 2 || !matches(getCosCache(), f16, {any, d / 2}) ||
-        !matches(getSinCache(), f16, c.getShape()))
-      return emitOpError("rotary caches must be matching f16[P,D/2]");
+  if constexpr (Mrope) {
+    const int64_t rotary = op.getRotaryDimAttr().getInt();
+    auto sections = op.getMropeSection();
+    if (rotary <= 0 || (rotary & 1) || rotary > d || sections.size() != 3 ||
+        (op.getMropeLayout() != 0 && op.getMropeLayout() != 1) ||
+        !std::isfinite(op.getMropeScale().convertToFloat()))
+      return op.emitOpError("invalid MRoPE dimension/layout/scale");
+    int64_t sum = 0;
+    for (Attribute attr : sections) {
+      int64_t n = cast<IntegerAttr>(attr).getInt();
+      if (n < 0 || n > rotary / 2)
+        return op.emitOpError("invalid MRoPE section");
+      sum += n;
+    }
+    if (sum != rotary / 2)
+      return op.emitOpError("MRoPE sections must sum to rotary_dim/2");
+    Type f32 = Float32Type::get(op.getContext());
+    auto c = cast<ShapedType>(op.getCosCache().getType());
+    auto positions = cast<ShapedType>(op.getPositionIds().getType());
+    if (c.getRank() != 2 ||
+        !matches(op.getCosCache(), f32, {any, rotary / 2}) ||
+        !matches(op.getSinCache(), f32, c.getShape()))
+      return op.emitOpError("MRoPE tables must be matching f32[P,R/2]");
+    Type i64 = IntegerType::get(op.getContext(), 64);
+    if (!((positions.getRank() == 2 &&
+           matches(op.getPositionIds(), i64, {3, t})) ||
+          (positions.getRank() == 3 &&
+           matches(op.getPositionIds(), i64, {3, 1, t}))))
+      return op.emitOpError("MRoPE positions must be i64[3,T] or i64[3,1,T]");
+  } else {
+    if (static_cast<bool>(op.getCosCache()) !=
+            static_cast<bool>(op.getSinCache()) ||
+        (doRotary && !op.getCosCache()))
+      return op.emitOpError("rotary requires both cos/sin caches");
+    if (op.getCosCache()) {
+      auto c = cast<ShapedType>(op.getCosCache().getType());
+      if (c.getRank() != 2 || !matches(op.getCosCache(), f16, {any, d / 2}) ||
+          !matches(op.getSinCache(), f16, c.getShape()))
+        return op.emitOpError("rotary caches must be matching f16[P,D/2]");
+    }
   }
   return success();
+}
+LogicalResult PagedAttentionOp::verify() {
+  return verifyPagedAttention<PagedAttentionOp, false>(*this);
+}
+MutableOperandRange PagedMropeAttentionOp::getDpsInitsMutable() {
+  return MutableOperandRange(*this, getOutputMutable().getOperandNumber(), 3);
+}
+void PagedMropeAttentionOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+  for (auto *operand : {&getKeyPoolMutable(), &getValuePoolMutable()})
+    effects.emplace_back(MemoryEffects::Read::get(), operand,
+                         SideEffects::DefaultResource::get());
+}
+LogicalResult PagedMropeAttentionOp::verify() {
+  return verifyPagedAttention<PagedMropeAttentionOp, true>(*this);
 }
 
 //===----------------------------------------------------------------------===//

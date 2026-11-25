@@ -622,4 +622,12 @@ The existing `qmoe_ragged_mm` leaf remains a separate primitive test; its
 timing does not stand for an entire QMoE model node. See the full-wrapper
 leaf README for supported attributes, coverage tiers and timing presets.
 
-PagedAttention FP16 decode/prefill leaves invoke the complete public entry (RoPE, paged append and causal attention). Their semantic custom parameters are registered in `ut_interface.json`; both MODE values label the fixed configuration. See `paged_attention/decode/Xfp16_Wfp16_Yfp16/README.md` and the prefill counterpart.
+PagedAttention FP16 decode/prefill leaves cover the complete entry (RoPE,
+paged append and causal attention). `MODE=lookup` uses a compatible LUT;
+misses and `MODE=autotune` use real production preparation. The
+`Xfp32_Wfp16_Yfp16_mrope` leaves additionally cover fused FP32 MRoPE,
+conversion and append, with explicit three-stream positions and partial/full
+rotation. `COMPARE=1` measures the complete standalone MRoPE + Cast + Page
+chain with the same selected attention configuration. Custom parameters,
+coverage, timing presets and LUT ranking follow `ut_interface.json` and the
+corresponding decode/prefill leaf READMEs.

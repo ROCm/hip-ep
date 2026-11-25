@@ -625,6 +625,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
         populateAttentionWindowFoldPatterns(preLoweringPatterns, ctx);
         populateQMoESigmoidRoutingFoldPatterns(preLoweringPatterns, ctx);
         populateIndexerRotaryFoldPatterns(preLoweringPatterns, ctx);
+        populatePagedMropeFusionPatterns(preLoweringPatterns, ctx);
         populateIndexerCountsFoldPatterns(preLoweringPatterns, ctx);
         populateDsaPrologueFoldPatterns(preLoweringPatterns, ctx);
         populateQsaPairFoldPatterns(preLoweringPatterns, ctx);

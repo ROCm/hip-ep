@@ -29,7 +29,7 @@ bool region(size_t bytes, size_t &cursor, size_t &offset) {
   if (bytes > SIZE_MAX - cursor) return false;
   cursor += bytes; return true;
 }
-int layout(const hip_paged_attention_f16_desc &d, Layout &l) {
+int layout(const hip_paged_attention_f16_desc &d, Layout &l, bool prepare_query = false) {
   if (d.batch <= 0 || d.tokens < 0 || d.num_heads <= 0 || d.kv_num_heads <= 0 ||
       d.num_heads % d.kv_num_heads || d.num_pages <= 0 || d.page_size <= 0 ||
       d.table_columns <= 0 || (d.do_rotary != 0 && d.do_rotary != 1) ||
@@ -71,7 +71,7 @@ int layout(const hip_paged_attention_f16_desc &d, Layout &l) {
   if (!d.tokens) return HIP_PAGED_ATTENTION_SUCCESS;
   size_t cursor = sizeof(int32_t), ignored;
   if (!region(size_t(d.batch)*sizeof(int32_t), cursor, l.post) ||
-      !region(d.do_rotary ? l.query_bytes : 0, cursor, l.query))
+      !region(d.do_rotary || prepare_query ? l.query_bytes : 0, cursor, l.query))
     return HIP_PAGED_ATTENTION_INVALID_ARGUMENT;
   size_t partial_bytes = 0;
   if (d.phase == HIP_PAGED_ATTENTION_DECODE &&
@@ -199,6 +199,128 @@ __global__ void rotate_append(hip_paged_attention_f16_desc d, GqaPagedArgs pg, _
     }
   }
 }
+
+int mrope_layout(const hip_paged_attention_mrope_f16_desc &d, Layout &l) {
+  if (d.page.do_rotary || d.page.rotary_interleaved)
+    return HIP_PAGED_ATTENTION_UNSUPPORTED;
+  if (d.rotary_dim <= 0 || (d.rotary_dim & 1) || d.rotary_dim > d.page.head_dim ||
+      d.max_position <= 0 || d.section_t < 0 || d.section_h < 0 || d.section_w < 0 ||
+      int64_t(d.section_t) + d.section_h + d.section_w != d.rotary_dim / 2 ||
+      (d.mrope_layout != 0 && d.mrope_layout != 1) || !std::isfinite(d.rotary_scale))
+    return HIP_PAGED_ATTENTION_INVALID_ARGUMENT;
+  return layout(d.page, l, true);
+}
+
+int mrope_storage(const hip_paged_attention_mrope_f16_desc &d, const Layout &l,
+                  void *workspace, size_t bytes) {
+  if (!workspace || bytes < l.bytes) return HIP_PAGED_ATTENTION_WORKSPACE_TOO_SMALL;
+  if (reinterpret_cast<uintptr_t>(workspace) % kAlignment)
+    return HIP_PAGED_ATTENTION_INVALID_ARGUMENT;
+  size_t q_bytes, k_bytes, table_bytes, position_bytes, count;
+  if (!mul(l.query_bytes, 2, q_bytes) || !mul(l.new_bytes, 2, k_bytes) ||
+      !mul(size_t(d.max_position), size_t(d.rotary_dim / 2), count) ||
+      !mul(count, sizeof(float), table_bytes) ||
+      !mul(size_t(d.page.tokens), 3 * sizeof(int64_t), position_bytes))
+    return HIP_PAGED_ATTENTION_INVALID_ARGUMENT;
+  Range writes[4];
+  if (!range(d.page.k_pool, l.pool_bytes, writes[0]) ||
+      !range(d.page.v_pool, l.pool_bytes, writes[1]) ||
+      !range(d.page.o, l.query_bytes, writes[2]) || !range(workspace, l.bytes, writes[3]))
+    return HIP_PAGED_ATTENTION_INVALID_ARGUMENT;
+  for (int i = 0; i < 4; ++i)
+    if (writes[i].begin % (i == 3 ? kAlignment : 16))
+      return HIP_PAGED_ATTENTION_INVALID_ARGUMENT;
+    else
+      for (int j = 0; j < i; ++j)
+        if (overlaps(writes[i], writes[j])) return HIP_PAGED_ATTENTION_INVALID_ARGUMENT;
+  const void *pointers[] = {d.q, d.k_new, d.page.v_new, d.page.block_table,
+      d.page.cum, d.page.past_seqlens, d.position_ids, d.cos_cache, d.sin_cache};
+  const size_t sizes[] = {q_bytes, k_bytes, l.new_bytes, l.table_bytes,
+      (size_t(d.page.batch) + 1) * sizeof(int32_t), size_t(d.page.batch) * sizeof(int32_t),
+      position_bytes, table_bytes, table_bytes};
+  for (int i = 0; i < 9; ++i) {
+    Range read;
+    const size_t alignment = i < 3 ? 16 : i == 6 ? 8 : 4;
+    if (!range(pointers[i], sizes[i], read) || read.begin % alignment)
+      return HIP_PAGED_ATTENTION_INVALID_ARGUMENT;
+    for (const auto &write : writes)
+      if (overlaps(read, write)) return HIP_PAGED_ATTENTION_INVALID_ARGUMENT;
+  }
+  return HIP_PAGED_ATTENTION_SUCCESS;
+}
+
+__device__ __forceinline__ int mrope_stream_index(int column,
+    const hip_paged_attention_mrope_f16_desc &d) {
+  if (d.mrope_layout == 0)
+    return column < d.section_t ? 0 : column < d.section_t + d.section_h ? 1 : 2;
+  if (column % 3 == 1 && column < 3LL * d.section_h) return 1;
+  if (column % 3 == 2 && column < 3LL * d.section_w) return 2;
+  return 0;
+}
+
+// D determines pair indexing, not attention tiling. Keep the shared GQA
+// arguments and dense kernel instantiations untouched. Query work requires
+// no request search: explicit MRoPE ids already name every packed token.
+template <int D>
+__global__ void mrope_cast_append(hip_paged_attention_mrope_f16_desc d,
+                                 GqaPagedArgs pg, __half *query) {
+  if (*pg.status) return;
+  constexpr int pairs = D / 2;
+  const size_t query_pairs = size_t(d.page.tokens) * d.page.num_heads * pairs;
+  const size_t work = query_pairs + size_t(d.page.tokens) * d.page.kv_num_heads * pairs;
+  const int rotary_pairs = d.rotary_dim / 2;
+  for (size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+       i < work; i += size_t(gridDim.x) * blockDim.x) {
+    const bool is_query = i < query_pairs;
+    const size_t pair = is_query ? i : i - query_pairs;
+    const int column = int(pair % pairs);
+    const size_t token_head = pair / pairs;
+    const int heads = is_query ? d.page.num_heads : d.page.kv_num_heads;
+    const int token = int(token_head / heads);
+    const size_t source = token_head * D;
+    const float *input = (is_query ? d.q : d.k_new) + source;
+    size_t destination = source;
+    if (!is_query) {
+      int b = 0;
+      while (d.page.cum[b + 1] <= token) ++b;
+      const int position = d.page.past_seqlens[b] + token - d.page.cum[b];
+      destination = pg.offset(b, position, int(token_head % heads), D);
+    }
+    __half *output = (is_query ? query : static_cast<__half *>(d.page.k_pool)) + destination;
+    if (column < rotary_pairs) {
+      const float x = input[column], y = input[column + rotary_pairs];
+      float first = x, second = y;
+      const int stream = mrope_stream_index(column, d);
+      const int64_t position = d.position_ids[size_t(stream) * d.page.tokens + token];
+      if (position >= 0 && position < d.max_position) {
+        const size_t angle = size_t(position) * rotary_pairs + column;
+        const float co = d.cos_cache[angle] * d.rotary_scale;
+        const float si = d.sin_cache[angle] * d.rotary_scale;
+        // Match the standalone FP32 MRoPE contraction order. Merely writing
+        // equivalent expressions lets instruction selection contract the other
+        // product, which can cross an FP16 rounding midpoint after fusion.
+        float y_sin = y * si, y_cos = y * co;
+        asm("" : "+v"(y_sin), "+v"(y_cos));
+        first = fmaf(x, co, -y_sin);
+        second = fmaf(x, si, y_cos);
+      }
+      // The removed FP32 MRoPE tensor was a rounding boundary. Preserve it
+      // before truncating to FP16, rather than contracting into a half FMA.
+      asm("" : "+v"(first), "+v"(second));
+      output[column] = __float2half_rn(first);
+      output[column + rotary_pairs] = __float2half_rn(second);
+    } else {
+      const int channel = d.rotary_dim + 2 * (column - rotary_pairs);
+      const float2 value = *reinterpret_cast<const float2 *>(input + channel);
+      *reinterpret_cast<__half2 *>(output + channel) = __floats2half2_rn(value.x, value.y);
+    }
+    if (!is_query) {
+      const size_t channel = size_t(column) * 2;
+      *reinterpret_cast<__half2 *>(static_cast<__half *>(d.page.v_pool) + destination + channel) =
+          *reinterpret_cast<const __half2 *>(static_cast<const __half *>(d.page.v_new) + source + channel);
+    }
+  }
+}
 } // namespace
 
 extern "C" HIP_KERNEL_API int hip_paged_attention_f16_workspace_size(
@@ -280,4 +402,83 @@ extern "C" HIP_KERNEL_API int hip_paged_attention_f16_prepare_v2(void* stream_pt
     if(rc)return rc;
   }
   *config=selected;return HIP_PAGED_ATTENTION_SUCCESS;
+}
+
+extern "C" HIP_KERNEL_API int hip_paged_attention_mrope_f16_workspace_size(
+    const hip_paged_attention_mrope_f16_desc *desc, size_t *bytes) {
+  if (!desc || !bytes) return HIP_PAGED_ATTENTION_INVALID_ARGUMENT;
+  *bytes = 0;
+  Layout l;
+  const int rc = mrope_layout(*desc, l);
+  if (!rc) *bytes = l.bytes;
+  return rc;
+}
+
+extern "C" HIP_KERNEL_API int hip_paged_attention_mrope_f16_configured_v1(
+    void *stream_ptr, const hip_paged_attention_mrope_f16_desc *desc,
+    void *workspace, size_t workspace_bytes, const GqaPagedConfig *config, size_t config_size) {
+  if (!desc) return HIP_PAGED_ATTENTION_INVALID_ARGUMENT;
+  Layout l;
+  int rc = mrope_layout(*desc, l);
+  if (rc) return rc;
+  if (config && config_size != sizeof(GqaPagedConfig)) return HIP_PAGED_ATTENTION_INVALID_ARGUMENT;
+  const auto selected = config ? *config : gqa_paged_default(desc->page);
+  if (!gqa_paged_config_valid(desc->page, selected)) return HIP_PAGED_ATTENTION_UNSUPPORTED;
+  last_config = selected; last_config_valid = true;
+  if (!desc->page.tokens) return HIP_PAGED_ATTENTION_SUCCESS;
+  rc = mrope_storage(*desc, l, workspace, workspace_bytes);
+  if (rc) return rc;
+  const auto stream = static_cast<hipStream_t>(stream_ptr);
+  auto *base = static_cast<unsigned char *>(workspace);
+  const auto &p = desc->page;
+  const GqaPagedArgs pg = {p.block_table, p.cum, p.past_seqlens,
+      reinterpret_cast<int32_t *>(base + l.post), reinterpret_cast<int32_t *>(base),
+      p.page_size, p.table_columns, p.kv_num_heads, gqa_paged_page_shift(p.page_size)};
+  (void)hipGetLastError();
+  validate_metadata<<<1, 1, 0, stream>>>(p, reinterpret_cast<int32_t *>(base + l.post),
+                                      reinterpret_cast<int32_t *>(base));
+  if (hipGetLastError() != hipSuccess) return HIP_PAGED_ATTENTION_HIP_ERROR;
+  const unsigned blocks = unsigned(std::min<size_t>(65535, (l.append_pairs + 255) / 256));
+  auto *query = reinterpret_cast<__half *>(base + l.query);
+  switch (p.head_dim) {
+#define MROPE_D(D_) case D_: mrope_cast_append<D_><<<blocks, 256, 0, stream>>>(*desc, pg, query); break
+    MROPE_D(64); MROPE_D(96); MROPE_D(128); MROPE_D(256);
+#undef MROPE_D
+  }
+  if (hipGetLastError() != hipSuccess) return HIP_PAGED_ATTENTION_HIP_ERROR;
+  rc = gqa_paged_attention_f16_launch(stream_ptr, p, query,
+      reinterpret_cast<float *>(base + l.partial), pg, selected);
+  return rc ? HIP_PAGED_ATTENTION_HIP_ERROR : HIP_PAGED_ATTENTION_SUCCESS;
+}
+
+extern "C" HIP_KERNEL_API int hip_paged_attention_mrope_f16_prepare_v1(
+    void *stream_ptr, const hip_paged_attention_mrope_f16_desc *desc,
+    void *workspace, size_t workspace_bytes, GqaPagedConfig *config, size_t config_size) {
+  if (!desc || !config || config_size != sizeof(GqaPagedConfig))
+    return HIP_PAGED_ATTENTION_INVALID_ARGUMENT;
+  Layout l;
+  int rc = mrope_layout(*desc, l);
+  if (rc) return rc;
+  auto selected = gqa_paged_default(desc->page);
+  rc = hip_paged_attention_mrope_f16_configured_v1(stream_ptr, desc, workspace,
+                                                 workspace_bytes, &selected, sizeof(selected));
+  if (rc) return rc;
+  if (desc->page.tokens) {
+    const auto stream = static_cast<hipStream_t>(stream_ptr);
+    int32_t status = 0;
+    if (hipMemcpyAsync(&status, workspace, sizeof(status), hipMemcpyDeviceToHost, stream) != hipSuccess ||
+        hipStreamSynchronize(stream) != hipSuccess) return HIP_PAGED_ATTENTION_HIP_ERROR;
+    if (!status) {
+      auto *base = static_cast<unsigned char *>(workspace);
+      const auto &p = desc->page;
+      const GqaPagedArgs pg = {p.block_table, p.cum, p.past_seqlens,
+          reinterpret_cast<int32_t *>(base + l.post), reinterpret_cast<int32_t *>(base),
+          p.page_size, p.table_columns, p.kv_num_heads, gqa_paged_page_shift(p.page_size)};
+      rc = gqa_paged_attention_f16_tune(stream_ptr, p, base + l.query,
+          reinterpret_cast<float *>(base + l.partial), pg, &selected);
+      if (rc) return rc;
+    }
+  }
+  *config = selected;
+  return HIP_PAGED_ATTENTION_SUCCESS;
 }

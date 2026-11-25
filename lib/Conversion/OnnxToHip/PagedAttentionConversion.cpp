@@ -13,11 +13,16 @@ struct PagedAttentionToHip : RewritePattern {
                                 PatternRewriter &rewriter) const override {
     auto name = op->getAttrOfType<StringAttr>("function_name");
     auto domain = op->getAttrOfType<StringAttr>("domain_name");
-    if (!name || name.getValue() != "PagedAttention" || !domain ||
-        domain.getValue() != "com.microsoft")
+    const bool mrope = name && domain &&
+                       name.getValue() == "PagedAttentionMRoPE" &&
+                       domain.getValue() == "hip.internal";
+    if (!mrope && (!name || name.getValue() != "PagedAttention" || !domain ||
+                   domain.getValue() != "com.microsoft"))
       return failure();
-    if (op->getNumOperands() < 8 || op->getNumOperands() > 17 ||
-        op->getNumResults() < 1 || op->getNumResults() > 3)
+    if (op->getNumOperands() < 8 ||
+        op->getNumOperands() > (mrope ? 18u : 17u) ||
+        (mrope && op->getNumOperands() != 18) || op->getNumResults() < 1 ||
+        op->getNumResults() > 3)
       return rewriter.notifyMatchFailure(
           op, "PagedAttention expects 8-17 slots and 1-3 outputs");
     auto slot = [&](unsigned i) -> Value {
@@ -84,29 +89,52 @@ struct PagedAttentionToHip : RewritePattern {
     auto ctx = getContextArg(op, rewriter);
     if (failed(ctx))
       return failure();
-    OperationState state(op->getLoc(), "hip.paged_attention");
+    OperationState state(op->getLoc(), mrope ? "hip.paged_mrope_attention"
+                                             : "hip.paged_attention");
     state.addOperands(
         {*ctx, slot(0), slot(1), slot(2), slot(5), slot(6), slot(7)});
-    for (unsigned i : {8u, 9u, 16u})
+    for (unsigned i : {8u, 9u})
       if (slot(i))
         state.addOperands(slot(i));
+    if (mrope) {
+      if (!slot(8) || !slot(9) || !slot(17))
+        return rewriter.notifyMatchFailure(
+            op, "fused MRoPE requires tables and explicit positions");
+      state.addOperands(slot(17));
+    }
+    if (slot(16))
+      state.addOperands(slot(16));
     state.addOperands(
         {createEmptyTensor(rewriter, op->getLoc(), outputs[0], slot(0)),
          slot(3), slot(4)});
     state.addTypes(outputs);
     // ONNX integer attributes may be signed; Hip I64Attr is signless.
-    for (StringRef attr : {"num_heads", "kv_num_heads", "local_window_size",
-                           "do_rotary", "rotary_interleaved"})
+    for (StringRef attr : {"num_heads", "kv_num_heads", "local_window_size"})
       if (auto a = op->getAttrOfType<IntegerAttr>(attr))
         state.addAttribute(attr, rewriter.getI64IntegerAttr(a.getInt()));
+    if (mrope) {
+      for (StringRef attr :
+           {"rotary_dim", "mrope_section", "mrope_layout", "mrope_scale"}) {
+        Attribute a = op->getAttr(attr);
+        if (!a)
+          return rewriter.notifyMatchFailure(
+              op, "missing internal MRoPE attribute");
+        state.addAttribute(attr, a);
+      }
+    } else {
+      for (StringRef attr : {"do_rotary", "rotary_interleaved"})
+        if (auto a = op->getAttrOfType<IntegerAttr>(attr))
+          state.addAttribute(attr, rewriter.getI64IntegerAttr(a.getInt()));
+    }
     for (StringRef attr : {"scale", "softcap"})
       if (auto a = op->getAttrOfType<FloatAttr>(attr))
         state.addAttribute(attr,
                            rewriter.getF32FloatAttr(a.getValueAsDouble()));
-    state.addAttribute("operand_segment_sizes",
-                       rewriter.getDenseI32ArrayAttr(
-                           {1, 1, 1, 1, 1, 1, 1, slot(8) ? 1 : 0,
-                            slot(9) ? 1 : 0, slot(16) ? 1 : 0, 1, 1, 1}));
+    if (!mrope)
+      state.addAttribute("operand_segment_sizes",
+                         rewriter.getDenseI32ArrayAttr(
+                             {1, 1, 1, 1, 1, 1, 1, slot(8) ? 1 : 0,
+                              slot(9) ? 1 : 0, slot(16) ? 1 : 0, 1, 1, 1}));
     auto converted = rewriter.create(state);
     rewriter.replaceOp(op, converted->getResults().take_front(resultCount));
     return success();

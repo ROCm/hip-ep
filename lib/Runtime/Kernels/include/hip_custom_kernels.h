@@ -170,6 +170,40 @@ HIP_KERNEL_API int hip_paged_attention_f16(
     void *stream, const hip_paged_attention_f16_desc *desc,
     void *workspace, size_t workspace_bytes);
 
+/* Fused packed MRoPE -> FP16 Page. The attention math/config ABI is unchanged.
+ * page supplies V, pools, output, request/page metadata and attention options;
+ * page.do_rotary must be 0. Its q/k_new/cos_cache/sin_cache are unused.
+ * q/k_new: FP32 [T,Hq*D]/[T,Hkv*D]; cos/sin: FP32 [max_position,R/2].
+ * position_ids is contiguous i64 [3,1,T] (or the same flattened [3,T]).
+ * It is independent of past_seqlens: cache append uses past+local token,
+ * whereas each rotary frequency uses its explicit temporal/height/width id.
+ * R=rotary_dim is positive/even and <=D; sections sum to R/2. Layout 0/1
+ * matches hip_mrope_forward. Out-of-cache positions retain its unrotated-copy
+ * semantics. FP32 rotation completes before a single FP16 rounding boundary.
+ * Only new K is rotated; history and V are never rotated. Q preparation and
+ * rotary/cast/paged-KV append share one kernel before the existing attention.
+ * All ordinary Page storage/status/window restrictions still apply. */
+typedef struct hip_paged_attention_mrope_f16_desc {
+  hip_paged_attention_f16_desc page;
+  const float *q, *k_new, *cos_cache, *sin_cache;
+  const int64_t *position_ids;
+  int32_t rotary_dim, max_position;
+  int32_t section_t, section_h, section_w, mrope_layout;
+  float rotary_scale;
+} hip_paged_attention_mrope_f16_desc;
+HIP_KERNEL_API int hip_paged_attention_mrope_f16_workspace_size(
+    const hip_paged_attention_mrope_f16_desc *desc, size_t *bytes);
+HIP_KERNEL_API int hip_paged_attention_mrope_f16_configured_v1(
+    void *stream, const hip_paged_attention_mrope_f16_desc *desc,
+    void *workspace, size_t workspace_bytes,
+    const hip_paged_attention_f16_config_v2 *config, size_t config_size);
+/* Explicit untimed preparation; the same ownership/synchronization contract
+ * as hip_paged_attention_f16_prepare_v2. No tuning in configured_v1. */
+HIP_KERNEL_API int hip_paged_attention_mrope_f16_prepare_v1(
+    void *stream, const hip_paged_attention_mrope_f16_desc *desc,
+    void *workspace, size_t workspace_bytes,
+    hip_paged_attention_f16_config_v2 *config, size_t config_size);
+
 // tq4_mse_qr_v1: B1/Hq24/G4/D256, BSHD FP16 inputs, packed BNSD cache.
 // Each row is 33 u32 words: FP32 norm then 32 words of centroid indices.
 HIP_KERNEL_API size_t hip_tq4_decode_workspace(int valid_length);

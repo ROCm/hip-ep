@@ -102,25 +102,26 @@ struct HipReadbackBufferizableModel
   }
 };
 
+template <typename PageOp>
 struct HipPagedBufferizableModel
     : public bufferization::DstBufferizableOpInterfaceExternalModel<
-          HipPagedBufferizableModel, PagedAttentionOp> {
+          HipPagedBufferizableModel<PageOp>, PageOp> {
   bool bufferizesToMemoryRead(Operation *op, OpOperand &operand,
                               const bufferization::AnalysisState &) const {
-    auto page = cast<PagedAttentionOp>(op);
+    auto page = cast<PageOp>(op);
     return operand.get() != page.getOutput();
   }
   bool mustBufferizeInPlace(Operation *op, OpOperand &operand,
                             const bufferization::AnalysisState &) const {
-    auto page = cast<PagedAttentionOp>(op);
+    auto page = cast<PageOp>(op);
     return &operand == &page.getKeyPoolMutable() ||
            &operand == &page.getValuePoolMutable();
   }
   LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
                           const bufferization::BufferizationOptions &options,
                           bufferization::BufferizationState &state) const {
-    return HipDstBufferizableModel<PagedAttentionOp>().bufferize(
-        op, rewriter, options, state);
+    return HipDstBufferizableModel<PageOp>().bufferize(op, rewriter, options,
+                                                       state);
   }
 };
 
@@ -160,7 +161,10 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     RangeOp::attachInterface<HipDstBufferizableModel<RangeOp>>(*ctx);
     SiluOp::attachInterface<HipDstBufferizableModel<SiluOp>>(*ctx);
     GqaOp::attachInterface<HipDstBufferizableModel<GqaOp>>(*ctx);
-    PagedAttentionOp::attachInterface<HipPagedBufferizableModel>(*ctx);
+    PagedAttentionOp::attachInterface<
+        HipPagedBufferizableModel<PagedAttentionOp>>(*ctx);
+    PagedMropeAttentionOp::attachInterface<
+        HipPagedBufferizableModel<PagedMropeAttentionOp>>(*ctx);
     CastOp::attachInterface<HipDstBufferizableModel<CastOp>>(*ctx);
     SigmoidOp::attachInterface<HipDstBufferizableModel<SigmoidOp>>(*ctx);
     TanhOp::attachInterface<HipDstBufferizableModel<TanhOp>>(*ctx);

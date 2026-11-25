@@ -1061,6 +1061,22 @@ int wrap_paged_attention(
     int64_t num_heads, int64_t kv_heads, int64_t window, int64_t do_rotary,
     int64_t rotary_interleaved, float scale, float softcap);
 
+int wrap_paged_attention_mrope(
+    RuntimeState *state, int32_t op_state_slot, const void *q, const void *k,
+    const void *v, void *k_pool, void *v_pool, const int32_t *cum,
+    const int32_t *past, const int32_t *table, const void *cos_cache,
+    const void *sin_cache, const int32_t *metadata, void *output,
+    int64_t tokens, int64_t key_tokens, int64_t value_tokens,
+    int64_t output_tokens, int64_t batch, int64_t pages, int64_t value_pages,
+    int64_t page_size, int64_t value_page_size, int64_t head_dim,
+    int64_t table_batch, int64_t table_columns, int64_t cum_count,
+    int64_t metadata_count, int64_t cos_rows, int64_t sin_rows,
+    int64_t num_heads, int64_t kv_heads, int64_t window, int64_t do_rotary,
+    int64_t rotary_interleaved, float scale, float softcap,
+    const int64_t *position_ids, int64_t position_tokens, int64_t rotary_dim,
+    int64_t section_t, int64_t section_h, int64_t section_w,
+    int64_t mrope_layout, float mrope_scale);
+
 // Generic element-wise tensor operation wrapper with per-operand 4D shapes.
 // Computes output = op(lhs, rhs) element-wise via the custom HIP kernels
 // (flat int kernels + hip_expand for int16/int32/int64, the native
