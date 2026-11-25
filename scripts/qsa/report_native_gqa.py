@@ -10,7 +10,8 @@ import math
 import re
 import subprocess
 
-from prepare_baseline import REFERENCE, ROOT, SELECTOR, SELECTOR_SHA, WORK, sha
+from prepare_baseline import selector_fingerprint
+from prepare_baseline import REFERENCE, ROOT, SELECTOR_SHA, WORK, sha
 
 
 def load(path):
@@ -27,7 +28,7 @@ def main():
     validation = load(task / "validation.json")
     assert validation["status"] == "passed"
     assert load(task / "error-validation.json")["status"] == "passed"
-    assert sha(SELECTOR) == SELECTOR_SHA
+    assert selector_fingerprint() == SELECTOR_SHA
     for variant in ["Original", "Changed"]:
         assert (
             validation["dispatch_profiles"][variant]["ep_dispatches_per_forward"] == 1

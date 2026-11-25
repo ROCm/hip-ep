@@ -139,6 +139,7 @@ Tool availability depends on the build configuration; see the platform quick-sta
 - [Qwen trained-selector port and native default evidence](docs/experiments/qwen-qsa-native-gqa-results.md)
 <!-- QWEN_EIGHT_PERFORMANCE_BEGIN -->
 - [QSA support: OLMo four and Qwen four/eight selectors](docs/design/qsa-support.md)
+- [Published QSA selectors: pinned Hugging Face assets](docs/design/qsa-selector-assets.md)
 - [Qwen eight-selector QSA: latest 4K/16K/32K performance](docs/experiments/qwen-qsa-eight-selector-results.md)
 - [Qwen eight-selector paper packet and raw measurements](docs/reproducibility/qwen-eight-hip-ep/README.md)
 <!-- QWEN_EIGHT_PERFORMANCE_END -->

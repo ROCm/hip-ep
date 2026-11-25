@@ -87,8 +87,9 @@ remains the general build entry point on other hosts.
 `export_native_gqa.py` produces matched B1 Original/Changed graphs from the
 accepted packed Original export and its CPU-generated `partitioned/manifest.json`.
 The manifest supplies attention boundary names; production inference uses the
-complete graph. The frozen source checkpoint and held-out data must also be
-available at the paths in `prepare_baseline.py`. Local artifacts live in
+complete graph. Frozen selectors now load from [pinned Hugging Face assets](qsa-selector-assets.md),
+with all12 BF16 tensors matching the measured export. Held-out data remains a
+separate prerequisite at the paths in `prepare_baseline.py`. Local artifacts live in
 `_local/qsa/native-gqa/`; source model and selector hashes retain the contracts
 in the [original port audit](olmo-qsa-port.md).
 

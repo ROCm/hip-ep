@@ -219,12 +219,19 @@ def update_documents():
     root_readme = ROOT / "README.md"
     put_block(
         root_readme,
-        f"- [QSA support: OLMo four and Qwen four/eight selectors]({link(root_readme, ROOT / 'docs/design/qsa-support.md')})\n- [Qwen eight-selector QSA: latest 4K/16K/32K performance]({link(root_readme, REPORT)})\n- [Qwen eight-selector paper packet and raw measurements]({link(root_readme, eight_readme)})",
+        f"- [QSA support: OLMo four and Qwen four/eight selectors]({link(root_readme, ROOT / 'docs/design/qsa-support.md')})\n- [Published QSA selectors: pinned Hugging Face assets]({link(root_readme, ROOT / 'docs/design/qsa-selector-assets.md')})\n- [Qwen eight-selector QSA: latest 4K/16K/32K performance]({link(root_readme, REPORT)})\n- [Qwen eight-selector paper packet and raw measurements]({link(root_readme, eight_readme)})",
         "- [Qwen isolated default/QSA memory-only matrix]",
     )
     changed.append(root_readme)
     if bfcl_report.exists():
         changed.append(bfcl_report)
+    for name in [
+        "docs/design/qsa-support.md",
+        "docs/design/qsa-selector-assets.md",
+        "docs/design/olmo-qsa-native-gqa.md",
+    ]:
+        if (ROOT / name).exists():
+            changed.append(ROOT / name)
     registry = dict(
         source_performance_sha256=digest(PACKET / "eight-140w-performance.json"),
         generator_sha256=digest(Path(__file__)),

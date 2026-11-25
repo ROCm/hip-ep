@@ -4,25 +4,31 @@
 #
 """Export full Original/Changed graphs with four native QSA GQA nodes."""
 
+import argparse
 import json
 import os
+from pathlib import Path
 
 import onnx
 import torch
 from onnx import TensorProto, helper
-from prepare_baseline import SELECTOR, SELECTOR_SHA, WORK, original_folder, sha
+from prepare_baseline import SELECTOR_SHA, WORK, original_folder, sha
+from selector_assets import get_selector_asset
 
 
 def main():
-    assert sha(SELECTOR) == SELECTOR_SHA
-    bank = torch.load(SELECTOR, map_location="cpu", weights_only=True)
-    assert bank["architecture"]["layers"] == [7, 11, 15, 23]
-    tensors = bank["selector"]
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output-root", type=Path, default=WORK / "native-gqa/models")
+    args = parser.parse_args()
+    asset = get_selector_asset("olmo-four")
+    assert asset.spec["compatibility_sha256"] == SELECTOR_SHA
+    assert asset.config["layers"] == [7, 11, 15, 23]
+    tensors = asset.tensors()
     assert all(t.dtype == torch.bfloat16 for t in tensors.values())
     source = original_folder()
     manifest = json.loads((source / "partitioned/manifest.json").read_text())
     for variant in ["Original", "Changed"]:
-        folder = WORK / "native-gqa/models" / variant
+        folder = args.output_root / variant
         folder.mkdir(parents=True, exist_ok=True)
         assert not (folder / "original.onnx").exists(), "Preserve existing exports"
         os.link(source / "original.weights.bin", folder / "original.weights.bin")
@@ -104,6 +110,7 @@ def main():
             variant=variant,
             batch=1,
             selector_sha256=SELECTOR_SHA,
+            selector_asset=asset.receipt(),
             selector_tensor_sha256=frozen_hashes,
             execution="one full ONNX graph/session",
         )
@@ -117,7 +124,7 @@ def main():
         }
         (folder / "export.json").write_text(json.dumps(receipt, indent=2) + "\n")
         print(variant, sha(folder / "original.onnx"), flush=True)
-    assert sha(SELECTOR) == SELECTOR_SHA
+    assert get_selector_asset("olmo-four").receipt() == asset.receipt()
 
 
 if __name__ == "__main__":

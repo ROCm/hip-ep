@@ -40,9 +40,10 @@ those results remain separate in the
 [OLMo report](../../experiments/olmo-qsa-native-gqa-results.md) and
 [agent evaluation report](../../experiments/olmo-qsa-agent-accuracy.md).
 
-The review branch is `codex/qwen-native-qsa-pr`, checked out locally at
-`_local/qwen-qsa/pr-worktree`. This packet is also kept in the main `hip-ep`
-checkout so the paper agent can read it here. The preceding measured branch,
+The combined review branch is `users/rajeevp/qsa` ([draft PR1650](https://github.com/ROCm/hip-ep/pull/1650)).
+The older `codex/qwen-native-qsa-pr` branch preserves the earlier merge-candidate
+audit. This packet remains in the main `hip-ep` checkout for the paper agent.
+The preceding measured branch,
 `codex/qwen-native-qsa`, retains the historical experiment stack. Unrelated
 Markdown and the sibling source project are left unchanged.
 
@@ -235,6 +236,11 @@ environment with the recorded dependencies. Existing prompt profiles are
 checked for equality rather than overwritten when preparing a resumed run.
 
 ## Reproduce or validate
+
+Native export and selector guards now use [pinned public HF assets](../../design/qsa-selector-assets.md).
+The original containers, raw rows and as-run source snapshots retain their
+historical identities. The packet regeneration command below archives that
+historical campaign and still requires its original local evidence.
 
 Packet verification is CPU-only and uses the Python standard library:
 

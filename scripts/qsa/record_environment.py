@@ -16,7 +16,8 @@ from runtime import CORE, INSTALL, SDK, WORK
 import psutil
 import torch
 
-from prepare_baseline import ROOT, SELECTOR, SELECTOR_SHA, sha
+from prepare_baseline import selector_fingerprint
+from prepare_baseline import ROOT, SELECTOR_SHA, sha
 
 
 def device_attributes(hip):
@@ -55,7 +56,7 @@ def device_attributes(hip):
 
 
 def main():
-    assert sha(SELECTOR) == SELECTOR_SHA
+    assert selector_fingerprint() == SELECTOR_SHA
     WORK.mkdir(parents=True, exist_ok=True)
     hip = ctypes.CDLL(str(CORE / "bin/amdhip64_7.dll"))
     runtime, driver = ctypes.c_int(), ctypes.c_int()

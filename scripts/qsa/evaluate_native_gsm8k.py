@@ -22,7 +22,8 @@ import torch
 
 from evaluate_pair import gsm
 from original_inference import Original
-from prepare_baseline import SELECTOR, SELECTOR_SHA, sha
+from prepare_baseline import selector_fingerprint
+from prepare_baseline import SELECTOR_SHA, sha
 
 
 @torch.inference_mode()
@@ -33,7 +34,7 @@ def main():
     assert 1 <= args.limit <= 128
     assert runtime.INSTALL == TASK / "install"
     assert json.loads((TASK / "validation.json").read_text())["status"] == "passed"
-    assert sha(SELECTOR) == SELECTOR_SHA
+    assert selector_fingerprint() == SELECTOR_SHA
     torch.set_num_threads(8)
     folder = TASK / "gsm8k"
     folder.mkdir(exist_ok=True)
@@ -75,7 +76,7 @@ def main():
     try:
         gsm(Pair(), folder, args.limit)
     finally:
-        assert sha(SELECTOR) == SELECTOR_SHA
+        assert selector_fingerprint() == SELECTOR_SHA
         assert pointers == [v.data_ptr() for v in changed.caches.values()]
         (folder / "integrity.json").write_text(
             json.dumps(

@@ -26,8 +26,8 @@
       "bytes": 207
     },
     "documentation.json": {
-      "sha256": "92dbe8bf6582ed900ab6bb290efff3a249a8cdb2b05a562b5c689542bbf77ff9",
-      "bytes": 2637
+      "sha256": "d6d2c27b73d14f4d4182275f4395a6eabec17a091df63c2974c5314b95b38eac",
+      "bytes": 3198
     },
     "eight-140w-archive.json": {
       "sha256": "d814845a56abe03068ee4935d89ac2a5f1ecfb7a61896275b2732fc565d1ec98",
@@ -48,6 +48,10 @@
     "evaluation-time-estimate.json": {
       "sha256": "717b53ae5ec2d85b547aa5fd73abb113e3242f06de9d8bbaa6da77da681c300f",
       "bytes": 6088
+    },
+    "hf-selector-migration.json": {
+      "sha256": "f3e847af11e3354b21137959743315c6b7e3ce661a9b5e64de191f173206b1b1",
+      "bytes": 5974
     },
     "original-140w-4k-comparison.json": {
       "sha256": "1c820395dc6414207cf68a71968c15cf3f1dbe36006e3b5ce57aace7ae4e8e67",
@@ -702,8 +706,8 @@
       "bytes": 864
     },
     "README.md": {
-      "sha256": "c6cba79e8b52607a8ec37089585567273f908a539979a2888d06c1179123fd30",
-      "bytes": 18979
+      "sha256": "a708c62513ae40209ed2b7429d84d2a124cdd87e07c8cf4930169a6537004f46",
+      "bytes": 19399
     },
     "status.json": {
       "sha256": "fb50e1a7454a198d5d3507131906243c2afcad4bbe92603aedfffd069eabb78d",

@@ -16,6 +16,9 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.append(str(ROOT / "scripts/qsa"))
+from selector_assets import get_selector_asset  # noqa: E402
+
 SOURCE = ROOT.parent / "sparse-attn"
 WORK = ROOT / "_local/qwen-qsa"
 REVISION = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
@@ -40,15 +43,25 @@ def header(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--verify-backbone-bytes", action="store_true")
+    parser.add_argument("--selectors-only", action="store_true")
     args = parser.parse_args()
     assert sys.byteorder == "little"
-    manifest_path = SOURCE / "docs/reproducibility/qwen-hip-ep-manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    payload = SOURCE / manifest["portable_export"]["path"]
-    assert sha(payload) == manifest["portable_export"]["sha256"] == PAYLOAD_SHA
-    assert (
-        sha(SOURCE / manifest["source_pt"]["path"]) == manifest["source_pt"]["sha256"]
-    )
+    asset = get_selector_asset("qwen-four")
+    payload = asset.weights
+    assert sha(payload) == PAYLOAD_SHA
+    if args.selectors_only:
+        print(json.dumps(asset.receipt(), indent=2))
+        return
+    manifest = {
+        "tensors": {
+            name: dict(
+                dtype=item["dtype"],
+                shape=item["shape"],
+                raw_little_endian_sha256=item["sha256"],
+            )
+            for name, item in asset.provenance["tensor_records"].items()
+        }
+    }
     descriptors, start = header(payload)
     keys = set(descriptors) - {"__metadata__"}
     assert keys == set(manifest["tensors"]) and len(keys) == 16
@@ -140,6 +153,7 @@ def main():
         "model": "Qwen/Qwen3.8-27B",
         "revision": REVISION,
         "selector_sha256": PAYLOAD_SHA,
+        "selector_asset": asset.receipt(),
         "parameters": parameter_count,
         "tensors": checked,
         "data_sha256": data_hashes,

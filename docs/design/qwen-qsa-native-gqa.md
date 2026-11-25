@@ -31,6 +31,10 @@ measurement limits are in the
 
 ## Scope and execution boundary
 
+Both selector configurations now load [pinned Hugging Face safetensors](qsa-selector-assets.md).
+All48 Qwen BF16 tensors and the Four/Eight re-exported graph/selector binaries
+match the measured artifacts; historical raw identities and results are preserved.
+
 The historical four-selector export replaces full-attention layers
 **27/31/35/39**, zero-based, in the pinned Qwen/Qwen3.8-27B revision. The
 eight-selector export replaces **3/7/23/27/31/35/39/63**, using all eight updated

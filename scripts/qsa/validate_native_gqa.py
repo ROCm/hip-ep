@@ -21,7 +21,8 @@ import torch
 
 from original_inference import Original, stats
 from partitioned_inference import PartitionedOriginal
-from prepare_baseline import REFERENCE, SELECTOR, SELECTOR_SHA, sha
+from prepare_baseline import selector_fingerprint
+from prepare_baseline import REFERENCE, SELECTOR_SHA
 
 
 @torch.inference_mode()
@@ -92,7 +93,7 @@ def main():
         assert pointers == [t.data_ptr() for t in reference.caches.values()]
         assert pointers == [t.data_ptr() for t in original.caches.values()]
         assert pointers == [t.data_ptr() for t in changed.caches.values()]
-        assert sha(SELECTOR) == SELECTOR_SHA
+        assert selector_fingerprint() == SELECTOR_SHA
         receipt["dispatch_profiles"] = {}
         for name, model, expected_runs in [
             ("Original", original, 20),

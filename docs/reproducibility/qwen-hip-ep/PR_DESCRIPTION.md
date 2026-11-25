@@ -59,5 +59,7 @@ bind those checks to their exact source/binaries. The branch includes current
 upstream main and the previously audited integration fixes. The final cleanup
 checks are recorded separately in the [PR validation receipt](../qwen-eight-hip-ep/pr-validation.json).
 Historical performance/accuracy remains attached to the preserved measured build.
-Large model weights, compiled binaries/caches and local ZIP archives are not
-part of the branch; the portable Markdown/JSON/CSV/raw evidence is included.
+The selector-only weights are available as [pinned Hugging Face assets](../../design/qsa-selector-assets.md).
+All60 BF16 tensors and the three re-exported native graph/selector binaries match
+the measured artifacts. Base-model weights, compiled binaries/caches and local
+ZIP archives remain outside Git; portable Markdown/JSON/CSV/raw evidence is included.

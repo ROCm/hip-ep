@@ -8,6 +8,12 @@ Licensed under the MIT License.
 
 ## Data coverage: four and eight selectors
 
+Selector weights are now public: [pinned Hugging Face assets and loading commands](../../design/qsa-selector-assets.md).
+All60 BF16 tensor payloads and the three native graph/selector-bin re-exports
+match their measured counterparts. [Migration verification](hf-selector-migration.json)
+keeps new Hub container hashes separate from historical export identities;
+historical timing and accuracy rows are unchanged.
+
 Both variants' evidence is retained locally and in the portable packets below. Historical `Changed` labels in the four-selector packet mean **Four**, not Eight.
 
 | Measurement | Four selectors | Eight selectors |

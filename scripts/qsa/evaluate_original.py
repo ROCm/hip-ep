@@ -16,7 +16,8 @@ import torch
 from transformers import AutoTokenizer
 
 from original_inference import Original
-from prepare_baseline import REFERENCE, SELECTOR, SELECTOR_SHA, original_folder, sha
+from prepare_baseline import selector_fingerprint
+from prepare_baseline import REFERENCE, SELECTOR_SHA, original_folder, sha
 
 TEST_SHA = "64b40ea48f14a0bda01e4700b3a7e91ba82f547a5cc7b20cf57f087bf20cf764"
 
@@ -200,7 +201,7 @@ def main():
     parser.add_argument("--bits", type=int, choices=[4, 8], default=4)
     args = parser.parse_args()
     torch.set_num_threads(8)
-    assert sha(SELECTOR) == SELECTOR_SHA
+    assert selector_fingerprint() == SELECTOR_SHA
     original = original_folder(args.bits)
     assert json.loads((original / "validation.json").read_text())["status"] == "passed"
     folder = WORK / f"baseline-w{args.bits}-rope-v2"

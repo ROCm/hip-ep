@@ -8,14 +8,14 @@
 import ctypes
 import hashlib
 import json
-import shutil
 
 from runtime import ROOT, WORK
 import numpy as np
 import onnx
 import torch
 
-from prepare_baseline import SELECTOR, SELECTOR_SHA, original_folder, sha
+from prepare_baseline import SELECTOR_SHA, original_folder, selector_fingerprint, sha
+from selector_assets import get_selector_asset
 
 LAYERS = [7, 11, 15, 23]
 CHUNK = 32
@@ -75,29 +75,16 @@ def rotary_tables():
 
 class FrozenBank:
     def __init__(self):
-        assert sha(SELECTOR) == SELECTOR_SHA
-        folder = WORK / "selectors"
-        folder.mkdir(exist_ok=True)
-        copied = folder / "selector-bf16.pt"
-        if not copied.exists():
-            shutil.copyfile(SELECTOR, copied)
-        assert sha(copied) == SELECTOR_SHA
-        export = torch.load(copied, map_location="cpu", weights_only=True)
-        assert export["architecture"] == {
-            "layers": LAYERS,
-            "selector": {
-                "hidden_size": 4096,
-                "head_dim": 128,
-                "query_heads": 4,
-                "eps": 1e-6,
-            },
-        }
-        assert all(t.dtype == torch.bfloat16 for t in export["selector"].values())
+        self.asset = get_selector_asset("olmo-four")
+        assert self.asset.spec["compatibility_sha256"] == SELECTOR_SHA
+        assert self.asset.config["layers"] == LAYERS
+        tensors = self.asset.tensors()
+        assert all(t.dtype == torch.bfloat16 for t in tensors.values())
         self.tensors = {
             name: value.detach().cuda().contiguous().requires_grad_(False)
-            for name, value in export["selector"].items()
+            for name, value in tensors.items()
         }
-        assert tensor_digest(self.tensors) == tensor_digest(export["selector"])
+        assert tensor_digest(self.tensors) == tensor_digest(tensors)
         self.before = tensor_digest(self.tensors)
         self.cos, self.sin = rotary_tables()
         self.kernel = KernelLibrary()
@@ -110,7 +97,7 @@ class FrozenBank:
         ]
 
     def integrity(self):
-        assert sha(SELECTOR) == SELECTOR_SHA
+        assert selector_fingerprint() == SELECTOR_SHA
         assert tensor_digest(self.tensors) == self.before
         assert all(
             t.dtype == torch.bfloat16 and not t.requires_grad and t.grad is None
@@ -118,6 +105,7 @@ class FrozenBank:
         )
         return {
             "export_sha256": SELECTOR_SHA,
+            "selector_asset": self.asset.receipt(),
             "runtime_selector_digest": self.before,
             "parameters_unchanged": True,
             "selector_parameter_dtype": "BF16",

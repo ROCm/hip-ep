@@ -4,6 +4,7 @@
 #
 """Add four frozen Qwen selectors without changing any default backbone node."""
 
+import argparse
 import hashlib
 import json
 import os
@@ -11,17 +12,18 @@ from pathlib import Path
 
 import onnx
 from onnx import TensorProto, helper
-from verify_handoff import PAYLOAD_SHA, SOURCE, WORK, header, sha
+from verify_handoff import PAYLOAD_SHA, WORK, get_selector_asset, header, sha
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output-root", type=Path, default=WORK / "native-gqa/models")
+    args = parser.parse_args()
     source = WORK / "default-rtn-w4a16-64"
     exported = json.loads((source / "export.json").read_text())
     assert sha(source / "default.onnx") == exported["onnx_sha256"]
-    manifest = json.loads(
-        (SOURCE / "docs/reproducibility/qwen-hip-ep-manifest.json").read_text()
-    )
-    payload = SOURCE / manifest["portable_export"]["path"]
+    asset = get_selector_asset("qwen-four")
+    payload = asset.weights
     assert sha(payload) == PAYLOAD_SHA
     descriptors, first = header(payload)
     original = onnx.load(source / "default.onnx", load_external_data=False)
@@ -31,7 +33,7 @@ def main():
         for layer in [27, 31, 35, 39]
     }
     for variant in ["Original", "Changed"]:
-        folder = WORK / "native-gqa/models" / variant
+        folder = args.output_root / variant
         folder.mkdir(parents=True, exist_ok=True)
         assert not (folder / "default.onnx").exists(), "Preserve previous exports"
         os.link(source / "default.weights.bin", folder / "default.weights.bin")
@@ -71,8 +73,7 @@ def main():
                         raw = stream.read(end - begin)
                         digest = hashlib.sha256(raw).hexdigest()
                         assert (
-                            digest
-                            == manifest["tensors"][name]["raw_little_endian_sha256"]
+                            digest == asset.provenance["tensor_records"][name]["sha256"]
                         )
                         offset = data.tell()
                         data.write(raw)
@@ -130,6 +131,7 @@ def main():
             onnx_sha256=sha(folder / "default.onnx"),
             baseline_onnx_sha256=exported["onnx_sha256"],
             selector_sha256=PAYLOAD_SHA,
+            selector_asset=asset.receipt(),
             selector_tensor_sha256=hashes,
             boundaries=boundaries,
             execution="one full ONNX graph/session",

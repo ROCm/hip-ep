@@ -14,20 +14,21 @@ import time
 from pathlib import Path
 
 import psutil
-from prepare_baseline import ROOT, SELECTOR, SELECTOR_SHA, WORK, sha
+from prepare_baseline import ROOT, WORK, sha
+from selector_assets import get_selector_asset
 
 
 def selector_for_command(command):
     script = Path(command[0])
     script = (script if script.is_absolute() else ROOT / script).resolve()
     if script.is_relative_to((ROOT / "scripts/qwen_qsa").resolve()):
-        source = ROOT.parent / "sparse-attn"
-        manifest = json.loads(
-            (source / "docs/reproducibility/qwen-hip-ep-manifest.json").read_text()
+        variant_eight = any(
+            arg == "--variant" and command[i + 1 : i + 2] == ["Eight"]
+            for i, arg in enumerate(command)
         )
-        export = manifest["portable_export"]
-        return "qwen", source / export["path"], export["sha256"]
-    return "olmo", SELECTOR, SELECTOR_SHA
+        key = "qwen-eight" if "eight" in script.stem or variant_eight else "qwen-four"
+        return "qwen", get_selector_asset(key)
+    return "olmo", get_selector_asset("olmo-four")
 
 
 def main():
@@ -46,9 +47,11 @@ def main():
         parser.error("a Python script and its arguments are required")
     if args.timeout_seconds <= 0:
         parser.error("--timeout-seconds must be positive")
-    model, selector, selector_sha = selector_for_command(command)
+    model, asset = selector_for_command(command)
+    selector = asset.weights
+    selector_sha = asset.spec["compatibility_sha256"]
     before = sha(selector)
-    assert before == selector_sha
+    assert before == asset.spec["files"]["selectors.safetensors"]
     folder = WORK / "stages" / args.label
     folder.mkdir(parents=True, exist_ok=True)
     status_path = folder / "status.json"
@@ -73,7 +76,10 @@ def main():
         "timeout_seconds": args.timeout_seconds,
         "selector_model": model,
         "selector_path": str(selector),
-        "selector_sha256_before": before,
+        "selector_sha256_before": selector_sha,
+        "selector_identity_kind": "historical_export_identity_sha256",
+        "selector_file_sha256_before": before,
+        "selector_asset": asset.receipt(),
         "source_sha256": {},
     }
     try:
@@ -82,6 +88,9 @@ def main():
         for path in sorted((ROOT / "scripts/qsa").glob("*.py")):
             shutil.copyfile(path, source / path.name)
             receipt["source_sha256"][path.name] = sha(path)
+        registry = ROOT / "scripts/qsa/selector_assets.json"
+        shutil.copyfile(registry, source / registry.name)
+        receipt["source_sha256"][registry.name] = sha(registry)
         if model == "qwen":
             qwen_source = source / "qwen_qsa"
             qwen_source.mkdir()
@@ -129,14 +138,19 @@ def main():
                     process.kill()
                 process.wait()
                 raise
-        receipt["selector_sha256_after"] = sha(selector)
-        assert receipt["selector_sha256_after"] == selector_sha
+        assert get_selector_asset(asset.key).receipt() == asset.receipt()
+        receipt["selector_sha256_after"] = selector_sha
         receipt["state"] = "complete" if receipt["exit_code"] == 0 else "failed"
     except BaseException as exc:
         receipt.update(state="failed", error=repr(exc))
         raise
     finally:
-        receipt["selector_sha256_after"] = sha(selector) if selector.exists() else None
+        receipt["selector_file_sha256_after"] = (
+            sha(selector) if selector.exists() else None
+        )
+        receipt["selector_sha256_after"] = (
+            selector_sha if receipt["selector_file_sha256_after"] == before else None
+        )
         receipt["elapsed_seconds"] = time.time() - receipt["started_unix"]
         status_path.write_text(json.dumps(receipt, indent=2) + "\n")
         if not args.cpu and lock.exists() and lock.read_text() == str(os.getpid()):

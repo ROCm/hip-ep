@@ -24,7 +24,8 @@ import torch
 from transformers import AutoTokenizer
 
 from original_inference import Original
-from prepare_baseline import SELECTOR, SELECTOR_SHA, WORK, sha
+from prepare_baseline import selector_fingerprint
+from prepare_baseline import SELECTOR_SHA, WORK
 
 
 def write_json(path, data):
@@ -53,7 +54,7 @@ def main():
     args = parser.parse_args()
     assert runtime.INSTALL == TASK / "install"
     assert 1 <= args.capacity <= 65536
-    assert sha(SELECTOR) == SELECTOR_SHA
+    assert selector_fingerprint() == SELECTOR_SHA
     torch.set_num_threads(8)
     args.queue.mkdir(parents=True, exist_ok=True)
     assert not (args.queue / "ready.json").exists(), "Use a fresh stage queue"
@@ -138,7 +139,7 @@ def main():
                 "finish_reason": reason,
                 "generation_seconds": time.perf_counter() - started,
             }
-            assert sha(SELECTOR) == SELECTOR_SHA
+            assert selector_fingerprint() == SELECTOR_SHA
             assert pointers == [v.data_ptr() for v in changed.caches.values()]
             write_json(response_path, response)
             share_retry(lambda: request_path.rename(request_path.with_suffix(".done")))
@@ -149,7 +150,7 @@ def main():
             raise
     write_json(
         args.queue / "stopped.json",
-        {"selector_sha256": sha(SELECTOR), "training_updates": 0},
+        {"selector_sha256": selector_fingerprint(), "training_updates": 0},
     )
 
 

@@ -10,6 +10,10 @@ The repository requires an approved prefix, so the requested `rajeevp/qsa` name
 uses the compliant `users/rajeevp/qsa` namespace. The older local branches
 preserve historical work and are not separate PRs.
 
+All three configurations use [published Hugging Face selectors](qsa-selector-assets.md)
+with pinned revisions and file/per-tensor verification. Native exports do not
+require private selector checkpoint files.
+
 | Model | Frozen selector configuration | Native operation | Export entry point |
 |---|---|---|---|
 | `allenai/Olmo-3-1025-7B` | Four: zero-based 7, 11, 15, 23 | `com.amd::QsaGroupQueryAttention` | `scripts/qsa/export_native_gqa.py` |

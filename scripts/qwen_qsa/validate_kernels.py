@@ -12,7 +12,7 @@ from pathlib import Path
 
 import native_inference
 from selector_reference import norm, rotate, token_support
-from verify_handoff import PAYLOAD_SHA, SOURCE, WORK, sha
+from verify_handoff import PAYLOAD_SHA, WORK, get_selector_asset, sha
 
 import torch
 from safetensors.torch import load_file
@@ -56,9 +56,7 @@ def main():
     folder = WORK / "selector-fixtures-v1"
     receipt = json.loads((folder / "receipt.json").read_text())
     assert sha(folder / "fixtures.safetensors") == receipt["fixtures_sha256"]
-    payload = (
-        SOURCE / "checkpoints/hip-ep-qwen/303042-step-0128/selector-bf16.safetensors"
-    )
+    payload = get_selector_asset("qwen-four").weights
     assert sha(payload) == PAYLOAD_SHA
     fixture = load_file(folder / "fixtures.safetensors", device="cpu")
     weights = load_file(payload, device="cpu")

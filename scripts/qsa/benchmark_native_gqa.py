@@ -24,7 +24,8 @@ import torch
 
 from benchmark_original import prepared
 from original_inference import Original
-from prepare_baseline import REFERENCE, SELECTOR, SELECTOR_SHA, sha
+from prepare_baseline import selector_fingerprint
+from prepare_baseline import REFERENCE, SELECTOR_SHA, sha
 
 
 @torch.inference_mode()
@@ -58,7 +59,7 @@ def main():
         folder = TASK / "paired-quality"
         folder.mkdir(exist_ok=True)
         dolma(Pair(), folder, 64, validate_baseline=False)
-        assert sha(SELECTOR) == SELECTOR_SHA
+        assert selector_fingerprint() == SELECTOR_SHA
         (folder / "integrity.json").write_text(
             json.dumps(
                 {
@@ -164,7 +165,7 @@ def main():
             print(json.dumps(row), flush=True)
     assert sessions == {k: id(v.sess) for k, v in models.items()}
     assert pointers == [v.data_ptr() for v in changed.caches.values()]
-    assert sha(SELECTOR) == SELECTOR_SHA
+    assert selector_fingerprint() == SELECTOR_SHA
     summary = {"batch": 1, "context": context, "pairs": args.pairs, "phases": {}}
     for phase, count in [("prefill", context), ("decode", 64)]:
         elapsed = {

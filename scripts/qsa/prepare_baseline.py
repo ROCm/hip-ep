@@ -11,14 +11,21 @@ import subprocess
 from pathlib import Path
 
 from huggingface_hub import snapshot_download
+from selector_assets import get_selector_asset
 
 ROOT = Path(__file__).resolve().parents[2]
 WORK = ROOT / "_local/qsa"
 MODEL = "allenai/Olmo-3-1025-7B"
 REVISION = "a81bae42db3975be1671e27b9c9a56da1a9f980f"
 REFERENCE = ROOT.parent / "sparse-attn"
+# Retained for historical container-byte audits; active loaders use Hub assets.
 SELECTOR = REFERENCE / "checkpoints/extended-selector/302354/step-4096/selector-bf16.pt"
 SELECTOR_SHA = "decd3160f4321839c80fee2ba0b0241575fc06017676e38a04286a3ae3daa10b"
+
+
+def selector_fingerprint():
+    """Verify public weights while retaining the historical export identity."""
+    return get_selector_asset("olmo-four").spec["compatibility_sha256"]
 
 
 def original_folder(bits=4, layers=32):
@@ -39,7 +46,8 @@ def sha(path):
 
 def main():
     WORK.mkdir(parents=True, exist_ok=True)
-    assert sha(SELECTOR) == SELECTOR_SHA
+    asset = get_selector_asset("olmo-four")
+    assert asset.spec["compatibility_sha256"] == SELECTOR_SHA
     receipt = {
         "stage": "downloading_original",
         "model": MODEL,
@@ -51,8 +59,9 @@ def main():
             ["git", "status", "--short"], cwd=ROOT, text=True
         ),
         "platform": platform.platform(),
-        "selector_source": str(SELECTOR),
+        "selector_source": str(asset.weights),
         "selector_sha256": SELECTOR_SHA,
+        "selector_asset": asset.receipt(),
         "training_updates": 0,
     }
     out = WORK / "preparation.json"

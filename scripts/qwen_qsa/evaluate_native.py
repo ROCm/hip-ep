@@ -11,6 +11,7 @@ import re
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
+from verify_handoff import get_selector_asset
 from verify_handoff import PAYLOAD_SHA, ROOT, SOURCE, WORK, sha
 
 
@@ -40,9 +41,7 @@ def main():
 
     torch.set_num_threads(2)
     verified = json.loads((WORK / "handoff-verification.json").read_text())
-    selector_path = (
-        SOURCE / "checkpoints/hip-ep-qwen/303042-step-0128/selector-bf16.safetensors"
-    )
+    selector_path = get_selector_asset("qwen-four").weights
     assert sha(selector_path) == PAYLOAD_SHA
     snapshot = Path(verified["backbone"]["snapshot"])
     directory = SOURCE / "data/qwen-selector-v1"

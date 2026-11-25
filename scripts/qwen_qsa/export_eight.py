@@ -5,17 +5,16 @@
 """Export all eight frozen selectors onto the preserved measured Qwen graph."""
 # ruff: noqa: E402
 
+import argparse
 import hashlib
 import json
 import os
-import shutil
 from pathlib import Path
 
-import native_inference  # noqa: F401 -- configure the Windows ROCm DLL paths
 import onnx
 import torch
 from onnx import TensorProto, helper
-from verify_handoff import SOURCE, WORK, sha
+from verify_handoff import WORK, get_selector_asset, sha
 
 TASK = WORK / "eight-qsa-v1"
 LAYERS = [3, 7, 23, 27, 31, 35, 39, 63]
@@ -33,30 +32,29 @@ def tensor_bytes(tensor):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output-dir", type=Path, default=TASK / "models/Eight")
+    args = parser.parse_args()
     torch.set_num_threads(2)
     assert not torch.cuda.is_initialized()
-    payload_path = SOURCE / "runs/309590/selector-bf16.pt"
-    assert sha(payload_path) == EXPORT_SHA
-    payload = torch.load(payload_path, map_location="cpu", weights_only=True)
-    assert set(payload) == {"layers", "selectors", "source_checkpoint_sha256"}
-    assert payload["layers"] == LAYERS
-    assert payload["source_checkpoint_sha256"] == CHECKPOINT_SHA
-    source_protocol = json.loads((SOURCE / "runs/309590/protocol.json").read_text())
-    assert source_protocol["selector_export_sha256"] == EXPORT_SHA
+    asset = get_selector_asset("qwen-eight")
+    assert asset.spec["compatibility_sha256"] == EXPORT_SHA
+    assert asset.config["layers"] == LAYERS
+    assert asset.provenance["source_checkpoint_sha256"] == CHECKPOINT_SHA
+    tensors = asset.tensors()
     source = WORK / "native-gqa/models/Original"
     exported = json.loads((source / "export.json").read_text())
     assert sha(source / "default.onnx") == exported["onnx_sha256"]
     assert sha(source / "default.weights.bin") == exported["data_sha256"]
     original = onnx.load(source / "default.onnx", load_external_data=False)
     graph = onnx.load(source / "default.onnx", load_external_data=False)
-    folder = TASK / "models/Eight"
+    folder = args.output_dir
     folder.mkdir(parents=True, exist_ok=True)
     assert not (folder / "default.onnx").exists(), "Preserve previous exports"
     os.link(source / "default.weights.bin", folder / "default.weights.bin")
     replacements = {
         f"/model/layers.{layer}/attn/GroupQueryAttention": layer for layer in LAYERS
     }
-    assert set(payload["selectors"]) == {str(layer) for layer in LAYERS}
     shapes = {
         "projection.weight": (640, 5120),
         "q_norm.weight": (128,),
@@ -70,8 +68,7 @@ def main():
             if node.name not in replacements:
                 continue
             layer = replacements[node.name]
-            state = payload["selectors"][str(layer)]
-            assert set(state) == set(shapes)
+            state = {name: tensors[f"selectors.{layer}.{name}"] for name in shapes}
             digest = hashlib.sha256()
             for name, tensor in state.items():
                 assert tuple(tensor.shape) == shapes[name]
@@ -82,8 +79,7 @@ def main():
                 digest.update(tensor_bytes(tensor))
             digests[str(layer)] = digest.hexdigest()
             assert (
-                digests[str(layer)]
-                == source_protocol["selector_tensor_digests"][str(layer)]
+                digests[str(layer)] == asset.spec["source_tensor_digests"][str(layer)]
             )
             assert (
                 node.op_type == "GroupQueryAttention" and node.domain == "com.microsoft"
@@ -169,6 +165,7 @@ def main():
         onnx_sha256=sha(folder / "default.onnx"),
         baseline_onnx_sha256=exported["onnx_sha256"],
         selector_sha256=EXPORT_SHA,
+        selector_asset=asset.receipt(),
         source_checkpoint_sha256=CHECKPOINT_SHA,
         selector_tensor_sha256=hashes,
         source_tensor_digests=digests,
@@ -182,8 +179,7 @@ def main():
         phase_policy="sparse prefill and sparse decode",
     )
     save(folder / "export.json", receipt)
-    shutil.copyfile(payload_path, TASK / "selector-bf16.pt")
-    shutil.copyfile(SOURCE / "runs/309590/protocol.json", TASK / "source-protocol.json")
+    save(folder / "selector-asset.json", asset.receipt())
     assert not torch.cuda.is_initialized()
     print(
         "Verified all 32 BF16 tensor payloads and eight per-layer digests; backbone unchanged",

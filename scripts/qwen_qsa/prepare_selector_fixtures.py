@@ -14,6 +14,7 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 from selector_reference import features, select, token_support
+from verify_handoff import get_selector_asset
 from verify_handoff import PAYLOAD_SHA, SOURCE, WORK, sha
 
 
@@ -22,9 +23,7 @@ def main():
     torch.set_num_threads(2)
     output = WORK / "selector-fixtures-v1"
     output.mkdir(exist_ok=False)
-    payload = (
-        SOURCE / "checkpoints/hip-ep-qwen/303042-step-0128/selector-bf16.safetensors"
-    )
+    payload = get_selector_asset("qwen-four").weights
     assert sha(payload) == PAYLOAD_SHA
     source_path = SOURCE / "scripts/qwen_qsa.py"
     identity = json.loads(

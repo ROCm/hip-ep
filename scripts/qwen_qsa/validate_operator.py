@@ -12,7 +12,7 @@ from pathlib import Path
 import native_inference
 from runtime import INSTALL, binding, run, session
 from selector_reference import token_support
-from verify_handoff import SOURCE, WORK, sha
+from verify_handoff import WORK, get_selector_asset, sha
 
 import numpy as np
 import onnx
@@ -42,9 +42,7 @@ def main():
     fixture_path = WORK / "selector-fixtures-v1/fixtures.safetensors"
     assert sha(fixture_path) == control["fixtures_sha256"]
     fixture = load_file(fixture_path)
-    weights = load_file(
-        SOURCE / "checkpoints/hip-ep-qwen/303042-step-0128/selector-bf16.safetensors"
-    )
+    weights = get_selector_asset("qwen-four").tensors()
     initializers = []
     for kind in ["projection", "q_norm", "token_k_norm", "pool_k_norm"]:
         value = weights[f"selectors.27.{kind}.weight"].contiguous()
