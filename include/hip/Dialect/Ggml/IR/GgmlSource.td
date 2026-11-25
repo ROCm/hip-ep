@@ -63,38 +63,20 @@ class FromI32Run<string a, int index_, int count_, string m = "">
   int count = count_;
 }
 
-/// An enumerator GGML spells as an int32 ordinal at `index`. `spelling` names
-/// it, and `cast` is the GGML enum the ordinal belongs to.
-class FromI32Enum<string a, int index_, string spelling_, string cast_,
-                  string m = ""> : GgmlParam<a, m> {
+/// An enumerator GGML stores as an int32 at `index`. `spelling` names it
+/// (GgmlEnums.td).
+class FromI32Enum<string a, int index_, string spelling_, string m = "">
+    : GgmlParam<a, m> {
   int index = index_;
   string spelling = spelling_;
-  string cast = cast_;
 }
 
-/// An enumerator stored in selected bits of the int32 at `index`.
-class FromI32MaskedEnum<string a, int index_, int mask_, string spelling_,
-                        string cast_, string m = ""> : GgmlParam<a, m> {
-  int index = index_;
-  int mask = mask_;
-  string spelling = spelling_;
-  string cast = cast_;
-}
-
-/// A value `op_params` does not hold. `expression` reads it off the tensor,
-/// which is in scope as `tensor`.
+/// A value `op_params` does not hold. `expression` reads it off the tensor
+/// (hip/Frontend/Ggml/GgmlTensor.h), which is in scope as `tensor`.
 class FromTensor<string a, string type_, string expression_, string m = "",
                  bit attribute_ = 1> : GgmlParam<a, m, attribute_> {
   string type = type_;
   string expression = expression_;
-}
-
-/// An enumerator GGML hands over through a call rather than through
-/// `op_params`. `expression` is that call and `spelling` names the result.
-class FromTensorEnum<string a, string expression_, string spelling_,
-                     string m = ""> : GgmlParam<a, m> {
-  string expression = expression_;
-  string spelling = spelling_;
 }
 
 /// A value GGML does not store, because this spelling of the operation fixes

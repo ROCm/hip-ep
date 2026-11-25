@@ -33,23 +33,26 @@ python3 build.py --cmake_extra_defines HIPDNN_EP_BUILD_GGML=ON
 | Option | Default | |
 |---|---|---|
 | `HIPDNN_EP_BUILD_GGML` | OFF | the `ggml` dialect, `convert-ggml-to-hip` and the `ggml-to-hip-pipeline`, the split frontend and `libhipep_backend` |
-| `HIPDNN_EP_LLAMA_CPP_SOURCE_DIR` | empty | a llama.cpp tree to take ggml from |
-| `HIPDNN_EP_LLAMA_CPP_REPOSITORY`, `HIPDNN_EP_LLAMA_CPP_REVISION` | AMD-Ecosystem/llama.cpp, the commit of its `ggml-hipep` branch | what is fetched otherwise |
 
 The install has `lib/libhipep_backend.so` (it exports `hipep_backend_*`
 alone and depends only on HIP), `include/hipep_backend.h`, the CMake package
 `lib/cmake/hipep_backend`, and beside it the kernel library the compiled
 code links against, `libcustom_kernels_<arch>.so`.
 
-ggml is linked into `libhipep_backend` statically, from the same llama.cpp
-revision the host is built from: a split's operation parameters are read as
-that ggml lays them out, and the library refuses a description of another
-ggml minor version.
+hip-ep needs neither llama.cpp nor ggml to build: a split arrives as plain C
+(`hipep_backend.h`), and the few facts of ggml's the frontend needs - its
+type numbers, which GGUF files store, the bytes a block of each type takes,
+and where each operation keeps its parameters (`GgmlOps.td`) - are written
+down in hip-ep (`GgmlTensor.h`, `GgmlBlockLayout.h`). Parameters are read as
+ggml 1.0 lays them out, and the library refuses a description of another ggml
+minor version.
 
-llama.cpp, from the AMD-Ecosystem fork's `ggml-hipep` branch:
+llama.cpp, from the AMD-Ecosystem fork's `ggml-hipep` branch, finds the
+library with `find_package(hipep_backend)` and includes `hipep_backend.h`
+alone:
 
 ```bash
-cmake -B build -DGGML_HIP=ON -DGGML_HIPEP=ON \
+cmake -B build -DGGML_HIPEP=ON \
   -Dhipep_backend_DIR=<hip-ep-install>/lib/cmake/hipep_backend
 llama-cli -m model.gguf --device HIPEP0 -ngl 99 -fa on
 ```
@@ -178,9 +181,8 @@ Built with `HIPDNN_EP_BUILD_GGML`, where hip-ep keeps the like of it:
 |---|---|
 | `include/hip/Dialect/Ggml`, `lib/Dialect/Ggml`, `tools/ggml-tblgen` | the `ggml` dialect and its transforms (shape symbolization, the state donation proof) |
 | `include/hip/Conversion/GgmlToHip`, `lib/Conversion/GgmlToHip` | `convert-ggml-to-hip`; the `ggml-to-hip-pipeline` is in `lib/Dialect/Transforms/Pipelines.cpp` |
-| `include/hip/Frontend/Ggml`, `lib/Frontend/Ggml` | the split frontend: ggml tensors captured and emitted, compiled in-process |
+| `include/hip/Frontend/Ggml`, `lib/Frontend/Ggml` | the split frontend: a split's tensors (`GgmlTensor.h`) captured and emitted, compiled in-process |
 | `lib/HipepBackend` | `libhipep_backend` |
-| `cmake/Ggml.cmake` | ggml, from the llama.cpp revision it pins |
 | `test/lit/{Dialect/Ggml,Conversion/ggml-to-hip,Pipeline/ggml}`, `test/lib/Dialect/Ggml`, `test/unit/hipep_backend` | its tests |
 
 ## The hip operations it lowers to
