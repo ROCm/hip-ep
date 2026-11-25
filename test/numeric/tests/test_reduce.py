@@ -353,6 +353,49 @@ class TestReduceProd:
 
 
 @pytest.mark.parametrize(
+    "op_type", ["ReduceMean", "ReduceSum", "ReduceMax", "ReduceMin", "ReduceL2"]
+)
+def test_reduce_keepdims0_dynamic_extent(model_runner, op_type):
+    """keepdims=0 over axis 1 of [N, 2, W, 8]: the destination's dim 1 is W
+    (data dim 2), 16 at run time, not the reduced extent 2 at the same
+    position."""
+    tp = np_to_onnx_type(np.float16)
+    X = helper.make_tensor_value_info("X", tp, ["N", 2, "W", 8])
+    Y = helper.make_tensor_value_info("Y", tp, ["N", "W", 8])
+    axes = numpy_helper.from_array(np.array([1], dtype=np.int64), name="axes")
+    node = helper.make_node(op_type, ["X", "axes"], ["Y"], keepdims=0)
+    model = make_model_from_nodes([node], [X], [Y], initializers=[axes], opset=18)
+    rng = np.random.default_rng(60)
+    x = rng.uniform(-2.0, 2.0, [3, 2, 16, 8]).astype(np.float16)
+    actual, expected = model_runner.run_sample(model, [x])
+    compare_outputs(actual, expected, atol=2e-2, rtol=1e-2, cos_threshold=0.9999)
+
+
+@pytest.mark.parametrize(
+    "op_type", ["ReduceMean", "ReduceSum", "ReduceMax", "ReduceMin"]
+)
+@pytest.mark.parametrize("keepdims", [0, 1])
+def test_reduce_noncontiguous_axes(model_runner, op_type, keepdims):
+    """Constant axes [2, 4] are two runs, reduced one after the other.
+
+    The symbolic dims make the destination extents dynamic. W is 16 at run
+    time, not 2: with keepdims=0 a destination that took result dim 2 from
+    data dim 2 (the reduced extent 2) instead of data dim 3 would be wrong.
+    """
+    tp = np_to_onnx_type(np.float16)
+    X = helper.make_tensor_value_info("X", tp, ["N", "H", 2, "W", 2, 64])
+    out_shape = ["N", "H", 1, "W", 1, 64] if keepdims else ["N", "H", "W", 64]
+    Y = helper.make_tensor_value_info("Y", tp, out_shape)
+    axes = numpy_helper.from_array(np.array([2, 4], dtype=np.int64), name="axes")
+    node = helper.make_node(op_type, ["X", "axes"], ["Y"], keepdims=keepdims)
+    model = make_model_from_nodes([node], [X], [Y], initializers=[axes], opset=18)
+    rng = np.random.default_rng(59)
+    x = rng.uniform(-2.0, 2.0, [1, 5, 2, 16, 2, 64]).astype(np.float16)
+    actual, expected = model_runner.run_sample(model, [x])
+    compare_outputs(actual, expected, atol=2e-2, rtol=1e-2, cos_threshold=0.9999)
+
+
+@pytest.mark.parametrize(
     "op_type",
     ["ReduceSum", "ReduceMean", "ReduceL2", "ReduceMax", "ReduceMin", "ReduceProd"],
 )
