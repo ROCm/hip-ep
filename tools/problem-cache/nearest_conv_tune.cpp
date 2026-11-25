@@ -2074,7 +2074,8 @@ std::optional<NearestConvTuneHit>
 findNearestConvTune(std::string_view problemKey,
                     const std::vector<ProblemCacheConvEntry> &entries,
                     const std::vector<std::string> &rejectedSolutions,
-                    double weightM, double weightN, double weightK) {
+                    double weightM, double weightN, double weightK,
+                    bool allowNearest) {
   // The stored perfConfig was benchmarked for this exact kernel. Do not
   // re-check the block against the derived GEMM; rocMLIR pads past it.
   for (const auto &entry : entries) {
@@ -2091,7 +2092,9 @@ findNearestConvTune(std::string_view problemKey,
     return hit;
   }
 
-  if (entries.empty())
+  // Borrowing a neighbor's tile is opt-in. Without it, a problem the table has
+  // not measured is a miss and the caller searches.
+  if (!allowNearest || entries.empty())
     return std::nullopt;
   const std::string key(problemKey);
   if (auto query = parseConvProblem(key)) {

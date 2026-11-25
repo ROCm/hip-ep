@@ -189,27 +189,37 @@ static void printUsage(llvm::raw_ostream &os, const char *prog) {
      << "                       points, fallbacks). It takes priority over\n"
      << "                       the search and replaces the shipped table. An\n"
      << "                       identical problem string is compiled as\n"
-     << "                       stored. A conv miss requires matching arch,\n"
-     << "                       dtype, -F, layouts, stride, dilation, and\n"
-     << "                       fusions, then the nearest M/N/K tile (weights\n"
-     << "                       1) that fits. A tile that fails to compile is\n"
-     << "                       skipped for the next nearest; otherwise the\n"
-     << "                       search runs. After a successful compile the\n"
-     << "                       winners that the search picked are merged\n"
-     << "                       into the file itself, so the next compile\n"
-     << "                       reads them back. Tiles taken from the file\n"
-     << "                       are not written as winners. A missing or\n"
-     << "                       empty file is created. A file that is not a\n"
-     << "                       LUT, is malformed, is for another GPU, is\n"
-     << "                       read-only, is not a regular file, is in a\n"
-     << "                       directory that cannot be written, or is a\n"
-     << "                       FlatBuffer (.fb) stops the compile before it\n"
-     << "                       starts, with the file untouched. A failed\n"
-     << "                       write is a warning. The file is replaced\n"
-     << "                       atomically; with several processes at once\n"
-     << "                       the last writer wins. Needs autotune.\n"
+     << "                       stored; any other problem is searched unless\n"
+     << "                       --enable-nearest-config is on. After a\n"
+     << "                       successful compile the winners that the\n"
+     << "                       search picked are merged into the file\n"
+     << "                       itself, so the next compile reads them back.\n"
+     << "                       Tiles taken from the file are not written as\n"
+     << "                       winners. A missing or empty file is created.\n"
+     << "                       A file that is not a LUT, is malformed, is\n"
+     << "                       for another GPU, is read-only, is not a\n"
+     << "                       regular file, is in a directory that cannot\n"
+     << "                       be written, or is a .fb stops the compile\n"
+     << "                       before it starts, with the file untouched. A\n"
+     << "                       failed write is a warning. The file is\n"
+     << "                       replaced atomically; with several processes\n"
+     << "                       at once the last writer wins. Needs autotune.\n"
      << "                       problem_cache_to_fb.py compiles the JSON to a\n"
      << "                       .fb to ship it as a LUT.\n"
+     << "  --enable-nearest-config\n"
+     << "                       Off by default: a problem that the problem\n"
+     << "                       cache (the shipped table, or the --enable-\n"
+     << "                       problem-cache-rw file) has not measured is\n"
+     << "                       searched. With this flag it borrows the tile\n"
+     << "                       of the nearest measured problem instead. A\n"
+     << "                       conv miss requires matching arch, dtype, -F,\n"
+     << "                       layouts, stride, dilation, and fusions, then\n"
+     << "                       the nearest M/N/K tile (weights 1) that fits.\n"
+     << "                       A tile that fails to compile is skipped for\n"
+     << "                       the next nearest; otherwise the search runs.\n"
+     << "                       HIPDNN_EP_ROCMLIR_NEAREST_CONFIG=1 turns it\n"
+     << "                       on for the whole shell, and in the ONNX\n"
+     << "                       Runtime provider.\n"
      << "  --verbose            Print per-config compile/benchmark lines "
         "and the\n"
      << "                       selected perfConfig.\n"
@@ -256,6 +266,9 @@ int main(int argc, char **argv) {
   autotune.log = &llvm::errs();
   autotune.logPrefix = "[hip-rocmlir-compiler]";
   mlir::hip::rocMlirAutotuneBenchmarkFromEnv(autotune.benchmark);
+  // Off unless HIPDNN_EP_ROCMLIR_NEAREST_CONFIG is set; --enable-nearest-config
+  // turns it on for this run.
+  autotune.nearestConfig = mlir::hip::rocMlirNearestConfigFromEnv();
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
     if (arg == "-o" && i + 1 < argc) {
@@ -306,6 +319,8 @@ int main(int argc, char **argv) {
       llvm::errs() << "error: --enable-problem-cache-rw needs a JSON file "
                       "path\n";
       return 1;
+    } else if (arg == "--enable-nearest-config") {
+      autotune.nearestConfig = true;
     } else if (arg == "--autotune-runs" && i + 1 < argc) {
       if (llvm::StringRef(argv[++i]).getAsInteger(10, autotune.measuredRuns) ||
           autotune.measuredRuns == 0) {

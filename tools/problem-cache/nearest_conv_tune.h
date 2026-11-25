@@ -29,6 +29,12 @@
 // problem string is returned as stored. The block-size check applies only
 // when borrowing a neighbor. `rejectedSolutions` are tiles that already
 // failed to compile; the next nearest legal row is returned.
+//
+// Borrowing a neighbor is the part that `allowNearest` turns off. With it
+// false only an identical problem string matches, and every other problem is a
+// miss. The compiler passes false unless nearest-config lookup was enabled
+// (see AutotuneOptions::nearestConfig); the default here is true so that the
+// table logic itself stays testable on its own.
 
 #ifndef HIP_PROBLEM_CACHE_NEAREST_CONV_TUNE_H
 #define HIP_PROBLEM_CACHE_NEAREST_CONV_TUNE_H
@@ -212,7 +218,7 @@ findNearestConvTune(std::string_view problemKey,
                     const std::vector<ProblemCacheConvEntry> &entries,
                     const std::vector<std::string> &rejectedSolutions = {},
                     double weightM = 1.0, double weightN = 1.0,
-                    double weightK = 1.0);
+                    double weightK = 1.0, bool allowNearest = true);
 
 } // namespace hip
 } // namespace mlir

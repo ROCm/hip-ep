@@ -79,7 +79,12 @@ which is empty when `HIPDNN_EP_ROCMLIR` was off, the arch with an
 `HIP_ROCMLIR_SKIP_BENCHMARKING` compiled the default perfConfig (`gfx1151`).
 There is no `+lut=` fingerprint. A provided `HIPDNN_EP_ROCMLIR_AUTOTUNE`
 skips the shipped `tools/problem-cache/lut/*.fb`; when it is unset, the shipped
-table is consulted before the search. `hip-rocmlir-compiler` still honors
+table is consulted before the search. Either table answers only for an
+identical problem string. A miss borrows the nearest measured tile of the same
+kernel kind only when nearest-config lookup is on:
+`HIPDNN_EP_ROCMLIR_NEAREST_CONFIG=1` in either binary, or
+`--enable-nearest-config` on `hip-rocmlir-compiler`. It is off by default, and
+the artifact suffix does not record it. `hip-rocmlir-compiler` still honors
 `--enable-problem-cache-rw` ahead of the search.
 The flag names a LUT JSON file (the document it writes) and merges the
 compile's search winners back into it; a file it would refuse to rewrite stops

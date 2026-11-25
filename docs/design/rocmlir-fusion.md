@@ -452,6 +452,11 @@ and `int4-weights` are the fusion switches.
   checked before the compile: one the rewrite would refuse (not a LUT, another
   `gpu_arch`, malformed, read-only, not a regular file, in a directory it cannot
   write to, or a `.fb`) is reported, then neither read nor updated, and the compile goes on. A failed write is reported the same way.
+- `HIPDNN_EP_ROCMLIR_NEAREST_CONFIG=1` lets a problem-cache miss borrow the
+  tile of the nearest measured problem of the same kernel kind, instead of
+  searching. It is off by default, so the shipped LUT and an external problem
+  cache answer only for identical problem strings. `hip-rocmlir-compiler` reads
+  the same variable and also takes `--enable-nearest-config` for one run.
 - `HIPDNN_EP_ROCMLIR_FUSION_REPORT=<file>` (pipeline option `report`)
   appends one JSON line for each kernel and each host function. Two runs make
   the same kernels when their records are equal as multisets.

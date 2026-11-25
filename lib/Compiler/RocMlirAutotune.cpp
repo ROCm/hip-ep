@@ -154,6 +154,10 @@ void rocMlirAutotuneBenchmarkFromEnv(AutotuneBenchmark &out) {
                << mode << "' (expected adaptive or simple)\n";
 }
 
+bool rocMlirNearestConfigFromEnv() {
+  return hip_env_is_on("HIPDNN_EP_ROCMLIR_NEAREST_CONFIG");
+}
+
 #ifdef HIPDNN_EP_HAVE_HIP_RUNTIME
 
 namespace {
@@ -965,7 +969,7 @@ std::optional<std::string> RocMlirAutotuner::Impl::lookupProblemCache(
       return std::nullopt;
     std::optional<NearestConvTuneHit> hit = findNearestConvTune(
         std::string_view(problem.data(), problem.size()), lut.entries, rejected,
-        lut.weightM, lut.weightN, lut.weightK);
+        lut.weightM, lut.weightN, lut.weightK, options.nearestConfig);
     if (!hit)
       return std::nullopt;
     if (log())

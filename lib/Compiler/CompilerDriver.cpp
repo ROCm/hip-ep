@@ -624,6 +624,10 @@ bool CompilerDriver::runMLIRPasses(
       mlir::hip::AutotuneOptions autotuneOpts;
       autotuneOpts.space = autotuneSpace;
       mlir::hip::rocMlirAutotuneBenchmarkFromEnv(autotuneOpts.benchmark);
+      // HIPDNN_EP_ROCMLIR_NEAREST_CONFIG: borrow a neighbour's tile on a
+      // problem-cache miss. Off unless set, so a table answers only for the
+      // exact problems it holds.
+      autotuneOpts.nearestConfig = mlir::hip::rocMlirNearestConfigFromEnv();
       autotuneOpts.log = embedOpts.log;
       autotuneOpts.logPrefix = "[CompilerDriver/rocmlir-autotune]";
       // HIPDNN_EP_ROCMLIR_VERBOSE also turns on the per-candidate lines, one

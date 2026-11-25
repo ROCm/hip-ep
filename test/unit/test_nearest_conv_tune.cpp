@@ -309,6 +309,50 @@ int main() {
       mlir::hip::findNearestConvTune(gegProblem(96, 128, 64, 64, "true"), gegs);
   expect(!hit.has_value(), "gemm-elementwise-gemm transC is a different group");
 
+  // Nearest-config lookup off (allowNearest=false): only an identical problem
+  // string answers. Every other problem is a miss, for each kernel kind.
+  const auto exactOnly = [](const std::string &problem,
+                            const std::vector<ProblemCacheConvEntry> &entries,
+                            const std::vector<std::string> &rejected = {}) {
+    return mlir::hip::findNearestConvTune(problem, entries, rejected, 1.0f,
+                                          1.0f, 1.0f, /*allowNearest=*/false);
+  };
+  hit = exactOnly(exact, table);
+  expect(hit.has_value() && hit->exact && hit->distance == 0.0f &&
+             hit->solution == tile32,
+         "nearest off: an identical conv problem still returns its row");
+  hit = exactOnly(query64, spatial);
+  expect(!hit.has_value(), "nearest off: conv H/W=64 does not borrow a row");
+  hit = mlir::hip::findNearestConvTune(query64, spatial);
+  expect(hit.has_value() && hit->solution == tile96,
+         "nearest on by default in the table logic: conv H/W=64 borrows");
+  hit = exactOnly(padded, table);
+  expect(!hit.has_value(),
+         "nearest off: a conv with another padding does not borrow a row");
+  hit = exactOnly(exact, table, {tile32});
+  expect(!hit.has_value(),
+         "nearest off: a rejected exact tile is a miss, not a neighbour");
+  hit = exactOnly(gemmQuery, gemms);
+  expect(!hit.has_value(), "nearest off: a gemm miss does not borrow a row");
+  hit = exactOnly(gemmProblem("f16", 64, 128, 256), gemms);
+  expect(hit.has_value() && hit->exact && hit->solution == gemmNear,
+         "nearest off: an identical gemm problem still returns its row");
+  hit = exactOnly(attnQuery, attns);
+  expect(!hit.has_value(),
+         "nearest off: an attention miss does not borrow a row");
+  hit = exactOnly(attnProblem(128, 128), attns);
+  expect(hit.has_value() && hit->exact && hit->solution == attnNear,
+         "nearest off: an identical attention problem still returns its row");
+  hit = exactOnly(gegQuery, gegs);
+  expect(!hit.has_value(),
+         "nearest off: a gemm-elementwise-gemm miss does not borrow a row");
+  hit = exactOnly(gegProblem(64, 128, 64, 64), gegs);
+  expect(hit.has_value() && hit->exact && hit->solution == gegNear,
+         "nearest off: an identical gemm-elementwise-gemm problem still "
+         "returns its row");
+  hit = exactOnly(exact, {});
+  expect(!hit.has_value(), "nearest off: an empty table is a miss");
+
   namespace fbs = hipdnn_ep::rocmlir_autotune::fbs;
   flatbuffers::FlatBufferBuilder builder;
   auto tileOff = builder.CreateString(tile32);

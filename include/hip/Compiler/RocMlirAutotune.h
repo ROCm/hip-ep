@@ -100,6 +100,14 @@ struct AutotuneOptions {
   // EP. A provided tuning type skips the shipped LUT. With it false (the
   // default), the shipped LUT is consulted before the search.
   bool tuningTypeProvided = false;
+  // Let a problem the table has not measured borrow the tile of its nearest
+  // neighbour in the problem cache, shipped or external, instead of searching.
+  // Off by default, so a table answers only for the exact problem strings it
+  // holds and every other problem is searched. Set by
+  // --enable-nearest-config on hip-rocmlir-compiler, or by
+  // rocMlirNearestConfigFromEnv (HIPDNN_EP_ROCMLIR_NEAREST_CONFIG) in either
+  // binary. It changes nothing when no problem cache is in use.
+  bool nearestConfig = false;
   // Also print a line per candidate and the winning perfConfig. Separate from
   // `log` because the per-candidate lines are one per config per kernel --
   // useful when tuning by hand, far too much for a normal compile.
@@ -207,6 +215,13 @@ bool rocMlirAutotuneFromEnv(AutotuneSpace &out);
 // Reads HIPDNN_EP_ROCMLIR_AUTOTUNE_BENCH ("adaptive" or "simple"). Leaves
 // \p out alone when unset or unparseable.
 void rocMlirAutotuneBenchmarkFromEnv(AutotuneBenchmark &out);
+
+// Reads HIPDNN_EP_ROCMLIR_NEAREST_CONFIG, the shell-wide switch for
+// AutotuneOptions::nearestConfig. Unset, empty, "0", "false", "off" and "no"
+// leave nearest-config lookup off, which is the default; any other value turns
+// it on. hip-rocmlir-compiler uses it as the starting value and
+// --enable-nearest-config turns it on for that run.
+bool rocMlirNearestConfigFromEnv();
 
 } // namespace hip
 } // namespace mlir
