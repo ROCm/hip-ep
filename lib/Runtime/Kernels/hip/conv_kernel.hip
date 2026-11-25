@@ -1398,6 +1398,12 @@ static bool windowCovers(const ConvParams &pr, int64_t bm, int64_t th,
   return blocks >= units;
 }
 
+// How many blocks a bm x bn tile makes for this convolution.
+static int64_t tileBlocks(const ConvParams &pr, int64_t bm, int64_t bn) {
+  return ((pr.MPerGroup + bm - 1) / bm) * ((pr.Nout + bn - 1) / bn) * pr.N *
+         pr.group;
+}
+
 // Whether a tile shape is worth using: its row block has to be fully live (a
 // block computes its whole tile whether or not the rows exist) and the grid it
 // produces has to cover the device.
@@ -1409,9 +1415,7 @@ static bool windowCovers(const ConvParams &pr, int64_t bm, int64_t th,
 // choose and this only does the arithmetic.
 static bool tileCovers(const ConvParams &pr, int64_t bm, int64_t bn,
                        int64_t units) {
-  const int64_t blocks = ((pr.MPerGroup + bm - 1) / bm) *
-                         ((pr.Nout + bn - 1) / bn) * pr.N * pr.group;
-  return blocks >= units;
+  return tileBlocks(pr, bm, bn) >= units;
 }
 
 static bool tileFits(const ConvParams &pr, int64_t bm, int64_t bn,
@@ -1589,8 +1593,8 @@ static int launch(hipStream_t stream, const void *x, const void *w,
   }
 
   // Two passes over the ladder. The first asks a tile shape to cover the
-  // device; the second takes the widest tile whose rows are live and accepts
-  // whatever grid that gives.
+  // device; the second takes the tile that makes the most blocks among those
+  // whose rows are live and accepts whatever grid that gives.
   //
   // The second pass exists because coverage is the wrong thing to insist on
   // when the problem is small. A shape with few output channels over a small
@@ -1625,6 +1629,33 @@ static int launch(hipStream_t stream, const void *x, const void *w,
     // tile is better" and is really "the wide tile is broken". The unroll
     // comment in conv_tiled_kernel has the numbers. Reorder these rungs only
     // against a sweep taken with a kernel that does not spill.
+    if (pass == 1) {
+      // No tile covers the device, so the widest-first order above would leave
+      // most of it idle: a 256-channel 14x14 output is 4 blocks at 128x128 and
+      // 16 at 64x64. Take the tile that makes the most blocks, the wider one on
+      // a tie.
+      const int64_t blocks128x128 =
+          tileFits(pr, 128, 128, 1) ? tileBlocks(pr, 128, 128) : 0;
+      const int64_t blocks64x64 =
+          tileFits(pr, 64, 64, 1) ? tileBlocks(pr, 64, 64) : 0;
+      const int64_t blocks32x128 =
+          (pr.MPerGroup >= 24 && tileFits(pr, 32, 128, 1))
+              ? tileBlocks(pr, 32, 128)
+              : 0;
+      if (blocks128x128 > 0 && blocks128x128 >= blocks64x64 &&
+          blocks128x128 >= blocks32x128) {
+        launchTile<T, 128, 128, 8, 8>(stream, x, w, bias, y, pr);
+        break;
+      }
+      if (blocks64x64 > 0 && blocks64x64 >= blocks32x128) {
+        launchTile<T, 64, 64, 4, 4>(stream, x, w, bias, y, pr);
+        break;
+      }
+      if (blocks32x128 > 0) {
+        launchTile<T, 32, 128, 2, 8>(stream, x, w, bias, y, pr);
+        break;
+      }
+    }
     if (tileFits(pr, 128, 128, need)) {
       launchTile<T, 128, 128, 8, 8>(stream, x, w, bias, y, pr);
       break;
