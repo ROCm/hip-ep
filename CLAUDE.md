@@ -37,6 +37,7 @@ The generated model ABI uses `inference_compute(state, inputs)`. Graph outputs a
 | Compiler tests | `test/lit/`, `test/e2e/`, `test/runtime/` |
 | Numeric and model tests | `test/numeric/`, `test/python/` |
 | Design documentation | `docs/design/` |
+| ggml graphs and `libhipep_backend` (llama.cpp's ggml-hipep backend, `HIPDNN_EP_BUILD_GGML`) | `lib/Dialect/Ggml/`, `lib/Conversion/GgmlToHip/`, `lib/Frontend/Ggml/`, `lib/HipepBackend/`, [docs/design/ggml-backend.md](docs/design/ggml-backend.md) |
 
 ## Build, test, and lint
 
