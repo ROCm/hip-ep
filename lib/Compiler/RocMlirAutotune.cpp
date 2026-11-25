@@ -508,9 +508,9 @@ struct RocMlirAutotuner::Impl {
   // has its own symbol and must be compiled.
   llvm::StringMap<std::string> winnerCache;
   // The subset of winnerCache that a search produced, by the same key. A lookup
-  // hit goes into winnerCache too (a tile borrowed from the problem cache, which
-  // may be a neighbor's), but not here: only these are measurements, and only
-  // these are written back by updateProblemCacheFile.
+  // hit goes into winnerCache too (a tile borrowed from the problem cache,
+  // which may be a neighbor's), but not here: only these are measurements, and
+  // only these are written back by updateProblemCacheFile.
   llvm::StringMap<std::string> measuredWinners;
   // perfConfigs from the problem cache that failed to compile for this
   // problem. The next lookup skips them and takes the next nearest tile.
@@ -1479,8 +1479,7 @@ bool RocMlirAutotuner::Impl::updateProblemCacheFile() const {
   if (log())
     *log() << options.logPrefix << " updated problem cache "
            << options.problemCachePath << " with " << winners.size()
-           << " benchmarked winner" << (winners.size() == 1 ? "" : "s")
-           << "\n";
+           << " benchmarked winner" << (winners.size() == 1 ? "" : "s") << "\n";
   return true;
 }
 

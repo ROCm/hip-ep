@@ -970,9 +970,8 @@ struct StoredPoint {
 };
 
 bool isBlank(std::string_view text) {
-  return std::all_of(text.begin(), text.end(), [](unsigned char c) {
-    return std::isspace(c) != 0;
-  });
+  return std::all_of(text.begin(), text.end(),
+                     [](unsigned char c) { return std::isspace(c) != 0; });
 }
 
 } // namespace
@@ -1074,7 +1073,8 @@ bool mergeProblemCacheJson(std::string_view existing, std::string_view gpuArch,
                   .emplace(stored.perfConfig,
                            static_cast<int64_t>(outConfigs.size()))
                   .first;
-      outConfigs.push_back(llvm::json::Object{{"perf_config", stored.perfConfig}});
+      outConfigs.push_back(
+          llvm::json::Object{{"perf_config", stored.perfConfig}});
     }
     outPoints.push_back(llvm::json::Object{{"problem", problem},
                                            {"config", found->second},
@@ -1128,10 +1128,9 @@ bool updateProblemCacheJsonFile(const std::string &path,
   // Write beside the target and rename over it, so the old file survives a
   // failed or interrupted write.
   fs::path temporary = target;
-  temporary += ".tmp" + std::to_string(
-                           std::chrono::steady_clock::now()
-                               .time_since_epoch()
-                               .count());
+  temporary +=
+      ".tmp" + std::to_string(
+                   std::chrono::steady_clock::now().time_since_epoch().count());
   {
     std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
     out.write(merged.data(), static_cast<std::streamsize>(merged.size()));

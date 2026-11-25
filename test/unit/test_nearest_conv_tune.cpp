@@ -310,25 +310,19 @@ int main() {
   };
   const auto dumpDoc = [&] {
     llvm::json::Array jsonConfigs;
-    for (const char *perf : {tile32.c_str(), "{\"algo\":\"block\"}",
-                             gemmTile.c_str()})
+    for (const char *perf :
+         {tile32.c_str(), "{\"algo\":\"block\"}", gemmTile.c_str()})
       jsonConfigs.push_back(llvm::json::Object{{"perf_config", perf}});
     llvm::json::Array jsonPoints;
-    jsonPoints.push_back(llvm::json::Object{{"problem", exact},
-                                            {"config", 0},
-                                            {"m", 32},
-                                            {"n", 4096},
-                                            {"k", 144}});
+    jsonPoints.push_back(llvm::json::Object{
+        {"problem", exact}, {"config", 0}, {"m", 32}, {"n", 4096}, {"k", 144}});
     jsonPoints.push_back(llvm::json::Object{{"problem", "{\"lens\":[1,2]}"},
                                             {"config", 1},
                                             {"m", 0},
                                             {"n", 0},
                                             {"k", 0}});
-    jsonPoints.push_back(llvm::json::Object{{"problem", gemmKey},
-                                            {"config", 2},
-                                            {"m", 0},
-                                            {"n", 0},
-                                            {"k", 0}});
+    jsonPoints.push_back(llvm::json::Object{
+        {"problem", gemmKey}, {"config", 2}, {"m", 0}, {"n", 0}, {"k", 0}});
     return llvm::json::Object{{"schema_version", 1},
                               {"gpu_arch", "gfx1151"},
                               {"rocm_version", 0},
@@ -350,9 +344,9 @@ int main() {
              fromRcal.entries.size() == 2,
          "the RCAL buffer reloads for the parity check");
   mlir::hip::ProblemCacheLut fromJson;
-  expect(mlir::hip::loadProblemCacheLutJson(jsonText(dumpDoc()), fromJson,
-                                            error),
-         "a dumped LUT JSON loads");
+  expect(
+      mlir::hip::loadProblemCacheLutJson(jsonText(dumpDoc()), fromJson, error),
+      "a dumped LUT JSON loads");
   expect(fromJson.entries.size() == fromRcal.entries.size() &&
              fromJson.entries.size() == 2 &&
              fromJson.entries[0].problem == fromRcal.entries[0].problem &&
@@ -395,12 +389,12 @@ int main() {
     // as in the RCAL loader.
     llvm::json::Object doc = dumpDoc();
     llvm::json::Array &pts = *doc.getArray("points");
-    pts.push_back(llvm::json::Object{{"problem", "out-of-range"},
-                                     {"config", 99}});
+    pts.push_back(
+        llvm::json::Object{{"problem", "out-of-range"}, {"config", 99}});
     pts.push_back(llvm::json::Object{{"problem", "negative"}, {"config", -1}});
     mlir::hip::ProblemCacheLut skipped;
-    expect(mlir::hip::loadProblemCacheLutJson(jsonText(std::move(doc)),
-                                              skipped, error) &&
+    expect(mlir::hip::loadProblemCacheLutJson(jsonText(std::move(doc)), skipped,
+                                              error) &&
                skipped.entries.size() == 2,
            "points with a bad config index are skipped");
   }
@@ -476,9 +470,8 @@ int main() {
     expect(!mlir::hip::loadProblemCacheLutJsonFile(fbPath, fromFile, error) &&
                error.find(fbPath) != std::string::npos,
            "a .fb file is rejected as an external problem cache");
-    expect(!mlir::hip::loadProblemCacheLutJsonFile(dir.string() + "/no-such-" +
-                                                       stem + ".json",
-                                                   fromFile, error) &&
+    expect(!mlir::hip::loadProblemCacheLutJsonFile(
+               dir.string() + "/no-such-" + stem + ".json", fromFile, error) &&
                fromFile.entries.empty(),
            "a missing external problem cache reports an error");
     std::error_code ignored;
@@ -492,8 +485,7 @@ int main() {
   const std::string tile16 = "gemm:mPerBlock=16,nPerBlock=16,kPerBlock=8";
   const std::string tileBig = "gemm:mPerBlock=128,nPerBlock=64,kPerBlock=8";
   const auto gemmAt = [](int m) {
-    return "gfx1151\t2\t1\t-t f32 -m " + std::to_string(m) +
-           " -n 1000 -k 1280";
+    return "gfx1151\t2\t1\t-t f32 -m " + std::to_string(m) + " -n 1000 -k 1280";
   };
   const auto parseDoc = [](const std::string &text) {
     llvm::Expected<llvm::json::Value> parsed = llvm::json::parse(text);
@@ -517,12 +509,11 @@ int main() {
       auto index = o->getInteger("config");
       if (problem && index && *index >= 0 &&
           static_cast<size_t>(*index) < cfgs.size())
-        rows[problem->str()] =
-            cfgs[static_cast<size_t>(*index)]
-                .getAsObject()
-                ->getString("perf_config")
-                .value_or("")
-                .str();
+        rows[problem->str()] = cfgs[static_cast<size_t>(*index)]
+                                   .getAsObject()
+                                   ->getString("perf_config")
+                                   .value_or("")
+                                   .str();
     }
     return rows;
   };
@@ -594,7 +585,8 @@ int main() {
     expect(root && root->getString("model_key") == "keep-me" &&
                root->getNumber("weight_m") == 2.0,
            "weights and model_key are carried over");
-    // tile32 is used by two new winners and tileBig by one: still one entry each.
+    // tile32 is used by two new winners and tileBig by one: still one entry
+    // each.
     size_t tile32Configs = 0;
     if (root && root->getArray("configs"))
       for (const llvm::json::Value &c : *root->getArray("configs"))
@@ -605,24 +597,27 @@ int main() {
     std::vector<std::string> order;
     if (root && root->getArray("points"))
       for (const llvm::json::Value &p : *root->getArray("points"))
-        order.push_back(p.getAsObject()->getString("problem").value_or("").str());
+        order.push_back(
+            p.getAsObject()->getString("problem").value_or("").str());
     expect(std::is_sorted(order.begin(), order.end()),
            "points are written sorted by problem");
   }
   {
     std::string merged;
     expect(!mlir::hip::mergeProblemCacheJson(jsonText(dumpDoc()), "gfx942",
-                                             {{exact, tile32}}, merged, error) &&
+                                             {{exact, tile32}}, merged,
+                                             error) &&
                merged.empty() && error.find("gfx1151") != std::string::npos,
            "a table for another gpu_arch is not rewritten");
-    expect(!mlir::hip::mergeProblemCacheJson("{not json", "gfx1151",
-                                             {{exact, tile32}}, merged, error) &&
+    expect(!mlir::hip::mergeProblemCacheJson(
+               "{not json", "gfx1151", {{exact, tile32}}, merged, error) &&
                merged.empty(),
            "an unparsable existing table is not replaced");
     llvm::json::Object bad = dumpDoc();
     bad["kernel_abi"] = "other-abi";
-    expect(!mlir::hip::mergeProblemCacheJson(jsonText(std::move(bad)), "gfx1151",
-                                             {{exact, tile32}}, merged, error),
+    expect(!mlir::hip::mergeProblemCacheJson(jsonText(std::move(bad)),
+                                             "gfx1151", {{exact, tile32}},
+                                             merged, error),
            "an unsupported existing table is not replaced");
     expect(mlir::hip::mergeProblemCacheJson("  \n", "gfx1151",
                                             {{exact, tile32}}, merged, error) &&
@@ -678,8 +673,8 @@ int main() {
     expect(leftovers == 0, "no temporary file is left beside the cache");
 
     // A table for another device is refused and the file is left as it was.
-    expect(!mlir::hip::updateProblemCacheJsonFile(file, "gfx942",
-                                                  {{gemmAt(99), tile32}}, error),
+    expect(!mlir::hip::updateProblemCacheJsonFile(
+               file, "gfx942", {{gemmAt(99), tile32}}, error),
            "a file for another gpu_arch is not rewritten");
     std::string after;
     {

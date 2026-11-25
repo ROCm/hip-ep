@@ -49,8 +49,9 @@ struct ProblemCacheConvEntry {
 };
 
 // One loaded table, from a shipped .fb or an external JSON file. `entries` are
-// the gemm:/attn: points; other perfConfigs are dropped. Weights are the table's log-space metric. `gpuArch` is the table's
-// gpu_arch; empty means the table is not restricted to one device.
+// the gemm:/attn: points; other perfConfigs are dropped. Weights are the
+// table's log-space metric. `gpuArch` is the table's gpu_arch; empty means the
+// table is not restricted to one device.
 struct ProblemCacheLut {
   std::string gpuArch;
   float weightM = 1.0f;
