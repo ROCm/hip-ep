@@ -130,9 +130,9 @@ option(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS
 
 # ggml graphs through the compiler, for llama.cpp's ggml-hipep backend
 # (docs/design/ggml-backend.md): the ggml dialect, its conversion to HIP and
-# the ggml-to-hip pipeline.
+# the ggml-to-hip pipeline, the split frontend and libhipep_backend.
 option(HIPDNN_EP_BUILD_GGML
-  "Build the ggml dialect and the ggml-to-hip pipeline for llama.cpp's ggml-hipep backend"
+  "Build the ggml-to-hip pipeline and libhipep_backend for llama.cpp's ggml-hipep backend"
   OFF)
 if(HIPDNN_EP_BUILD_GGML)
   add_compile_definitions(HIPDNN_EP_BUILD_GGML)
@@ -302,6 +302,15 @@ endif()
 # Out-of-tree plugin dirs (HIPDNN_EP_COMPILER_PLUGIN_PATHS): add each so it can
 # register its plugin. Must run before finalize (below).
 hipdnn_ep_add_external_plugins()
+
+# The split frontend and libhipep_backend, the library llama.cpp's ggml-hipep
+# backend compiles and runs its splits with; after the compiler and the EP's
+# JIT (backend-mlir-compiler) they build on.
+if(HIPDNN_EP_BUILD_GGML)
+  include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/Ggml.cmake)
+  add_subdirectory(lib/Frontend/Ggml)
+  add_subdirectory(lib/HipepBackend)
+endif()
 
 # Finalize static compiler plugins: generate the registrar include and link
 # the selected plugin static libs into LibHipCompiler. Must run after every

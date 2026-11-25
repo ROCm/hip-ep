@@ -197,3 +197,8 @@ add_test(NAME NearestConvTuneUnit COMMAND test-nearest-conv-tune)
 set_target_properties(test-nearest-conv-tune PROPERTIES
   FOLDER "mlir/Test/Dialect/Hipsr"
 )
+
+# libhipep_backend (HIPDNN_EP_BUILD_GGML).
+if(HIPDNN_EP_BUILD_GGML)
+  add_subdirectory(hipep_backend)
+endif()
