@@ -44,6 +44,10 @@ env:
   # pull/<n>.diff and applied on top of OGA_REF. Part of the OGA cache key.
   # Empty: the fork branch already carries everything the build needs.
   OGA_PR_PATCHES: ""
+  # Local ABI repair for the pinned fork; the hash also binds its cache key.
+  OGA_COMPAT_PATCH_SHA256: "7e0cddb2ab069ad46d49d03955fc4646b743baa0e664e0f9a7adeef69fcccc89"
+  # Scope the pinned fork's CUDA-only benchmark staging to CUDA builds.
+  OGA_ENGINE_PATCH_SHA256: "0e15dee5fac333137622b91cda46379bb7379637b1081d8f32906f11e405900e"
   # The GPU arch the artifact targets. CI runners have no GPU, so it is passed
   # explicitly (build.py auto-detects from /sys on a real GPU host).
   HIP_ARCHITECTURES: gfx11-generic
@@ -426,7 +430,7 @@ jobs:
         uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/oga-artifacts
-          key: linux-oga-${{ env.OGA_REF }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
+          key: linux-oga-${{ env.OGA_REF }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}-local${{ env.OGA_COMPAT_PATCH_SHA256 }}-engine${{ env.OGA_ENGINE_PATCH_SHA256 }}
 
       # Checkout + build are skipped on an OGA cache hit (step-level gate); the
       # install-copy below always runs so the
@@ -481,8 +485,41 @@ jobs:
               || { echo "PR #${pr} failed to apply"; exit 1; }
           done
 
+      - name: Apply pinned OGA word-piece ABI repair
+        if: steps.cache-oga.outputs.cache-hit != 'true'
+        shell: bash
+        working-directory: onnxruntime-genai
+        run: |
+          set -euo pipefail
+          # Hash canonical Git bytes; a Windows checkout may convert to CRLF.
+          PATCH_FILE="$(mktemp)"
+          trap 'rm -f "$PATCH_FILE"' EXIT
+          git -C .. show HEAD:cmake/oga-wordpiece-types.patch > "$PATCH_FILE"
+          printf '%s  %s\n' "$OGA_COMPAT_PATCH_SHA256" "$PATCH_FILE" | sha256sum --check --strict
+          git -c core.autocrlf=input apply --check "$PATCH_FILE"
+          git -c core.autocrlf=input apply "$PATCH_FILE"
+
+      - name: Apply pinned OGA CUDA staging guard
+        if: steps.cache-oga.outputs.cache-hit != 'true'
+        working-directory: onnxruntime-genai
+        run: |
+          set -euo pipefail
+          PATCH_FILE=$(mktemp)
+          trap 'rm -f "$PATCH_FILE"' EXIT
+          git -C .. show HEAD:cmake/oga-engine-cuda-staging.patch > "$PATCH_FILE"
+          printf '%s  %s\n' "$OGA_ENGINE_PATCH_SHA256" "$PATCH_FILE" | sha256sum --check --strict
+          git -c core.autocrlf=input apply --check "$PATCH_FILE"
+          git -c core.autocrlf=input apply "$PATCH_FILE"
+
       - name: Build OGA
         if: steps.cache-oga.outputs.cache-hit != 'true'
+        # The original extensions repository returns 404. This mirror retains
+        # OGA's exact e2e119c08b4379d038bcb5c75d9111328a9b86c1 commit. Scope
+        # the transport mapping to this step; keep OGA's deps.txt pins intact.
+        env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: "url.https://github.com/Liquid4All/onnxruntime-extensions.git.insteadOf"
+          GIT_CONFIG_VALUE_0: "https://github.com/microsoft/onnxruntime-extensions.git"
         run: |
           set -euo pipefail
           ART="${{ runner.workspace }}/oga-artifacts"
