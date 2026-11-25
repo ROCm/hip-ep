@@ -380,12 +380,13 @@ void *hipdnn_ep_state_get_qmoe_amd_host_scratch(RuntimeState *state);
 int hipdnn_ep_state_ensure_qmoe_amd_host_scratch(RuntimeState *state,
                                                  size_t needed_size);
 
-// Per-session convolution workspace pool. No wrapper allocates from it today
-// -- MIOpen's Find API owns its own per-problem workspace, and forward Conv
-// runs on hip_conv, which needs none. Lazily grown via
+// Per-session convolution workspace pool. wrap_conv takes the partial-sum
+// workspace for split-K plans of hip_conv from it, through an allocation
+// callback, only for the shapes that use one. Lazily grown via
 // hipdnn_ep_state_ensure_conv_scratch (same policy as qmoe_scratch above:
-// never shrinks, freed in hipdnn_ep_state_cleanup). See
-// runtime_state_internal.h.
+// never shrinks, freed in hipdnn_ep_state_cleanup). Single buffer reused across
+// all convolutions in the session -- safe because the stream is serialised.
+// See runtime_state_internal.h.
 void *hipdnn_ep_state_get_conv_scratch(RuntimeState *state);
 int hipdnn_ep_state_ensure_conv_scratch(RuntimeState *state,
                                         size_t needed_size);

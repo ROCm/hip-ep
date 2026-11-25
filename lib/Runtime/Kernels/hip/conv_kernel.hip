@@ -1523,6 +1523,16 @@ static inline void logPick(const char *what, const ConvParams &pr) {
       (long long)pr.k1, (long long)pr.s0, (long long)pr.s1);
 }
 
+// Source of the partial-sum workspace: the caller's allocation callback, or
+// nothing, in which case split-K is simply not used.
+struct WorkspaceSource {
+  hip_conv_workspace_fn fn;
+  void *ctx;
+  float *get(size_t bytes) const {
+    return fn ? static_cast<float *>(fn(ctx, bytes)) : nullptr;
+  }
+};
+
 template <typename T, int BM, int BN, int TM, int TN>
 static void launchTile(hipStream_t stream, const void *x, const void *w,
                        const void *bias, void *y, const ConvParams &base) {
@@ -1847,7 +1857,8 @@ static bool smallMTileWorthwhile(const ConvParams &pr) {
 
 template <typename T>
 static int launch(hipStream_t stream, const void *x, const void *w,
-                  const void *bias, void *y, const ConvParams &pr) {
+                  const void *bias, void *y, const ConvParams &pr,
+                  const WorkspaceSource &wsrc) {
   const int64_t totalOut = pr.N * pr.Cout * pr.Nout;
   if (totalOut <= 0 || pr.K <= 0) return 0;
   (void)hipGetLastError(); // so the check after the launch sees only ours
@@ -2076,7 +2087,8 @@ extern "C" int hip_conv(void *stream, const void *input, const void *weights,
                         int64_t k0, int64_t k1, int64_t k2, int64_t s0,
                         int64_t s1, int64_t s2, int64_t p0, int64_t p1,
                         int64_t p2, int64_t dil0, int64_t dil1, int64_t dil2,
-                        int64_t group) {
+                        int64_t group, hip_conv_workspace_fn workspace_fn,
+                        void *workspace_ctx) {
   if (spatial_rank < 1 || spatial_rank > 3) {
     fprintf(stderr, "[custom_kernels] hip_conv: unsupported spatial_rank=%d\n",
             spatial_rank);
@@ -2158,13 +2170,15 @@ extern "C" int hip_conv(void *stream, const void *input, const void *weights,
       bias ? "yes" : "null");
 
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+  const WorkspaceSource wsrc{workspace_fn, workspace_ctx};
   switch (hip_dtype) {
     case HIP_DTYPE_FLOAT32:
-      return launch<float>(hip_stream, input, weights, bias, output, pr);
+      return launch<float>(hip_stream, input, weights, bias, output, pr, wsrc);
     case HIP_DTYPE_FLOAT16:
-      return launch<__half>(hip_stream, input, weights, bias, output, pr);
+      return launch<__half>(hip_stream, input, weights, bias, output, pr, wsrc);
     case HIP_DTYPE_BFLOAT16:
-      return launch<hip_bfloat16>(hip_stream, input, weights, bias, output, pr);
+      return launch<hip_bfloat16>(hip_stream, input, weights, bias, output, pr,
+                                  wsrc);
     default:
       fprintf(stderr, "[custom_kernels] hip_conv: unsupported dtype=%d\n",
               hip_dtype);

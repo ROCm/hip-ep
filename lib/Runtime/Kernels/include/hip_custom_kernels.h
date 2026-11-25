@@ -4268,8 +4268,19 @@ HIP_KERNEL_API int hip_sparse_attention_indexer(
  * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
  * HIP_DTYPE_BFLOAT16, HIP_DTYPE_INT32. All of input / weights / bias / output
  * share the dtype.
+ *
+ * Workspace. Some shapes are faster with the reduction split across blocks
+ * (split-K), which needs device memory for the partial sums. The kernel asks for
+ * it through `workspace_fn(workspace_ctx, bytes)`: called at most once per
+ * hip_conv call, before any launch, with the size the chosen plan needs. The
+ * returned device pointer must stay valid until the work enqueued on `stream`
+ * has run, and may be reused by a later hip_conv on the same stream (stream
+ * order serialises them). A NULL return, or a NULL `workspace_fn`, is not an
+ * error: the kernel then uses a path that needs no workspace.
  * Returns: 0 on success, non-zero on failure.
  */
+typedef void* (*hip_conv_workspace_fn)(void* ctx, size_t bytes);
+
 HIP_KERNEL_API int hip_conv(
     void* stream,
     const void* input,
@@ -4285,7 +4296,9 @@ HIP_KERNEL_API int hip_conv(
     int64_t s0, int64_t s1, int64_t s2,
     int64_t p0, int64_t p1, int64_t p2,
     int64_t dil0, int64_t dil1, int64_t dil2,
-    int64_t group);
+    int64_t group,
+    hip_conv_workspace_fn workspace_fn,  /* nullable, see "Workspace" above */
+    void* workspace_ctx);
 
 /* =========================================================================
  * ConvTranspose — forward transposed convolution (2D spatial)
