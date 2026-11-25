@@ -47,6 +47,21 @@ It applies only when `M >= 32` and `K >= 2 * kSplitMinTaps`.
 - `sliceSplit` caps the count so a slice keeps at least `kSplitMinTaps` taps and
   the partial sums fit in `kSplitMaxWorkspace`.
 
+## WMMA kernels (fp16)
+
+fp16 has its own kernels and its own planner, `planFp16Split`, which uses the
+same `sliceSplit` arithmetic. It does not choose a tile: it splits whatever tile
+the fp16 ladder chose.
+
+- It applies only when that tile's grid is at most one block per CU, so that the
+  grid is properly starved. Above that, a split costs more in workspace traffic
+  than the parallelism returns.
+- The target is again two blocks per CU, a slice keeps at least `kSplitMinTaps`
+  taps, and a chunk is a multiple of the WMMA depth (16).
+- The dedicated fp16 1x1 kernel is dispatched before split planning and never
+  splits. A 1x1 convolution reaches the WMMA split path only when the 1x1 kernel
+  rejects it (for example a reduction that is not a multiple of 8, or stride 2).
+
 ## Constants
 
 Both limits were chosen on one part, a 40-CU gfx1151 (an 8060S, which reports 20
@@ -73,7 +88,9 @@ derived from the wave size). Neither is derived from the hardware.
   traffic of writing and re-reading `split` fp32 copies of the output. It is a
   footprint limit rather than a tuned value.
 
-These sweeps were fp32 only.
+These sweeps were fp32 only. The fp16 kernels use the same constants and were
+only compared with split-K off, and at a few targets on ResNet-50, not swept
+shape by shape.
 
 ## Not yet done
 

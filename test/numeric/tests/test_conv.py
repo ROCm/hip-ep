@@ -155,9 +155,12 @@ class TestConvSplitK:
 
     Every row has to split, or it only repeats the unsplit kernels' tests. They
     do on the 40-CU gfx1151 (checked from the plan arithmetic and from the
-    kernels launched) and, for most rows, on smaller and larger devices too."""
+    kernels launched) and, for most rows, on smaller and larger devices too. The
+    1x1 rows use a reduction that is not a multiple of 8, which keeps fp16 off
+    its dedicated 1x1 kernel (that one never splits); the rows without a bias
+    cover the reduce kernel's null-bias path in fp32 and fp16."""
 
-    @pytest.mark.parametrize("dtype", [TensorProto.FLOAT])
+    @pytest.mark.parametrize("dtype", [TensorProto.FLOAT, TensorProto.FLOAT16])
     @pytest.mark.parametrize(
         "n,in_c,hw,out_c,k,stride,group,bias",
         [
