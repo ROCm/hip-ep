@@ -1642,11 +1642,12 @@ static void launchWmma(hipStream_t stream, const void *x, const void *w,
 
 constexpr int kWinKMax = 3; // largest kernel extent the window kernel stages
 
-// deviceUnitCount() reports WGPs, and a WGP is two CUs, so a coverage test
-// stated in units of real compute has to double it. Kept as a named constant
-// because the two ladders below disagree about whether they want WGPs or CUs
-// and the difference is otherwise invisible at the call site.
-constexpr int kUnitsPerWgp = 2;
+// How many CUs one unit of deviceUnitCount() stands for. RDNA (wave32) reports
+// WGPs, which are two CUs each, so a coverage test stated in units of real
+// compute has to double it; CDNA (wave64) reports CUs already. Kept as a named
+// function because the two ladders below disagree about whether they want WGPs
+// or CUs and the difference is otherwise invisible at the call site.
+static int cusPerUnit() { return hipdnn_device_is_wave64() ? 1 : 2; }
 
 template <int BM, int TH, int TW, int WM, int WN>
 static void launchWindow(hipStream_t stream, const void *x, const void *w,
@@ -1751,7 +1752,7 @@ bool launchWmmaIfProfitable<__half>(hipStream_t stream, const void *x,
   // caller's second pass and its scalar rungs are now unreachable for __half.
   // That is the intent: the second pass exists to keep small shapes off
   // conv_direct, and a WMMA tile does that better than a scalar one.
-  const int64_t cus = units * kUnitsPerWgp;
+  const int64_t cus = units * cusPerUnit();
   // The window-staging kernel gets first refusal on the multi-tap 2-D shapes.
   // Every tile below re-reads the input once per kernel tap, and on those
   // shapes that amplification -- not arithmetic, not occupancy -- is what the
