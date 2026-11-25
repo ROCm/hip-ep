@@ -62,6 +62,15 @@ zero-points combo. At startup the exe prints `coverage=N -> running
 <n> matmul_nbits cases`. No human edits a shape list -- there is no
 `shapes.csv` or `gen_data.py` in this leaf.
 
+Every tier also runs the W4A8 dp4a entry, `hip_matmul_nbits_dp4a`, at 2..9
+rows (`dp4a_rows` in the cpp), which the sweep never takes: `K=2560` with
+`N=1` at `M` in `{4,5,7}` and with `N=2560` at `M` in `{2,4,7,9}`, crossed with
+the same 6 group_size x zero-points combos (42 cases). `N=1` is narrower than
+every row-blocked tile, so it runs on the `tile_m=4` default and `M=5..7`
+takes two row tiles; `N=2560` takes one tile of 2, 4 and 8 rows, and two tiles
+of 8 at `M=9`. These cases are compared with the CPU reference only: they are
+not timed and write no `out/results.csv` row.
+
 `MODE=lookup` (default) -- resolves from `hip/autotune/matmul_nbits/lut/<arch>.fb`
 if it exists for the arch in `OFFLOAD`, else falls back to `autotune` with a
 warning. `MODE=autotune` always sweeps, ignoring any `.fb`. `MODE=lookup`
