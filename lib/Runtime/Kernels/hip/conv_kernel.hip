@@ -1450,6 +1450,14 @@ static bool tileFits(const ConvParams &pr, int64_t bm, int64_t bn,
   return pr.MPerGroup >= bm && tileCovers(pr, bm, bn, units);
 }
 
+// The WMMA kernels use the gfx11 and gfx12 matrix instructions, which are
+// wave32; on any other target they compile to a trap (HIPDNN_HAS_WMMA). Every
+// dispatch to one of them has to check this, so that fp16 falls to the scalar
+// rungs, which are templated on the element type. The wave size is the only
+// property the runtime exposes, so this rules out wave64 (CDNA) but not gfx10,
+// which is wave32 without WMMA.
+static bool wmmaSupported() { return !hipdnn_device_is_wave64(); }
+
 // fp16 gets first refusal on the matrix cores; everything else, and every fp16
 // shape too small for a WMMA tile, falls through to the scalar ladder.
 template <typename T>
@@ -1463,6 +1471,7 @@ template <>
 bool launchWmmaIfProfitable<__half>(hipStream_t stream, const void *x,
                                     const void *w, const void *bias, void *y,
                                     const ConvParams &pr, int64_t units) {
+  if (!wmmaSupported()) return false;
   // Every coverage test below is in CUs. The rungs were originally calibrated
   // against deviceUnitCount()'s WGPs, which asked each tile for half the grid
   // the test was written to demand, and the effect was not that tiles were
