@@ -91,4 +91,48 @@ module {
   // CHECK: %[[INIT:.*]] = tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?x512xf16>
   // CHECK: hip.cast(%[[CTX]]) ins(%[[IN]] : tensor<?x?x512xf32>) outs(%[[INIT]] : tensor<?x?x512xf16>) {to = 10 : i64} : tensor<?x?x512xf16>
   // CHECK-NOT: hip.alloc
+
+  // ==========================================================================
+  // ONNX UINT8(2) and BOOL(9) both lower to the MLIR element type `ui8`
+  // (see onnxElementTypeToMlirElementType in mlir-imp), so the result type
+  // alone cannot disambiguate them. The importer (mlir-graph.cpp) preserves
+  // the original ONNX enum in the "onnx_to_enum" attribute; CastToHip must
+  // prefer it over re-deriving `to` from the (ambiguous) result type.
+  // ==========================================================================
+
+  func.func @cast_f32_to_bool(%input: tensor<4xf32>) -> tensor<4xui8> {
+    %output = "onnx.Cast"(%input) {to = ui8, onnx_to_enum = 9 : i64} : (tensor<4xf32>) -> tensor<4xui8>
+    return %output : tensor<4xui8>
+  }
+
+  // CHECK-LABEL: func.func @cast_f32_to_bool
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<4xf32>) -> tensor<4xui8>
+  // CHECK: tensor.empty() : tensor<4xui8>
+  // CHECK: hip.cast(%[[CTX]]) ins(%[[IN]] : tensor<4xf32>) outs({{.*}} : tensor<4xui8>) {to = 9 : i64}
+  // CHECK-NOT: hip.alloc
+
+  func.func @cast_f32_to_uint8(%input: tensor<4xf32>) -> tensor<4xui8> {
+    %output = "onnx.Cast"(%input) {to = ui8, onnx_to_enum = 2 : i64} : (tensor<4xf32>) -> tensor<4xui8>
+    return %output : tensor<4xui8>
+  }
+
+  // CHECK-LABEL: func.func @cast_f32_to_uint8
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<4xf32>) -> tensor<4xui8>
+  // CHECK: tensor.empty() : tensor<4xui8>
+  // CHECK: hip.cast(%[[CTX]]) ins(%[[IN]] : tensor<4xf32>) outs({{.*}} : tensor<4xui8>) {to = 2 : i64}
+  // CHECK-NOT: hip.alloc
+
+  // No "onnx_to_enum" attribute (e.g. onnx.Cast synthesized by another pass,
+  // or hand-authored IR): falls back to the pre-existing type-based guess,
+  // which cannot distinguish UINT8 from BOOL and picks INT8 (3) for any
+  // 8-bit integer result. This documents the known fallback limitation
+  // rather than silently fixing it, since there is no enum to recover.
+  func.func @cast_f32_to_ui8_no_enum_hint(%input: tensor<4xf32>) -> tensor<4xui8> {
+    %output = "onnx.Cast"(%input) {to = ui8} : (tensor<4xf32>) -> tensor<4xui8>
+    return %output : tensor<4xui8>
+  }
+
+  // CHECK-LABEL: func.func @cast_f32_to_ui8_no_enum_hint
+  // CHECK: hip.cast({{.*}}) ins({{.*}} : tensor<4xf32>) outs({{.*}} : tensor<4xui8>) {to = 3 : i64}
+  // CHECK-NOT: hip.alloc
 }

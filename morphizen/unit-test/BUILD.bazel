@@ -132,6 +132,7 @@ cc_test(
         "morphizen/test_mmap_file.cpp",
         "morphizen/test_mmap_tmphandle.cpp",
         "morphizen/test_node_builder.cpp",
+        "morphizen/test_onnx_cast_enum.cpp",
         "morphizen/test_onnx_custom.cpp",
         "morphizen/test_onnx_return.cpp",
         "morphizen/test_onnx_schema.cpp",

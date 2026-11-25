@@ -35,27 +35,37 @@ CastToHip::matchAndRewrite(mlir::Operation *op,
     return rewriter.notifyMatchFailure(op, "unranked cast result");
   mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
 
-  // Map MLIR element type to ONNX DataType enum
-  mlir::Type targetType = resultType.getElementType();
+  // Prefer the original ONNX enum preserved at import time (mlir-graph.cpp),
+  // since the MLIR element type alone is ambiguous (e.g. UINT8 and BOOL both
+  // lower to `ui8`). Fall back to recomputing from the result type only for
+  // onnx.Cast ops synthesized by other passes (e.g. CastLike decomposition,
+  // or hand-authored test IR) that never had an original ONNX enum to carry
+  // forward.
   int64_t onnxDataType = 0;
-  if (targetType.isF16())
-    onnxDataType = 10;
-  else if (targetType.isBF16())
-    onnxDataType = 16;
-  else if (targetType.isF32())
-    onnxDataType = 1;
-  else if (targetType.isF64())
-    onnxDataType = 11;
-  else if (targetType.isInteger(8))
-    onnxDataType = 3;
-  else if (targetType.isInteger(16))
-    onnxDataType = 5;
-  else if (targetType.isInteger(32))
-    onnxDataType = 6;
-  else if (targetType.isInteger(64))
-    onnxDataType = 7;
-  else if (targetType.isInteger(1))
-    onnxDataType = 9;
+  if (auto preserved = op->getAttrOfType<mlir::IntegerAttr>(kOnnxToEnumAttr)) {
+    onnxDataType = preserved.getInt();
+  } else {
+    // Map MLIR element type to ONNX DataType enum
+    mlir::Type targetType = resultType.getElementType();
+    if (targetType.isF16())
+      onnxDataType = 10;
+    else if (targetType.isBF16())
+      onnxDataType = 16;
+    else if (targetType.isF32())
+      onnxDataType = 1;
+    else if (targetType.isF64())
+      onnxDataType = 11;
+    else if (targetType.isInteger(8))
+      onnxDataType = 3;
+    else if (targetType.isInteger(16))
+      onnxDataType = 5;
+    else if (targetType.isInteger(32))
+      onnxDataType = 6;
+    else if (targetType.isInteger(64))
+      onnxDataType = 7;
+    else if (targetType.isInteger(1))
+      onnxDataType = 9;
+  }
 
   // Validate that we have a supported type
   if (onnxDataType == 0)
