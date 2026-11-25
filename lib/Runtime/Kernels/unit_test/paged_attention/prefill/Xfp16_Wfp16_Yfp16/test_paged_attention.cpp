@@ -76,11 +76,12 @@ static std::vector<int> array(const std::string& s) {
 }
 static float floating(const std::string& s) { size_t n;float x=std::stof(s,&n);if(n!=s.size())throw std::invalid_argument("invalid float");return x; }
 static const std::vector<std::string> errors={"none","cum_start","cum_end","cum_order","negative_past","decode_length","post_overflow","table_small","bad_page","position","workspace","workspace_alignment","alias","pool_alias","softcap","negative_scale","nan_scale","inf_scale","nan_softcap","interleaved","partial_rotary","d256_window","geometry","write_conflict","null_rotary","size_overflow","tensor_alignment"};
-static Case parse_single(int argc,char** argv,bool& single,int& coverage) {
+static Case parse_single(int argc,char** argv,bool& single,int& coverage,bool& list_cases) {
   Case c;coverage=3;
   if(const char* e=std::getenv("HIPDNN_UT_COVERAGE"))coverage=int(input::integer(e,"coverage",1,3));
   for(int i=1;i<argc;++i){const std::string f=argv[i];const std::string s=input::value(argc,argv,i);
     if(f=="--coverage"){coverage=int(input::integer(s,"coverage",1,3));continue;}
+    if(f=="--list-cases"){list_cases=input::boolean(s,"list-cases");continue;}
     single=true;
     if(f=="--b")c.B=int(input::integer(s,"B"));
     else if(f=="--h")c.H=int(input::integer(s,"H"));
@@ -180,6 +181,18 @@ static std::vector<Case> build_cases(int coverage) {
     c.rotary=(hpg+d/32)%2;c.window=d==256&&!kDecode ? -1 : (hpg%3==0 ? 1:hpg%3==1 ? c.S+3:-1);
     c.scale=hpg%2 ? 0:0.17f;c.map=hpg%3==0 ? "shared":hpg%3==1 ? "ordered":"permuted";
     compact(c);c.seed+=unsigned(out.size());out.push_back(c);
+  }
+  // Keep the complete RoPE x window matrix at every coverage tier.
+  for(int d:{64,96,128,256})for(int rope:{0,1})for(int window:{-1,0,1,20,153}){
+    if(!kDecode&&d==256&&window>0)continue;
+    Case c;c.D=d;c.H=4;c.G=1;c.rotary=rope;c.window=window;c.past={34,51,68};
+    c.seed=0x11250000u;compact(c);out.push_back(c);
+  }
+  // First prefill/first decode: exercise window clipping at position zero.
+  for(int rope:{0,1})for(int window:{-1,0,1,20,153}){
+    Case c;c.D=128;c.H=8;c.G=2;c.rotary=rope;c.window=window;c.past={0,0,0};
+    c.q=kDecode?std::vector<int>{1,0,1}:std::vector<int>{3,0,33};
+    c.seed=0x11250001u;compact(c);out.push_back(c);
   }
   for(const std::string& map:{"ordered","permuted","shared"})for(int rotary:{0,1})for(int window:{-1,1,41}){
     Case c;c.D=64;c.H=4;c.G=1;c.past={34,51,68};c.q=kDecode ? std::vector<int>{1,0,1}:std::vector<int>{17,0,33};
@@ -392,9 +405,18 @@ static bool guards(const std::vector<unsigned char>& raw,size_t padding){
 }
 __global__ void hold_stream(const int* flag){volatile const int* p=flag;while(*p==0){}}
 struct Copies { int n;size_t bytes_per_copy;int count()const{return n;}size_t bytes()const{return bytes_per_copy;} };
+#ifdef HIPDNN_UT_PAGED_RUNTIME
+#include "../../../common/ut_paged_runtime.h"
+#endif
 struct CaseResult { bool passed=false;double rel_l2=0,time_ms=0;std::string config; };
 static CaseResult run_case(const Case& c,const timing::RankRow* rank_row=nullptr) {
   const std::string shape=describe_case(c);
+  bool runtime=false;
+#ifdef HIPDNN_UT_PAGED_RUNTIME
+  runtime=std::getenv("HIPDNN_UT_PAGED_RUNTIME")&&std::string(std::getenv("HIPDNN_UT_PAGED_RUNTIME"))=="1";
+  if(runtime&&(rank_row||public_entry()||c.error!="none"||std::getenv("HIPDNN_PAGED_ATTENTION_CFG")))
+    throw std::invalid_argument("runtime mode requires a normal, non-public, unpinned case");
+#endif
   Host h=prepare(c);CaseResult result;result.config=kDecode?"fixed:gqa-scalar splits=16":c.D==256?"fixed:gqa-v8x BKV=16 ND=2 HB=1":"fixed:gqa-v6x MT=1 BKV=32 HB=1 QW=2";
   GqaPagedConfig selected=gqa_paged_default(h.desc);std::string source="fixed:default";
   const char* pin=std::getenv("HIPDNN_PAGED_ATTENTION_CFG");
@@ -482,6 +504,24 @@ static CaseResult run_case(const Case& c,const timing::RankRow* rank_row=nullptr
     hipdnn_ep_test::GpuExecutionScope admission([]{check(hipDeviceSynchronize());});
     {
       Bundle base(h,bytes);
+      hipStream_t timed_stream=nullptr;
+#ifdef HIPDNN_UT_PAGED_RUNTIME
+      std::unique_ptr<UtPagedRuntime,decltype(&utPagedRuntimeDestroy)> runtime_state(
+          runtime?utPagedRuntimeCreate():nullptr,&utPagedRuntimeDestroy);
+      int32_t runtime_bounds[3]={0,0,INT32_MAX};
+      for(int request=0;request<c.B;++request){runtime_bounds[0]=std::max(runtime_bounds[0],c.q[request]);
+        if(c.q[request]){runtime_bounds[1]=std::max(runtime_bounds[1],c.past[request]+c.q[request]);
+          runtime_bounds[2]=std::min(runtime_bounds[2],c.past[request]+c.q[request]);}}
+      const char* metadata_mode=std::getenv("HIPDNN_UT_RUNTIME_METADATA");
+      std::string runtime_metadata=metadata_mode?metadata_mode:"host";
+      if(runtime_metadata!="host"&&runtime_metadata!="device"&&runtime_metadata!="none")
+        throw std::invalid_argument("runtime metadata must be host, device or none");
+      Buffer runtime_metadata_device(sizeof(runtime_bounds));runtime_metadata_device.upload(runtime_bounds);
+      const int32_t* runtime_metadata_pointer=runtime_metadata=="none"?nullptr:
+          runtime_metadata=="device"?static_cast<const int32_t*>(runtime_metadata_device.ptr()):runtime_bounds;
+      if(runtime){timed_stream=static_cast<hipStream_t>(utPagedRuntimeStream(runtime_state.get()));
+        std::printf("RUNTIME_BOUNDARY wrapper=wrap_paged_attention_v2 metadata=%s status=sticky-device scratch=grow-only op_state=session-slot alias=rotated-input-pools profile=disabled gate=none includes=metadata,status,selection,append,attention,completion\n",runtime_metadata.c_str());}
+#endif
       struct Cache {
         Buffer k,v;
         explicit Cache(const Host& h):k(h.kp.size()*2),v(h.vp.size()*2){k.upload(h.kp.data());v.upload(h.vp.data());}
@@ -491,18 +531,28 @@ static CaseResult run_case(const Case& c,const timing::RankRow* rank_row=nullptr
       int* flag=nullptr;check(hipHostMalloc(&flag,sizeof(int),hipHostMallocMapped|hipHostMallocCoherent));
       try {
         Copies rotation{copies,working};
-        auto launch=[&](int i){auto desc=base.desc;if(i){desc.k_pool=caches[size_t(i-1)]->k.ptr();desc.v_pool=caches[size_t(i-1)]->v.ptr();}return page_complete_entry(nullptr,&desc,base.workspace.ptr(),bytes,&selected,sizeof(selected));};
+        auto launch=[&](int i){auto desc=base.desc;if(i){desc.k_pool=caches[size_t(i-1)]->k.ptr();desc.v_pool=caches[size_t(i-1)]->v.ptr();}
+#ifdef HIPDNN_UT_PAGED_RUNTIME
+          if(runtime)return utPagedRuntimeCall(runtime_state.get(),desc,runtime_metadata_pointer,runtime_metadata_pointer?3:0);
+#endif
+          return page_complete_entry(nullptr,&desc,base.workspace.ptr(),bytes,&selected,sizeof(selected));};
         auto validate=[&](){
           if(launch(0))throw std::runtime_error("Page candidate host rejection");check(hipDeviceSynchronize());
-          auto raw=base.o.download();auto kp=base.kp.download(),vp=base.vp.download();int status=0;check(hipMemcpy(&status,base.workspace.ptr(),4,hipMemcpyDeviceToHost));
+          auto raw=base.o.download();auto kp=base.kp.download(),vp=base.vp.download();int status=0;
+#ifdef HIPDNN_UT_PAGED_RUNTIME
+          if(runtime)status=utPagedRuntimeStatus(runtime_state.get());else
+#endif
+          check(hipMemcpy(&status,base.workspace.ptr(),4,hipMemcpyDeviceToHost));
           if(status||!guards(raw,16)||!guards(base.workspace.download(),256)||!matches(base.co.download(),h.co.data(),h.co.size()*2)||!matches(base.si.download(),h.si.data(),h.si.size()*2)||!matches(kp,h.expected_k.data(),h.expected_k.size()*2)||!matches(vp,h.expected_v.data(),h.expected_v.size()*2)||
              !matches(base.q.download(),h.q.data(),h.q.size()*2)||!matches(base.k.download(),h.k.data(),h.k.size()*2)||!matches(base.v.download(),h.v.data(),h.v.size()*2)||
              !matches(base.cum.download(),h.cum.data(),h.cum.size()*4)||!matches(base.past.download(),h.past.data(),h.past.size()*4)||!matches(base.table.download(),h.table.data(),h.table.size()*4))throw std::runtime_error("Page candidate storage/metadata check failed");
           double sum=0,norm=0;for(size_t i=0;i<h.reference.size();++i){__half x;std::memcpy(&x,raw.data()+16+2*i,2);double e=__half2float(x)-h.reference[i];sum+=e*e;norm+=double(h.reference[i])*h.reference[i];}
           double error=std::sqrt(sum/std::max(norm,1e-30));if(!(error<(kDecode?2e-2:2e-3)))throw std::runtime_error("Page candidate CPU reference FAIL");return error;
         };
-        auto measure=[&](const timing::RankOptions* options=nullptr){return timing::adaptiveRotatedMeanMs(nullptr,rotation,launch,
-          flag,[&](const int* p){hold_stream<<<1,1>>>(p);},warm,size_t(128)<<20,"paged_attention_f16",(public_entry()?"hip_paged_attention_f16":"hip_paged_attention_f16_configured_v2"),timing::NoPreparation{},options);};
+        auto measure=[&](const timing::RankOptions* options=nullptr){return timing::adaptiveRotatedMeanMs(timed_stream,rotation,launch,
+          flag,[&](const int* p){if(!runtime)hold_stream<<<1,1>>>(p);},warm,size_t(128)<<20,
+          runtime?"paged_attention_runtime":"paged_attention_f16",
+          runtime?"wrap_paged_attention_v2":(public_entry()?"hip_paged_attention_f16":"hip_paged_attention_f16_configured_v2"),timing::NoPreparation{},options);};
         if(rank_row){
 #ifndef HIPDNN_UT_RANK_PAGED_ADAPTER
           throw std::invalid_argument("UT rank: Page requires RANK=1 build");
@@ -521,10 +571,17 @@ static CaseResult run_case(const Case& c,const timing::RankRow* rank_row=nullptr
             if(rc)throw std::runtime_error("production Page preparation failed");
             selected=prepared.config;source=prepared.source;result.rel_l2=validate();
           }
+#ifdef HIPDNN_UT_PAGED_RUNTIME
+          if(runtime){result.rel_l2=validate();if(hip_paged_attention_f16_last_config_v2(&selected,sizeof(selected)))throw std::runtime_error("runtime actual config unavailable");source="runtime:production-prepared-cache";}
+#endif
           result.config=source+":"+config_string(selected);std::printf("PAGED_CONFIG shape=%s config=%s boundary=complete\n",shape.c_str(),result.config.c_str());
           result.time_ms=measure();
         }
-        int state=0;check(hipMemcpy(&state,base.workspace.ptr(),4,hipMemcpyDeviceToHost));if(state)throw std::runtime_error("timed entry metadata failure");
+        int state=0;
+#ifdef HIPDNN_UT_PAGED_RUNTIME
+        if(runtime){state=utPagedRuntimeStatus(runtime_state.get());result.rel_l2=validate();}else
+#endif
+        check(hipMemcpy(&state,base.workspace.ptr(),4,hipMemcpyDeviceToHost));if(state)throw std::runtime_error("timed entry metadata failure");
         check(hipDeviceSynchronize());check(hipHostFree(flag));flag=nullptr;
       }catch(...){if(flag){check(hipDeviceSynchronize());check(hipHostFree(flag));}throw;}
     }
@@ -781,7 +838,7 @@ static void run_compare(const Case& c){
 #endif
 
 int main(int argc,char** argv){
-  try {bool single=false;int coverage=3;Case c=parse_single(argc,argv,single,coverage);if(single)validate_case(c);
+  try {bool single=false,list_cases=false;int coverage=3;Case c=parse_single(argc,argv,single,coverage,list_cases);if(single)validate_case(c);
     if(c.compare){
 #ifdef HIPDNN_UT_COMPARE_ORIGINAL_GQA
       if(!single)throw std::invalid_argument("compare requires custom case");run_compare(c);return 0;
@@ -790,6 +847,7 @@ int main(int argc,char** argv){
 #endif
     }
     const std::vector<Case> cases=single?std::vector<Case>{c}:build_cases(coverage);
+    if(list_cases){for(const auto& test:cases){validate_case(test);std::printf("UT_CASE %s\n",timing::jsonString(describe_case(test)).c_str());}return 0;}
     if(timing::rankRequested()) {
 #ifndef HIPDNN_UT_RANK_PAGED_ADAPTER
       throw std::invalid_argument("UT rank: Page requires RANK=1 build");

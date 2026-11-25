@@ -15,6 +15,7 @@ OFFLOAD ?= --offload-arch=gfx11-generic
 HIP_SDK ?= $(HIP_PATH)
 MODE ?= lookup
 RANK ?= 0
+RUNTIME ?= 0
 COMPARE ?= 0
 FLASH_SOURCE ?=
 SHARED_PREFIX ?= 0
@@ -86,6 +87,19 @@ $(COMPARE_OBJ): ../../../common/original_gqa_compare_adapter.hip $(FLASH_SOURCE)
 	"$(HIPCC)" -c $(KERNEL_FLAGS) $(OFFLOAD) -I$(INCLUDE_DIR) -I$(GEN_DIR) $< -o $@
 endif
 INCLUDES := -I$(INCLUDE_DIR) -I$(AUTOTUNE_DIR) -I$(GEN_DIR) -I$(FLATBUFFERS_INC)
+RUNTIME_OBJS :=
+ifeq ($(RUNTIME),1)
+ifneq ($(RANK)$(COMPARE),00)
+$(error RUNTIME=1 requires RANK=0 COMPARE=0)
+endif
+TEST_DEFINES += -DHIPDNN_UT_PAGED_RUNTIME=1 -DHIPDNN_EP_RT_NO_EXPORT
+INCLUDES += -I../../../../../real -I../../../../.. -I../../../../../../../include
+RUNTIME_OBJS := $(BUILD_DIR)/runtime.obj $(BUILD_DIR)/runtime_adapter.obj
+$(BUILD_DIR)/runtime.obj: ../../../../../real/paged_attention.cpp $(PUBLIC_HEADERS) | $(BUILD_DIR)
+	"$(HIPCC)" -c $(CXXFLAGS) -x c++ -D__HIP_PLATFORM_AMD__=1 -I"$(HIP_SDK)/include" -DHIPDNN_EP_RT_NO_EXPORT $(INCLUDES) $< -o $@
+$(BUILD_DIR)/runtime_adapter.obj: ../../../common/paged_runtime_adapter.cpp $(COMMON_HEADERS) | $(BUILD_DIR)
+	"$(HIPCC)" -c $(CXXFLAGS) -x c++ -D__HIP_PLATFORM_AMD__=1 -I"$(HIP_SDK)/include" -DHIPDNN_EP_RT_NO_EXPORT $(INCLUDES) $< -o $@
+endif
 KERNEL_MODE := $(if $(filter autotune,$(MODE)),online,lookup)
 RESULTS_CSV ?= $(BUILD_DIR)/results.csv
 CSV_FRESH ?= 1
@@ -119,7 +133,7 @@ $(KERNEL_OBJ): $(KERNEL_HIP) $(PUBLIC_HEADERS) | $(BUILD_DIR)
 	"$(HIPCC)" -c $(KERNEL_FLAGS) $(OFFLOAD) -I$(INCLUDE_DIR) $< -o $@
 $(GQA_OBJ): $(GQA_HIP) ../../../../hip/gqa_kernel.hip $(PUBLIC_HEADERS) | $(BUILD_DIR)
 	"$(HIPCC)" -c $(KERNEL_FLAGS) $(OFFLOAD) -I$(INCLUDE_DIR) $< -o $@
-$(TARGET): $(TEST_OBJ) $(KERNEL_OBJ) $(GQA_OBJ) $(AUTOTUNE_OBJ) $(COMPARE_OBJ)
+$(TARGET): $(TEST_OBJ) $(KERNEL_OBJ) $(GQA_OBJ) $(AUTOTUNE_OBJ) $(COMPARE_OBJ) $(RUNTIME_OBJS)
 	"$(HIPCC)" $(OFFLOAD) $^ -o $@
 RUN = set "PATH=$(subst /,\,$(HIP_SDK))\bin;%PATH%" && set "HIPDNN_PAGED_ATTENTION_AUTOTUNE_MODE=$(KERNEL_MODE)" && set "HIPDNN_UT_TIMING=$(TIMING)" && set "HIPDNN_RESULTS_CSV=$(subst /,\,$(RESULTS_CSV))" && set "HIPDNN_RESULTS_ARCH=$(ARCH)" && set "HIPDNN_RESULTS_MODE=$(MODE)" && "$(subst /,\,$(TARGET))"
 test: $(TARGET)
