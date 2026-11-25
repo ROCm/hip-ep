@@ -181,6 +181,17 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
         list(APPEND COMPILE_FLAGS "-fPIC")
     endif()
 
+    # Register static dtors via atexit() rather than __cxa_atexit(..,
+    # &__dso_handle). Clang declares __dso_handle hidden and reaches it
+    # PC-relative, but under the LLJIT path it is defined in a separate JITLink
+    # graph that can be mapped >2 GiB away, failing initialize() with an
+    # out-of-range Delta32. atexit is what MSVC uses already and what
+    # LlvmIrJit's atexit shim captures; in a native .so, glibc's atexit stub
+    # still passes the .so's own __dso_handle.
+    if(NOT WIN32)
+        list(APPEND COMPILE_FLAGS "-fno-use-cxa-atexit")
+    endif()
+
     # Propagate the vendor-BLAS opt-out into the bitcode compile so the
     # hipBLASLt-backed wrappers (real/{hipblas,gemm}.cpp) compile their stub
     # branch instead of the vendor-backed one.
