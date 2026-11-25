@@ -75,14 +75,11 @@ struct PagedAttentionOpLowering : ConvertOpToLLVMPattern<PageOp> {
         c(interleaved),
         LLVM::ConstantOp::create(
             rewriter, loc, f32,
-            rewriter.getF32FloatAttr(op.getScale().convertToFloat())),
-        LLVM::ConstantOp::create(
-            rewriter, loc, f32,
-            rewriter.getF32FloatAttr(op.getSoftcap().convertToFloat()))};
+            rewriter.getF32FloatAttr(op.getScale().convertToFloat()))};
     SmallVector<Type> types{ptr, rewriter.getI32Type()};
     types.append(12, ptr);
     types.append(21, i64);
-    types.append(2, f32);
+    types.append(1, f32);
     if constexpr (Mrope) {
       args.push_back(data(adaptor.getPositionIds()));
       types.push_back(ptr);
@@ -101,8 +98,8 @@ struct PagedAttentionOpLowering : ConvertOpToLLVMPattern<PageOp> {
     }
     auto fn = LLVM::lookupOrCreateFn(
         rewriter, op->template getParentOfType<ModuleOp>(),
-        Mrope ? "wrap_paged_attention_mrope" : "wrap_paged_attention", types,
-        rewriter.getI32Type());
+        Mrope ? "wrap_paged_attention_mrope_v2" : "wrap_paged_attention_v2",
+        types, rewriter.getI32Type());
     if (failed(fn))
       return failure();
     LLVM::CallOp::create(rewriter, loc, *fn, args);

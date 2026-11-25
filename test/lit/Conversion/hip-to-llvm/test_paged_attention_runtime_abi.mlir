@@ -3,8 +3,8 @@
 
 // RUN: hip-mlir-opt --convert-hip-to-llvm %s | FileCheck %s
 
-// Check all 37 parameter types, including the two independently sized extents.
-// CHECK: llvm.func @wrap_paged_attention(!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32) -> i32
+// Check all 36 parameter types, including the two independently sized extents.
+// CHECK: llvm.func @wrap_paged_attention_v2(!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f32) -> i32
 // CHECK-LABEL: llvm.func @paged_runtime_extents
 // Tie extent extraction to the same descriptors used for each data pointer.
 // CHECK: llvm.extractvalue %[[Q_DESC:[a-zA-Z0-9_]+]][1]
@@ -28,8 +28,8 @@
 // CHECK-NEXT: %[[K_PAGE_SIZE:[a-zA-Z0-9_]+]] = llvm.extractvalue %[[KP_DESC]][3, 1]
 // CHECK-NEXT: %[[V_PAGE_SIZE:[a-zA-Z0-9_]+]] = llvm.extractvalue %[[VP_DESC]][3, 1]
 // The runtime must receive output.dim0 after Q/K/V token counts, and V.dim1
-// after K.dim1. Checking the full call type also rejects the previous 35-arg ABI.
-// CHECK: llvm.call @wrap_paged_attention(%{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %[[VP_PTR]], %{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %[[OUT_PTR]], %[[Q_T]], %[[K_T]], %[[V_T]], %[[OUT_T]], %[[BATCH]], %[[K_PAGES]], %[[V_PAGES]], %[[K_PAGE_SIZE]], %[[V_PAGE_SIZE]], %{{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32) -> i32
+// after K.dim1. Checking the full call type also rejects the previous 37-arg ABI.
+// CHECK: llvm.call @wrap_paged_attention_v2(%{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %[[VP_PTR]], %{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %{{[^,]+}}, %[[OUT_PTR]], %[[Q_T]], %[[K_T]], %[[V_T]], %[[OUT_T]], %[[BATCH]], %[[K_PAGES]], %[[V_PAGES]], %[[K_PAGE_SIZE]], %[[V_PAGE_SIZE]], %{{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f32) -> i32
 
 // Independent dynamic descriptors make accidental reuse of Q's token count or
 // K's page size visible in the runtime ABI. This only compiles Hip IR.

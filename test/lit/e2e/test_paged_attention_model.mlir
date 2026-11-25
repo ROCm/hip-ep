@@ -10,11 +10,11 @@
 // HIP-SAME: metadata(
 // HIP-SAME: outs(%{{.*}}, %{{.*}}, %{{.*}}
 // LLVM-DAG: llvm.func @hipdnn_ep_bind_output
-// LLVM-DAG: llvm.func @wrap_paged_attention
+// LLVM-DAG: llvm.func @wrap_paged_attention_v2
 // LLVM-LABEL: llvm.func private @main_graph_internal
 // LLVM: llvm.call @hipdnn_ep_bind_output
 // LLVM: llvm.call @hipdnn_ep_bind_output
-// LLVM: llvm.call @wrap_paged_attention
+// LLVM: llvm.call @wrap_paged_attention_v2
 // LLVM-NOT: llvm.call @hipdnn_ep_memcpy
 // LLVM: llvm.return
 

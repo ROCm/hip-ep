@@ -10,6 +10,7 @@
 // CHECK-SAME: mrope_layout = 1
 // CHECK-SAME: mrope_section = [11, 11, 10]
 // CHECK-SAME: rotary_dim = 64
+// CHECK-NOT: softcap
 // CHECK-NOT: hip.mrotary_embedding
 // CHECK-LABEL: func.func @model_static
 // CHECK-NOT: hip.mrotary_embedding

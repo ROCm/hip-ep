@@ -77,11 +77,12 @@ static std::vector<int> array(const std::string& s) {
 }
 static float floating(const std::string& s) { size_t n;float x=std::stof(s,&n);if(n!=s.size())throw std::invalid_argument("invalid float");return x; }
 static const std::vector<std::string> errors={"none","cum_start","cum_end","cum_order","negative_past","decode_length","post_overflow","table_small","bad_page","workspace","workspace_alignment","alias","pool_alias","softcap","negative_scale","nan_scale","inf_scale","nan_softcap","d256_window","geometry","write_conflict","size_overflow","tensor_alignment","output_alignment","pool_alignment","mrope_layout","mrope_sections","mrope_dim","mrope_scale","mrope_null"};
-static Case parse_single(int argc,char** argv,bool& single,int& coverage) {
+static Case parse_single(int argc,char** argv,bool& single,int& coverage,bool& list_cases) {
   Case c;coverage=3;
   if(const char* e=std::getenv("HIPDNN_UT_COVERAGE"))coverage=int(input::integer(e,"coverage",1,3));
   for(int i=1;i<argc;++i){const std::string f=argv[i];const std::string s=input::value(argc,argv,i);
     if(f=="--coverage"){coverage=int(input::integer(s,"coverage",1,3));continue;}
+    if(f=="--list-cases"){list_cases=input::boolean(s,"list-cases");continue;}
     single=true;
     if(f=="--mrope-layout")c.mrope_layout=int(input::integer(s,"mrope_layout",0,1));
     else if(f=="--mrope-sections")c.sections=array(s);
@@ -178,11 +179,21 @@ static std::vector<Case> build_cases(int coverage) {
   std::vector<Case> out;
   // Every tier retains both layouts, full/partial rotation, three position
   // patterns, physical maps, head dimensions, inactive/ragged requests.
-  for(int d:{64,96,128,256})for(int layout:{0,1})for(int full:{0,1}){
-    Case c;c.D=d;c.H=6;c.G=1;c.mrope_layout=layout;c.rotary_dim=full?d:32;
+  for(int d:{64,96,128,256})for(int layout:{0,1})for(int full:{0,1})for(int window:{-1,0,1,20,153}){
+    if(!kDecode&&d==256&&window>0)continue;
+    Case c;c.D=d;c.H=6;c.G=1;c.mrope_layout=layout;c.window=window;c.past={34,51,68};c.seed=0x11250000u;c.rotary_dim=full?d:32;
     const int n=c.rotary_dim/2;c.sections={n/3,n/3,n-2*(n/3)};
     c.positions=full?"distinct":"out-of-cache";c.mrope_scale=full?1:0.5f;
     c.map=layout?"permuted":"ordered";compact(c);out.push_back(c);
+  }
+  // Initial requests retain both stream layouts and rotary widths too.
+  for(int layout:{0,1})for(int full:{0,1})for(int window:{-1,0,1,20,153}){
+    Case c;c.D=128;c.H=6;c.G=1;c.mrope_layout=layout;c.rotary_dim=full?128:32;
+    const int n=c.rotary_dim/2;c.sections={n/3,n/3,n-2*(n/3)};
+    c.positions=full?"distinct":"out-of-cache";c.mrope_scale=full?1:0.5f;
+    c.window=window;c.past={0,0,0};c.map=layout?"permuted":"ordered";
+    c.q=kDecode?std::vector<int>{1,0,1}:std::vector<int>{3,0,33};
+    c.seed=0x11250001u;compact(c);out.push_back(c);
   }
   for(const std::string& map:{"ordered","permuted","shared"})for(const std::string& ids:{"same","distinct","out-of-cache"}){
     Case c;c.D=64;c.H=4;c.G=1;c.past={34,51,68};c.map=map;c.positions=ids;c.window=19;
@@ -580,8 +591,9 @@ static void csv(const Case& c,const CaseResult& r){
   if(std::fclose(f))throw std::runtime_error("CSV close failed");
 }
 int main(int argc,char** argv){
-  try {bool single=false;int coverage=3;Case c=parse_single(argc,argv,single,coverage);if(single)validate_case(c);
+  try {bool single=false,list_cases=false;int coverage=3;Case c=parse_single(argc,argv,single,coverage,list_cases);if(single)validate_case(c);
     const std::vector<Case> cases=single?std::vector<Case>{c}:build_cases(coverage);
+    if(list_cases){for(const auto& test:cases){validate_case(test);std::printf("UT_CASE %s\n",timing::jsonString(describe_case(test)).c_str());}return 0;}
     if(timing::rankRequested()) {
 #ifndef HIPDNN_UT_RANK_PAGED_ADAPTER
       throw std::invalid_argument("UT rank: Page requires RANK=1 build");

@@ -4547,10 +4547,9 @@ static LogicalResult verifyPagedAttention(PageOp op) {
     interleaved = op.getRotaryInterleaved();
   }
   if ((doRotary != 0 && doRotary != 1) || interleaved != 0 || window < -1 ||
-      window > INT32_MAX || op.getSoftcap().convertToFloat() != 0 ||
-      !std::isfinite(op.getScale().convertToFloat()) ||
+      window > INT32_MAX || !std::isfinite(op.getScale().convertToFloat()) ||
       op.getScale().convertToFloat() < 0)
-    return op.emitOpError("unsupported rotary/window/softcap/scale options");
+    return op.emitOpError("unsupported rotary/window/scale options");
   constexpr int64_t any = ShapedType::kDynamic;
   auto matches = [&](Value v, Type elem, ArrayRef<int64_t> dims) {
     auto t = cast<ShapedType>(v.getType());

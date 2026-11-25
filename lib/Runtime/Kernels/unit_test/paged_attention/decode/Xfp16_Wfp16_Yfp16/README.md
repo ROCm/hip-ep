@@ -195,3 +195,12 @@ separate each active request's descriptor with a pipe. Native pins must match
 the original candidate space and conflict with HIPDNN_UT_FLASH_CFG. Final Page
 winners use the existing HIPDNN_PAGED_ATTENTION_CFG. Config queries and search
 remain outside complete-call event intervals.
+
+`--coverage N --list-cases 1` lists the actual suite keys without allocating or
+launching GPU work. Every tier retains the explicit RoPE/window categorical
+matrix: full context (-1 and 0), window one, a window crossing physical pages,
+and a window larger than the context. FP16 covers RoPE off/on; the MRoPE leaf
+crosses both layouts and partial/full rotation. D256 positive-window prefill
+remains a rejection case; decode D256 positive windows are normal cases.
+The native descriptor's reserved SOFTCAP field is a legacy ABI check only;
+the HIP op and v2 runtime wrappers have no softcap parameter.

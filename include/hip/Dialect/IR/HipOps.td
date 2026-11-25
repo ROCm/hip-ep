@@ -4531,7 +4531,6 @@ def Hip_PagedAttentionOp : Hip_DpsOp_AutoReify<"paged_attention", [AttrSizedOper
     I64Attr:$num_heads, I64Attr:$kv_num_heads,
     DefaultValuedAttr<F32Attr,"0.0f">:$scale,
     DefaultValuedAttr<I64Attr,"-1">:$local_window_size,
-    DefaultValuedAttr<F32Attr,"0.0f">:$softcap,
     DefaultValuedAttr<I64Attr,"0">:$do_rotary,
     DefaultValuedAttr<I64Attr,"0">:$rotary_interleaved);
   let assemblyFormat = [{
@@ -4580,8 +4579,7 @@ def Hip_PagedMropeAttentionOp : Hip_DpsOp_AutoReify<"paged_mrope_attention", [Op
     DefaultValuedAttr<I64Attr,"0">:$mrope_layout,
     DefaultValuedAttr<F32Attr,"1.0f">:$mrope_scale,
     DefaultValuedAttr<F32Attr,"0.0f">:$scale,
-    DefaultValuedAttr<I64Attr,"-1">:$local_window_size,
-    DefaultValuedAttr<F32Attr,"0.0f">:$softcap);
+    DefaultValuedAttr<I64Attr,"-1">:$local_window_size);
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $query `,` $key `,` $value `,` $cu_seqlens `,`
       $past_seqlens `,` $block_table `:` type($query) `,` type($key) `,`

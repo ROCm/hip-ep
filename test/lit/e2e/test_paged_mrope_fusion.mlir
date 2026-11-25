@@ -2,14 +2,14 @@
 // Licensed under the MIT License.
 
 // RUN: hip-mlir-opt %s --hipdnn-pipeline | FileCheck %s
-// CHECK-DAG: llvm.func @wrap_paged_attention_mrope
+// CHECK-DAG: llvm.func @wrap_paged_attention_mrope_v2
 // CHECK-DAG: llvm.func @hipdnn_ep_op_state_construct_paged_attention
 // CHECK-LABEL: llvm.func private @main_graph_internal
 // CHECK-NOT: llvm.call @wrap_mrotary_embedding
 // CHECK-NOT: llvm.call @wrap_cast
 // CHECK: llvm.call @hipdnn_ep_bind_output
 // CHECK: llvm.call @hipdnn_ep_bind_output
-// CHECK: llvm.call @wrap_paged_attention_mrope
+// CHECK: llvm.call @wrap_paged_attention_mrope_v2
 // CHECK-NOT: llvm.call @hipdnn_ep_memcpy
 // CHECK: llvm.return
 // CHECK: llvm.func @inference_compute

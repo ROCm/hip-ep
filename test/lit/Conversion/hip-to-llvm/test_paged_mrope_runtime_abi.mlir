@@ -2,9 +2,9 @@
 // Licensed under the MIT License.
 
 // RUN: hip-mlir-opt --convert-hip-to-llvm %s | FileCheck %s
-// CHECK: llvm.func @wrap_paged_attention_mrope(!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, !llvm.ptr, i64, i64, i64, i64, i64, i64, f32) -> i32
+// CHECK: llvm.func @wrap_paged_attention_mrope_v2(!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, !llvm.ptr, i64, i64, i64, i64, i64, i64, f32) -> i32
 // CHECK-LABEL: llvm.func @paged_mrope_extents
-// CHECK: llvm.call @wrap_paged_attention_mrope
+// CHECK: llvm.call @wrap_paged_attention_mrope_v2
 module {
   func.func @paged_mrope_extents(
       %ctx: !hip.context,

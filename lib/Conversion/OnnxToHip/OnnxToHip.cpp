@@ -524,6 +524,29 @@ void ConvertOnnxToHipPass::runOnOperation() {
                    << llvm::format("%.3f", sec) << "s\n";
   };
 
+  // Reject an unsupported ONNX request before its attribute is consumed.
+  // HIP Page ops and runtime wrappers deliberately have no softcap parameter.
+  auto unsupportedPage = module.walk([](Operation *op) -> WalkResult {
+    if (op->getName().getStringRef() != "onnx.Custom")
+      return WalkResult::advance();
+    auto function = op->getAttrOfType<StringAttr>("function_name");
+    auto domain = op->getAttrOfType<StringAttr>("domain_name");
+    if (!function || function.getValue() != "PagedAttention" || !domain ||
+        domain.getValue() != "com.microsoft")
+      return WalkResult::advance();
+    if (Attribute value = op->getAttr("softcap")) {
+      auto cap = dyn_cast<FloatAttr>(value);
+      if (!cap || cap.getValueAsDouble() != 0.0) {
+        op->emitOpError("HIP PagedAttention requires softcap to be omitted or "
+                        "zero; soft-capping is unsupported");
+        return WalkResult::interrupt();
+      }
+    }
+    return WalkResult::advance();
+  });
+  if (unsupportedPage.wasInterrupted())
+    return signalPassFailure();
+
   // NOTE: onnx.CastLike -> onnx.Cast + dead-type-donor function-argument
   // drop is handled by the standalone simplify-onnx pass, which must run
   // upstream of this one (see lib/Dialect/Transforms/Pipelines.cpp). We

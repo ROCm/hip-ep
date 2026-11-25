@@ -112,6 +112,11 @@ struct PagedMropeFusion : RewritePattern {
         op->getNumOperands() > 17 || integer(op, "do_rotary") != 0 ||
         integer(op, "rotary_interleaved") != 0)
       return failure();
+    if (Attribute value = op->getAttr("softcap")) {
+      auto cap = dyn_cast<FloatAttr>(value);
+      if (!cap || cap.getValueAsDouble() != 0.0)
+        return failure();
+    }
     auto present = [&](unsigned i) {
       return i < op->getNumOperands() &&
              !isa<NoneType>(op->getOperand(i).getType());
@@ -163,6 +168,7 @@ struct PagedMropeFusion : RewritePattern {
     state.addOperands(operands);
     state.addTypes(op->getResultTypes());
     state.addAttributes(op->getAttrs());
+    state.attributes.erase("softcap");
     state.attributes.set("function_name",
                          rewriter.getStringAttr("PagedAttentionMRoPE"));
     state.attributes.set("domain_name", rewriter.getStringAttr("hip.internal"));

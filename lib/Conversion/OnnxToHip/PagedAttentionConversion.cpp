@@ -19,6 +19,14 @@ struct PagedAttentionToHip : RewritePattern {
     if (!mrope && (!name || name.getValue() != "PagedAttention" || !domain ||
                    domain.getValue() != "com.microsoft"))
       return failure();
+    // The ONNX schema owns the optional/default-zero attribute. It is not
+    // part of the HIP op or runtime contract until soft-capping is supported.
+    if (Attribute value = op->getAttr("softcap")) {
+      auto cap = dyn_cast<FloatAttr>(value);
+      if (!cap || cap.getValueAsDouble() != 0.0)
+        return rewriter.notifyMatchFailure(op,
+                                           "nonzero softcap is unsupported");
+    }
     if (op->getNumOperands() < 8 ||
         op->getNumOperands() > (mrope ? 18u : 17u) ||
         (mrope && op->getNumOperands() != 18) || op->getNumResults() < 1 ||
@@ -126,7 +134,7 @@ struct PagedAttentionToHip : RewritePattern {
         if (auto a = op->getAttrOfType<IntegerAttr>(attr))
           state.addAttribute(attr, rewriter.getI64IntegerAttr(a.getInt()));
     }
-    for (StringRef attr : {"scale", "softcap"})
+    for (StringRef attr : {"scale"})
       if (auto a = op->getAttrOfType<FloatAttr>(attr))
         state.addAttribute(attr,
                            rewriter.getF32FloatAttr(a.getValueAsDouble()));
