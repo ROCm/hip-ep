@@ -52,3 +52,6 @@ target_link_libraries(HipConversion PUBLIC
 )
 
 set_target_properties(HipConversion PROPERTIES FOLDER "mlir/Conversion")
+if(HIPDNN_EP_BUILD_GGML)
+  add_subdirectory(GgmlToHip)
+endif()

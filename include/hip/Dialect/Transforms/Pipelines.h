@@ -90,6 +90,15 @@ void buildOnnxToHipPipelineTail(OpPassManager &pm,
                                 const OnnxToHipPipelineOptions &options,
                                 morphizen::FileSystem *fs = nullptr);
 
+#ifdef HIPDNN_EP_BUILD_GGML
+/// ggml graphs (HIPDNN_EP_BUILD_GGML): a module of the ggml dialect, as a
+/// ggml backend's split is captured (docs/design/ggml-backend.md), converted
+/// to tensor-form HIP IR and taken to bufferized HIP IR by the tail ONNX runs.
+void buildGgmlToHipPipeline(OpPassManager &pm,
+                            const OnnxToHipPipelineOptions &options,
+                            morphizen::FileSystem *fs = nullptr);
+#endif
+
 /// Build the head of the ONNX-to-HIP pipeline: everything up to and including
 /// the OnnxToHip conversion. Split out from the tail so a caller can insert
 /// work between the two -- the rocMLIR path outlines kernels and compiles them

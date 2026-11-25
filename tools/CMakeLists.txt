@@ -3,6 +3,10 @@
 # ** Licensed under the MIT License.
 ##
 
+if(HIPDNN_EP_BUILD_GGML)
+  # Generates the ggml dialect's parameter traversals (include/hip/Dialect/Ggml).
+  add_subdirectory(ggml-tblgen)
+endif()
 add_subdirectory(hip-mlir-opt)
 add_subdirectory(hip-compiler)
 # hip-rocmlir-compiler links the rocMLIR (rocmlirTriton) C++ API directly, so it

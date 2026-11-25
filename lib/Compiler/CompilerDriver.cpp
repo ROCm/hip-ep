@@ -578,6 +578,27 @@ bool CompilerDriver::runMLIRPasses(
 
     COMPILER_DEBUG_LOG("[CompilerDriver] HIPDNN_EP_ROCMLIR set\n");
 #endif
+#ifdef HIPDNN_EP_BUILD_GGML
+  } else if (module->hasAttr("ggml.schema")) {
+    // A ggml graph (a ggml backend's split): the ggml-to-hip pipeline, for
+    // the graphs of the schema the frontend emits.
+    constexpr llvm::StringLiteral ggmlSchema = "hip-ggml-graph-v1";
+    auto schema = module->getAttrOfType<mlir::StringAttr>("ggml.schema");
+    if (!schema || schema.getValue() != ggmlSchema) {
+      error_message = "the ggml-to-hip pipeline requires ggml.schema = \"" +
+                      ggmlSchema.str() + "\"";
+      return false;
+    }
+    mlir::hip::OnnxToHipPipelineOptions ggmlOpts;
+    ggmlOpts.externalizeMinNumElements =
+        mlir::hip::kDefaultExternalizeMinNumElements;
+    ggmlOpts.skipConstantData = options.skip_constant_data;
+    mlir::hip::buildGgmlToHipPipeline(pm, ggmlOpts, fileSystem_);
+
+    mlir::hip::HipToLLVMPipelineOptions hipToLlvmOpts;
+    hipToLlvmOpts.constantsFile = options.constants_file;
+    mlir::hip::buildHipToLLVMPipeline(pm, hipToLlvmOpts);
+#endif
   } else {
     mlir::hip::OnnxToHipPipelineOptions onnxToHipOpts;
     onnxToHipOpts.externalizeMinNumElements =
