@@ -50,13 +50,17 @@ __device__ __forceinline__ float softplus(float x) {
 // lanes is what makes a token step cheap: the two row dot products reduce over
 // TPR lanes instead of a full wave. Each row is read before it is written by
 // the threads that own it, so an initial_state aliasing final_state is safe.
+// With cuSeqlens, request b owns tokens [cu[b], cu[b+1]) of a single packed
+// token axis and seqLenArg is unused; a range outside [0, totalTokens] is
+// treated as empty so the state passes through.
 template <typename T, int DK>
 __global__ void __launch_bounds__(kBlockSize) gatedDeltaNetRecurrentKernel(
     const T *__restrict__ qkv, const float *__restrict__ decay,
     const float *__restrict__ beta, const float *initialState,
     const float *__restrict__ aLog, const float *__restrict__ dtBias,
-    T *__restrict__ output, float *finalState, int seqLen, int numHeadsQk,
-    int numHeadsV, int headSizeV, float scale) {
+    T *__restrict__ output, float *finalState, int seqLenArg, int numHeadsQk,
+    int numHeadsV, int headSizeV, float scale, const int *cuSeqlens,
+    int totalTokens) {
   constexpr int kTpr = DK >= 64 ? DK / 64 : 1;
   constexpr int kE = DK / kTpr;
   constexpr int kRowsPerBlock = kBlockSize / kTpr;
@@ -65,6 +69,15 @@ __global__ void __launch_bounds__(kBlockSize) gatedDeltaNetRecurrentKernel(
   const int rowGroup = static_cast<int>(blockIdx.x) % rowGroups;
   const int hv = (static_cast<int>(blockIdx.x) / rowGroups) % numHeadsV;
   const int b = static_cast<int>(blockIdx.x) / (rowGroups * numHeadsV);
+  int seqLen = seqLenArg;
+  int64_t tokBase = static_cast<int64_t>(b) * seqLenArg;
+  if (cuSeqlens != nullptr) {
+    const int start = cuSeqlens[b];
+    const int end = cuSeqlens[b + 1];
+    const bool valid = start >= 0 && end >= start && end <= totalTokens;
+    tokBase = valid ? start : 0;
+    seqLen = valid ? end - start : 0;
+  }
   const int hq = hv * numHeadsQk / numHeadsV;
   const int tid = static_cast<int>(threadIdx.x);
   const int lane = tid % kLanes;
@@ -102,7 +115,7 @@ __global__ void __launch_bounds__(kBlockSize) gatedDeltaNetRecurrentKernel(
   float rawBeta = 0.0f;
   float vNext = 0.0f;
   auto load = [&](int t) {
-    const int64_t tok = static_cast<int64_t>(b) * seqLen + t;
+    const int64_t tok = tokBase + t;
     const T *row = qkv + tok * packed;
     if (leadWave) {
       const T *qh = row + static_cast<int64_t>(hq) * DK;
@@ -119,7 +132,9 @@ __global__ void __launch_bounds__(kBlockSize) gatedDeltaNetRecurrentKernel(
     }
     vNext = active ? toF32(row[vOffset + v]) : 0.0f;
   };
-  load(0);
+  if (seqLen > 0) {
+    load(0);
+  }
 
   for (int t = 0; t < seqLen; ++t) {
     if (leadWave) {
@@ -167,7 +182,7 @@ __global__ void __launch_bounds__(kBlockSize) gatedDeltaNetRecurrentKernel(
     }
     o = groupSum<kTpr>(o);
     if (active && part == 0) {
-      const int64_t tok = static_cast<int64_t>(b) * seqLen + t;
+      const int64_t tok = tokBase + t;
       output[(tok * numHeadsV + hv) * headSizeV + v] = fromF32<T>(scale * o);
     }
     __syncthreads();
@@ -617,7 +632,9 @@ hipError_t launchRecurrent(hipStream_t stream, const void *qkv,
                            const float *initialState, const float *aLog,
                            const float *dtBias, void *output, float *finalState,
                            int batch, int seqLen, int numHeadsQk,
-                           int numHeadsV, int headSizeV, float scale) {
+                           int numHeadsV, int headSizeV, float scale,
+                           const int *cuSeqlens = nullptr,
+                           int totalTokens = 0) {
   constexpr int kTpr = DK >= 64 ? DK / 64 : 1;
   constexpr int kRowsPerBlock = kBlockSize / kTpr;
   const int rowGroups = (headSizeV + kRowsPerBlock - 1) / kRowsPerBlock;
@@ -627,16 +644,19 @@ hipError_t launchRecurrent(hipStream_t stream, const void *qkv,
                      dim3(kBlockSize), 0, stream, static_cast<const T *>(qkv),
                      decay, beta, initialState, aLog, dtBias,
                      static_cast<T *>(output), finalState, seqLen, numHeadsQk,
-                     numHeadsV, headSizeV, scale);
+                     numHeadsV, headSizeV, scale, cuSeqlens, totalTokens);
   return hipGetLastError();
 }
 
+// A ragged batch (cuSeqlens set) always uses the recurrent kernel: the chunked
+// kernel's prefetch assumes every request has at least one token.
 template <typename T>
 hipError_t dispatchHeadSize(hipStream_t stream, int64_t headSizeQk,
                             const void *qkv, const float *decay,
-                            const float *beta, const float *initialState,
-                            const float *aLog, const float *dtBias,
-                            void *output, float *finalState, int batch,
+                            const float *beta, const int *cuSeqlens,
+                            const float *initialState, const float *aLog,
+                            const float *dtBias, void *output,
+                            float *finalState, int totalTokens, int batch,
                             int seqLen, int numHeadsQk, int numHeadsV,
                             int headSizeV, float scale) {
   switch (headSizeQk) {
@@ -644,16 +664,16 @@ hipError_t dispatchHeadSize(hipStream_t stream, int64_t headSizeQk,
     return launchRecurrent<T, 32>(stream, qkv, decay, beta, initialState,
                                   aLog, dtBias, output, finalState, batch,
                                   seqLen, numHeadsQk, numHeadsV, headSizeV,
-                                  scale);
+                                  scale, cuSeqlens, totalTokens);
   case 64:
     return launchRecurrent<T, 64>(stream, qkv, decay, beta, initialState,
                                   aLog, dtBias, output, finalState, batch,
                                   seqLen, numHeadsQk, numHeadsV, headSizeV,
-                                  scale);
+                                  scale, cuSeqlens, totalTokens);
   case 128:
     if constexpr (std::is_same<T, __half>::value) {
-      if (seqLen >= kChunkedMinSeqLen && headSizeV % kSliceV == 0 &&
-          chunkedDevice()) {
+      if (cuSeqlens == nullptr && seqLen >= kChunkedMinSeqLen &&
+          headSizeV % kSliceV == 0 && chunkedDevice()) {
         return launchChunked(stream, qkv, decay, beta, initialState, aLog,
                              dtBias, output, finalState, batch, seqLen,
                              numHeadsQk, numHeadsV, headSizeV, scale);
@@ -662,12 +682,12 @@ hipError_t dispatchHeadSize(hipStream_t stream, int64_t headSizeQk,
     return launchRecurrent<T, 128>(stream, qkv, decay, beta, initialState,
                                    aLog, dtBias, output, finalState, batch,
                                    seqLen, numHeadsQk, numHeadsV, headSizeV,
-                                   scale);
+                                   scale, cuSeqlens, totalTokens);
   case 256:
     return launchRecurrent<T, 256>(stream, qkv, decay, beta, initialState,
                                    aLog, dtBias, output, finalState, batch,
                                    seqLen, numHeadsQk, numHeadsV, headSizeV,
-                                   scale);
+                                   scale, cuSeqlens, totalTokens);
   default:
     return hipErrorInvalidValue;
   }
@@ -677,22 +697,33 @@ hipError_t dispatchHeadSize(hipStream_t stream, int64_t headSizeQk,
 
 extern "C" int hip_gated_delta_net(
     void *stream, const void *qkv, const float *decay, const float *beta,
-    const float *initial_state, const float *a_log, const float *dt_bias,
-    void *output, float *final_state, int64_t batch, int64_t seq_len,
-    int64_t num_heads_qk, int64_t num_heads_v, int64_t head_size_qk,
-    int64_t head_size_v, float scale, int element_size_bytes) {
+    const void *cumulative_sequence_length, const float *initial_state,
+    const float *a_log, const float *dt_bias, void *output, float *final_state,
+    int64_t total_tokens, int64_t batch, int64_t num_heads_qk,
+    int64_t num_heads_v, int64_t head_size_qk, int64_t head_size_v, float scale,
+    int element_size_bytes) {
   if (!qkv || !decay || !beta || !initial_state || !a_log || !dt_bias ||
       !output || !final_state) {
     fprintf(stderr, "[custom_kernels] hip_gated_delta_net: null pointer\n");
     return -1;
   }
-  if (batch <= 0 || seq_len <= 0 || num_heads_qk <= 0 || num_heads_v <= 0 ||
-      head_size_v <= 0 || num_heads_v % num_heads_qk != 0) {
+  if (batch <= 0 || total_tokens <= 0 || num_heads_qk <= 0 ||
+      num_heads_v <= 0 || head_size_v <= 0 ||
+      num_heads_v % num_heads_qk != 0 || total_tokens > INT32_MAX ||
+      batch > INT32_MAX) {
     fprintf(stderr,
-            "[custom_kernels] hip_gated_delta_net: invalid shape batch=%lld "
-            "seq_len=%lld Hqk=%lld Hv=%lld dv=%lld\n",
-            (long long)batch, (long long)seq_len, (long long)num_heads_qk,
+            "[custom_kernels] hip_gated_delta_net: invalid shape tokens=%lld "
+            "batch=%lld Hqk=%lld Hv=%lld dv=%lld\n",
+            (long long)total_tokens, (long long)batch, (long long)num_heads_qk,
             (long long)num_heads_v, (long long)head_size_v);
+    return -1;
+  }
+  // Without cu every request has the same length.
+  if (!cumulative_sequence_length && total_tokens % batch != 0) {
+    fprintf(stderr,
+            "[custom_kernels] hip_gated_delta_net: tokens=%lld is not a "
+            "multiple of batch=%lld\n",
+            (long long)total_tokens, (long long)batch);
     return -1;
   }
   if (head_size_qk != 32 && head_size_qk != 64 && head_size_qk != 128 &&
@@ -705,20 +736,22 @@ extern "C" int hip_gated_delta_net(
   }
 
   hipStream_t s = static_cast<hipStream_t>(stream);
+  const int *cu = static_cast<const int *>(cumulative_sequence_length);
+  const int T = static_cast<int>(total_tokens);
   const int B = static_cast<int>(batch);
-  const int L = static_cast<int>(seq_len);
+  const int L = T / B;
   const int Hqk = static_cast<int>(num_heads_qk);
   const int Hv = static_cast<int>(num_heads_v);
   const int Dv = static_cast<int>(head_size_v);
   hipError_t err;
   if (element_size_bytes == 2) {
-    err = dispatchHeadSize<__half>(s, head_size_qk, qkv, decay, beta,
+    err = dispatchHeadSize<__half>(s, head_size_qk, qkv, decay, beta, cu,
                                    initial_state, a_log, dt_bias, output,
-                                   final_state, B, L, Hqk, Hv, Dv, scale);
+                                   final_state, T, B, L, Hqk, Hv, Dv, scale);
   } else if (element_size_bytes == 4) {
-    err = dispatchHeadSize<float>(s, head_size_qk, qkv, decay, beta,
+    err = dispatchHeadSize<float>(s, head_size_qk, qkv, decay, beta, cu,
                                   initial_state, a_log, dt_bias, output,
-                                  final_state, B, L, Hqk, Hv, Dv, scale);
+                                  final_state, T, B, L, Hqk, Hv, Dv, scale);
   } else {
     fprintf(stderr,
             "[custom_kernels] hip_gated_delta_net: unsupported "

@@ -287,6 +287,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateMultiHeadAttentionConversionPatterns(patterns, ctx);
   populateAttentionConversionPatterns(patterns, ctx);
   populateOnnxAttentionConversionPatterns(patterns, ctx);
+  populatePagedAttentionConversionPatterns(patterns, ctx);
   populateMatMulNBitsConversionPatterns(patterns, ctx);
   populateMatMulBnb4ConversionPatterns(patterns, ctx);
   populateQMoEConversionPatterns(patterns, ctx);

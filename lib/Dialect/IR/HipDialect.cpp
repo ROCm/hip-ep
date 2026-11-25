@@ -3419,6 +3419,111 @@ LogicalResult CausalConvWithStateOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// VarlenCausalConvWithStateOp
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange VarlenCausalConvWithStateOp::getDpsInitsMutable() {
+  // The trailing operands are the two outs (output, final_state).
+  return MutableOperandRange(*this, /*start=*/getNumOperands() - 2,
+                             /*length=*/2);
+}
+
+void VarlenCausalConvWithStateOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult VarlenCausalConvWithStateOp::verify() {
+  auto dilation = static_cast<int64_t>(getDilation());
+  if (dilation < 1)
+    return emitOpError("dilation must be at least 1, got ") << dilation;
+  auto activation = getActivation();
+  if (activation != "none" && activation != "silu" && activation != "swish")
+    return emitOpError("activation must be none, silu, or swish");
+
+  auto inputType = cast<ShapedType>(getInput().getType());
+  auto weightType = cast<ShapedType>(getWeight().getType());
+  auto cuType = cast<ShapedType>(getCumulativeSequenceLength().getType());
+  auto stateType = cast<ShapedType>(getInitialState().getType());
+  auto finalType = cast<ShapedType>(getFinalState().getType());
+  auto outputType = cast<ShapedType>(getOutput().getType());
+  if (inputType.getRank() != 2 || weightType.getRank() != 3 ||
+      cuType.getRank() != 1 || stateType.getRank() != 3 ||
+      finalType.getRank() != 3 || outputType.getRank() != 2)
+    return emitOpError("input and output rank 2, weight rank 3, cumulative "
+                       "rank 1, state rank 3");
+  if (!cuType.getElementType().isInteger(32))
+    return emitOpError("cumulative_sequence_length must be i32");
+
+  mlir::Type elemType = inputType.getElementType();
+  if (!isa<FloatType>(elemType))
+    return emitOpError("input must have a floating-point element type");
+  auto checkElemType = [&](mlir::Type type, StringRef name) -> LogicalResult {
+    if (type != elemType)
+      return emitOpError(name)
+             << " element type must match the input element type";
+    return success();
+  };
+  if (failed(checkElemType(weightType.getElementType(), "weight")) ||
+      failed(checkElemType(stateType.getElementType(), "initial_state")) ||
+      failed(checkElemType(outputType.getElementType(), "output")) ||
+      failed(checkElemType(finalType.getElementType(), "final_state")))
+    return failure();
+  if (auto bias = getBias()) {
+    auto biasType = cast<ShapedType>(bias.getType());
+    if (failed(checkElemType(biasType.getElementType(), "bias")))
+      return failure();
+    if (biasType.getRank() != 1)
+      return emitOpError("bias must be rank 1");
+    if (!biasType.isDynamicDim(0) && !inputType.isDynamicDim(1) &&
+        biasType.getDimSize(0) != inputType.getDimSize(1))
+      return emitOpError("bias length must match the input channels");
+  }
+
+  for (int64_t dim = 0; dim < 2; ++dim) {
+    if (!outputType.isDynamicDim(dim) && !inputType.isDynamicDim(dim) &&
+        outputType.getDimSize(dim) != inputType.getDimSize(dim))
+      return emitOpError("output shape must match the input shape");
+  }
+
+  // cumulative_sequence_length has batch + 1 entries.
+  if (!cuType.isDynamicDim(0) && !stateType.isDynamicDim(0) &&
+      cuType.getDimSize(0) != stateType.getDimSize(0) + 1)
+    return emitOpError("cumulative_sequence_length must have batch + 1 "
+                       "entries, where batch is initial_state dim 0");
+  if (!stateType.isDynamicDim(0) && !finalType.isDynamicDim(0) &&
+      stateType.getDimSize(0) != finalType.getDimSize(0))
+    return emitOpError("final_state batch must match initial_state");
+
+  if (!weightType.isDynamicDim(1) && weightType.getDimSize(1) != 1)
+    return emitOpError("weight dim 1 must be 1");
+  if (!weightType.isDynamicDim(2) && weightType.getDimSize(2) < 1)
+    return emitOpError("kernel_size must be at least 1");
+
+  int64_t channels = inputType.getDimSize(1);
+  if (!ShapedType::isDynamic(channels) && !weightType.isDynamicDim(0) &&
+      weightType.getDimSize(0) != channels)
+    return emitOpError("weight channels must match the input");
+  if (!weightType.isDynamicDim(2)) {
+    int64_t stateLen = (weightType.getDimSize(2) - 1) * dilation;
+    auto checkState = [&](ShapedType type, StringRef name) -> LogicalResult {
+      if (!type.isDynamicDim(2) && type.getDimSize(2) != stateLen)
+        return emitOpError(name)
+               << " dim 2 must be (kernel_size - 1) * dilation = " << stateLen;
+      if (!ShapedType::isDynamic(channels) && !type.isDynamicDim(1) &&
+          type.getDimSize(1) != channels)
+        return emitOpError(name) << " dim 1 must match the input channels";
+      return success();
+    };
+    if (failed(checkState(stateType, "initial_state")) ||
+        failed(checkState(finalType, "final_state")))
+      return failure();
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // NGramHashMappingOp: ins(input_ids, multipliers, vocab_sizes, [past_ids],
 //                         [head_offsets], [eos_token_id], [segment_ids])
 //                     outs(hash_ids, [present_ids])
@@ -3585,7 +3690,7 @@ void LinearAttentionOp::getEffects(
 
 //===----------------------------------------------------------------------===//
 // GatedDeltaNetOp: ins(qkv, decay, beta, initial_state, a_log, dt_bias)
-//                  outs(output, final_state)
+//                  [cu(cumulative_sequence_length)] outs(output, final_state)
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange GatedDeltaNetOp::getDpsInitsMutable() {
@@ -3600,9 +3705,13 @@ void GatedDeltaNetOp::getEffects(
 }
 
 LogicalResult GatedDeltaNetOp::verify() {
-  SmallVector<Value> data = {getQkv(),          getDecay(),     getBeta(),
-                             getInitialState(), getALog(),      getDtBias(),
-                             getOutput(),       getFinalState()};
+  Value cu = getCumulativeSequenceLength();
+  SmallVector<Value> data = {getQkv(), getDecay(), getBeta()};
+  if (cu) {
+    data.push_back(cu);
+  }
+  data.append({getInitialState(), getALog(), getDtBias(), getOutput(),
+               getFinalState()});
   if (failed(verifyDpsComputeOp(*this, data, 2))) {
     return failure();
   }
@@ -3610,16 +3719,20 @@ LogicalResult GatedDeltaNetOp::verify() {
   constexpr int64_t kAny = ShapedType::kDynamic;
   Type f32 = Float32Type::get(getContext());
 
+  // Without cumulative_sequence_length the requests form a [B, L] pair; with
+  // it they share one token axis.
+  const int64_t qkvRank = cu ? 2 : 3;
   auto qkvType = cast<ShapedType>(getQkv().getType());
   Type elem = qkvType.getElementType();
   if (!elem.isF16() && !elem.isF32()) {
     return emitOpError("qkv must be f16 or f32, got ") << elem;
   }
-  if (qkvType.getRank() != 3) {
-    return emitOpError("qkv must be rank 3, got rank ") << qkvType.getRank();
+  if (qkvType.getRank() != qkvRank) {
+    return emitOpError("qkv must be rank ")
+           << qkvRank << ", got rank " << qkvType.getRank();
   }
-  if (qkvType.isDynamicDim(2)) {
-    return emitOpError("qkv dim 2 must be static");
+  if (qkvType.isDynamicDim(qkvRank - 1)) {
+    return emitOpError("qkv dim ") << qkvRank - 1 << " must be static";
   }
 
   auto stateType = cast<ShapedType>(getInitialState().getType());
@@ -3637,9 +3750,27 @@ LogicalResult GatedDeltaNetOp::verify() {
     }
   }
 
-  const int64_t batch = qkvType.getDimSize(0);
-  const int64_t seq = qkvType.getDimSize(1);
-  const int64_t packed = qkvType.getDimSize(2);
+  if (cu) {
+    auto cuType = cast<ShapedType>(cu.getType());
+    if (!cuType.getElementType().isInteger(32)) {
+      return emitOpError("cumulative_sequence_length must be i32, got ")
+             << cuType.getElementType();
+    }
+    if (cuType.getRank() != 1) {
+      return emitOpError("cumulative_sequence_length must be rank 1, got rank ")
+             << cuType.getRank();
+    }
+    if (!cuType.isDynamicDim(0) && !stateType.isDynamicDim(0) &&
+        cuType.getDimSize(0) != stateType.getDimSize(0) + 1) {
+      return emitOpError("cumulative_sequence_length must have batch + 1 = ")
+             << stateType.getDimSize(0) + 1 << " entries, got "
+             << cuType.getDimSize(0);
+    }
+  }
+
+  const int64_t batch = cu ? kAny : qkvType.getDimSize(0);
+  const int64_t seq = qkvType.getDimSize(qkvRank - 2);
+  const int64_t packed = qkvType.getDimSize(qkvRank - 1);
   const int64_t numHeadsV = stateType.getDimSize(1);
   const int64_t headSizeV = stateType.getDimSize(2);
   const int64_t headSizeQk = stateType.getDimSize(3);
@@ -3650,10 +3781,10 @@ LogicalResult GatedDeltaNetOp::verify() {
   }
   const int64_t qkWidth = packed - numHeadsV * headSizeV;
   if (qkWidth <= 0 || qkWidth % (2 * headSizeQk) != 0) {
-    return emitOpError("qkv dim 2 (")
-           << packed << ") minus Hv*dv (" << numHeadsV * headSizeV
-           << ") must be a positive multiple of 2*dk (" << 2 * headSizeQk
-           << ")";
+    return emitOpError("qkv dim ")
+           << qkvRank - 1 << " (" << packed << ") minus Hv*dv ("
+           << numHeadsV * headSizeV << ") must be a positive multiple of 2*dk ("
+           << 2 * headSizeQk << ")";
   }
   const int64_t numHeadsQk = qkWidth / (2 * headSizeQk);
   if (numHeadsV % numHeadsQk != 0) {
@@ -3682,14 +3813,22 @@ LogicalResult GatedDeltaNetOp::verify() {
     return success();
   };
 
+  SmallVector<int64_t, 3> gateShape;
+  SmallVector<int64_t, 4> outputShape;
+  if (!cu) {
+    gateShape.push_back(batch);
+    outputShape.push_back(batch);
+  }
+  gateShape.append({seq, numHeadsV});
+  outputShape.append({seq, numHeadsV, headSizeV});
+
   if (failed(check(getInitialState(), "initial_state", f32,
                    {batch, numHeadsV, headSizeV, headSizeQk})) ||
-      failed(check(getDecay(), "decay", f32, {batch, seq, numHeadsV})) ||
-      failed(check(getBeta(), "beta", f32, {batch, seq, numHeadsV})) ||
+      failed(check(getDecay(), "decay", f32, gateShape)) ||
+      failed(check(getBeta(), "beta", f32, gateShape)) ||
       failed(check(getALog(), "a_log", f32, {numHeadsV})) ||
       failed(check(getDtBias(), "dt_bias", f32, {numHeadsV})) ||
-      failed(check(getOutput(), "output", elem,
-                   {batch, seq, numHeadsV, headSizeV})) ||
+      failed(check(getOutput(), "output", elem, outputShape)) ||
       failed(
           check(getFinalState(), "final_state", f32,
                 {stateType.getDimSize(0), numHeadsV, headSizeV, headSizeQk}))) {
@@ -4278,6 +4417,143 @@ LogicalResult GqaOp::verify() {
                          "be false)");
   }
 
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// PagedAttentionOp: ins(query, [key, value], key_cache, value_cache,
+//                       cumulative_sequence_length, past_seqlens, block_table,
+//                       [cos_cache, sin_cache], [attention_metadata])
+//                   outs(output, key_cache_out, value_cache_out)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange PagedAttentionOp::getDpsInitsMutable() {
+  return MutableOperandRange(
+      *this, /*start=*/getOutputMutable().getOperandNumber(), /*length=*/3);
+}
+
+void PagedAttentionOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult PagedAttentionOp::verify() {
+  if (static_cast<bool>(getKey()) != static_cast<bool>(getValue())) {
+    return emitOpError("key and value must be both given or both absent");
+  }
+
+  // attention_metadata is a host-side hint, not a device compute operand.
+  SmallVector<Value> data = {getQuery()};
+  if (getKey()) {
+    data.append({getKey(), getValue()});
+  }
+  data.append({getKeyCache(), getValueCache(), getCumulativeSequenceLength(),
+               getPastSeqlens(), getBlockTable()});
+  for (Value rope : {getCosCache(), getSinCache()}) {
+    if (rope) {
+      data.push_back(rope);
+    }
+  }
+  data.append({getOutput(), getKeyCacheOut(), getValueCacheOut()});
+  if (failed(verifyDpsComputeOp(*this, data, /*numInits=*/3))) {
+    return failure();
+  }
+
+  const int64_t numHeads = getNumHeads();
+  const int64_t kvNumHeads = getKvNumHeads();
+  if (numHeads <= 0 || kvNumHeads <= 0 || numHeads % kvNumHeads != 0) {
+    return emitOpError("num_heads (")
+           << numHeads << ") must be a positive multiple of kv_num_heads ("
+           << kvNumHeads << ")";
+  }
+  if (static_cast<int64_t>(getLocalWindowSize()) < -1) {
+    return emitOpError("local_window_size must be -1 or non-negative");
+  }
+  if (getDoRotary() == 1 && (!getCosCache() || !getSinCache())) {
+    return emitOpError("do_rotary requires cos_cache and sin_cache");
+  }
+  const float scale = getScale().convertToFloat();
+  if (!std::isfinite(scale) || scale < 0.0f) {
+    return emitOpError("scale must be finite and non-negative");
+  }
+
+  constexpr int64_t kAny = ShapedType::kDynamic;
+  auto queryType = cast<ShapedType>(getQuery().getType());
+  Type elem = queryType.getElementType();
+  if (!elem.isF16()) {
+    return emitOpError("query must be f16, got ") << elem;
+  }
+  const bool packed = !getKey();
+  const int64_t queryHeads = packed ? numHeads + 2 * kvNumHeads : numHeads;
+  if (queryType.getRank() != 2 || queryType.isDynamicDim(1) ||
+      queryType.getDimSize(1) % queryHeads != 0 ||
+      queryType.getDimSize(1) == 0) {
+    return emitOpError("query must be rank 2 with a static, positive dim 1 "
+                       "that is a multiple of ")
+           << (packed ? "num_heads + 2 * kv_num_heads" : "num_heads");
+  }
+  const int64_t headSize = queryType.getDimSize(1) / queryHeads;
+  const int64_t tokens = queryType.getDimSize(0);
+
+  auto check = [&](Value v, StringRef name, Type expectedElem,
+                   ArrayRef<int64_t> expected) -> LogicalResult {
+    auto type = cast<ShapedType>(v.getType());
+    if (type.getElementType() != expectedElem) {
+      return emitOpError() << name << " must have element type " << expectedElem
+                           << ", got " << type.getElementType();
+    }
+    if (type.getRank() != static_cast<int64_t>(expected.size())) {
+      return emitOpError() << name << " must be rank " << expected.size()
+                           << ", got rank " << type.getRank();
+    }
+    for (auto [i, want] : llvm::enumerate(expected)) {
+      int64_t got = type.getDimSize(i);
+      if (want != kAny && got != ShapedType::kDynamic && got != want) {
+        return emitOpError() << name << " dim " << i << " must be " << want
+                             << ", got " << got;
+      }
+    }
+    return success();
+  };
+
+  // The op carries no k_scale/v_scale, so the caches are unquantized and share
+  // the query element type.
+  Type cacheElem = elem;
+  Type i32 = IntegerType::get(getContext(), 32);
+  if (failed(check(getKeyCache(), "key_cache", cacheElem,
+                   {kAny, kAny, kvNumHeads, headSize}))) {
+    return failure();
+  }
+  auto keyCacheType = cast<ShapedType>(getKeyCache().getType());
+  const SmallVector<int64_t> cacheShape = {keyCacheType.getDimSize(0),
+                                           keyCacheType.getDimSize(1),
+                                           kvNumHeads, headSize};
+  if (failed(check(getPastSeqlens(), "past_seqlens", i32, {kAny}))) {
+    return failure();
+  }
+  const int64_t batch =
+      cast<ShapedType>(getPastSeqlens().getType()).getDimSize(0);
+  const int64_t cuLen = ShapedType::isDynamic(batch) ? kAny : batch + 1;
+  if (failed(check(getValueCache(), "value_cache", cacheElem, cacheShape)) ||
+      failed(check(getCumulativeSequenceLength(), "cumulative_sequence_length",
+                   i32, {cuLen})) ||
+      failed(check(getBlockTable(), "block_table", i32, {batch, kAny})) ||
+      failed(
+          check(getOutput(), "output", elem, {tokens, numHeads * headSize})) ||
+      (getKey() &&
+       (failed(check(getKey(), "key", elem, {tokens, kvNumHeads * headSize})) ||
+        failed(check(getValue(), "value", elem,
+                     {tokens, kvNumHeads * headSize})))) ||
+      (getCosCache() &&
+       failed(check(getCosCache(), "cos_cache", elem, {kAny, headSize / 2}))) ||
+      (getSinCache() &&
+       failed(check(getSinCache(), "sin_cache", elem, {kAny, headSize / 2}))) ||
+      failed(check(getKeyCacheOut(), "key_cache_out", cacheElem, cacheShape)) ||
+      failed(check(getValueCacheOut(), "value_cache_out", cacheElem,
+                   cacheShape))) {
+    return failure();
+  }
   return success();
 }
 

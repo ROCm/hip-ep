@@ -424,6 +424,14 @@ int hipdnn_ep_state_ensure_matmul_dp4a_scratch(RuntimeState *state,
 void *hipdnn_ep_state_get_la_scratch(RuntimeState *state);
 int hipdnn_ep_state_ensure_la_scratch(RuntimeState *state, size_t needed_size);
 
+// Per-session scratch for hip_paged_attention: metadata staging plus the
+// context-split partials. Same policy as la_scratch: grown on demand, never
+// shrunk, freed in hipdnn_ep_state_cleanup, shared by all attention layers
+// because the stream is serialised.
+void *hipdnn_ep_state_get_paged_attention_scratch(RuntimeState *state);
+int hipdnn_ep_state_ensure_paged_attention_scratch(RuntimeState *state,
+                                                   size_t needed_size);
+
 // Per-op state slots (see docs/design/op-state-slots-design.md). The generated
 // @hipdnn_ep_op_states_init_fn (built by --generate-op-state-init) calls
 // _alloc once, then per stateful op calls its construct symbol; each construct
@@ -1032,6 +1040,24 @@ int wrap_multi_head_attention(
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t query_hidden, int64_t v_hidden, int64_t head_size,
     int64_t query_rank, int64_t element_size_bytes);
+
+// PagedAttention (com.microsoft), fp16 only. The caches are updated in
+// key_cache_out / value_cache_out. An output that is the input buffer is
+// updated in place; a distinct buffer receives a copy of its input cache
+// first. scale == 0 means 1 / sqrt(head_size). The last five integers are
+// batch, num_blocks, block_size, head_size, and block_table columns.
+int wrap_paged_attention(RuntimeState *state, void *query, void *key,
+                         void *value, void *key_cache, void *value_cache,
+                         void *cumulative_sequence_length, void *past_seqlens,
+                         void *block_table, void *cos_cache, void *sin_cache,
+                         void *output, void *key_cache_out,
+                         void *value_cache_out, int64_t num_heads,
+                         int64_t kv_num_heads, int64_t do_rotary,
+                         int64_t rotary_interleaved, int64_t local_window_size,
+                         float scale, int64_t num_tokens, int64_t query_dim1,
+                         int64_t element_size_bytes, int64_t batch,
+                         int64_t num_blocks, int64_t block_size,
+                         int64_t head_size, int64_t max_blocks);
 
 // Generic element-wise tensor operation wrapper with per-operand 4D shapes.
 // Computes output = op(lhs, rhs) element-wise via the custom HIP kernels
@@ -1984,6 +2010,21 @@ int wrap_causal_conv_with_state(
     // 1 = carry state is (batch, state_len, channels). Requires channels_last.
     int64_t state_channels_last);
 
+// Packed token-major causal depthwise convolution.
+// input/output: [total_tokens, channels]
+// weight: [channels, 1, kernel_size]
+// cumulative_sequence_length: int32 [batch + 1], device memory
+// initial_state/final_state: [batch, channels, state_len], may alias
+// state_len = (kernel_size - 1) * dilation
+// activation: 0=none, 1=silu/swish
+int wrap_varlen_causal_conv_with_state(
+    RuntimeState *state, const void *input, const void *weight,
+    const void *cumulative_sequence_length, const void *bias,
+    const void *initial_state, void *output, void *final_state,
+    int64_t total_tokens, int64_t channels, int64_t batch, int64_t kernel_size,
+    int64_t dilation, int64_t state_len, int64_t activation,
+    int64_t element_size_bytes);
+
 //==============================================================================
 // ONNX Gemm via hipBLASLt
 //==============================================================================
@@ -2031,14 +2072,18 @@ int wrap_linear_attention(
     int64_t update_rule, // 0=linear, 1=gated, 2=delta, 3=gated_delta
     int64_t B, int64_t seq_len, int64_t dk, int64_t dv, int64_t type);
 
-// scale == 0 means 1 / sqrt(head_size_qk).
+// scale == 0 means 1 / sqrt(head_size_qk). qkv, decay, beta and output are
+// packed over total_tokens. With cumulative_sequence_length, request b owns
+// tokens [cu[b], cu[b+1]) and its own state slice; without it every request has
+// total_tokens / batch tokens.
 int wrap_gated_delta_net(RuntimeState *state, const void *qkv,
                          const float *decay, const float *beta,
+                         const void *cumulative_sequence_length,
                          const float *initial_state, const float *a_log,
                          const float *dt_bias, void *output, float *final_state,
-                         int64_t batch, int64_t seq_len, int64_t num_heads_qk,
-                         int64_t num_heads_v, int64_t head_size_qk,
-                         int64_t head_size_v, float scale,
+                         int64_t total_tokens, int64_t batch,
+                         int64_t num_heads_qk, int64_t num_heads_v,
+                         int64_t head_size_qk, int64_t head_size_v, float scale,
                          int64_t element_size_bytes);
 
 // fp16 only. past_* may alias present_*. head_size is query width / num_heads

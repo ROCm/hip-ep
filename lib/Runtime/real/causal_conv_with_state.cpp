@@ -211,3 +211,47 @@ int wrap_causal_conv_with_state(
       channels_last ? " (nlc)" : "");
   return 0;
 }
+
+int wrap_varlen_causal_conv_with_state(
+    RuntimeState *state, const void *input, const void *weight,
+    const void *cumulative_sequence_length, const void *bias,
+    const void *initial_state, void *output, void *final_state,
+    int64_t total_tokens, int64_t channels, int64_t batch, int64_t kernel_size,
+    int64_t dilation, int64_t state_len, int64_t activation,
+    int64_t element_size_bytes) {
+  if (!state || !input || !weight || !cumulative_sequence_length ||
+      !initial_state || !output || !final_state) {
+    fprintf(stderr,
+            "wrap_varlen_causal_conv_with_state: null required argument\n");
+    return -1;
+  }
+  if (element_size_bytes != 2 && element_size_bytes != 4) {
+    fprintf(
+        stderr,
+        "wrap_varlen_causal_conv_with_state: unsupported element_size %lld\n",
+        (long long)element_size_bytes);
+    return -1;
+  }
+  if (total_tokens < 1 || channels < 1 || batch < 1 || kernel_size < 1 ||
+      dilation < 1 || state_len < 0 || activation < 0 || activation > 1) {
+    fprintf(stderr, "wrap_varlen_causal_conv_with_state: invalid shape\n");
+    return -1;
+  }
+  if (state_len != (kernel_size - 1) * dilation) {
+    fprintf(stderr,
+            "wrap_varlen_causal_conv_with_state: state_len=%lld does not match "
+            "kernel=%lld dilation=%lld\n",
+            (long long)state_len, (long long)kernel_size, (long long)dilation);
+    return -1;
+  }
+  hipStream_t stream =
+      static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+  if (!stream) {
+    fprintf(stderr, "wrap_varlen_causal_conv_with_state: null stream\n");
+    return -1;
+  }
+  return hip_varlen_causal_conv(
+      stream, input, weight, cumulative_sequence_length, bias, initial_state,
+      output, final_state, total_tokens, channels, batch, kernel_size, dilation,
+      state_len, activation, element_size_bytes);
+}

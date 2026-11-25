@@ -2035,8 +2035,8 @@ def Hip_RopeOp : Hip_DpsOp_WithInfer<"rope"> {
 def Hip_MRotaryEmbeddingOp : Hip_DpsOp_AutoReifyInfer<"mrotary_embedding"> {
   let summary = "Multimodal rotary position embedding (M-RoPE)";
   let description = [{
-    com.microsoft MRotaryEmbedding restricted to rank-3 input,
-    interleaved = 0 and is_packed_batching = 0.
+    com.microsoft MRotaryEmbedding restricted to rank-3 input and
+    interleaved = 0.
 
     Shapes, with T = f16 or f32:
       input, output        [B, S, num_heads * head_size]          T
@@ -4188,6 +4188,68 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp_AutoReify<"causal_conv_with_state", [A
   }];
 }
 
+// Packed, token-major sibling of causal_conv_with_state.
+def Hip_VarlenCausalConvWithStateOp :
+    Hip_DpsOp_AutoReify<"varlen_causal_conv_with_state"> {
+  let summary = "Packed variable-length stateful causal depthwise convolution";
+  let description = [{
+    Depthwise causal convolution over a packed, token-major batch of
+    variable-length sequences.
+
+    `input` and `output` are [total_tokens, channels].
+    `cumulative_sequence_length` is [batch + 1]: sequence b occupies the
+    half-open token range
+    [cumulative_sequence_length[b], cumulative_sequence_length[b + 1]), with
+    cumulative_sequence_length[0] = 0, cumulative_sequence_length[batch] =
+    total_tokens and at least one token per sequence. `weight` is
+    [channels, 1, kernel_size] and `bias`, when present, is [channels]. The
+    convolution never reads across a sequence boundary.
+
+    `initial_state` is the carry state before each sequence and `final_state`
+    the carry state after its last token. A carry state is the state_len most
+    recent raw input samples, oldest first. Both are
+    [batch, channels, state_len] with
+    state_len = (kernel_size - 1) * dilation, `final_state` is fully written,
+    and the two may share one allocation.
+
+    Tap j of local token t reads local position
+    t - (kernel_size - 1 - j) * dilation; positions before the sequence's
+    first token are taken from `initial_state`. `activation` is none, silu,
+    or swish.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$weight,
+    Hip_TensorOrMemRef:$cumulative_sequence_length,
+    Optional<Hip_TensorOrMemRef>:$bias,
+    Hip_TensorOrMemRef:$initial_state,
+    Hip_TensorOrMemRef:$output,
+    Hip_TensorOrMemRef:$final_state,
+    DefaultValuedAttr<StrAttr, "\"none\"">:$activation,
+    DefaultValuedAttr<I64Attr, "1">:$dilation
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $input `,` $weight `,` $cumulative_sequence_length `,` $initial_state
+        `:`
+        type($input) `,` type($weight) `,` type($cumulative_sequence_length)
+        `,` type($initial_state)
+    `)`
+    (`bias` `(` $bias^ `:` type($bias) `)`)?
+    `outs` `(`
+        $output `,` $final_state
+        `:`
+        type($output) `,` type($final_state)
+    `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+}
+
 // ===== N-gram Hash Mapping ===================================================
 
 def Hip_NGramHashMappingOp : Hip_DpsOp_AutoReify<"ngram_hash_mapping",
@@ -4432,6 +4494,99 @@ def Hip_GqaOp : Hip_DpsOp_AutoReify<"gqa", [AttrSizedOperandSegments, OpStateOpI
       return ::mlir::hip::emitOpStateConstruct(
           builder, loc, statePtr, slot, "hipdnn_ep_op_state_construct_gqa", {});
     }
+  }];
+
+  let hasVerifier = 1;
+}
+
+// ===== Paged Attention (com.microsoft) =======================================
+
+def Hip_PagedAttentionOp : Hip_DpsOp_AutoReify<"paged_attention",
+    [AttrSizedOperandSegments]> {
+  let summary = "PagedAttention (com.microsoft)";
+  let description = [{
+    Causal attention over a block-based KV cache for packed, variable-length
+    requests. Tokens of all requests share one axis: request b owns query rows
+    [cumulative_sequence_length[b], cumulative_sequence_length[b + 1]) and has
+    past_seqlens[b] tokens already in the cache.
+
+    Shapes, with head_size = key_cache dim 3. query, key, value, output and
+    the caches share one element type (f16):
+      query         [T, num_heads * head_size], or, when key and value are
+                    absent, query, key and value packed along dim 1 as
+                    [T, (num_heads + 2 * kv_num_heads) * head_size]
+      key, value    [T, kv_num_heads * head_size]
+      key_cache,
+      value_cache   [num_blocks, block_size, kv_num_heads, head_size]
+      cumulative_sequence_length  i32 [B + 1]
+      past_seqlens                i32 [B]
+      block_table                 i32 [B, max_blocks_per_sequence]
+      output        [T, num_heads * head_size]
+
+    The new keys and values of request b are written to cache positions
+    past_seqlens[b] + i, resolved through block_table. `key_cache_out` and
+    `value_cache_out` are the updated caches, with the same shape and element
+    type as `key_cache` and `value_cache`. They may be the same buffers as
+    the inputs, in which case the update is done in place. Otherwise each holds
+    the whole updated cache, including the blocks this op does not write.
+    `attention_metadata` is an optional host-side hint that does not change
+    the result.
+
+    `cos_cache` and `sin_cache` are [max_total_seqlen, head_size / 2] tables
+    that are read only when `do_rotary` is 1, in which case both are required.
+    `rotary_interleaved` selects the interleaved rotation pattern.
+    `local_window_size` >= 0 limits each token to that many preceding tokens,
+    and -1 means unused. `scale` = 0 means 1 / sqrt(head_size).
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+
+    Hip_TensorOrMemRef:$query,
+    Optional<Hip_TensorOrMemRef>:$key,
+    Optional<Hip_TensorOrMemRef>:$value,
+    Hip_TensorOrMemRef:$key_cache,
+    Hip_TensorOrMemRef:$value_cache,
+    Hip_TensorOrMemRef:$cumulative_sequence_length,
+    Hip_TensorOrMemRef:$past_seqlens,
+    Hip_TensorOrMemRef:$block_table,
+    Optional<Hip_TensorOrMemRef>:$cos_cache,
+    Optional<Hip_TensorOrMemRef>:$sin_cache,
+    Optional<Hip_TensorOrMemRef>:$attention_metadata,
+
+    Hip_TensorOrMemRef:$output,
+    Hip_TensorOrMemRef:$key_cache_out,
+    Hip_TensorOrMemRef:$value_cache_out,
+
+    I64Attr:$num_heads,
+    I64Attr:$kv_num_heads,
+    DefaultValuedAttr<I64Attr, "0">:$do_rotary,
+    DefaultValuedAttr<I64Attr, "0">:$rotary_interleaved,
+    DefaultValuedAttr<I64Attr, "-1">:$local_window_size,
+    DefaultValuedAttr<F32Attr, "0.0">:$scale
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $query `,` $key_cache `,` $value_cache `,`
+        $cumulative_sequence_length `,` $past_seqlens `,` $block_table
+        `:`
+        type($query) `,` type($key_cache) `,` type($value_cache) `,`
+        type($cumulative_sequence_length) `,` type($past_seqlens) `,`
+        type($block_table)
+    `)`
+    (`key` `(` $key^ `:` type($key) `)`)?
+    (`value` `(` $value^ `:` type($value) `)`)?
+    (`cos` `(` $cos_cache^ `:` type($cos_cache) `)`)?
+    (`sin` `(` $sin_cache^ `:` type($sin_cache) `)`)?
+    (`metadata` `(` $attention_metadata^ `:` type($attention_metadata) `)`)?
+    `outs` `(`
+        $output `,` $key_cache_out `,` $value_cache_out
+        `:`
+        type($output) `,` type($key_cache_out) `,`
+        type($value_cache_out)
+    `)`
+    attr-dict (`:` type($result_tensors)^)?
   }];
 
   let hasVerifier = 1;
@@ -4876,6 +5031,14 @@ def Hip_GatedDeltaNetOp : Hip_DpsOp_AutoReify<"gated_delta_net"> {
       o     = scale * S^T q
     `scale` = 0 means 1 / sqrt(dk).
 
+    With cumulative_sequence_length (i32 [B + 1], the exclusive prefix sums of
+    the per-request token counts) the requests are packed along a single token
+    axis instead of the [B, L] pair: qkv is [T, P], decay and beta are
+    [T, Hv] and output is [T, Hv, dv]. Request b owns tokens
+    [cu[b], cu[b+1]) and starts from its own slice of initial_state; a request
+    with no tokens passes its state through unchanged. B is then the first
+    dim of initial_state.
+
     Example:
     ```mlir
     hip.gated_delta_net(%ctx)
@@ -4894,6 +5057,7 @@ def Hip_GatedDeltaNetOp : Hip_DpsOp_AutoReify<"gated_delta_net"> {
     Hip_TensorOrMemRef:$qkv,
     Hip_TensorOrMemRef:$decay,
     Hip_TensorOrMemRef:$beta,
+    Optional<Hip_TensorOrMemRef>:$cumulative_sequence_length,
     Hip_TensorOrMemRef:$initial_state,
     Hip_TensorOrMemRef:$a_log,
     Hip_TensorOrMemRef:$dt_bias,
@@ -4908,6 +5072,8 @@ def Hip_GatedDeltaNetOp : Hip_DpsOp_AutoReify<"gated_delta_net"> {
         `:` type($qkv) `,` type($decay) `,` type($beta) `,`
         type($initial_state) `,` type($a_log) `,` type($dt_bias)
     `)`
+    (`cu` `(` $cumulative_sequence_length^ `:`
+              type($cumulative_sequence_length) `)`)?
     `outs` `(` $output `,` $final_state `:`
               type($output) `,` type($final_state) `)`
     attr-dict (`:` type($result_tensors)^)?

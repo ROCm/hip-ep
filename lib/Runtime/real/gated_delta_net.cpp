@@ -14,11 +14,12 @@
 
 int wrap_gated_delta_net(RuntimeState *state, const void *qkv,
                          const float *decay, const float *beta,
+                         const void *cumulative_sequence_length,
                          const float *initial_state, const float *a_log,
                          const float *dt_bias, void *output, float *final_state,
-                         int64_t batch, int64_t seq_len, int64_t num_heads_qk,
-                         int64_t num_heads_v, int64_t head_size_qk,
-                         int64_t head_size_v, float scale,
+                         int64_t total_tokens, int64_t batch,
+                         int64_t num_heads_qk, int64_t num_heads_v,
+                         int64_t head_size_qk, int64_t head_size_v, float scale,
                          int64_t element_size_bytes) {
   if (!state || !qkv || !decay || !beta || !initial_state || !a_log ||
       !dt_bias || !output || !final_state) {
@@ -32,11 +33,11 @@ int wrap_gated_delta_net(RuntimeState *state, const void *qkv,
             (long long)element_size_bytes);
     return -1;
   }
-  if (batch < 1 || seq_len < 1 || head_size_qk < 1) {
+  if (batch < 1 || total_tokens < 1 || head_size_qk < 1) {
     fprintf(stderr,
-            "wrap_gated_delta_net: invalid shape batch=%lld seq_len=%lld "
+            "wrap_gated_delta_net: invalid shape tokens=%lld batch=%lld "
             "dk=%lld\n",
-            (long long)batch, (long long)seq_len, (long long)head_size_qk);
+            (long long)total_tokens, (long long)batch, (long long)head_size_qk);
     return -1;
   }
 
@@ -53,26 +54,27 @@ int wrap_gated_delta_net(RuntimeState *state, const void *qkv,
       "gated_delta_net",
       [&] {
         char b[80];
-        snprintf(b, sizeof(b),
-                 "b=%lld,sq=%lld,hqk=%lld,hv=%lld,dk=%lld,dv=%lld",
-                 (long long)batch, (long long)seq_len, (long long)num_heads_qk,
-                 (long long)num_heads_v, (long long)head_size_qk,
-                 (long long)head_size_v);
+        snprintf(b, sizeof(b), "t=%lld,b=%lld,hqk=%lld,hv=%lld,dk=%lld,dv=%lld",
+                 (long long)total_tokens, (long long)batch,
+                 (long long)num_heads_qk, (long long)num_heads_v,
+                 (long long)head_size_qk, (long long)head_size_v);
         return std::string(b);
       },
       state);
 
-  RUNTIME_DEBUG_LOG("[REAL] wrap_gated_delta_net: B=%lld L=%lld Hqk=%lld "
-                    "Hv=%lld dk=%lld dv=%lld scale=%f elem=%lld\n",
-                    (long long)batch, (long long)seq_len,
+  RUNTIME_DEBUG_LOG("[REAL] wrap_gated_delta_net: T=%lld B=%lld Hqk=%lld "
+                    "Hv=%lld dk=%lld dv=%lld scale=%f elem=%lld ragged=%d\n",
+                    (long long)total_tokens, (long long)batch,
                     (long long)num_heads_qk, (long long)num_heads_v,
                     (long long)head_size_qk, (long long)head_size_v,
-                    (double)scale, (long long)element_size_bytes);
+                    (double)scale, (long long)element_size_bytes,
+                    cumulative_sequence_length != nullptr);
 
   int rc = hip_gated_delta_net(
-      stream, qkv, decay, beta, initial_state, a_log, dt_bias, output,
-      final_state, batch, seq_len, num_heads_qk, num_heads_v, head_size_qk,
-      head_size_v, scale, static_cast<int>(element_size_bytes));
+      stream, qkv, decay, beta, cumulative_sequence_length, initial_state,
+      a_log, dt_bias, output, final_state, total_tokens, batch, num_heads_qk,
+      num_heads_v, head_size_qk, head_size_v, scale,
+      static_cast<int>(element_size_bytes));
   if (rc != 0) {
     fprintf(stderr, "wrap_gated_delta_net: hip_gated_delta_net failed (%d)\n",
             rc);

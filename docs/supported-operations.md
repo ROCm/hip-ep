@@ -107,7 +107,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | LpNormalization | Decomposed to Mul / ReduceSum / Sqrt / Div |
 | RotaryEmbedding (`com.microsoft`) | Custom HIP kernel |
 | RotaryEmbedding (`ai.onnx`) | Custom HIP kernel |
-| MRotaryEmbedding (`com.microsoft`) | Custom HIP kernel. Rank-3 input, `interleaved=0`, `is_packed_batching=0`, f16/f32 |
+| MRotaryEmbedding (`com.microsoft`) | Custom HIP kernel. Rank-3 input, `interleaved=0`, `is_packed_batching` 0 or 1, f16/f32 |
 | GroupQueryAttention (`com.microsoft`) | Custom HIP kernels and hipBLASLt |
 | SparseAttentionIndexer (`com.microsoft`) | Custom HIP kernels, wave32 (RDNA) only. `qsa` policy with packed QK, head size 128, up to 8 heads, `token_budget / compress_ratio` ≤ 512, f16/f32. With `past_sequence_length`, `past_key` / `present_key` are max-capacity caches that may share one buffer. An MRoPE cos/sin table subgraph with constant section masks is folded into the op, which then reads the base tables through the position ids. The exported per-row counts subgraph (`ReduceSum(Where(selected_indices >= 0, 1, 0))`) is folded into an extra op output. Without a mask, an indexer whose selection only feeds DynamicSparseAttention is paired with it: rows that select every position skip scoring, and the rest are listed in block order |
 | DynamicSparseAttention (`com.microsoft`) | Custom HIP kernel (WMMA), wave32 (RDNA) only. `selected_only` over the main KV cache, head size 128 or 256, up to 16 query heads per KV head, f16; the op's own rotary, q/k norm and `head_sink` inputs are not supported. A surrounding packed-QKV `Split`, per-head `SimplifiedLayerNormalization` + `MRotaryEmbedding` of q/k and `Mul(output, Sigmoid(gate))` are folded into the kernel. Paired with its indexer, an unsplit call runs the dense rows of a long enough prompt on the GQA flash prefill |
@@ -132,8 +132,10 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 | QLinearLeakyRelu (`com.microsoft`) | Decomposed to DequantizeLinear + LeakyRelu + QuantizeLinear. int8 or uint8. `alpha` defaults to 0.01. `Y_zero_point` may be omitted |
 | QLinearMatMul | Custom HIP kernel. Rank-2 8-bit. A and Y scales and zero points are per-tensor. B's scale and zero point are per-tensor or one value per column. Separate from the `hip.qmatmul` QDQ fusion. With `HIPDNN_EP_ROCMLIR=1`, constant parameters move it to a rocMLIR i8 matmul with a fused requantize; ui8 B or a non-zero B zero point add a second i8 matmul over the zero point |
 | LinearAttention (`com.microsoft`) | Custom HIP kernel |
-| GatedDeltaNet (`com.microsoft`) | Custom HIP kernel. Packed QKV, `gate_activation=qwen`, `beta_activation=sigmoid`, `qk_l2_norm=1`, f16/f32; no `cu_seqlens` or state capture |
+| GatedDeltaNet (`com.microsoft`) | Custom HIP kernel. Packed QKV, `gate_activation=qwen`, `beta_activation=sigmoid`, `qk_l2_norm=1`, f16/f32; optional `cu_seqlens` (ragged `[T, ...]` packing); no state capture |
 | CausalConvWithState (`com.microsoft`) | Custom HIP kernel |
+| VarlenCausalConvWithState (`com.microsoft`) | Custom HIP kernel. Packed token-major input, `activation` none/silu/swish, any `dilation`, f16/f32; `state_update_capacity=0` only (no `capture_count` or `state_update`) |
+| PagedAttention (`com.microsoft`) | Custom HIP kernel. Causal (`is_causal=1`), separate key and value caches, f16, `scale`, head size up to 512. The conversion refuses `softcap`, quantized caches, the `LATENT` cache layout and the optional inputs after `sin_cache` (`slot_mapping`, `head_sink`, q/k norm, quantization scales). The `key_cache_out` / `value_cache_out` outputs are required; an output that is not the same buffer as its input cache costs a full cache copy per call |
 | NGramHashMapping (`com.microsoft`) | Custom HIP kernel. int32/int64 |
 | Relu | Decomposed to Max |
 | LeakyRelu | Custom HIP kernel |
