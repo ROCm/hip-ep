@@ -1850,6 +1850,7 @@ static int launch(hipStream_t stream, const void *x, const void *w,
                   const void *bias, void *y, const ConvParams &pr) {
   const int64_t totalOut = pr.N * pr.Cout * pr.Nout;
   if (totalOut <= 0 || pr.K <= 0) return 0;
+  (void)hipGetLastError(); // so the check after the launch sees only ours
 
   const int64_t units = deviceUnitCount();
 
