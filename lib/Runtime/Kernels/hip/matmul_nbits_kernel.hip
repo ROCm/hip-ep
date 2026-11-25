@@ -1408,6 +1408,9 @@ void matmul_nbits_gemv_dp4a_kernel(
     const int     bs_shift =
         __builtin_ctzll(static_cast<unsigned long long>(block_size));
     const bool has_zp = (zp != nullptr);
+    // B is [N, k_blocks, block_size / 2]: a row holds whole blocks, so it is
+    // longer than K / 2 bytes when block_size does not divide K.
+    const int64_t b_row_bytes = k_blocks * (block_size / 2);
 
     if (m0 >= M) return;
     const int rows = (TILE_M == 1)
@@ -1426,7 +1429,7 @@ void matmul_nbits_gemv_dp4a_kernel(
             int64_t n  = n_base + tn;
             int64_t sn = (n < N) ? n : 0;
             n_idx[tn]  = sn;
-            b_base_arr[tn] = B + sn * (K / 2);
+            b_base_arr[tn] = B + sn * b_row_bytes;
             s_rows[tn] = scales + sn * k_blocks;
         }
     }
@@ -1436,7 +1439,7 @@ void matmul_nbits_gemv_dp4a_kernel(
     };
     auto b_ptr = [&](int tn) __attribute__((always_inline)) -> const uint8_t* {
         if constexpr (TILE_M == 1) return b_base_arr[tn];
-        else return B + col_idx(tn) * (K / 2);
+        else return B + col_idx(tn) * b_row_bytes;
     };
     auto s_ptr = [&](int tn) __attribute__((always_inline)) -> const __half* {
         if constexpr (TILE_M == 1) return s_rows[tn];
