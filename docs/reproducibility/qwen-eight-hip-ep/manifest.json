@@ -1,5 +1,5 @@
 {
-  "state": "eight_charged_performance_complete_estimates_only",
+  "state": "eight_charged_performance_and_bfcl_complete",
   "files": {
     ".gitattributes": {
       "sha256": "9270f5d00be8254ec79574e9d8a4ab1def8796f6c0b005713d119d5bd75aee54",
@@ -26,7 +26,7 @@
       "bytes": 207
     },
     "documentation.json": {
-      "sha256": "3c388cd3456c61f43435b03acd242c9b371b22c3ba8ac4f0716389d9f365f41f",
+      "sha256": "dc65a919a381bcdc16d71aad3f5b911235ebb08e38bbfc7ca773c5ddfe640e1d",
       "bytes": 2637
     },
     "eight-140w-archive.json": {
@@ -698,8 +698,8 @@
       "bytes": 864
     },
     "README.md": {
-      "sha256": "f6c7c27d5be301bbf6d7a7317ec8725d1a57ebc4fc84f8b70b5122c2f810718e",
-      "bytes": 16273
+      "sha256": "a4df20b990925ab669bf074bf76de3cbcbb388ad7cd3ae9d15147247796e1fb4",
+      "bytes": 18758
     },
     "status.json": {
       "sha256": "fb50e1a7454a198d5d3507131906243c2afcad4bbe92603aedfffd069eabb78d",

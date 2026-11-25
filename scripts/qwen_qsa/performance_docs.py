@@ -248,6 +248,11 @@ def update_documents():
     (PACKET / "documentation.json").write_text(json.dumps(registry, indent=2) + "\n")
     manifest_path = PACKET / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
+    manifest["state"] = (
+        "eight_charged_performance_and_bfcl_complete"
+        if bfcl_summary_path.exists()
+        else "eight_charged_performance_complete_estimates_only"
+    )
     manifest["files"] = {
         p.relative_to(PACKET).as_posix(): dict(sha256=digest(p), bytes=p.stat().st_size)
         for p in sorted(PACKET.rglob("*"))

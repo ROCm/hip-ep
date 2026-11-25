@@ -6,6 +6,22 @@ Licensed under the MIT License.
 
 **Current state:** the clean eight-selector performance campaign is complete at B1/4K,16K,32K after the140W charger change. It uses **one warmup and three measured requests per shape**, as requested. The Eight-only BFCL50 pilot is complete: **Eight 29/50 versus reused Original 26/50**. GSM8K remains unstarted. No64K or batched shapes were run.
 
+## Data coverage: four and eight selectors
+
+Both variants' evidence is retained locally and in the portable packets below. Historical `Changed` labels in the four-selector packet mean **Four**, not Eight.
+
+| Measurement | Four selectors | Eight selectors |
+|---|---|---|
+| B1 performance, 4K/16K/32K | Complete: [JSON](../qwen-hip-ep/performance.json), [report](../../experiments/qwen-qsa-native-gqa-results.md) | Complete: [JSON](eight-140w-performance.json), [report](../../experiments/qwen-qsa-eight-selector-results.md) |
+| Same fixed BFCL50 cases | 24/50; Original 26/50: [report and raw-data links](../../experiments/qwen-qsa-bfcl-v4-50.md) | 29/50; Original 26/50 reused: [JSON](bfcl-eight-summary.json), [report and raw-data links](../../experiments/qwen-qsa-eight-bfcl-v4-50.md) |
+| Native PPL, 64 documents | Original 5.968688; Four 5.971270: [quality JSON](../qwen-hip-ep/quality.json) | Not measured on hip-ep; source checkpoint still misses its fixed32K PPL gate |
+| GSM8K, 128 cases | Original and Four 111/128; no pruning at these short contexts: [quality JSON](../qwen-hip-ep/quality.json) | Not run |
+| Application memory | Selected B1/4K comparison complete; WDDM commitment, not physical residency: [memory JSON](../qwen-hip-ep/memory.json), [report](../../experiments/qwen-qsa-memory.md) | Not measured; host RAM telemetry is diagnostic only |
+
+The performance comparisons reuse historical Original/Four controls across runs; the protocols differ as detailed below. The BFCL pilots are component scores, not official overall BFCL scores. Neither packet establishes accepted natural-long quality. No valid64K timing or Qwen SWE-bench result is available; no additional run is queued.
+
+**Status-file guide:** [bfcl-eight-status.json](bfcl-eight-status.json) and [bfcl-eight-summary.json](bfcl-eight-summary.json) are the completed BFCL result; [eight-140w-performance.json](eight-140w-performance.json) is the accepted charged-run timing record. The packet's `status.json`, `control-status.json`, `original-control-status.json`, pause receipts and `raw/` status files are preserved snapshots of their named earlier campaigns. Their paused/canceled/intermediate states are historical evidence, not active jobs. [evaluation-time-estimate.json](evaluation-time-estimate.json) is a pre-evaluation planning snapshot; its no-accuracy-runs label describes when the estimate was made. The completed BFCL result above supersedes that planning status.
+
 ## Eight selectors: completed charged-power performance
 
 All eight updated BF16 selectors at zero-based layers3/7/23/27/31/35/39/63 come from the frozen checkpoint640 export; the original four positions also use its updated weights. The backbone remains native RTN W4A16 group128, with FP16 activations/KV and FP32 recurrent state. No training,learned calibration,kernel/compiler rebuild or model update occurred during this campaign. Both prefill and decode use sparse QSA. The earlier eight-node/cache/finite/dispatch validation is reused with exact graph,selector and binary identities.
@@ -57,7 +73,7 @@ These are planning estimates derived **after** measured performance. Each actual
 
 [Estimation JSON](evaluation-time-estimate.json) includes both trajectory scenarios,phase components,startup costs,formulas and limitations. `raw/eight-140w/bfcl-estimate-inputs.csv` and `gsm-estimate-inputs.csv` retain per-call/case workload lengths. Startup includes the maximum observed new Eight session load/compile plus15seconds for CPU/import/tokenizer setup; it may reuse OS/compiler caches. One resident session per variant is assumed; retaining four32-case GSM processes adds three startups per variant.
 
-Ranges are planning envelopes,not confidence intervals or guaranteed upper bounds. BFCL can change tool paths,call counts,turn stops and lengths with the new selectors. Sub-4K phase costs are calibrated extrapolations,and historical GSM token totals are workload assumptions,not output or accuracy predictions. Fresh Original estimates reuse its historical evaluation time; only its4K charged baseline was freshly checked. **Checkpoint640 still misses the source fixed32K PPL gate. No new accuracy score or accepted long-context accuracy is claimed.**
+Ranges are planning envelopes,not confidence intervals or guaranteed upper bounds. BFCL can change tool paths,call counts,turn stops and lengths with the new selectors. Sub-4K phase costs are calibrated extrapolations,and historical GSM token totals are workload assumptions,not output or accuracy predictions. Fresh Original estimates reuse its historical evaluation time; only its4K charged baseline was freshly checked. **Checkpoint640 still misses the source fixed32K PPL gate. The completed BFCL pilot does not establish accepted long-context accuracy.**
 
 ## Repeat after the140W charger change
 

@@ -1,6 +1,6 @@
 {
   "source_performance_sha256": "bed3190aca4590fcc1ad85d566a7442e630e5dbbe348a0193400f554f762ff49",
-  "generator_sha256": "88f6e72d1320c84ed13ba7377eddee212a9c1446c9c3bd694f106ef62119dcb6",
+  "generator_sha256": "170a17798b57cfe1ca516b96245b2f248b8040df3a333a6546b0cd713cd6090f",
   "document_hash_normalization": "UTF-8 text with LF line endings",
   "documents": {
     "docs/experiments/qwen-qsa-eight-selector-results.md": {
@@ -8,8 +8,8 @@
       "normalized_utf8_bytes": 3723
     },
     "docs/reproducibility/qwen-eight-hip-ep/README.md": {
-      "normalized_lf_sha256": "497f19f7d43eb052d972445ade315943fcf91159dae5cbdec9f494d040a01a86",
-      "normalized_utf8_bytes": 16155
+      "normalized_lf_sha256": "9389dfc98b7e7b7080d93df2c3c50723f86d587c122edc3d1a2cb673e5b2e785",
+      "normalized_utf8_bytes": 18624
     },
     "docs/experiments/qwen-qsa-native-gqa-results.md": {
       "normalized_lf_sha256": "e8cc591c76388c888123711818f7ac63506a1eea3ba98049df4995e9d0e2e02e",
