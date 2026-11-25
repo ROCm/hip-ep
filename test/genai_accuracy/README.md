@@ -16,17 +16,23 @@ it on every PR, merge group, and push.
 
 ## What runs
 
-The workflow runs these models in order, each through the same steps:
+The workflow runs these models in order, each through the same steps. The test
+follows the modelzoo profile, as in the Jenkins flow:
 
-| Model | Source | Revision |
-|-------|--------|----------|
-| `Qwen3.8-Flash-Next` | Hugging Face `amd/Qwen3.8-Flash-Next_gpuep_1.0_gpu_128` | pinned |
-| `Qwen3.8-27B` | Hugging Face `amd/Qwen3.8-27B_gpuep_1.0_gpu_128` | pinned |
-| `Gemma-4-E4B-it` | modelzoo entry `gemma-4-E4B-it-awq-uint4-onnx-split-fp16-pruned_lm_head` (not on Hugging Face), staged by hand | n/a |
+| Model | Test | Source |
+|-------|------|--------|
+| `Qwen3.8-Flash-Next` | `PPL_VLM` | Hugging Face `amd/Qwen3.8-Flash-Next_gpuep_1.0_gpu_128`, pinned revision |
+| `Qwen3.8-27B` | `PPL_VLM` | model share |
+| `Gemma-4-E4B-it` | `PPL_VLM` | model share |
+| `gpt-oss-20b` | `PPL` | model share |
+| `Llama-3.1-8B` | `PPL` | model share |
 
-All models use the `PPL_VLM` test, matching the modelzoo `vlm_model_mm_accuracy`
-profile. Its parameters come from the framework's `test_config_vlm.json`:
-conditional perplexity of `lmms-lab/flickr30k` test captions given the image.
+- `PPL_VLM` (VLM profile): conditional perplexity of `lmms-lab/flickr30k` test
+  captions given the image. Parameters come from the framework's
+  `test_config_vlm.json`.
+- `PPL` (LLM profile): wikitext2 perplexity with a 512-token window over 2% of the
+  corpus (`nsamples=0.02`); the other parameters, such as `stride`, come from the
+  framework's `test_config.json`.
 
 | Item | Value |
 |------|-------|
@@ -34,23 +40,21 @@ conditional perplexity of `lmms-lab/flickr30k` test captions given the image.
 | Framework | hipdnn-accuracy-test at a pinned commit |
 | Python | 3.14 venv with the package's `onnxruntime_directml` and `onnxruntime_genai_directml` wheels |
 
-The LLM models in the modelzoo (`gpt-oss-20b`, `Llama-3.1-8B`) are not
-included.
-
 `session.disable_cpu_ep_fallback=1` makes session creation fail if any node
 would fall back to the CPU EP. A passing run therefore measured the GPU path.
 
 ## Pass criteria
 
-1. `run_accuracy.py` exits 0 and reports a `Perplexity:` value for every model.
-   Otherwise the `Run GenAI accuracy` step fails.
+1. `run_accuracy.py` exits 0 and reports a `Perplexity:` value for every model
+   that ran. Otherwise the `Run GenAI accuracy` step fails. A skipped model (see
+   below) does not fail the step.
 2. On pull requests and merge groups, each model's perplexity may rise by at
    most 2% over its `<model>/result.json` in the `genai-accuracy-results`
    artifact of the latest successful `Windows Build` push run on `main` that
    has one. Lower perplexity is better. A model's baseline is used only when its
    model revision, framework commit, and test parameters match this run. Pushes
-   report the delta without gating. The first run after the artifact layout
-   changed has no baseline, so it is not gated.
+   report the delta without gating. A model with no comparable baseline is not
+   gated.
 
 Results appear in the job summary and, on PRs, in one comment marked
 `<!-- morphizen-genai-accuracy-results -->` with a section per model. The
@@ -65,37 +69,57 @@ Results appear in the job summary and, on PRs, in one comment marked
 ```text
 hipdnn-accuracy-test/   framework checkout at the pinned commit
 genai-accuracy-venv/    venv, rebuilt when the Python or pinned packages change
-hf-home/                Hugging Face cache (flickr30k)
+hf-home/                Hugging Face cache (datasets)
 genai-models/<model>    link to the model in the model store
 ```
 
 The models live in the machine-wide model store `--models-root` (default
 `$GENAI_MODELS_ROOT`, or `C:\models` on Windows) as `<models-root>/<model>`, so
-every runner workspace shares one copy. The three models take about 150 GB
-together (Flash-Next ~124 GB, Qwen3.8-27B ~17 GB, Gemma ~11 GB). `prepare`:
+every runner workspace shares one copy. `prepare` sets up the framework, venv and
+wheels once, then for each model:
 
-1. Treats the model as present when `<models-root>/<model>/genai_config.json`
-   exists and no `.download_incomplete` marker is left by an interrupted
-   download. A model placed there by hand is used as is; its revision is not
-   verified against the pin.
-2. Otherwise downloads the pinned revision into `<models-root>/<model>`. A model
-   without a Hugging Face source (`Gemma-4-E4B-it`) is not downloaded; when it is
-   absent from the store its test is skipped (see below).
-3. Links `<cache-root>/genai-models/<model>` to it: a symlink, or a directory
-   junction when the account cannot create symlinks.
+1. Uses the model in the store when `<models-root>/<model>/genai_config.json`
+   exists and no `.download_incomplete` marker is left by an interrupted copy or
+   download. A model placed there by hand is used as is.
+2. Otherwise copies it from the model share `--source-root` (default
+   `$GENAI_MODELS_SOURCE`, or `R:/` on Windows) into `<models-root>/<model>`
+   with `robocopy`, which resumes a partial copy.
+3. Otherwise, for a model with a Hugging Face source, downloads the pinned
+   revision.
+4. Links `<cache-root>/genai-models/<model>` to the store directory: a symlink,
+   or a directory junction when the account cannot create symlinks.
+
+One model failing to copy or download does not stop the others; `prepare` then
+exits non-zero.
 
 Each run hard-links the model into its work dir, because `run_accuracy.py`
 overwrites `genai_config.json` in the model directory. The work dir must be on
-the same volume as the model store.
+the same volume as the model store. The five models take roughly 150 GB or more
+in the store.
 
-### Staging Gemma-4-E4B-it
+### Model share layout
 
-Copy the modelzoo directory from `xcosdaem579.xilinx.com` (the `model_url` of the
-modelzoo entry, `/proj/aiebuilds/vitisaijenkins/ROCm/models/key_llm/gemma-4-E4B-it-awq-uint4-onnx-split-fp16-pruned_lm_head`,
-about 11 GB) into `C:\models\Gemma-4-E4B-it` on the runner. The directory must
-contain `genai_config.json`. Until it is there, this model's test is skipped: `run`
-writes a `result.json` with `skipped: true`, the report shows `SKIPPED`, and the
-job does not fail or gate on it.
+The share `R:/` is mounted from `xcosdaem579.xilinx.com:/proj/aiebuilds/vitisaijenkins/ROCm/models/key_llm`.
+It holds one directory per model, named after the modelzoo alias. Each must
+contain `genai_config.json`:
+
+| Model | Directory under `R:/` |
+|-------|----------------------|
+| `Qwen3.8-27B` | `Qwen3.8-27B-fp16-ve-fp16-int4-k_quant-gs128-text-dml-onnx` (16 GB) |
+| `Gemma-4-E4B-it` | `gemma-4-E4B-it-awq-uint4-onnx-split-fp16-pruned_lm_head` (11 GB) |
+| `gpt-oss-20b` | `gpt-oss-20b-webgpu-int4-rtn-block-32-pruned_lm_head` (12 GB) |
+| `Llama-3.1-8B` | `Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml-pruned_lm_head` (4.7 GB) |
+
+The directory names are the `MODELS[...]["source_dirs"]` entries in
+`run_genai_accuracy.py`. These models have no pinned revision; the copy from the
+share is used as is.
+
+### Skipped models
+
+A model with no Hugging Face source that is neither in the store nor on the
+share is skipped, not failed: `prepare` logs `[SKIP]`, `run` writes a
+`result.json` with `skipped: true`, the report shows `SKIPPED`, and the job does
+not gate on it.
 
 ## Running locally
 
@@ -104,9 +128,11 @@ On a Windows Strix Halo machine with Python 3.14 and an extracted
 
 ```bash
 python test/genai_accuracy/run_genai_accuracy.py prepare \
+  --model Qwen3.8-27B gpt-oss-20b \
   --package-dir gpu-test-package --cache-root D:/genai-accuracy \
-  --models-root D:/models
+  --models-root D:/models --source-root R:/
 python test/genai_accuracy/run_genai_accuracy.py run \
+  --model gpt-oss-20b \
   --package-dir gpu-test-package --cache-root D:/genai-accuracy \
   --work-dir D:/genai-accuracy-work --results-dir genai-accuracy-results
 python test/genai_accuracy/run_genai_accuracy.py report \
@@ -117,7 +143,7 @@ python test/genai_accuracy/run_genai_accuracy.py report \
 
 ## Changing the pins
 
-Changing `ACCURACY_REPO_COMMIT`, a model `revision`, or the framework's
-PPL_VLM parameters makes the main baseline non-comparable. The first PR after
-such a change runs ungated. Gating resumes once that change has a successful
-run on `main`.
+Changing `ACCURACY_REPO_COMMIT`, a model `revision`, a model's test parameters, or
+the framework's `PPL`/`PPL_VLM` parameters makes the main baseline non-comparable
+for the affected models. The first PR after such a change runs ungated for them.
+Gating resumes once that change has a successful run on `main`.

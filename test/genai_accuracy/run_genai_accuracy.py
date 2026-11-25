@@ -11,7 +11,9 @@ with the latest main run. See test/genai_accuracy/README.md.
 
 Subcommands:
   prepare  Clone the pinned framework, build or reuse the Python venv, install
-           the package's ORT/OGA wheels, and download the pinned model.
+           the package's ORT/OGA wheels, and make each model available: in the
+           model store, else copied from the model share, else downloaded from
+           Hugging Face. A model found nowhere is skipped by run.
   run      Mirror the model, generate its AMDGPU genai_config, run the test and
            write <results-dir>/result.json. Exits 1 when the test fails.
   report   Render a Markdown summary of result.json against a main baseline
@@ -37,6 +39,7 @@ ACCURACY_REPO_URL = "https://github.com/AMDmoore/hipdnn-accuracy-test.git"
 # to a framework update. Bump together with the main baseline.
 ACCURACY_REPO_COMMIT = "6274c2b6b131f8d9cca9a443a24f7a6439e680b5"
 VLM_TEMPLATE_CONFIG = "test_config_vlm.json"
+TEXT_TEMPLATE_CONFIG = "test_config.json"
 
 # Mirrors one entry of the GenAI modelzoo used by the HIP EP GenAI CI.
 MODELS = {
@@ -54,10 +57,16 @@ MODELS = {
         },
         "hip_provider_options": {},
     },
+    # The models below have no pinned Hugging Face revision: they are copied
+    # from the model share (--source-root) into the model store when missing,
+    # and their test is skipped when the share does not have them either.
+    # "source_dirs" are the directory names tried under the share, in order.
     "Qwen3.8-27B": {
-        "hf_repo": "amd/Qwen3.8-27B_gpuep_1.0_gpu_128",
-        "revision": "0c75d4c27f27fce78f150fde4aee4a19ef189b6b",
+        "hf_repo": None,
+        "revision": None,
+        "source_dirs": ["Qwen3.8-27B-fp16-ve-fp16-int4-k_quant-gs128-text-dml-onnx"],
         "test": "PPL_VLM",
+        "template": VLM_TEMPLATE_CONFIG,
         "variant": "allgpu",
         "ci_options": {
             "LLM_TOKENS_MITRIX": "128|128,2048|128,16384|128",
@@ -66,23 +75,51 @@ MODELS = {
         "hip_provider_options": {},
     },
     "Gemma-4-E4B-it": {
-        # Not on Hugging Face. The modelzoo entry
-        # gemma-4-E4B-it-awq-uint4-onnx-split-fp16-pruned_lm_head lives on
-        # xcosdaem579; it must already be in the model store (see the README),
-        # so prepare never tries to download it.
         "hf_repo": None,
         "revision": None,
+        "source_dirs": ["gemma-4-E4B-it-awq-uint4-onnx-split-fp16-pruned_lm_head"],
         "test": "PPL_VLM",
+        "template": VLM_TEMPLATE_CONFIG,
         "variant": "allgpu",
         "ci_options": {
             "LLM_TOKENS_MITRIX": "128|128,2048|128,16384|128",
         },
         "hip_provider_options": {"enable_graph_capture": "0"},
     },
+    # LLMs run the text PPL test the way the Jenkins flow does: wikitext2, a
+    # 512-token window, 2% of the corpus (the template's stride is kept).
+    "gpt-oss-20b": {
+        "hf_repo": None,
+        "revision": None,
+        "source_dirs": ["gpt-oss-20b-webgpu-int4-rtn-block-32-pruned_lm_head"],
+        "test": "PPL",
+        "template": TEXT_TEMPLATE_CONFIG,
+        "seq_len": 512,
+        "param_overrides": {"nsamples": 0.02},
+        "ci_options": {
+            "LLM_TOKENS_MITRIX": "128|128,2048|128,16384|128",
+            "HIP_CHUNK_SIZE": 512,
+        },
+        "hip_provider_options": {},
+    },
+    "Llama-3.1-8B": {
+        "hf_repo": None,
+        "revision": None,
+        "source_dirs": ["Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml-pruned_lm_head"],
+        "test": "PPL",
+        "template": TEXT_TEMPLATE_CONFIG,
+        "seq_len": 512,
+        "param_overrides": {"nsamples": 0.02},
+        "ci_options": {
+            "LLM_TOKENS_MITRIX": "128|128,2048|128,16384|128",
+            "HIP_CHUNK_SIZE": 512,
+        },
+        "hip_provider_options": {},
+    },
 }
 DEFAULT_MODEL = "Qwen3.8-Flash-Next"
-# result.json source label for a model staged by hand (no Hugging Face repo).
-STAGED_SOURCE = "staged (modelzoo)"
+# result.json source label for a model without a pinned Hugging Face revision.
+STAGED_SOURCE = "staged"
 
 AMDGPU_GENAI_CONFIG = "genai_config_AMDGPU.json"
 CPU_FALLBACK_KEY = "session.disable_cpu_ep_fallback"
@@ -141,9 +178,17 @@ def _default_models_root() -> str:
     return r"C:\models" if os.name == "nt" else str(Path.home() / "models")
 
 
-def _paths(args) -> dict:
+def _default_source_root() -> str | None:
+    env = os.environ.get("GENAI_MODELS_SOURCE")
+    if env:
+        return env
+    return "R:/" if os.name == "nt" else None
+
+
+def _paths(args, model: str) -> dict:
     cache_root = Path(args.cache_root).resolve()
     models_root = Path(args.models_root).resolve()
+    source_root = getattr(args, "source_root", None)
     return {
         "framework": cache_root / "hipdnn-accuracy-test",
         "venv": cache_root / "genai-accuracy-venv",
@@ -151,9 +196,16 @@ def _paths(args) -> dict:
         # The model lives in the machine-wide store (models_root) so it is
         # shared across runner workspaces; "model" is the link to it under the
         # cache root that the rest of the flow reads.
-        "model_store": models_root / args.model,
-        "model": cache_root / "genai-models" / args.model,
+        "model_store": models_root / model,
+        "model": cache_root / "genai-models" / model,
+        # Where a missing model is copied from; None when there is no share.
+        "source_root": Path(source_root) if source_root else None,
     }
+
+
+def _sweep_entry(spec: dict):
+    """The framework's seq_lengths entry: a window size or a variant name."""
+    return spec.get("seq_len") or spec["variant"]
 
 
 # ---------------------------------------------------------------------------
@@ -336,37 +388,90 @@ def _link_model(store_dir: Path, link: Path) -> None:
         _run(["cmd", "/c", "mklink", "/J", link, store_dir])
 
 
-def _ensure_model(venv_python: Path, spec: dict, paths: dict, name: str) -> bool:
-    """Make the model available; return False when a staged model is absent.
+def _find_source_dir(spec: dict, source_root: Path | None) -> Path | None:
+    if source_root is None or not source_root.is_dir():
+        return None
+    for name in spec.get("source_dirs", []):
+        candidate = source_root / name
+        if (candidate / "genai_config.json").is_file():
+            return candidate
+    return None
 
-    A model without a Hugging Face source is never downloaded. When it is not
-    staged in the store, its test is skipped instead of failing the run.
+
+def _copy_model(source: Path, store: Path) -> None:
+    """Copy a model directory from the share into the model store."""
+    store.mkdir(parents=True, exist_ok=True)
+    marker = store / DOWNLOAD_MARKER
+    marker.write_text(f"copied from {source}\n", encoding="utf-8")
+    if os.name == "nt":
+        # robocopy resumes a partial copy and copies in parallel; exit codes
+        # below 8 mean success (files copied, extra files, or nothing to do).
+        command = [
+            "robocopy",
+            source,
+            store,
+            "/E",
+            "/R:2",
+            "/W:5",
+            "/MT:8",
+            "/NFL",
+            "/NDL",
+            "/NP",
+        ]
+        _log("[CMD] " + subprocess.list2cmdline([str(c) for c in command]))
+        returncode = subprocess.run([str(c) for c in command]).returncode
+        if returncode >= 8:
+            raise SystemExit(f"robocopy failed ({returncode}) copying {source}")
+    else:
+        shutil.copytree(source, store, dirs_exist_ok=True)
+    marker.unlink()
+
+
+def _ensure_model(venv_python: Path, spec: dict, paths: dict, name: str) -> bool:
+    """Make the model available; return False when it cannot be obtained.
+
+    Order: already in the store, copy from the share, download from Hugging
+    Face. A model with none of these is skipped instead of failing the run.
     """
     store = paths["model_store"]
     if _model_present(store):
-        _log(f"Model already in store, skipping download: {store}")
-    elif spec["hf_repo"] is None:
-        _log(
-            f"[SKIP] {name} is not in {store} and has no Hugging Face source; "
-            "its test is skipped. Copy the model directory there (it must contain "
-            "genai_config.json) to run it."
-        )
-        return False
+        _log(f"Model already in store, skipping copy and download: {store}")
     else:
-        _log(f"Model not found in store, downloading to: {store}")
-        _download_model(venv_python, spec, store, paths["hf_home"])
+        source = _find_source_dir(spec, paths["source_root"])
+        if source is not None:
+            _log(f"Model not in store, copying from {source} to {store}")
+            _copy_model(source, store)
+        elif spec["hf_repo"] is not None:
+            _log(f"Model not found in store, downloading to: {store}")
+            _download_model(venv_python, spec, store, paths["hf_home"])
+        else:
+            _log(
+                f"[SKIP] {name} is not in {store} and was not found on the model "
+                f"share ({paths['source_root']}; tried {spec.get('source_dirs')}); "
+                "its test is skipped."
+            )
+            return False
     _link_model(store, paths["model"])
     return True
 
 
 def cmd_prepare(args) -> int:
-    paths = _paths(args)
-    spec = _model_spec(args.model)
     package_dir = Path(args.package_dir).resolve()
-    _sync_framework(paths["framework"])
-    venv_python = _ensure_venv(paths["venv"])
+    first = _paths(args, args.model[0])
+    _sync_framework(first["framework"])
+    venv_python = _ensure_venv(first["venv"])
     _install_package_wheels(venv_python, package_dir)
-    _ensure_model(venv_python, spec, paths, args.model)
+    failed = []
+    for name in args.model:
+        try:
+            _ensure_model(venv_python, _model_spec(name), _paths(args, name), name)
+        except (SystemExit, subprocess.CalledProcessError, OSError) as exc:
+            # One model failing to copy or download must not stop the others.
+            _log(f"[ERROR] could not prepare {name}: {exc}")
+            failed.append(name)
+    if failed:
+        _log(f"[ERROR] prepare failed for: {', '.join(failed)}")
+        return 1
     return 0
 
 
@@ -503,11 +608,12 @@ def _write_compat_sitecustomize(target_dir: Path) -> None:
     )
 
 
-def _test_params(framework_dir: Path, test: str) -> dict:
-    template = json.loads(
-        (framework_dir / VLM_TEMPLATE_CONFIG).read_text(encoding="utf-8")
-    )
-    return copy.deepcopy(template["tests"][test].get("params", {}))
+def _test_params(framework_dir: Path, spec: dict) -> dict:
+    template_name = spec.get("template", VLM_TEMPLATE_CONFIG)
+    template = json.loads((framework_dir / template_name).read_text(encoding="utf-8"))
+    params = copy.deepcopy(template["tests"][spec["test"]].get("params", {}))
+    params.update(spec.get("param_overrides", {}))
+    return params
 
 
 def _write_skipped_result(args, spec: dict, results_dir: Path, reason: str) -> None:
@@ -518,7 +624,7 @@ def _write_skipped_result(args, spec: dict, results_dir: Path, reason: str) -> N
         "framework_commit": ACCURACY_REPO_COMMIT,
         "test": spec["test"],
         "ep": "hip",
-        "variant": spec["variant"],
+        "variant": str(_sweep_entry(spec)),
         "params": {},
         "skipped": True,
         "success": False,
@@ -532,17 +638,18 @@ def _write_skipped_result(args, spec: dict, results_dir: Path, reason: str) -> N
 
 
 def cmd_run(args) -> int:
-    paths = _paths(args)
+    paths = _paths(args, args.model)
     spec = _model_spec(args.model)
     package_dir = Path(args.package_dir).resolve()
     work_dir = Path(args.work_dir).resolve()
     results_dir = Path(args.results_dir).resolve()
     venv_python = _venv_python(paths["venv"])
     if spec["hf_repo"] is None and not _model_present(paths["model_store"]):
-        # A staged model that was not copied in: skip, do not fail the job.
+        # No Hugging Face source, and prepare found it neither in the store nor
+        # on the model share: skip, do not fail the job.
         reason = (
-            f"{args.model} is not in {paths['model_store']}; copy it there to run "
-            "this test"
+            f"{args.model} is not in {paths['model_store']} and was not found on "
+            "the model share"
         )
         results_dir.mkdir(parents=True, exist_ok=True)
         _write_skipped_result(args, spec, results_dir, reason)
@@ -572,8 +679,10 @@ def cmd_run(args) -> int:
     )
 
     test = spec["test"]
-    variant = spec["variant"]
-    params = _test_params(paths["framework"], test)
+    # PPL sweeps a window size, PPL_VLM a provider variant name; the framework
+    # maps either to a genai_config file by its string form.
+    sweep = _sweep_entry(spec)
+    params = _test_params(paths["framework"], spec)
     case_dir = work_dir / "output"
     run_config = {
         "model_dir": str(model_dir),
@@ -581,8 +690,8 @@ def cmd_run(args) -> int:
         "package_dir": str(package_dir),
         # gpu-test-package bundles the HIP runtime in bin/.
         "therock_dist": str(package_dir),
-        "genai_configs": {variant: AMDGPU_GENAI_CONFIG},
-        "tests": {test: {"seq_lengths": [variant], "params": params}},
+        "genai_configs": {str(sweep): AMDGPU_GENAI_CONFIG},
+        "tests": {test: {"seq_lengths": [sweep], "params": params}},
     }
     run_config_path = work_dir / "run_accuracy_config.json"
     run_config_path.write_text(
@@ -641,7 +750,7 @@ def cmd_run(args) -> int:
         "framework_commit": ACCURACY_REPO_COMMIT,
         "test": test,
         "ep": "hip",
-        "variant": variant,
+        "variant": str(sweep),
         "params": params,
         "success": success,
         "error": error,
@@ -769,7 +878,6 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     def add_common(p):
-        p.add_argument("--model", default=DEFAULT_MODEL, choices=sorted(MODELS))
         p.add_argument("--package-dir", required=True, help="gpu-test-package root")
         p.add_argument(
             "--cache-root",
@@ -779,15 +887,29 @@ def main() -> int:
         p.add_argument(
             "--models-root",
             default=_default_models_root(),
-            help="Machine-wide model store; the model is downloaded here when "
-            "missing (default: $GENAI_MODELS_ROOT, C:\\models on Windows)",
+            help="Machine-wide model store; a missing model is copied or "
+            "downloaded here (default: $GENAI_MODELS_ROOT, C:\\models on Windows)",
+        )
+        p.add_argument(
+            "--source-root",
+            default=_default_source_root(),
+            help="Model share a missing model is copied from (default: "
+            "$GENAI_MODELS_SOURCE, R:/ on Windows)",
         )
 
-    p_prepare = sub.add_parser("prepare", help="Sync framework, venv and model")
+    p_prepare = sub.add_parser("prepare", help="Sync framework, venv and models")
+    p_prepare.add_argument(
+        "--model",
+        nargs="+",
+        default=[DEFAULT_MODEL],
+        choices=sorted(MODELS),
+        help="Models to prepare (framework, venv and wheels are set up once)",
+    )
     add_common(p_prepare)
     p_prepare.set_defaults(func=cmd_prepare)
 
     p_run = sub.add_parser("run", help="Run the accuracy test")
+    p_run.add_argument("--model", default=DEFAULT_MODEL, choices=sorted(MODELS))
     add_common(p_run)
     p_run.add_argument("--work-dir", required=True, help="Per-run scratch dir")
     p_run.add_argument("--results-dir", required=True, help="Per-run results dir")

@@ -523,11 +523,12 @@ jobs:
           exit $failed
 
       # -----------------------------------------------------------------------
-      # GenAI accuracy: hipdnn-accuracy-test PPL_VLM on each VLM model listed in
-      # the steps below through the AMDGPU (HIP) EP, gated against the latest main run. The
-      # framework, venv and HF cache persist under runner.workspace/genai-accuracy.
-      # Models live in C:\models: downloaded there when missing, except
-      # Gemma-4-E4B-it, which must be staged by hand. See test/genai_accuracy/README.md.
+      # GenAI accuracy: hipdnn-accuracy-test on each model listed in the steps
+      # below (PPL_VLM for VLMs, PPL for LLMs) through the AMDGPU (HIP) EP, gated
+      # against the latest main run. The framework, venv and HF cache persist under
+      # runner.workspace/genai-accuracy. Models live in C:\models: copied from R:
+      # when missing, and a model found nowhere is skipped.
+      # See test/genai_accuracy/README.md.
       # -----------------------------------------------------------------------
       - name: Checkout GenAI accuracy script
         if: ${{ !inputs.docs_only && always() }}
@@ -542,25 +543,27 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Continue"
-          $failed = 0
-          foreach ($model in @("Qwen3.8-Flash-Next", "Qwen3.8-27B", "Gemma-4-E4B-it")) {
-            python hip-ep-src\test\genai_accuracy\run_genai_accuracy.py prepare `
-              --model $model `
-              --package-dir gpu-test-package `
-              --cache-root "${{ runner.workspace }}\genai-accuracy" `
-              --models-root "C:\models"
-            if ($LASTEXITCODE -ne 0) { Write-Host "ERROR: prepare failed for $model"; $failed = 1 }
-          }
-          exit $failed
+          $models = @("Qwen3.8-Flash-Next", "Qwen3.8-27B", "Gemma-4-E4B-it", "gpt-oss-20b", "Llama-3.1-8B")
+          # Sets up the framework, venv and wheels once, then makes each model
+          # available: in C:\models, else copied from R:, else downloaded from
+          # Hugging Face; a model with none of these is skipped.
+          python hip-ep-src\test\genai_accuracy\run_genai_accuracy.py prepare `
+            --model $models `
+            --package-dir gpu-test-package `
+            --cache-root "${{ runner.workspace }}\genai-accuracy" `
+            --models-root "C:\models" `
+            --source-root "R:/"
+          exit $LASTEXITCODE
 
-      - name: Run GenAI accuracy (PPL_VLM)
+      - name: Run GenAI accuracy
         if: ${{ !inputs.docs_only && always() }}
-        timeout-minutes: 180
+        timeout-minutes: 240
         shell: pwsh
         run: |
           $ErrorActionPreference = "Continue"
           $failed = 0
-          foreach ($model in @("Qwen3.8-Flash-Next", "Qwen3.8-27B", "Gemma-4-E4B-it")) {
+          $models = @("Qwen3.8-Flash-Next", "Qwen3.8-27B", "Gemma-4-E4B-it", "gpt-oss-20b", "Llama-3.1-8B")
+          foreach ($model in $models) {
             python hip-ep-src\test\genai_accuracy\run_genai_accuracy.py run `
               --model $model `
               --package-dir gpu-test-package `
@@ -595,7 +598,7 @@ jobs:
           $repo = "${{ github.repository }}"
           $eventName = "${{ github.event_name }}"
           $prNumber = "${{ github.event.pull_request.number }}"
-          $models = @("Qwen3.8-Flash-Next", "Qwen3.8-27B", "Gemma-4-E4B-it")
+          $models = @("Qwen3.8-Flash-Next", "Qwen3.8-27B", "Gemma-4-E4B-it", "gpt-oss-20b", "Llama-3.1-8B")
           $baselineDir = "genai-accuracy-baseline"
           if (Test-Path -LiteralPath $baselineDir) {
             Remove-Item -LiteralPath $baselineDir -Recurse -Force
