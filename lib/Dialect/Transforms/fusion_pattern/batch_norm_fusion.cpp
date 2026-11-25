@@ -317,13 +317,11 @@ bool assignScaleAndNormalization(llvm::ArrayRef<Step> steps,
   return false;
 }
 
-/// Ops of another context, or ones that broadcast x itself, would change the
-/// result if fused.
-bool usesContextAndType(llvm::ArrayRef<mlir::Operation *> ops, mlir::Value ctx,
-                        mlir::RankedTensorType data) {
+/// The fused op runs on the root's context, so every op it replaces must too.
+bool usesContext(llvm::ArrayRef<mlir::Operation *> ops, mlir::Value ctx) {
   return llvm::all_of(ops, [&](mlir::Operation *op) {
     // The HIP context is operand 0 of every HIP op.
-    return op->getOperand(0) == ctx && op->getResult(0).getType() == data;
+    return op->getOperand(0) == ctx;
   });
 }
 
@@ -433,9 +431,9 @@ struct BatchNormFusion : public mlir::OpRewritePattern<RootOp> {
       if (step.op != root.getOperation())
         chain.ops.push_back(step.op);
     chain.ops.push_back(centered);
-    if (!usesContextAndType(chain.ops, root.getCtx(), data))
-      return rewriter.notifyMatchFailure(
-          root, "batch norm ops must share a context and the type of x");
+    if (!usesContext(chain.ops, root.getCtx()))
+      return rewriter.notifyMatchFailure(root,
+                                         "batch norm ops must share a context");
     auto initDefs = collectInitDefs(chain.ops);
     if (!initDefs)
       return rewriter.notifyMatchFailure(root, "batch norm op is not DPS");
