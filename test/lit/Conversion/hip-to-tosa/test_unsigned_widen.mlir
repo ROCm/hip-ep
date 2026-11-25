@@ -11,10 +11,10 @@
 
 // CHECK-LABEL: func.func @ui8_max_scalar
 // CHECK-SAME: (%[[A:.*]]: tensor<2x8xi8>) -> tensor<2x8xi8>
-// CHECK-DAG: %[[AW:.*]] = tosa.custom %[[A]] {{.*}}operator_name = "unsigned_cast"{{.*}} -> tensor<2x8xi32>
-// CHECK-DAG: %[[CW:.*]] = tosa.custom %{{.*}} {{.*}}operator_name = "unsigned_cast"{{.*}} -> tensor<1x1xi32>
+// CHECK-DAG: %[[AW:.*]] = tosa.custom %[[A]] {{.*}}operator_name("unsigned_cast"){{.*}} -> tensor<2x8xi32>
+// CHECK-DAG: %[[CW:.*]] = tosa.custom %{{.*}} {{.*}}operator_name("unsigned_cast"){{.*}} -> tensor<1x1xi32>
 // CHECK: %[[M:.*]] = tosa.maximum %[[AW]], %[[CW]] : (tensor<2x8xi32>, tensor<1x1xi32>) -> tensor<2x8xi32>
-// CHECK: %[[N:.*]] = tosa.custom %[[M]] {{.*}}operator_name = "unsigned_cast"{{.*}} : (tensor<2x8xi32>) -> tensor<2x8xi8>
+// CHECK: %[[N:.*]] = tosa.custom %[[M]] {{.*}}operator_name("unsigned_cast"){{.*}} : (tensor<2x8xi32>) -> tensor<2x8xi8>
 // CHECK: return %[[N]]
 // CHECK-NOT: ui8
 func.func @ui8_max_scalar(%a: tensor<2x8xui8>) -> tensor<2x8xui8>
@@ -31,7 +31,7 @@ func.func @ui8_max_scalar(%a: tensor<2x8xui8>) -> tensor<2x8xui8>
 // CHECK-LABEL: func.func @ui8_min_scalar_lhs
 // CHECK-SAME: -> tensor<2x8xi8>
 // CHECK: tosa.minimum %{{.*}}, %{{.*}} : (tensor<1x1xi32>, tensor<2x8xi32>) -> tensor<2x8xi32>
-// CHECK: tosa.custom %{{.*}} {{.*}}operator_name = "unsigned_cast"{{.*}} : (tensor<2x8xi32>) -> tensor<2x8xi8>
+// CHECK: tosa.custom %{{.*}} {{.*}}operator_name("unsigned_cast"){{.*}} : (tensor<2x8xi32>) -> tensor<2x8xi8>
 // CHECK-NOT: ui8
 func.func @ui8_min_scalar_lhs(%a: tensor<2x8xui8>) -> tensor<2x8xui8>
     attributes {rock.kernel} {
@@ -109,8 +109,8 @@ func.func @i8_max_unchanged(%a: tensor<4xi8>, %b: tensor<4xi8>) -> tensor<4xi8>
 // false.
 // CHECK-LABEL: func.func @ui8_less
 // CHECK-SAME: (%[[A:.*]]: tensor<2x8xi8>) -> tensor<2x8xi1>
-// CHECK-DAG: %[[AW:.*]] = tosa.custom %[[A]] {{.*}}operator_name = "unsigned_cast"{{.*}} -> tensor<2x8xi32>
-// CHECK-DAG: %[[CW:.*]] = tosa.custom %{{.*}} {{.*}}operator_name = "unsigned_cast"{{.*}} -> tensor<1x1xi32>
+// CHECK-DAG: %[[AW:.*]] = tosa.custom %[[A]] {{.*}}operator_name("unsigned_cast"){{.*}} -> tensor<2x8xi32>
+// CHECK-DAG: %[[CW:.*]] = tosa.custom %{{.*}} {{.*}}operator_name("unsigned_cast"){{.*}} -> tensor<1x1xi32>
 // CHECK: %[[L:.*]] = tosa.greater %[[CW]], %[[AW]] : (tensor<1x1xi32>, tensor<2x8xi32>) -> tensor<2x8xi1>
 // CHECK: return %[[L]]
 // CHECK-NOT: ui8
@@ -126,8 +126,8 @@ func.func @ui8_less(%a: tensor<2x8xui8>) -> tensor<2x8xi1>
 
 // CHECK-LABEL: func.func @ui16_equal
 // CHECK-SAME: (%[[A:.*]]: tensor<2x8xi16>, %[[B:.*]]: tensor<2x8xi16>) -> tensor<2x8xi1>
-// CHECK-DAG: %[[AW:.*]] = tosa.custom %[[A]] {{.*}}operator_name = "unsigned_cast"{{.*}} -> tensor<2x8xi32>
-// CHECK-DAG: %[[BW:.*]] = tosa.custom %[[B]] {{.*}}operator_name = "unsigned_cast"{{.*}} -> tensor<2x8xi32>
+// CHECK-DAG: %[[AW:.*]] = tosa.custom %[[A]] {{.*}}operator_name("unsigned_cast"){{.*}} -> tensor<2x8xi32>
+// CHECK-DAG: %[[BW:.*]] = tosa.custom %[[B]] {{.*}}operator_name("unsigned_cast"){{.*}} -> tensor<2x8xi32>
 // CHECK: %[[E:.*]] = tosa.equal %[[AW]], %[[BW]] : (tensor<2x8xi32>, tensor<2x8xi32>) -> tensor<2x8xi1>
 // CHECK: return %[[E]]
 func.func @ui16_equal(%a: tensor<2x8xui16>, %b: tensor<2x8xui16>)

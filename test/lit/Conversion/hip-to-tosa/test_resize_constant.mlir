@@ -54,12 +54,12 @@
 // offset = 16 - 32 = -16, and a border of (32-1)*32 + -16 - (16-1)*64 = 16.
 // The two transposes are the NCHW/NHWC bridge.
 // CHECK-LABEL: func.func @resize_half_pixel
-// CHECK: %[[NHWC:.*]] = tosa.transpose %arg1 {perms = array<i32: 0, 2, 3, 1>} : (tensor<1x3x16x16xf16>) -> tensor<1x16x16x3xf16>
-// CHECK: %[[SCALE:.*]] = tosa.const_shape {values = dense<[64, 32, 64, 32]> : tensor<4xindex>}
-// CHECK: %[[OFF:.*]] = tosa.const_shape {values = dense<-16> : tensor<2xindex>}
-// CHECK: %[[BORDER:.*]] = tosa.const_shape {values = dense<16> : tensor<2xindex>}
-// CHECK: %[[R:.*]] = tosa.resize %[[NHWC]], %[[SCALE]], %[[OFF]], %[[BORDER]] {mode = BILINEAR} : {{.*}} -> tensor<1x32x32x3xf16>
-// CHECK: tosa.transpose %[[R]] {perms = array<i32: 0, 3, 1, 2>} : (tensor<1x32x32x3xf16>) -> tensor<1x3x32x32xf16>
+// CHECK: %[[NHWC:.*]] = tosa.transpose %arg1 perms([0, 2, 3, 1]) : (tensor<1x3x16x16xf16>) -> tensor<1x16x16x3xf16>
+// CHECK: %[[SCALE:.*]] = tosa.const_shape values(dense<[64, 32, 64, 32]> : tensor<4xindex>)
+// CHECK: %[[OFF:.*]] = tosa.const_shape values(dense<-16> : tensor<2xindex>)
+// CHECK: %[[BORDER:.*]] = tosa.const_shape values(dense<16> : tensor<2xindex>)
+// CHECK: %[[R:.*]] = tosa.resize %[[NHWC]], %[[SCALE]], %[[OFF]], %[[BORDER]] mode<BILINEAR> : {{.*}} -> tensor<1x32x32x3xf16>
+// CHECK: tosa.transpose %[[R]] perms([0, 3, 1, 2]) : (tensor<1x32x32x3xf16>) -> tensor<1x3x32x32xf16>
 // CHECK-NOT: hip.resize
 func.func @resize_half_pixel(%ctx: !hip.context, %x: tensor<1x3x16x16xf16>,
                              %init: tensor<1x3x32x32xf16>)
@@ -76,10 +76,10 @@ func.func @resize_half_pixel(%ctx: !hip.context, %x: tensor<1x3x16x16xf16>,
 // pytorch_half_pixel with OUT > 1 is the half_pixel triple: n = 64, d = 32,
 // offset = -16, border = 16.
 // CHECK-LABEL: func.func @resize_pytorch_half_pixel
-// CHECK: %[[SCALE:.*]] = tosa.const_shape {values = dense<[64, 32, 64, 32]> : tensor<4xindex>}
-// CHECK: %[[OFF:.*]] = tosa.const_shape {values = dense<-16> : tensor<2xindex>}
-// CHECK: %[[BORDER:.*]] = tosa.const_shape {values = dense<16> : tensor<2xindex>}
-// CHECK: tosa.resize %{{.*}}, %[[SCALE]], %[[OFF]], %[[BORDER]] {mode = BILINEAR}
+// CHECK: %[[SCALE:.*]] = tosa.const_shape values(dense<[64, 32, 64, 32]> : tensor<4xindex>)
+// CHECK: %[[OFF:.*]] = tosa.const_shape values(dense<-16> : tensor<2xindex>)
+// CHECK: %[[BORDER:.*]] = tosa.const_shape values(dense<16> : tensor<2xindex>)
+// CHECK: tosa.resize %{{.*}}, %[[SCALE]], %[[OFF]], %[[BORDER]] mode<BILINEAR>
 // CHECK-NOT: hip.resize
 func.func @resize_pytorch_half_pixel(%ctx: !hip.context,
                                      %x: tensor<1x3x16x16xf16>,
@@ -99,10 +99,10 @@ func.func @resize_pytorch_half_pixel(%ctx: !hip.context,
 // triple n = 32, d = 16, offset = 8 - 16 = -8,
 // border = (16-1)*16 + -8 - (8-1)*32 = 8.
 // CHECK-LABEL: func.func @resize_pytorch_half_pixel_out1
-// CHECK: %[[SCALE:.*]] = tosa.const_shape {values = dense<[1, 1, 32, 16]> : tensor<4xindex>}
-// CHECK: %[[OFF:.*]] = tosa.const_shape {values = dense<[0, -8]> : tensor<2xindex>}
-// CHECK: %[[BORDER:.*]] = tosa.const_shape {values = dense<[-7, 8]> : tensor<2xindex>}
-// CHECK: tosa.resize %{{.*}}, %[[SCALE]], %[[OFF]], %[[BORDER]] {mode = BILINEAR}
+// CHECK: %[[SCALE:.*]] = tosa.const_shape values(dense<[1, 1, 32, 16]> : tensor<4xindex>)
+// CHECK: %[[OFF:.*]] = tosa.const_shape values(dense<[0, -8]> : tensor<2xindex>)
+// CHECK: %[[BORDER:.*]] = tosa.const_shape values(dense<[-7, 8]> : tensor<2xindex>)
+// CHECK: tosa.resize %{{.*}}, %[[SCALE]], %[[OFF]], %[[BORDER]] mode<BILINEAR>
 // CHECK-NOT: hip.resize
 func.func @resize_pytorch_half_pixel_out1(%ctx: !hip.context,
                                           %x: tensor<1x3x8x8xf16>,
@@ -120,10 +120,10 @@ func.func @resize_pytorch_half_pixel_out1(%ctx: !hip.context,
 // asymmetric needs no doubling, so the ratio stays 32/16 and the offset is
 // zero. The border is (32-1)*16 - (16-1)*32 = 16.
 // CHECK-LABEL: func.func @resize_asymmetric
-// CHECK: %[[SCALE:.*]] = tosa.const_shape {values = dense<[32, 16, 32, 16]> : tensor<4xindex>}
-// CHECK: %[[OFF:.*]] = tosa.const_shape {values = dense<0> : tensor<2xindex>}
-// CHECK: %[[BORDER:.*]] = tosa.const_shape {values = dense<16> : tensor<2xindex>}
-// CHECK: tosa.resize %{{.*}}, %[[SCALE]], %[[OFF]], %[[BORDER]] {mode = BILINEAR}
+// CHECK: %[[SCALE:.*]] = tosa.const_shape values(dense<[32, 16, 32, 16]> : tensor<4xindex>)
+// CHECK: %[[OFF:.*]] = tosa.const_shape values(dense<0> : tensor<2xindex>)
+// CHECK: %[[BORDER:.*]] = tosa.const_shape values(dense<16> : tensor<2xindex>)
+// CHECK: tosa.resize %{{.*}}, %[[SCALE]], %[[OFF]], %[[BORDER]] mode<BILINEAR>
 // CHECK-NOT: hip.resize
 func.func @resize_asymmetric(%ctx: !hip.context, %x: tensor<1x3x16x16xf32>,
                              %init: tensor<1x3x32x32xf32>)
@@ -143,10 +143,10 @@ func.func @resize_asymmetric(%ctx: !hip.context, %x: tensor<1x3x16x16xf32>,
 // the three shape operands are emitted in -- an ambiguous binding would let
 // them swap unnoticed.
 // CHECK-LABEL: func.func @resize_align_corners
-// CHECK: %[[SCALE:.*]] = tosa.const_shape {values = dense<[31, 15, 31, 15]> : tensor<4xindex>}
-// CHECK: %[[OFF:.*]] = tosa.const_shape {values = dense<0> : tensor<2xindex>}
-// CHECK: %[[BORDER:.*]] = tosa.const_shape {values = dense<0> : tensor<2xindex>}
-// CHECK: tosa.resize %{{.*}}, %[[SCALE]], %[[OFF]], %[[BORDER]] {mode = BILINEAR}
+// CHECK: %[[SCALE:.*]] = tosa.const_shape values(dense<[31, 15, 31, 15]> : tensor<4xindex>)
+// CHECK: %[[OFF:.*]] = tosa.const_shape values(dense<0> : tensor<2xindex>)
+// CHECK: %[[BORDER:.*]] = tosa.const_shape values(dense<0> : tensor<2xindex>)
+// CHECK: tosa.resize %{{.*}}, %[[SCALE]], %[[OFF]], %[[BORDER]] mode<BILINEAR>
 // CHECK-NOT: hip.resize
 func.func @resize_align_corners(%ctx: !hip.context, %x: tensor<1x3x16x16xf32>,
                                 %init: tensor<1x3x32x32xf32>)
@@ -164,10 +164,10 @@ func.func @resize_align_corners(%ctx: !hip.context, %x: tensor<1x3x16x16xf32>,
 // the border negative: (2-1)*8 + 2 - (4-1)*4 = -2. Nothing rejects that, and
 // it is what makes TOSA derive an output extent of 2.
 // CHECK-LABEL: func.func @resize_downsample
-// CHECK: %[[SCALE:.*]] = tosa.const_shape {values = dense<[4, 8, 4, 8]> : tensor<4xindex>}
-// CHECK: %[[OFF:.*]] = tosa.const_shape {values = dense<2> : tensor<2xindex>}
-// CHECK: %[[BORDER:.*]] = tosa.const_shape {values = dense<-2> : tensor<2xindex>}
-// CHECK: tosa.resize %{{.*}}, %[[SCALE]], %[[OFF]], %[[BORDER]] {mode = BILINEAR}
+// CHECK: %[[SCALE:.*]] = tosa.const_shape values(dense<[4, 8, 4, 8]> : tensor<4xindex>)
+// CHECK: %[[OFF:.*]] = tosa.const_shape values(dense<2> : tensor<2xindex>)
+// CHECK: %[[BORDER:.*]] = tosa.const_shape values(dense<-2> : tensor<2xindex>)
+// CHECK: tosa.resize %{{.*}}, %[[SCALE]], %[[OFF]], %[[BORDER]] mode<BILINEAR>
 // CHECK-NOT: hip.resize
 func.func @resize_downsample(%ctx: !hip.context, %x: tensor<2x8x4x4xf32>,
                              %init: tensor<2x8x2x2xf32>)
@@ -185,10 +185,10 @@ func.func @resize_downsample(%ctx: !hip.context, %x: tensor<2x8x4x4xf32>,
 // height and leaves width alone gets a mixed scale. Width 4 -> 4 under
 // half_pixel is n = d = 8 with a zero offset and border.
 // CHECK-LABEL: func.func @resize_height_only
-// CHECK: %[[SCALE:.*]] = tosa.const_shape {values = dense<[16, 8, 8, 8]> : tensor<4xindex>}
-// CHECK: %[[OFF:.*]] = tosa.const_shape {values = dense<[-4, 0]> : tensor<2xindex>}
-// CHECK: %[[BORDER:.*]] = tosa.const_shape {values = dense<[4, 0]> : tensor<2xindex>}
-// CHECK: tosa.resize %{{.*}}, %[[SCALE]], %[[OFF]], %[[BORDER]] {mode = BILINEAR}
+// CHECK: %[[SCALE:.*]] = tosa.const_shape values(dense<[16, 8, 8, 8]> : tensor<4xindex>)
+// CHECK: %[[OFF:.*]] = tosa.const_shape values(dense<[-4, 0]> : tensor<2xindex>)
+// CHECK: %[[BORDER:.*]] = tosa.const_shape values(dense<[4, 0]> : tensor<2xindex>)
+// CHECK: tosa.resize %{{.*}}, %[[SCALE]], %[[OFF]], %[[BORDER]] mode<BILINEAR>
 // CHECK-NOT: hip.resize
 func.func @resize_height_only(%ctx: !hip.context, %x: tensor<1x2x4x4xf32>,
                               %init: tensor<1x2x8x4xf32>)
@@ -204,7 +204,7 @@ func.func @resize_height_only(%ctx: !hip.context, %x: tensor<1x2x4x4xf32>,
 
 // nearest_mode is ignored for bilinear resize, so a nonzero value still lowers.
 // CHECK-LABEL: func.func @resize_bilinear_ignores_nearest_mode
-// CHECK: tosa.resize %{{.*}} {mode = BILINEAR}
+// CHECK: tosa.resize %{{.*}} mode<BILINEAR>
 // CHECK-NOT: hip.resize
 func.func @resize_bilinear_ignores_nearest_mode(
     %ctx: !hip.context, %x: tensor<1x3x16x16xf32>,
@@ -320,7 +320,7 @@ func.func @resize_reject_channel_change(%ctx: !hip.context,
 // The inline form carries the data, so it becomes tosa.const with the same
 // attribute.
 // CHECK-LABEL: func.func @constant_inline_f32
-// CHECK: "tosa.const"() <{values = dense<{{\[}}1.000000e+00, 2.000000e+00, 3.000000e+00]> : tensor<3xf32>}>
+// CHECK: tosa.const values(dense<{{\[}}1.000000e+00, 2.000000e+00, 3.000000e+00]> : tensor<3xf32>)
 // CHECK-NOT: hip.constant
 func.func @constant_inline_f32() -> tensor<3xf32> attributes {rock.kernel} {
   %c = hip.constant {value = dense<[1.0, 2.0, 3.0]> : tensor<3xf32>}
@@ -332,7 +332,7 @@ func.func @constant_inline_f32() -> tensor<3xf32> attributes {rock.kernel} {
 
 // Integers take the same path; tosa.const is not float-only.
 // CHECK-LABEL: func.func @constant_inline_i32
-// CHECK: "tosa.const"() <{values = dense<7> : tensor<2x2xi32>}>
+// CHECK: tosa.const values(dense<7> : tensor<2x2xi32>)
 // CHECK-NOT: hip.constant
 func.func @constant_inline_i32() -> tensor<2x2xi32> attributes {rock.kernel} {
   %c = hip.constant {value = dense<7> : tensor<2x2xi32>} : tensor<2x2xi32>

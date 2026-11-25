@@ -46,7 +46,7 @@
 
 // The NHWC-to-NCHW permutation an ONNX image model opens with.
 // CHECK-LABEL: func.func @transpose_nhwc
-// CHECK: tosa.transpose %arg1 {perms = array<i32: 0, 3, 1, 2>} : (tensor<1x224x224x3xf32>) -> tensor<1x3x224x224xf32>
+// CHECK: tosa.transpose %arg1 perms([0, 3, 1, 2]) : (tensor<1x224x224x3xf32>) -> tensor<1x3x224x224xf32>
 // CHECK-NOT: hip.transpose
 func.func @transpose_nhwc(%ctx: !hip.context, %x: tensor<1x224x224x3xf32>,
                           %init: tensor<1x3x224x224xf32>)
@@ -59,7 +59,7 @@ func.func @transpose_nhwc(%ctx: !hip.context, %x: tensor<1x224x224x3xf32>,
 
 // The last-two-dimension swap that feeds an attention matmul.
 // CHECK-LABEL: func.func @transpose_2d
-// CHECK: tosa.transpose %arg1 {perms = array<i32: 1, 0>} : (tensor<3x5xf16>) -> tensor<5x3xf16>
+// CHECK: tosa.transpose %arg1 perms([1, 0]) : (tensor<3x5xf16>) -> tensor<5x3xf16>
 func.func @transpose_2d(%ctx: !hip.context, %x: tensor<3x5xf16>,
                         %init: tensor<5x3xf16>) -> tensor<5x3xf16>
     attributes {rock.kernel} {
@@ -75,7 +75,7 @@ func.func @transpose_2d(%ctx: !hip.context, %x: tensor<3x5xf16>,
 
 // ResNet's Flatten between the global pool and the classifier.
 // CHECK-LABEL: func.func @flatten
-// CHECK: %[[SHAPE:.*]] = tosa.const_shape {values = dense<[1, 2048]> : tensor<2xindex>} : () -> !tosa.shape<2>
+// CHECK: %[[SHAPE:.*]] = tosa.const_shape values(dense<[1, 2048]> : tensor<2xindex>) : () -> !tosa.shape<2>
 // CHECK: tosa.reshape %arg0, %[[SHAPE]] : (tensor<1x2048x1x1xf16>, !tosa.shape<2>) -> tensor<1x2048xf16>
 // CHECK-NOT: tensor.collapse_shape
 func.func @flatten(%x: tensor<1x2048x1x1xf16>) -> tensor<1x2048xf16>
@@ -87,7 +87,7 @@ func.func @flatten(%x: tensor<1x2048x1x1xf16>) -> tensor<1x2048xf16>
 
 // Squeeze drops the size-1 dimensions.
 // CHECK-LABEL: func.func @squeeze
-// CHECK: %[[SHAPE:.*]] = tosa.const_shape {values = dense<4> : tensor<1xindex>} : () -> !tosa.shape<1>
+// CHECK: %[[SHAPE:.*]] = tosa.const_shape values(dense<4> : tensor<1xindex>) : () -> !tosa.shape<1>
 // CHECK: tosa.reshape %arg0, %[[SHAPE]] : (tensor<1x4x1xf32>, !tosa.shape<1>) -> tensor<4xf32>
 func.func @squeeze(%x: tensor<1x4x1xf32>) -> tensor<4xf32>
     attributes {rock.kernel} {
@@ -98,7 +98,7 @@ func.func @squeeze(%x: tensor<1x4x1xf32>) -> tensor<4xf32>
 
 // Unsqueeze adds one back.
 // CHECK-LABEL: func.func @unsqueeze
-// CHECK: %[[SHAPE:.*]] = tosa.const_shape {values = dense<[2, 3, 1]> : tensor<3xindex>} : () -> !tosa.shape<3>
+// CHECK: %[[SHAPE:.*]] = tosa.const_shape values(dense<[2, 3, 1]> : tensor<3xindex>) : () -> !tosa.shape<3>
 // CHECK: tosa.reshape %arg0, %[[SHAPE]] : (tensor<2x3xf16>, !tosa.shape<3>) -> tensor<2x3x1xf16>
 // CHECK-NOT: tensor.expand_shape
 func.func @unsqueeze(%x: tensor<2x3xf16>) -> tensor<2x3x1xf16>
@@ -114,8 +114,8 @@ func.func @unsqueeze(%x: tensor<2x3xf16>) -> tensor<2x3x1xf16>
 
 // tosa.slice carries start and size as shape operands rather than attributes.
 // CHECK-LABEL: func.func @slice
-// CHECK-DAG: %[[SIZE:.*]] = tosa.const_shape {values = dense<[2, 6]> : tensor<2xindex>} : () -> !tosa.shape<2>
-// CHECK-DAG: %[[START:.*]] = tosa.const_shape {values = dense<[1, 0]> : tensor<2xindex>} : () -> !tosa.shape<2>
+// CHECK-DAG: %[[SIZE:.*]] = tosa.const_shape values(dense<[2, 6]> : tensor<2xindex>) : () -> !tosa.shape<2>
+// CHECK-DAG: %[[START:.*]] = tosa.const_shape values(dense<[1, 0]> : tensor<2xindex>) : () -> !tosa.shape<2>
 // CHECK: tosa.slice %arg0, %[[START]], %[[SIZE]] : (tensor<4x6xf32>, !tosa.shape<2>, !tosa.shape<2>) -> tensor<2x6xf32>
 // CHECK-NOT: tensor.extract_slice
 func.func @slice(%x: tensor<4x6xf32>) -> tensor<2x6xf32>
@@ -185,11 +185,11 @@ func.func @not_a_kernel(%x: tensor<4x6xf32>) -> tensor<2x6xf32> {
 // CHECK-LABEL: func.func @rocMlir0
 // CHECK: ub.poison : !hip.context
 // CHECK: tensor.empty() : tensor<1x3x6x6xf32>
-// CHECK: tosa.transpose %arg0 {perms = array<i32: 0, 2, 3, 1>} : (tensor<1x3x8x8xf32>) -> tensor<1x8x8x3xf32>
+// CHECK: tosa.transpose %arg0 perms([0, 2, 3, 1]) : (tensor<1x3x8x8xf32>) -> tensor<1x8x8x3xf32>
 // CHECK: tosa.max_pool2d
-// CHECK: tosa.transpose %{{.*}} {perms = array<i32: 0, 3, 1, 2>} : (tensor<1x6x6x3xf32>) -> tensor<1x3x6x6xf32>
+// CHECK: tosa.transpose %{{.*}} perms([0, 3, 1, 2]) : (tensor<1x6x6x3xf32>) -> tensor<1x3x6x6xf32>
 // CHECK-NOT: hip.pool
-// CHECK: tosa.transpose %{{.*}} {perms = array<i32: 0, 2, 3, 1>} : (tensor<1x3x6x6xf32>) -> tensor<1x6x6x3xf32>
+// CHECK: tosa.transpose %{{.*}} perms([0, 2, 3, 1]) : (tensor<1x3x6x6xf32>) -> tensor<1x6x6x3xf32>
 // CHECK: tosa.reshape
 func.func @rocMlir0(%in: tensor<1x3x8x8xf32>) -> tensor<1x108xf32>
     attributes {rock.arch = "gfx1151", rock.kernel} {
