@@ -15,6 +15,8 @@
 // 3. f16 → f32   (to = 1)
 // 4. f32 → i64   (to = 7)
 // 5. i32 → f32   (to = 1)
+// 6. i64 → BOOL  (to = i1 on a ui8 result, to = 9)
+// 7. i64 → ui8   (to = 3, by value)
 // ============================================================================
 
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
@@ -91,4 +93,23 @@ module {
   // CHECK: %[[INIT:.*]] = tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?x512xf16>
   // CHECK: hip.cast(%[[CTX]]) ins(%[[IN]] : tensor<?x?x512xf32>) outs(%[[INIT]] : tensor<?x?x512xf16>) {to = 10 : i64} : tensor<?x?x512xf16>
   // CHECK-NOT: hip.alloc
+
+  // The importer stores BOOL as ui8 and marks the cast with `to = i1`, which
+  // must become `to = 9` (BOOL), not a by-value cast to UINT8.
+  func.func @cast_i64_to_bool(%input: tensor<4xi64>) -> tensor<4xui8> {
+    %output = "onnx.Cast"(%input) {to = i1} : (tensor<4xi64>) -> tensor<4xui8>
+    return %output : tensor<4xui8>
+  }
+
+  // CHECK-LABEL: func.func @cast_i64_to_bool
+  // CHECK: hip.cast({{.*}}) ins(%{{.*}} : tensor<4xi64>) outs({{.*}} : tensor<4xui8>) {to = 9 : i64}
+
+  // A plain UINT8 target keeps its by-value cast.
+  func.func @cast_i64_to_ui8(%input: tensor<4xi64>) -> tensor<4xui8> {
+    %output = "onnx.Cast"(%input) {to = ui8} : (tensor<4xi64>) -> tensor<4xui8>
+    return %output : tensor<4xui8>
+  }
+
+  // CHECK-LABEL: func.func @cast_i64_to_ui8
+  // CHECK: hip.cast({{.*}}) ins(%{{.*}} : tensor<4xi64>) outs({{.*}} : tensor<4xui8>) {to = 3 : i64}
 }

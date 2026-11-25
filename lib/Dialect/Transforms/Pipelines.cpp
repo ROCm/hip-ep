@@ -119,6 +119,11 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   // The rocMLIR path runs the same pass in its separate pre-fusion head.
   pm.addNestedPass<func::FuncOp>(mlir::hip::createDecomposeConvTransposePass());
 
+  // The cast kernels convert by value, so a cast to i1 from any other type
+  // becomes x != 0 here. It emits a hip.constant zero, so it must precede
+  // `hip-externalize-constants`.
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createDecomposeBoolCastPass());
+
   // 1a*. Resolve constant-index `tensor.extract` of assembled constant
   //      vectors (ONNX shape vectors) to the scalar they read, so 1b sees
   //      them as constants and no host readback is left for them. Reads

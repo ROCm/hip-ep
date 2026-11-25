@@ -920,8 +920,13 @@ MLIRGraph::add_node(const std::string &name, const std::string &op_type,
           if (auto int_attr =
                   mlir::dyn_cast<mlir::IntegerAttr>(attr.getValue())) {
             int onnx_type = static_cast<int>(int_attr.getSInt());
+            // BOOL tensors are stored as ui8, so `to = ui8` would read as a
+            // by-value cast to UINT8. `to = i1` keeps the x != 0 meaning for
+            // the compiler while the result type stays ui8.
             mlir::Type mlir_type =
-                onnxElementTypeToMlirElementType(onnx_type, builder);
+                onnx_type == 9
+                    ? builder.getI1Type()
+                    : onnxElementTypeToMlirElementType(onnx_type, builder);
             new_attrs.push_back(
                 builder.getNamedAttr("to", mlir::TypeAttr::get(mlir_type)));
             continue;

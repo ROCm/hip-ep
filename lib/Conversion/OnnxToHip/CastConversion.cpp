@@ -57,6 +57,13 @@ CastToHip::matchAndRewrite(mlir::Operation *op,
   else if (targetType.isInteger(1))
     onnxDataType = 9;
 
+  // The importer stores BOOL as ui8 and marks a cast to it with `to = i1`.
+  // hip-decompose-bool-cast reads `to = BOOL` to emit x != 0 rather than a
+  // by-value cast to UINT8.
+  if (auto to = op->getAttrOfType<mlir::TypeAttr>("to");
+      to && to.getValue().isInteger(1))
+    onnxDataType = 9;
+
   // Validate that we have a supported type
   if (onnxDataType == 0)
     return rewriter.notifyMatchFailure(op, "unsupported cast target type");

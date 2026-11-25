@@ -68,7 +68,8 @@ struct CastOpLowering : public ConvertOpToLLVMPattern<CastOp> {
 
     // The kernels convert by value, so f32 2.5, i64 5 or a ui8 5 would land in
     // the mask unchanged and later Where/And/Not would misread it. Only an i1
-    // source is already a 0/1 byte; anything else needs a `x != 0` kernel.
+    // source is already a 0/1 byte; hip-decompose-bool-cast rewrites the
+    // others as x != 0, and what it leaves (f64) fails here.
     if (outputType.getElementType().isInteger(1) &&
         !inputType.getElementType().isInteger(1))
       return rewriter.notifyMatchFailure(
