@@ -90,6 +90,7 @@ see [below](#passes-that-are-not-individually-nameable)). Prefer, in order:
 | Name | Options | What it builds |
 |---|---|---|
 | `onnx-to-hip-pipeline` | `externalize-output-dir`, `externalize-min-num-elements`, `skip-constant-data` | ONNX dialect → fully bufferized, pooled HIP memref IR with resolved extern constants. |
+| `ggml-to-hip-pipeline` | as `onnx-to-hip-pipeline` | `ggml` dialect → bufferized, pooled HIP memref IR (`hip-add-context-arg`, `convert-ggml-to-hip`, then the tail `onnx-to-hip-pipeline` runs after `convert-onnx-to-hip`). Built with `HIPDNN_EP_BUILD_GGML`; the compiler selects it for a module with `ggml.schema` ([ggml-backend.md](design/ggml-backend.md)). |
 | `hip-to-llvm-pipeline` | `constants-file` | HIP memref IR → LLVM dialect + the C-ABI interface (`inference_init/compute/cleanup`, metadata). |
 | `hipdnn-pipeline` | `constants-file`, `constants-dir`, `externalize-min-num-elements` | The full ONNX→HIP→LLVM→interface flow (chains the two above). |
 | `rocmlir-pipeline` | — | Prepare HIP tensor IR for rocMLIR kernel offload: split `hip.conv_transpose` into plain convolutions, outline the rocMLIR-eligible ops into `rock.kernel` funcs, then lower those bodies to TOSA. Not part of the default compile — `hip-rocmlir-compiler` runs it. |
@@ -156,6 +157,8 @@ the selected perfConfig string are printed only with `--verbose`.
 | `hip-infer-loop-body-shapes` | module | Rank-establish unranked tensors inside outlined loop bodies. |
 | `outline-onnx-to-hipdnn` | module | Outline subgraphs targeted at hipDNN graph compilation. |
 | `convert-onnx-to-hip` | module | Pattern-match ONNX ops by name → HIP dialect; lower both constant sweeps to policy-neutral `hip.constant`; legalize GatherBlockQuantized (INT4 packing, unsigned, quantize_axis). Pre-lowering folds run first on ONNX IR, among them the `onnx.Attention` mask fold (sliding window and key-padding bias, `AttentionWindowFold.cpp`) and the sigmoid + correction-bias QMoE routing fold (`QMoEConversion.cpp`). |
+| `ggml-symbolize-shapes` | module | `ggml` dialect: derive each extent as an expression of the declared symbols (or, with `ggml.infer_symbols`, learn which are one size). Built with `HIPDNN_EP_BUILD_GGML`. |
+| `convert-ggml-to-hip` | module | `ggml` dialect → HIP dialect (K-quant projections, Q8_1 activations, token-major GQA). Built with `HIPDNN_EP_BUILD_GGML`. |
 | `hip-fold-batchnorm` | func.func | Fold an inference `hip.batch_norm` with constant parameters into the filter and bias of the `hip.conv` producing it, directly or through a `hip.add` of two convs (the shift goes into one bias). Every intermediate result must have the batch norm as its only consumer. Reads inline and file-backed constants only; a batch norm over memory-address-backed weights is left in place. |
 | `hip-externalize-constants` | module | Validate explicit serialization order, append unordered carriers deterministically, plan/serialize, then replace `hip.constant` using the existing inline/full/streaming/hybrid metadata contract. Direct threshold default: 0. |
 | `hip-fold-constant-extracts` | func.func | Resolve constant-index `tensor.extract` of vectors assembled with `tensor.insert_slice` (ONNX shape vectors) to the `from_elements` operand or integer constant element they read. |
