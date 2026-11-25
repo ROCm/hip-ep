@@ -39,6 +39,8 @@
 
 #include "swiglu_fusion.hpp"
 
+#include "fusion_utils.hpp"
+
 #include "hip/Dialect/IR/HipDialect.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -55,27 +57,6 @@
 namespace hip {
 namespace fusion_transform {
 namespace {
-
-// True when every use is either `consumer` or a tensor.dim. tensor.dim only
-// reads the type, which this pattern requires to match the gate.
-bool hasSingleValueUse(mlir::Value value, mlir::Operation *consumer) {
-  mlir::Operation *seen = nullptr;
-  for (mlir::OpOperand &use : value.getUses()) {
-    if (mlir::isa<mlir::tensor::DimOp>(use.getOwner()))
-      continue;
-    if (seen)
-      return false;
-    seen = use.getOwner();
-  }
-  return seen == consumer;
-}
-
-void retargetShapeQueries(mlir::PatternRewriter &rewriter, mlir::Value from,
-                          mlir::Value to) {
-  rewriter.replaceUsesWithIf(from, to, [](mlir::OpOperand &operand) {
-    return mlir::isa<mlir::tensor::DimOp>(operand.getOwner());
-  });
-}
 
 // One dynamic axis after projection producers have been followed.
 struct Extent {
@@ -402,7 +383,8 @@ struct PromotedSwigluFusion : public mlir::OpRewritePattern<mlir::hip::CastOp> {
   matchAndRewrite(mlir::hip::CastOp outputCast,
                   mlir::PatternRewriter &rewriter) const override {
     auto swiglu = outputCast.getInput().getDefiningOp<mlir::hip::SwigluOp>();
-    if (!swiglu || swiglu.getPromoteActivation())
+    // The promoted kernel computes plain SwiGLU only.
+    if (!swiglu || swiglu.getPromoteActivation() || swiglu.isClamped())
       return mlir::failure();
     auto gateCast = swiglu.getGate().getDefiningOp<mlir::hip::CastOp>();
     auto upCast = swiglu.getUp().getDefiningOp<mlir::hip::CastOp>();

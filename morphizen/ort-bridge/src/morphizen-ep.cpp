@@ -402,7 +402,7 @@ MorphiZenEP::GetCapability(OrtGraphWrapper &graph_viewer,
   }
   MY_LOG(1) << "Using backend: " << backend_ir;
   auto with_new_api = setup_global_morphizen_ort_api(backend_ir);
-  // Build IRConverterConfig — threshold priority:
+  // Build IRConverterConfig â€” threshold priority:
   //   1. provider option XLNX_model_clone_external_data_threshold (per-session)
   //   2. env param XLNX_ABI_2_0_CLONE_EXTERNAL_DATA_THRESHOLD    (process-wide)
   //   3. default 127                                              (fallback)
@@ -644,18 +644,17 @@ OrtStatus *MorphiZenEP::CompileSubgraph(const morphizen::ExecutionProvider &ep,
         [](OrtNodeComputeInfo *this_ptr, void *compute_state,
            OrtKernelContext *kernel_context) -> OrtStatus * {
       auto self = static_cast<MorphiZenEP_ComputeInfo *>(this_ptr);
-      roctx::Range range(self->roctx_label);
+      // Exceptions must not cross this C callback or become successful runs.
       try {
+        roctx::Range range(self->roctx_label);
         static_cast<morphizen::CustomOp *>(compute_state)
             ->Compute(&Ort::GetApi(), kernel_context);
         return nullptr;
-      } catch (const Ort::Exception &e) {
-        return Ort::GetApi().CreateStatus(e.GetOrtErrorCode(), e.what());
       } catch (const std::exception &e) {
-        return Ort::GetApi().CreateStatus(ORT_RUNTIME_EXCEPTION, e.what());
+        return Ort::GetApi().CreateStatus(ORT_FAIL, e.what());
       } catch (...) {
-        return Ort::GetApi().CreateStatus(ORT_RUNTIME_EXCEPTION,
-                                          "Unknown exception in EP Compute");
+        return Ort::GetApi().CreateStatus(
+            ORT_FAIL, "MorphiZen Compute failed with unknown exception");
       }
     };
     MY_LOG(2) << "CompileSubgraph: Successfully compiled subgraph";

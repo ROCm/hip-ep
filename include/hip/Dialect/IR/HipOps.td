@@ -9,10 +9,12 @@
 include "hip/Dialect/IR/HipDialect.td"
 include "hip/Dialect/IR/HipDpsOpInterface.td"
 include "hip/Dialect/IR/HipOpStateInterface.td"
+include "hip/Dialect/IR/HipElementMoveInterface.td"
 include "hip/Dialect/IR/HipTypes.td"
 include "mlir/Interfaces/DestinationStyleOpInterface.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
+include "mlir/Interfaces/ViewLikeInterface.td"
 include "mlir/IR/OpBase.td"
 include "mlir/IR/SymbolInterfaces.td"
 
@@ -242,6 +244,38 @@ def Hip_GetHostScratchOp : Hip_Op<"get_host_scratch",
   let arguments = (ins Hip_ContextType:$ctx, Index:$scratch_size);
   let results = (outs AnyMemRef:$scratch);
   let assemblyFormat = "`(` $ctx `,` $scratch_size `)` attr-dict `:` type($scratch)";
+}
+
+// An identity memref covering a contiguous run of elements of another memref.
+// memref.view can only do this from a flat i8 buffer, and memref.reinterpret_cast
+// cannot change the element type, so the packed concat-slot rewrite needs its
+// own op. The lowering shifts the aligned pointer and stores a zero descriptor
+// offset, which is the pointer every HIP lowering already loads.
+def Hip_PackedViewOp : Hip_Op<"packed_view", [
+    Pure,
+    DeclareOpInterfaceMethods<ViewLikeOpInterface, ["getViewSource"]>
+  ]> {
+  let summary = "Identity memref for a contiguous span of another memref";
+  let description = [{
+    Names `result`, an identity-layout memref, as the contiguous elements of
+    `source` beginning at `element_offset` (counted in elements). `source`
+    must be identity layout, and both memrefs share an element type and a
+    memory space. The result's aligned pointer is the first element of the
+    span, so a lowering that loads only that pointer addresses the span.
+
+    Example:
+    ```mlir
+    %slot = hip.packed_view %cat[%c16]
+        : memref<1x8x2x2xf32> to memref<1x4x2x2xf32>
+    ```
+  }];
+  let arguments = (ins AnyMemRef:$source, Index:$element_offset);
+  let results = (outs AnyMemRef:$result);
+  let assemblyFormat = [{
+    $source `[` $element_offset `]` attr-dict
+    `:` type($source) `to` type($result)
+  }];
+  let hasVerifier = 1;
 }
 
 def Hip_AllocOutputOp : Hip_Op<"alloc_output",
@@ -1961,9 +1995,10 @@ def Hip_RopeOp : Hip_DpsOp_WithInfer<"rope"> {
     Example:
     ```mlir
     hip.rope(%ctx)
-        ins(%input, %position_ids, %cos_cache, %sin_cache :
-            memref<1x128x4096xf16, 1>, memref<1x128xi64, 1>,
+        ins(%input, %cos_cache, %sin_cache :
+            memref<1x128x4096xf16, 1>,
             memref<131072x64xf16, 1>, memref<131072x64xf16, 1>)
+        position_ids(%position_ids : memref<1x128xi64, 1>)
         outs(%output : memref<1x128x4096xf16, 1>)
         {interleaved = 0 : i64, num_heads = 32 : i64, rotary_embedding_dim = 128 : i64}
     ```
@@ -1982,17 +2017,16 @@ def Hip_RopeOp : Hip_DpsOp_WithInfer<"rope"> {
   );
 
   // position_ids is the only optional operand; MLIR resolves its presence from
-  // the operand count (no AttrSizedOperandSegments needed). Each optional group
-  // must LEAD with the `,` literal: a group's first parsable element has to be a
-  // literal / variable / custom directive, so a bare `type(...)` directive
-  // cannot open the type-list group. Anchoring on $position_ids omits it from
-  // both the value and type lists when absent; the present-form IR prints
-  // identically to before.
+  // the operand count (no AttrSizedOperandSegments needed). It has a keyword
+  // clause of its own: as a `,`-led group between $input and $cos_cache, an
+  // op without it printed three operands that the parser, committing to the
+  // group at the first `,`, read as input, position_ids and cos_cache.
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(`
-        $input (`,` $position_ids^)? `,` $cos_cache `,` $sin_cache `:`
-        type($input) (`,` type($position_ids)^)? `,` type($cos_cache) `,` type($sin_cache)
+        $input `,` $cos_cache `,` $sin_cache `:`
+        type($input) `,` type($cos_cache) `,` type($sin_cache)
     `)`
+    (`position_ids` `(` $position_ids^ `:` type($position_ids) `)`)?
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
@@ -2265,7 +2299,8 @@ def Hip_MiopenSoftmaxOp : Hip_DpsOp_AutoReifyInfer<"miopen.softmax"> {
 
 // ===== Custom HIP kernel ops (no library equivalent) =========================
 
-def Hip_TransposeOp : Hip_DpsOp_WithInfer<"transpose"> {
+def Hip_TransposeOp : Hip_DpsOp_WithInfer<"transpose", "Output",
+    [DeclareOpInterfaceMethods<ElementMoveOpInterface>]> {
   let summary = "N-D transpose with arbitrary permutation (ONNX Transpose)";
   let description = [{
     Permutes the dimensions of the input tensor according to the `perm`
@@ -2299,6 +2334,7 @@ def Hip_TransposeOp : Hip_DpsOp_WithInfer<"transpose"> {
     attr-dict (`:` type($result_tensors)^)?
   }];
   let hasVerifier = 1;
+  let hasCanonicalizer = 1;
 }
 
 def Hip_GatherOp : Hip_DpsOp_WithInfer<"gather"> {
@@ -2981,11 +3017,29 @@ def Hip_SwigluOp : Hip_DpsOp_AutoReify<"swiglu"> {
     bf16, and f64. With promote_activation, f16 inputs and output use f32
     sigmoid and multiply intermediates; only the final result rounds to f16.
 
+    `activation_alpha`, `activation_beta` and `swiglu_limit` select the
+    clamped form `hip.qmoe` applies between its projections (GPT-OSS's
+    SwiGLU), element-wise:
+
+      g = min(gate, swiglu_limit)
+      u = clamp(up, -swiglu_limit, swiglu_limit)
+      output = g / (1 + exp(-activation_alpha * g)) * (u + activation_beta)
+
+    `swiglu_limit` 0 (the default) clamps nothing. With the defaults (alpha
+    1, beta 0, limit 0) the op is the plain SwiGLU above. The clamped form
+    computes in f32 and rounds once, for f16, bf16 and f32; it does not
+    combine with promote_activation.
+
     Example:
     ```mlir
     hip.swiglu(%ctx) ins(%gate, %up : memref<3x4xf16, 1>,
                                       memref<3x4xf16, 1>)
                        outs(%output : memref<3x4xf16, 1>)
+    hip.swiglu(%ctx) ins(%gate, %up : memref<3x4xf32, 1>,
+                                      memref<3x4xf32, 1>)
+                       outs(%output : memref<3x4xf32, 1>)
+                       {activation_alpha = 1.702 : f32,
+                        activation_beta = 1.0 : f32, swiglu_limit = 7.0 : f32}
     ```
   }];
 
@@ -2994,14 +3048,87 @@ def Hip_SwigluOp : Hip_DpsOp_AutoReify<"swiglu"> {
     Hip_TensorOrMemRef:$gate,
     Hip_TensorOrMemRef:$up,
     Hip_TensorOrMemRef:$output,
-    DefaultValuedAttr<BoolAttr, "false">:$promote_activation
+    DefaultValuedAttr<BoolAttr, "false">:$promote_activation,
+    DefaultValuedAttr<F32Attr, "1.0f">:$activation_alpha,
+    DefaultValuedAttr<F32Attr, "0.0f">:$activation_beta,
+    DefaultValuedAttr<F32Attr, "0.0f">:$swiglu_limit
   );
+
+  // Plain SwiGLU, the clamped form's attributes at their defaults.
+  let builders = [
+    OpBuilder<(ins "::mlir::TypeRange":$result_tensors, "::mlir::Value":$ctx,
+                   "::mlir::Value":$gate, "::mlir::Value":$up,
+                   "::mlir::Value":$output,
+                   CArg<"bool", "false">:$promote_activation), [{
+      build($_builder, $_state, result_tensors, ctx, gate, up, output,
+            promote_activation, ::llvm::APFloat(1.0f), ::llvm::APFloat(0.0f),
+            ::llvm::APFloat(0.0f));
+    }]>
+  ];
+
+  let extraClassDeclaration = [{
+    /// True when the clamped form's attributes differ from plain SwiGLU's.
+    bool isClamped() {
+      return getActivationAlpha().convertToFloat() != 1.0f ||
+             getActivationBeta().convertToFloat() != 0.0f ||
+             getSwigluLimit().convertToFloat() != 0.0f;
+    }
+  }];
+
+  let hasVerifier = 1;
 
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $gate `,` $up `:` type($gate) `,` type($up) `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+}
+
+def Hip_ScaledMaskedSoftmaxOp : Hip_DpsOp_AutoReify<"scaled_masked_softmax"> {
+  let summary = "Softmax over the last axis of scaled, id-masked scores";
+  let description = [{
+    With the scores viewed as [outer, R, C] (R and C the last two axes):
+
+      output[o, r, c] = softmax_c(row_ids[r] == col_ids[c]
+                                      ? round(input[o, r, c] * scale)
+                                      : fill)
+
+    where round() is to the element type, as a separate multiply would store
+    it. An id vector of length 1 broadcasts across its axis; any other length
+    must equal the axis it indexes, which the runtime checks.
+
+    Produced by hip-fusion-transform from mul(scores, scale) ->
+    where(equal(row_ids[R,1], col_ids[1,C]), ., fill) -> miopen.softmax, the
+    per-frame attention mask of Qwen-VL style vision encoders. It never
+    materializes the mask or either intermediate score tensor.
+
+    Example:
+    ```mlir
+    hip.scaled_masked_softmax(%ctx) ins(%scores, %ids, %ids :
+        memref<16x?x?xf16>, memref<?xi64>, memref<?xi64>)
+        outs(%out : memref<16x?x?xf16>) {fill = -6.5504e+04 : f32,
+        scale = 0.1178 : f32}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$row_ids,
+    Hip_TensorOrMemRef:$col_ids,
+    Hip_TensorOrMemRef:$output,
+    F32Attr:$scale,
+    F32Attr:$fill
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $row_ids `,` $col_ids `:` type($input)
+    `,` type($row_ids) `,` type($col_ids) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
 }
 
 def Hip_ReciprocalOp : Hip_DpsOp_AutoReifyInfer<"reciprocal", "Y"> {
@@ -3738,6 +3865,10 @@ def Hip_CastOp : Hip_DpsOp_AutoReifyInfer<"cast"> {
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+
+  // Folds a widening and narrowing cast pair around ops that only move
+  // elements. See lib/Dialect/IR/HipCastCanonicalize.cpp.
+  let hasCanonicalizer = 1;
 }
 
 def Hip_ReduceSumOp : Hip_DpsOp_Reduction<"reduce_sum"> {
@@ -3991,9 +4122,9 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp_AutoReify<"causal_conv_with_state", [A
     Example (1D):
     ```mlir
     hip.causal_conv_with_state(%ctx)
-        ins(%input, %weight, %bias, %past_state :
-            tensor<1x64x128xf16>, tensor<64x1x4xf16>,
-            tensor<64xf16>, tensor<1x64x3xf16>)
+        ins(%input, %weight : tensor<1x64x128xf16>, tensor<64x1x4xf16>)
+        bias(%bias : tensor<64xf16>)
+        past_state(%past_state : tensor<1x64x3xf16>)
         outs(%output, %present_state :
              tensor<1x64x128xf16>, tensor<1x64x3xf16>)
         {activation = "silu", ndim = 1 : i64}
@@ -4025,14 +4156,10 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp_AutoReify<"causal_conv_with_state", [A
 
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(`
-        $input `,` $weight
-        (`,` $bias^)?
-        (`,` $past_state^)?
-        `:`
-        type($input) `,` type($weight)
-        (`,` type($bias)^)?
-        (`,` type($past_state)^)?
+        $input `,` $weight `:` type($input) `,` type($weight)
     `)`
+    (`bias` `(` $bias^ `:` type($bias) `)`)?
+    (`past_state` `(` $past_state^ `:` type($past_state) `)`)?
     `outs` `(`
         $output `,` $present_state
         `:`
@@ -4361,11 +4488,12 @@ def Hip_QwenQsaGqaOp : Hip_DpsOp_AutoReify<"qwen_qsa_gqa", [OpStateOpInterface]>
 // ===== hipDNN Graph Outlining + Execution ====================================
 
 def Hip_YieldOp : Hip_Op<"yield", [Pure, Terminator,
-    HasParent<"HipDNNGraphOutlineOp">]> {
-  let summary = "Yield results from a hipDNN graph outline region";
+    ParentOneOf<["HipDNNGraphOutlineOp", "RocMlirElementwiseOp"]>]> {
+  let summary = "Yield results from an outline region";
   let description = [{
-    Terminates the body of a `hip.hipdnn_graph_outline` operation, forwarding
-    the computed results back to the parent op.
+    Terminates the body of a `hip.hipdnn_graph_outline` or
+    `hip.rocmlir_elementwise` operation, forwarding the computed results back
+    to the parent op.
 
     Example:
     ```mlir
@@ -4420,6 +4548,50 @@ def Hip_HipDNNGraphOutlineOp : Hip_Op<"hipdnn_graph_outline", [
     `ins` `(` $inputs `:` type($inputs) `)` `->` type($results)
     $body attr-dict
   }];
+}
+
+def Hip_RocMlirElementwiseOp : Hip_Op<"rocmlir_elementwise", [
+    SingleBlockImplicitTerminator<"YieldOp">,
+    IsolatedFromAbove,
+    RecursiveMemoryEffects
+]> {
+  let summary = "A group of pointwise ops for one rocMLIR kernel";
+  let description = [{
+    Groups pointwise ops, transposes, static reshapes and quantize ops of
+    main_graph that hip-fuse-rocmlir-elementwise selected for one rocMLIR
+    kernel. hip-fuse-rocmlir-anchor then takes the group into the epilogue
+    or prologue of an anchor kernel, or inlines it back. No op of this kind
+    survives the rocMLIR fusion.
+
+    The block arguments are the context, then the inputs. The body holds
+    the grouped ops and the tensor.empty inits they write. Every input and
+    result has a static shape and no integer wider than 32 bits; a result
+    is never rank 0.
+
+    Example:
+    ```mlir
+    %r = hip.rocmlir_elementwise(%ctx)
+        ins(%x, %b : tensor<1x64x56x56xf16>, tensor<1x64x1x1xf16>)
+        -> tensor<1x64x56x56xf16> {
+    ^bb0(%c: !hip.context, %a0: tensor<1x64x56x56xf16>,
+         %a1: tensor<1x64x1x1xf16>):
+      %e = tensor.empty() : tensor<1x64x56x56xf16>
+      %s = hip.add(%c) ins(%a0, %a1 : tensor<1x64x56x56xf16>,
+                                     tensor<1x64x1x1xf16>)
+          outs(%e : tensor<1x64x56x56xf16>) -> tensor<1x64x56x56xf16>
+      hip.yield %s : tensor<1x64x56x56xf16>
+    }
+    ```
+  }];
+
+  let arguments = (ins Hip_ContextType:$ctx, Variadic<AnyRankedTensor>:$inputs);
+  let results = (outs Variadic<AnyRankedTensor>:$results);
+  let regions = (region SizedRegion<1>:$body);
+  let assemblyFormat = [{
+    `(` $ctx `)` (`ins` `(` $inputs^ `:` type($inputs) `)`)? `->`
+    type($results) $body attr-dict
+  }];
+  let hasVerifier = 1;
 }
 
 // ===== hipDNN Graph Execution ================================================
@@ -5144,6 +5316,16 @@ def Hip_PadOp : Hip_DpsOp_WithInfer<"pad", "Output", [AttrSizedOperandSegments]>
     The `mode` attribute is one of `"constant"`, `"reflect"`, `"edge"`,
     `"wrap"`.
 
+    `static_lower_pads`, when present, holds the compile-time begin pad of
+    every data axis (length = data rank). The lowering then passes the pads
+    from host memory and never reads `pads`/`axes`, which avoids a
+    device-to-host copy and stream synchronization per call. It is only set
+    when no runtime `constant_value` read is needed either.
+
+    `static_constant_value`, when present alongside `static_lower_pads`, is
+    the compile-time fill value of a constant-mode pad, typed as the data
+    element. The lowering passes it from host memory as well.
+
     Uses destination-passing style: output buffer is provided as argument.
 
     Example:
@@ -5162,7 +5344,9 @@ def Hip_PadOp : Hip_DpsOp_WithInfer<"pad", "Output", [AttrSizedOperandSegments]>
     Optional<Hip_TensorOrMemRef>:$constant_value,
     Optional<Hip_TensorOrMemRef>:$axes,
     Hip_TensorOrMemRef:$output,
-    DefaultValuedAttr<StrAttr, "\"constant\"">:$mode
+    DefaultValuedAttr<StrAttr, "\"constant\"">:$mode,
+    OptionalAttr<DenseI64ArrayAttr>:$static_lower_pads,
+    OptionalAttr<AnyAttr>:$static_constant_value
   );
 
   let assemblyFormat = [{
@@ -5377,6 +5561,14 @@ def Hip_SliceOp : Hip_DpsOp_WithInfer<"slice", "Output", [AttrSizedOperandSegmen
     runtime call. This op exists only to give the fallback path a stable
     DPS-shaped representation to bufferize and lower from.
 
+    `static_starts` and `static_steps`, when present, hold the resolved
+    start and step of every data axis (length = data rank; an axis that is not
+    sliced has start 0 and step 1), computed at compile time from constant
+    `starts`/`ends`/`axes`/`steps` over static extents. The output shape is
+    then exact, and the lowering passes them from host memory instead of
+    having the runtime read the index tensors back and synchronize the stream.
+    The usual case is a constant negative-step slice (a flip).
+
     Uses destination-passing style: output buffer is provided as argument.
 
     Example:
@@ -5397,7 +5589,9 @@ def Hip_SliceOp : Hip_DpsOp_WithInfer<"slice", "Output", [AttrSizedOperandSegmen
     Hip_TensorOrMemRef:$ends,
     Optional<Hip_TensorOrMemRef>:$axes,
     Optional<Hip_TensorOrMemRef>:$steps,
-    Hip_TensorOrMemRef:$output
+    Hip_TensorOrMemRef:$output,
+    OptionalAttr<DenseI64ArrayAttr>:$static_starts,
+    OptionalAttr<DenseI64ArrayAttr>:$static_steps
   );
 
   let assemblyFormat = [{
@@ -5791,7 +5985,8 @@ def Hip_PoolOp : Hip_DpsOp_AutoReify<"pool"> {
   }];
 }
 
-def Hip_ResizeOp : Hip_DpsOp_AutoReify<"resize"> {
+def Hip_ResizeOp : Hip_DpsOp_AutoReify<"resize",
+    [DeclareOpInterfaceMethods<ElementMoveOpInterface>]> {
   let summary = "Spatial resize / interpolation (ONNX Resize)";
   let description = [{
     Implements a subset of ONNX Resize that covers the common image / volume
@@ -6513,10 +6708,9 @@ def Hip_QuantConvOp : Hip_DpsOp_AutoReifyInfer<"quant_conv"> {
     i8 input, so `x - offset` is always an i8 value. Padding contributes 0
     to the sum. The weights are i8.
 
-    The op has no zero points, scales, or bias. hip-fuse-rocmlir creates it
-    inside a rocMLIR kernel, together with the constant zero-point correction
-    and the requantize epilogue. The op has no lowering outside a rocMLIR
-    kernel.
+    The op has no zero points, scales, or bias. hip-fuse-rocmlir-anchor creates
+    it inside a rocMLIR kernel, together with the constant zero-point correction
+    and the f32 scale epilogue. The op has no lowering outside a rocMLIR kernel.
   }];
 
   let arguments = (ins
@@ -6599,9 +6793,9 @@ def Hip_QuantMatmulOp : Hip_DpsOp_AutoReifyInfer<"quant_matmul"> {
     [M, N]. `offset` is 128 for a ui8 `a` and 0 for an i8 `a`, so
     `a - offset` is always an i8 value. `b` is i8.
 
-    The op has no zero points or scales. hip-fuse-rocmlir creates it inside
-    a rocMLIR kernel, together with the constant zero-point correction and
-    the requantize epilogue. The op has no lowering outside a rocMLIR
+    The op has no zero points or scales. hip-fuse-rocmlir-anchor creates it
+    inside a rocMLIR kernel, together with the constant zero-point correction
+    and the requantize epilogue. The op has no lowering outside a rocMLIR
     kernel.
   }];
 

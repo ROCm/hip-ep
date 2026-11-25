@@ -32,6 +32,7 @@
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 // Environment parameters (global scope, before namespace)
@@ -310,8 +311,8 @@ void check_rocmlir_arch(const std::string &recorded) {
   LOG(FATAL) << "Cached MLIR artifact was compiled with " << describe(recorded)
              << ", but this session requests " << describe(current)
              << " (HIPDNN_EP_ROCMLIR / HIPDNN_EP_ROCMLIR_AUTOTUNE / ROCK_ARCH "
-                "/ active GPU). Delete the model cache or EPContext model and "
-                "recompile.";
+                "/ active GPU). Delete the model cache or EPContext model "
+                "and recompile.";
 }
 } // anonymous namespace
 
@@ -754,8 +755,8 @@ void MlirCustomOp::compute_with_output_allocator(
   MY_LOG(2) << "MlirCustomOp::compute_with_output_allocator()";
 
 #ifdef HIPDNN_EP_LINK_HIP_HOST
-  // This dispatch emits its own PerfSample (§4 per-call distribution) and
-  // per-op flush (§3 GPU table) here, so under HIPDNN_EP_PERF=1 a session
+  // This dispatch emits its own PerfSample (Â§4 per-call distribution) and
+  // per-op flush (Â§3 GPU table) here, so under HIPDNN_EP_PERF=1 a session
   // produces EP-side [PERF]/[PERF SUMMARY] lines. There is no marshal-out
   // pre-pass (outputs are allocated in-graph via output_allocate_cb), so
   // marshal_out_ms is 0.
@@ -803,9 +804,11 @@ void MlirCustomOp::compute_with_output_allocator(
   inference_state_->set_output_allocator(nullptr);
 
   if (ret != 0) {
-    ORT_CXX_API_THROW("inference_compute (allocator) failed with code: " +
-                          std::to_string(ret),
-                      ORT_RUNTIME_EXCEPTION);
+    // Do not copy or publish outputs after a runtime admission/kernel failure.
+    // The EP Compute callback converts this exception to an OrtStatus.
+    throw std::runtime_error(
+        "inference_compute (allocator) failed with code: " +
+        std::to_string(ret));
   }
 
   // Output-completeness guard. Every declared output must be produced in-graph

@@ -86,11 +86,21 @@ struct RocMlirOpLowering : public ConvertOpToLLVMPattern<RocMlirOp> {
                                   (callee + "_name").str(), funcNameStr);
 
     // Operand data pointers, in kernel-arg order: inputs first, then outputs.
+    // Inputs stay identity-layout (hip-promote-strided-operands). An output
+    // may be a packed subview of a concat buffer: the kernel stores densely
+    // from the first element, so the pointer has to be alignedPtr + offset.
     SmallVector<Value> argPtrs;
     for (Value in : adaptor.getInputs())
       argPtrs.push_back(extractContiguousMemRefPtr(in, rewriter, loc));
-    for (Value out : adaptor.getOutputs())
-      argPtrs.push_back(extractContiguousMemRefPtr(out, rewriter, loc));
+    for (auto [out, outDesc] :
+         llvm::zip_equal(op.getOutputs(), adaptor.getOutputs())) {
+      Value outPtr =
+          extractMemRefDataPtr(outDesc, cast<MemRefType>(out.getType()),
+                               getTypeConverter(), rewriter, loc);
+      if (!outPtr)
+        return rewriter.notifyMatchFailure(op, "rocmlir output pointer");
+      argPtrs.push_back(outPtr);
+    }
 
     // alloc(kernargs, size): stack buffer of N pointer slots.
     int64_t numArgs = static_cast<int64_t>(argPtrs.size());

@@ -1,7 +1,7 @@
 # Kernel unit tests: build every leaf, then run them through hipdnn-kernel-ut.exe,
 # the same controller the packaging CI runs.
 #
-#   make test  HIP_SDK=<sdk> [OFFLOAD=--offload-arch=<gfx>] [MODE=lookup|autotune] [COVERAGE=1|2|3]
+#   make test  HIP_SDK=<sdk> [OFFLOAD=--offload-arch=<gfx>] [MODE=lookup|autotune] [COVERAGE=1|2|3] [TIMING=screen|standard|confirm]
 #   make build OFFLOAD=... HIP_SDK=...   (build only)
 #   make clean OFFLOAD=... HIP_SDK=...
 #
@@ -46,6 +46,8 @@ LEAVES := cast/Xany_Yany_bf16 \
 	matmul_nbits/Xfp32_Wu2_Yfp32 matmul_nbits/Xfp32_Wu3_Yfp32 \
 	matmul_nbits/Xfp32_Wu4_Yfp32 matmul_nbits/Xfp32_Wi8_Yfp32 \
 	qmoe/Xfp16_Wu4_Yfp16 \
+	group_norm/Xfp16_Wfp16_Yfp16 group_norm/Xbf16_Wbf16_Ybf16 \
+	group_norm/Xfp32_Wfp32_Yfp32 group_norm/Xfp64_Wfp64_Yfp64 \
 	qmoe_ragged_mm/Xfp16_Wu4_Yfp16
 
 ARCH  := $(patsubst --offload-arch=%,%,$(OFFLOAD))

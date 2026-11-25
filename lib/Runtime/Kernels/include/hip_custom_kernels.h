@@ -47,6 +47,34 @@
 extern "C" {
 #endif
 
+// tq4_mse_qr_v1: B1/Hq24/G4/D256, BSHD FP16 inputs, packed BNSD cache.
+// Each row is 33 u32 words: FP32 norm then 32 words of centroid indices.
+HIP_KERNEL_API size_t hip_tq4_decode_workspace(int valid_length);
+HIP_KERNEL_API int hip_tq4_encode_append(
+    void *stream, const void *key, const void *value, void *present_key,
+    void *present_value, int count, int past, int capacity, const float *rotation,
+    const float *key_centroids, const float *value_centroids);
+HIP_KERNEL_API int hip_tq4_decode(
+    void *stream, const void *query, const void *key, const void *value,
+    void *output, int valid_length, int capacity, float scale,
+    const float *rotation, const float *key_centroids,
+    const float *value_centroids, void *workspace, size_t workspace_bytes);
+
+// Append prefill: packed past plus causal FP16 BSHD new K/V; no cache writes.
+HIP_KERNEL_API size_t hip_tq4_prefill_workspace(int count);
+HIP_KERNEL_API int hip_tq4_prefill(
+    void *stream, const void *query, const void *key, const void *value,
+    const void *past_key, const void *past_value, void *output, int count,
+    int past, int capacity, const float *rotation, const float *key_centroids,
+    const float *value_centroids, void *workspace, size_t workspace_bytes);
+// Internal Ring statistics helper for a bounded query chunk.
+HIP_KERNEL_API int hip_gqa_ring_tq4_prefill(
+    void *stream, const void *rotated_query, const void *query,
+    const void *past_key, const void *past_value, const void *key,
+    const void *value, float *prefix, float *suffix, float *prefix_lse,
+    float *suffix_lse, int count, int start, int past, int capacity,
+    const float *key_centroids, const float *value_centroids);
+
 /* Experimental attention-only Ring entries. Q/output: [1,Q,24,256];
  * K/V: [1,4,capacity,256] FP16, already appended by the runtime. */
 // Validated attention-core bounds; full-model capacity depends on available memory.
@@ -885,6 +913,15 @@ HIP_KERNEL_API int hip_swiglu_promoted(void *stream, const void *gate,
                                       const void *up, void *output,
                                       int64_t num_elements, int hip_dtype);
 
+// Clamped SwiGLU, computed in FP32 and rounded once:
+//   g = min(gate, limit), u = clamp(up, -limit, limit),
+//   output = g / (1 + exp(-alpha * g)) * (u + beta).
+// limit may be +inf. HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16, HIP_DTYPE_BFLOAT16.
+HIP_KERNEL_API int hip_swiglu_clamped(void *stream, const void *gate,
+                                      const void *up, void *output,
+                                      int64_t num_elements, int hip_dtype,
+                                      float alpha, float beta, float limit);
+
 /* =========================================================================
  * Softplus activation
  * =========================================================================
@@ -1196,6 +1233,19 @@ HIP_KERNEL_API int hip_softmax_row_2d_fp32(void* stream, const void* input, void
 HIP_KERNEL_API int hip_softmax_row_2d_inplace(void* stream, void* data, int rows, int cols);
 HIP_KERNEL_API int hip_softmax_row_2d_inplace_fp32(void* stream, void* data, int rows, int cols);
 
+/* Last-axis softmax over [outer, R, C] scores with the scale and an id mask
+ * applied on the way in:
+ *   out[o,r,c] = softmax_c(row_ids[r] == col_ids[c] ? x[o,r,c] * scale : fill)
+ * The scaled value is rounded to the element type first. An id vector of
+ * length 1 broadcasts; any other length must be R (row_ids) or C (col_ids).
+ * elem_size_bytes: 2 for fp16, 4 for fp32. `input` may equal `output`.
+ * Returns -1 on invalid arguments. */
+HIP_KERNEL_API int hip_softmax_row_scaled_masked(
+    void* stream, const void* input, void* output, const int64_t* row_ids,
+    int64_t row_ids_len, const int64_t* col_ids, int64_t col_ids_len,
+    int64_t outer, int64_t R, int64_t C, float scale, float fill,
+    int elem_size_bytes);
+
 /* Column-wise softmax: fp32 input -> fp16 output.
  * Reads fp32 Score matrix (no fp16 overflow/inf), writes fp16 probabilities.
  * input_batch_stride is in float elements, output_batch_stride in half elements. */
@@ -1364,6 +1414,8 @@ HIP_KERNEL_API int hip_mha_flash_prefill(
  * process-wide map (matmul_nbits-style), and reuses it on later calls.
  * Env overrides skip autotune: HIPDNN_GQA_DECODE_SCALAR / _WMMA (impl),
  * HIPDNN_GQA_DECODE_SPLITS=N (count), HIPDNN_GQA_DECODE_NOAUTOTUNE=1 (fixed).
+ * Each override is read once, on first use in the process, and then stays
+ * fixed; changing it mid-process has no effect.
  *
  * seqlens_k: optional device pointer [B] int32. When non-null, total_seq
  * = seqlens_k[b]+1 is read on-device (no host sync).
@@ -1807,7 +1859,10 @@ HIP_KERNEL_API int hip_pool(
  * HIP_DTYPE_UINT8 for every mode. Integer linear interpolates the stored
  * codes in float and truncates toward zero on the store. Nearest copies
  * one sample.
- * Returns: 0 on success, non-zero on failure.
+ * Linear rounds each product and sum to f32 (no FMA contraction).
+ * Returns: 0 on success, non-zero on failure, including a window extent
+ * above 2^24 (a float coordinate cannot address every index beyond it) or
+ * an output row count (N * C * all output axes but the last) above INT32_MAX.
  */
 HIP_KERNEL_API int hip_resize(
     void* stream,
@@ -2309,7 +2364,21 @@ HIP_KERNEL_API int hip_batch_norm(
  * Mean/var over each (N, group). channels_last 0 is NCHW, 1 is NHWC.
  * activation 1 applies SiLU after the affine transform.
  * `hip_dtype`: FLOAT16, BFLOAT16, FLOAT32, or FLOAT64.
+ *
+ * Large groups use a split reduction whose partials live in `workspace`
+ * (device memory, 256-byte aligned). Query the size with
+ * hip_group_norm_workspace_bytes for the current device. A null or smaller
+ * workspace is valid: the kernel shrinks the split or uses a slower
+ * one-block-per-group path.
  */
+HIP_KERNEL_API size_t hip_group_norm_workspace_bytes(
+    int64_t n,
+    int64_t c,
+    int64_t spatial,
+    int64_t groups,
+    int channels_last,
+    int hip_dtype);
+
 HIP_KERNEL_API int hip_group_norm(
     void* stream,
     const void* input,
@@ -2323,6 +2392,8 @@ HIP_KERNEL_API int hip_group_norm(
     int channels_last,
     int activation,
     float epsilon,
+    void* workspace,
+    size_t workspace_bytes,
     int hip_dtype);
 
 /* =========================================================================
