@@ -31,9 +31,9 @@
 // RUN:   --verify-diagnostics %s | FileCheck %s
 
 // CHECK-LABEL: func.func @max_pool2d
-// CHECK: %[[NHWC:.*]] = tosa.transpose %arg1 {perms = array<i32: 0, 2, 3, 1>} : (tensor<1x3x32x32xf16>) -> tensor<1x32x32x3xf16>
-// CHECK: %[[POOL:.*]] = tosa.max_pool2d %[[NHWC]] {kernel = array<i64: 2, 2>, pad = array<i64: 0, 0, 0, 0>, stride = array<i64: 2, 2>} : (tensor<1x32x32x3xf16>) -> tensor<1x16x16x3xf16>
-// CHECK: tosa.transpose %[[POOL]] {perms = array<i32: 0, 3, 1, 2>} : (tensor<1x16x16x3xf16>) -> tensor<1x3x16x16xf16>
+// CHECK: %[[NHWC:.*]] = tosa.transpose %arg1 perms([0, 2, 3, 1]) : (tensor<1x3x32x32xf16>) -> tensor<1x32x32x3xf16>
+// CHECK: %[[POOL:.*]] = tosa.max_pool2d %[[NHWC]] kernel([2, 2]) stride([2, 2]) pad([0, 0, 0, 0]) : (tensor<1x32x32x3xf16>) -> tensor<1x16x16x3xf16>
+// CHECK: tosa.transpose %[[POOL]] perms([0, 3, 1, 2]) : (tensor<1x16x16x3xf16>) -> tensor<1x3x16x16xf16>
 // CHECK-NOT: hip.pool
 func.func @max_pool2d(%ctx: !hip.context, %x: tensor<1x3x32x32xf16>,
                       %init: tensor<1x3x16x16xf16>) -> tensor<1x3x16x16xf16>
@@ -48,12 +48,12 @@ func.func @max_pool2d(%ctx: !hip.context, %x: tensor<1x3x32x32xf16>,
 }
 
 // CHECK-LABEL: func.func @avg_pool2d
-// CHECK: %[[NHWC:.*]] = tosa.transpose %arg1 {perms = array<i32: 0, 2, 3, 1>}
+// CHECK: %[[NHWC:.*]] = tosa.transpose %arg1 perms([0, 2, 3, 1])
 // CHECK: tosa.avg_pool2d %[[NHWC]]
-// CHECK-SAME: acc_type = f32
-// CHECK-SAME: kernel = array<i64: 3, 3>
-// CHECK-SAME: pad = array<i64: 0, 0, 0, 0>
-// CHECK-SAME: stride = array<i64: 1, 1>
+// CHECK-SAME: kernel([3, 3])
+// CHECK-SAME: stride([1, 1])
+// CHECK-SAME: pad([0, 0, 0, 0])
+// CHECK-SAME: acc_type(f32)
 // CHECK: tosa.transpose
 // CHECK-NOT: hip.pool
 func.func @avg_pool2d(%ctx: !hip.context, %x: tensor<1x3x8x8xf32>,
@@ -74,7 +74,7 @@ func.func @avg_pool2d(%ctx: !hip.context, %x: tensor<1x3x8x8xf32>,
 // CHECK-LABEL: func.func @avg_pool2d_exclude_pad
 // CHECK-NOT: tosa.pad
 // CHECK: tosa.avg_pool2d
-// CHECK-SAME: pad = array<i64: 1, 1, 1, 1>
+// CHECK-SAME: pad([1, 1, 1, 1])
 // CHECK-NOT: hip.pool
 func.func @avg_pool2d_exclude_pad(%ctx: !hip.context, %x: tensor<1x3x8x8xf32>,
                                   %init: tensor<1x3x8x8xf32>)
@@ -94,7 +94,7 @@ func.func @avg_pool2d_exclude_pad(%ctx: !hip.context, %x: tensor<1x3x8x8xf32>,
 // CHECK-LABEL: func.func @avg_pool2d_include_pad
 // CHECK: %[[PAD:.*]] = tosa.pad %{{.*}} -> tensor<1x10x10x3xf32>
 // CHECK: tosa.avg_pool2d %[[PAD]]
-// CHECK-SAME: pad = array<i64: 0, 0, 0, 0>
+// CHECK-SAME: pad([0, 0, 0, 0])
 // CHECK-NOT: hip.pool
 func.func @avg_pool2d_include_pad(%ctx: !hip.context, %x: tensor<1x3x8x8xf32>,
                                   %init: tensor<1x3x8x8xf32>)
@@ -113,8 +113,8 @@ func.func @avg_pool2d_include_pad(%ctx: !hip.context, %x: tensor<1x3x8x8xf32>,
 // CHECK-LABEL: func.func @max_pool1d
 // CHECK: tosa.reshape %arg1, %{{.*}} -> tensor<1x3x1x32xf32>
 // CHECK: tosa.max_pool2d
-// CHECK-SAME: kernel = array<i64: 1, 2>
-// CHECK-SAME: stride = array<i64: 1, 1>
+// CHECK-SAME: kernel([1, 2])
+// CHECK-SAME: stride([1, 1])
 // CHECK: tosa.reshape %{{.*}} -> tensor<1x3x31xf32>
 // CHECK-NOT: hip.pool
 func.func @max_pool1d(%ctx: !hip.context, %x: tensor<1x3x32xf32>,
@@ -153,9 +153,9 @@ func.func @lp_pool2d(%ctx: !hip.context, %x: tensor<1x3x4x4xf32>,
 
 // CHECK-LABEL: func.func @global_avg_pool
 // CHECK: tosa.reduce_sum
-// CHECK-SAME: axis = 2
+// CHECK-SAME: axis(2)
 // CHECK: tosa.reduce_sum
-// CHECK-SAME: axis = 3
+// CHECK-SAME: axis(3)
 // CHECK-NOT: hip.global_pool
 func.func @global_avg_pool(%ctx: !hip.context, %x: tensor<1x3x5x5xf32>,
                            %init: tensor<1x3x1x1xf32>) -> tensor<1x3x1x1xf32>
@@ -169,9 +169,9 @@ func.func @global_avg_pool(%ctx: !hip.context, %x: tensor<1x3x5x5xf32>,
 
 // CHECK-LABEL: func.func @global_max_pool
 // CHECK: tosa.reduce_max
-// CHECK-SAME: axis = 2
+// CHECK-SAME: axis(2)
 // CHECK: tosa.reduce_max
-// CHECK-SAME: axis = 3
+// CHECK-SAME: axis(3)
 // CHECK-NOT: hip.global_pool
 func.func @global_max_pool(%ctx: !hip.context, %x: tensor<1x3x5x5xf16>,
                            %init: tensor<1x3x1x1xf16>) -> tensor<1x3x1x1xf16>
@@ -186,9 +186,9 @@ func.func @global_max_pool(%ctx: !hip.context, %x: tensor<1x3x5x5xf16>,
 // CHECK: tosa.abs
 // CHECK: tosa.pow
 // CHECK: tosa.reduce_sum
-// CHECK-SAME: axis = 2
+// CHECK-SAME: axis(2)
 // CHECK: tosa.reduce_sum
-// CHECK-SAME: axis = 3
+// CHECK-SAME: axis(3)
 // CHECK: tosa.pow
 // CHECK-NOT: hip.global_pool
 func.func @global_lp_pool(%ctx: !hip.context, %x: tensor<1x3x4x4xf32>,
