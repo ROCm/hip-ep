@@ -19,6 +19,9 @@
  * group_size/zero-points value. The CPU reference is multithreaded
  * (see genCase() below) so the wider shape set stays inside budget.
  *
+ * Every tier also runs the W4A8 dp4a entry (hip_matmul_nbits_dp4a) at 2..9
+ * rows; see dp4a_rows below.
+ *
  * A:        FP16 row-major [M, K]
  * B_packed: uint4 packed [N, K/2]-ish (see kernel_ut spec below), each byte
  *           = 2 values (low nibble first), row padded to
@@ -998,6 +1001,122 @@ static int run() {
 }  // namespace forced
 
 // ============================================================
+// W4A8 dp4a rows. The sweep above never takes hip_matmul_nbits_dp4a, which
+// sends M > 1 rows to one of two kernels:
+//   - 2..8 rows of K <= 512, and 5..8 rows of K <= 640: one thread per output
+//     column (matmul_nbits_gemv_dp4a_smallk_kernel).
+//   - everything else: the K-parallel kernel on row tiles of 2, 4 or 8 rows.
+//     In lookup mode one tile holds all M rows up to 8. N = 1 is narrower
+//     than every tile and gets the narrowest one of that height (Qwen3.8-
+//     Flash-Next's shared_expert_gate, K = 2560, at the row counts of a
+//     speculative-decoding verify call); N >= 15360 at 5..8 rows gets the
+//     4-column tile of 8 rows. Above 8 rows there are two row tiles, and the
+//     second one once read the first tile's activation rows (the EP sends
+//     that many rows only when HIPDNN_EP_MATMUL_DP4A_MAX_M is raised).
+// The shapes below sit on both sides of each of those boundaries. Each runs
+// with every group size that divides K (32 takes the per-group activation
+// quantizer, 64 and 128 the block one), with and without zero points, at
+// every tier, against the CPU reference. Like the forced entries above, these
+// are checked, not timed, and write no results.csv row.
+// ============================================================
+namespace dp4a_rows {
+
+static int run() {
+  static const sweep::Shape kShapes[] = {
+      {2, 2560, 1},     // N = 1: the tile of 2 rows
+      {4, 2560, 1},     // N = 1: the tile of 4 rows
+      {5, 2560, 1},     // N = 1: the tile of 8 rows, 5 of them used
+      {7, 2560, 1},     // N = 1: the tile of 8 rows, 7 of them used
+      {2, 2560, 2560},  // one tile of 2 rows
+      {4, 2560, 2560},  // one tile of 4 rows
+      {7, 2560, 2560},  // one tile of 8 rows, 7 of them used
+      {9, 2560, 2560},  // more rows than the tallest tile: two row tiles
+      {2, 320, 10240},  // column per thread: the fewest rows
+      {8, 320, 10240},  // column per thread: the most rows
+      {3, 512, 1000},   // column per thread: the largest K below 5 rows, and
+                        // an N that ends inside a 64-column block
+      {4, 640, 2560},   // K = 640 below 5 rows: K-parallel
+      {5, 640, 2560},   // K = 640 from 5 rows: column per thread
+      {7, 768, 15360},  // N >= 15360 at 5..8 rows: the 4-column tile of 8 rows
+  };
+  hipStream_t stream;
+  HIP_CHECK(hipStreamCreate(&stream));
+  int cases = 0, fail = 0;
+  for (const sweep::Shape& s : kShapes) {
+    for (int gs : sweep::kGsArray) {
+      if (s.K % gs != 0) continue;  // K = 320 has no whole number of 128-groups
+      for (bool zero : sweep::kZeroArray) {
+        CaseData d;
+        genCase(s.M, s.K, s.N, gs, zero, /*fp32=*/false,
+                /*seed=*/9000u + static_cast<unsigned>(cases), d);
+        const size_t groups = static_cast<size_t>(s.K / gs);
+        const size_t out_count = static_cast<size_t>(s.M) * s.N;
+        // The entry takes zero points as one uint8 per (column, group).
+        std::vector<uint8_t> zeros(d.zeros.size());
+        for (size_t i = 0; i < zeros.size(); ++i)
+          zeros[i] = static_cast<uint8_t>(half_to_float(d.zeros[i]));
+        void *dA = nullptr, *dB = nullptr, *dS = nullptr, *dZ = nullptr, *dC = nullptr;
+        // The entry's scratch: quantized activations and their per-group scales.
+        void *dQ = nullptr, *dQs = nullptr;
+        HIP_CHECK(hipMalloc(&dA, d.A16.size() * sizeof(__half)));
+        HIP_CHECK(hipMalloc(&dB, d.Bpacked.size()));
+        HIP_CHECK(hipMalloc(&dS, d.scales.size() * sizeof(__half)));
+        HIP_CHECK(hipMalloc(&dC, out_count * sizeof(__half)));
+        HIP_CHECK(hipMalloc(&dQ, static_cast<size_t>(s.M) * s.K));
+        HIP_CHECK(hipMalloc(&dQs, static_cast<size_t>(s.M) * groups * sizeof(float)));
+        if (zero) HIP_CHECK(hipMalloc(&dZ, zeros.size()));
+        HIP_CHECK(hipMemcpy(dA, d.A16.data(), d.A16.size() * sizeof(__half),
+                            hipMemcpyHostToDevice));
+        HIP_CHECK(hipMemcpy(dB, d.Bpacked.data(), d.Bpacked.size(), hipMemcpyHostToDevice));
+        HIP_CHECK(hipMemcpy(dS, d.scales.data(), d.scales.size() * sizeof(__half),
+                            hipMemcpyHostToDevice));
+        if (zero)
+          HIP_CHECK(hipMemcpy(dZ, zeros.data(), zeros.size(), hipMemcpyHostToDevice));
+        // 0xFFFF is an fp16 NaN: an output the kernel never writes fails.
+        HIP_CHECK(hipMemset(dC, 0xFF, out_count * sizeof(__half)));
+        const int rc = hip_matmul_nbits_dp4a(stream, dA, dB, dS, zero ? dZ : nullptr,
+                                             nullptr, dC, s.M, s.N, s.K, gs, dQ, dQs);
+        HIP_CHECK(hipStreamSynchronize(stream));
+        int errors = 0;
+        double ssd = 0.0, ssr = 0.0;
+        if (rc == 0) {
+          std::vector<__half> out(out_count);
+          HIP_CHECK(hipMemcpy(out.data(), dC, out_count * sizeof(__half),
+                              hipMemcpyDeviceToHost));
+          for (size_t i = 0; i < out_count; ++i) {
+            const float g = half_to_float(out[i]);
+            const float r = half_to_float(d.Cref16[i]);
+            const float diff = std::fabs(g - r);
+            if (!(diff <= std::fabs(r) * 0.05f + 0.1f) || !std::isfinite(g)) ++errors;
+            ssd += static_cast<double>(diff) * diff;
+            ssr += static_cast<double>(r) * r;
+          }
+        }
+        hipFree(dA);
+        hipFree(dB);
+        hipFree(dS);
+        if (dZ) hipFree(dZ);
+        hipFree(dC);
+        hipFree(dQ);
+        hipFree(dQs);
+        const bool pass = rc == 0 && errors == 0;
+        ++cases;
+        if (!pass) ++fail;
+        std::printf("  dp4a rows M=%d N=%d K=%d gs=%d zero=%d  rc=%d  relL2=%.3e  %s\n",
+                    s.M, s.N, s.K, gs, zero, rc,
+                    ssr > 0.0 ? std::sqrt(ssd / ssr) : std::sqrt(ssd),
+                    pass ? "PASS" : "*** FAIL ***");
+      }
+    }
+  }
+  HIP_CHECK(hipStreamDestroy(stream));
+  std::printf("\ndp4a rows: %d cases, %d failed\n", cases, fail);
+  return fail == 0 ? 0 : 1;
+}
+
+}  // namespace dp4a_rows
+
+// ============================================================
 // Single-shape convenience path (make test_custom): in-process rng, no data
 // files. SIZE=MxKxN GS=<group_size> [NO_ZEROS=1].
 // ============================================================
@@ -1096,6 +1215,7 @@ static int runMain(int argc, char* argv[]) {
 
   const int tier = hipdnn_ep_test::resolveCoverageTier(argc, argv);
   const int sweep_rc = sweep::run(tier);
+  const int dp4a_rc = dp4a_rows::run();
   // The extended entries run on gfx1151 only; elsewhere only the sweep above
   // applies.
   int forced_rc = 0;
@@ -1104,7 +1224,7 @@ static int runMain(int argc, char* argv[]) {
                 prop.gcnArchName);
   else
     forced_rc = forced::run();
-  return sweep_rc != 0 || forced_rc != 0 ? 1 : 0;
+  return sweep_rc != 0 || dp4a_rc != 0 || forced_rc != 0 ? 1 : 0;
 }
 
 int main(int argc, char* argv[]) {

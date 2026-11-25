@@ -62,6 +62,23 @@ zero-points combo. At startup the exe prints `coverage=N -> running
 <n> matmul_nbits cases`. No human edits a shape list -- there is no
 `shapes.csv` or `gen_data.py` in this leaf.
 
+Every tier also runs the W4A8 dp4a entry, `hip_matmul_nbits_dp4a`, at 2..9
+rows (`dp4a_rows` in the cpp), which the sweep never takes. The 14 shapes sit
+on both sides of each rule in that entry, crossed with every group size that
+divides `K` and with and without zero points (80 cases):
+
+| Shapes (`MxKxN`) | What they run |
+| --- | --- |
+| `{2,4,5,7}x2560x1` | K-parallel kernel, `N=1`: the narrowest tile of 2, 4 and 8 rows |
+| `{2,4,7}x2560x2560` | K-parallel kernel, one tile of 2, 4 and 8 rows |
+| `9x2560x2560` | K-parallel kernel, two row tiles of 8 |
+| `{2,8}x320x10240`, `3x512x1000` | column-per-thread kernel: fewest and most rows, the largest `K` below 5 rows, and an `N` that ends inside a block |
+| `4x640x2560`, `5x640x2560` | `K=640`: K-parallel below 5 rows, column-per-thread from 5 |
+| `7x768x15360` | K-parallel kernel, the 4-column tile of 8 rows (`N >= 15360`) |
+
+These cases are compared with the CPU reference only: they are not timed and
+write no `out/results.csv` row.
+
 `MODE=lookup` (default) -- resolves from `hip/autotune/matmul_nbits/lut/<arch>.fb`
 if it exists for the arch in `OFFLOAD`, else falls back to `autotune` with a
 warning. `MODE=autotune` always sweeps, ignoring any `.fb`. `MODE=lookup`
