@@ -7,6 +7,9 @@
 #include "hip/Compiler/PluginRegistry.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Conversion/OnnxToHipDNN/Passes.h"
+#ifdef HIPDNN_EP_BUILD_GGML
+#include "hip/Conversion/GgmlToHip/Passes.h"
+#endif
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 #include "hip/debug_log.h"
@@ -380,6 +383,16 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   pm.addPass(createCanonicalizerPass());
 }
 
+#ifdef HIPDNN_EP_BUILD_GGML
+void mlir::hip::buildGgmlToHipPipeline(OpPassManager &pm,
+                                       const OnnxToHipPipelineOptions &options,
+                                       morphizen::FileSystem *fs) {
+  pm.addPass(createHipAddContextArgPass());
+  pm.addPass(createConvertGgmlToHipPass());
+  buildOnnxToHipPipelineTail(pm, options, fs);
+}
+#endif
+
 void mlir::hip::buildOnnxToHipPipelineHead(OpPassManager &pm,
                                            hipdnnHandle_t handle,
                                            CompiledGraphMap output_graphs) {
@@ -594,6 +607,15 @@ void mlir::hip::buildRocMlirFusionPipeline(
 }
 
 void mlir::hip::registerHipPipelines() {
+#ifdef HIPDNN_EP_BUILD_GGML
+  PassPipelineRegistration<OnnxToHipPipelineOptions>(
+      "ggml-to-hip-pipeline",
+      "Lower a ggml-dialect module to bufferized, pooled HIP memref IR",
+      [](OpPassManager &pm, const OnnxToHipPipelineOptions &opts) {
+        buildGgmlToHipPipeline(pm, opts);
+      });
+#endif
+
   PassPipelineRegistration<OnnxToHipPipelineOptions>(
       "onnx-to-hip-pipeline",
       "Lower ONNX IR to bufferized HIP memref IR with optional constant "

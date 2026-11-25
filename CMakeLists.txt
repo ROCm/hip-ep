@@ -128,6 +128,16 @@ option(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS
   "Build the opt-in native .dll/.so artifact path (lld). When OFF, artifact_format=NATIVE throws."
   OFF)
 
+# ggml graphs through the compiler, for llama.cpp's ggml-hipep backend
+# (docs/design/ggml-backend.md): the ggml dialect, its conversion to HIP and
+# the ggml-to-hip pipeline.
+option(HIPDNN_EP_BUILD_GGML
+  "Build the ggml dialect and the ggml-to-hip pipeline for llama.cpp's ggml-hipep backend"
+  OFF)
+if(HIPDNN_EP_BUILD_GGML)
+  add_compile_definitions(HIPDNN_EP_BUILD_GGML)
+endif()
+
 # Build rocMLIR/Triton (rocmlirTriton) in-tree as a subdirectory, reusing the
 # same LLVM/MLIR this project already resolves (see cmake/deps.cmake). When ON,
 # the in-tree LLVM is built as a superset (adds the AMDGPU target and matching
@@ -246,6 +256,9 @@ add_subdirectory(backend-mlir-compiler)
 # Define the library before configuring tools so the target is linked by name.
 if(BUILD_HIP_UNIT_TESTS)
   add_subdirectory(test/lib/Dialect/Hip)
+  if(HIPDNN_EP_BUILD_GGML)
+    add_subdirectory(test/lib/Dialect/Ggml)
+  endif()
 endif()
 
 # Executable targets

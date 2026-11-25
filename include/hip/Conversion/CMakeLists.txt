@@ -8,3 +8,6 @@
 set(LLVM_TARGET_DEFINITIONS Passes.td)
 mlir_tablegen(Passes.h.inc -gen-pass-decls -name HipsrConversion)
 add_public_tablegen_target(HipsrConversionPassIncGen)
+if(HIPDNN_EP_BUILD_GGML)
+  add_subdirectory(GgmlToHip)
+endif()
