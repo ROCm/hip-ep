@@ -469,6 +469,39 @@ func.func @batch_norm_then_full_size_add(%ctx: !hip.context, %x: !full, %other: 
   return %y : !full
 }
 
+// A division cannot be the scale, so the division by %scale is not fused. The
+// division by the standard deviation before it is a batch normalization of its
+// own.
+
+// CHECK-LABEL: func.func @batch_norm_then_divide
+// CHECK-SAME:  (%[[CTX:.*]]: !hip.context, %[[X:.*]]: tensor<1x4x2x2xf32>, %[[MEAN:.*]]: tensor<4xf32>, %[[VAR:.*]]: tensor<4xf32>, %[[SCALE:.*]]: tensor<4xf32>)
+// CHECK:         %[[SCALE_V:.*]] = tensor.expand_shape %[[SCALE]]
+// CHECK:         %[[ONES:.*]] = hip.constant {{.*}}dense<1.000000e+00> : tensor<4xf32>
+// CHECK:         %[[ZEROS:.*]] = hip.constant {{.*}}dense<0.000000e+00> : tensor<4xf32>
+// CHECK:         %[[BN:.*]] = hip.batch_norm(%[[CTX]]) ins(%[[X]], %[[ONES]], %[[ZEROS]], %[[MEAN]], %[[VAR]] :
+// CHECK:         %[[Y:.*]] = hip.div(%[[CTX]]) ins(%[[BN]], %[[SCALE_V]] :
+// CHECK:         return %[[Y]]
+func.func @batch_norm_then_divide(%ctx: !hip.context, %x: !full, %mean: !vec,
+                                  %var: !vec, %scale: !vec) -> !full {
+  %eps = hip.constant {value = dense<1.0e-5> : tensor<f32>} : tensor<f32>
+  %e0 = tensor.empty() : !vec
+  %vpe = hip.add(%ctx) ins(%var, %eps : !vec, tensor<f32>) outs(%e0 : !vec) -> !vec
+  %e1 = tensor.empty() : !vec
+  %sd = hip.sqrt(%ctx) ins(%vpe : !vec) outs(%e1 : !vec) : !vec
+
+  %mean_v = tensor.expand_shape %mean [[0, 1, 2]] output_shape [4, 1, 1] : !vec into !view
+  %sd_v = tensor.expand_shape %sd [[0, 1, 2]] output_shape [4, 1, 1] : !vec into !view
+  %scale_v = tensor.expand_shape %scale [[0, 1, 2]] output_shape [4, 1, 1] : !vec into !view
+
+  %e2 = tensor.empty() : !full
+  %c = hip.sub(%ctx) ins(%x, %mean_v : !full, !view) outs(%e2 : !full) : !full
+  %e3 = tensor.empty() : !full
+  %n = hip.div(%ctx) ins(%c, %sd_v : !full, !view) outs(%e3 : !full) : !full
+  %e4 = tensor.empty() : !full
+  %y = hip.div(%ctx) ins(%n, %scale_v : !full, !view) outs(%e4 : !full) : !full
+  return %y : !full
+}
+
 // Cases that must not fuse.
 
 // A view on another dimension than the channel dimension, although it has C
@@ -499,7 +532,7 @@ func.func @no_fusion_view_not_on_channel(%ctx: !hip.context, %x: tensor<1x4x4x4x
   return %y : tensor<1x4x4x4xf32>
 }
 
-// The centered input is also returned, so the chain must stay to produce it.
+// The normalized input is also returned, so the chain must stay to produce it.
 
 // CHECK-LABEL: func.func @no_fusion_intermediate_has_other_use
 // CHECK-NOT:     hip.batch_norm
@@ -507,8 +540,65 @@ func.func @no_fusion_view_not_on_channel(%ctx: !hip.context, %x: tensor<1x4x4x4x
 // CHECK-NOT:     hip.batch_norm
 // CHECK:         return
 func.func @no_fusion_intermediate_has_other_use(%ctx: !hip.context, %x: !full,
-                                                %mean: !vec, %var: !vec)
+                                                %mean: !vec, %var: !vec,
+                                                %scale: !vec)
     -> (!full, !full) {
+  %eps = hip.constant {value = dense<1.0e-5> : tensor<f32>} : tensor<f32>
+  %e0 = tensor.empty() : !vec
+  %vpe = hip.add(%ctx) ins(%var, %eps : !vec, tensor<f32>) outs(%e0 : !vec) -> !vec
+  %e1 = tensor.empty() : !vec
+  %sd = hip.sqrt(%ctx) ins(%vpe : !vec) outs(%e1 : !vec) : !vec
+  %e2 = tensor.empty() : !vec
+  %inv = hip.reciprocal(%ctx) ins(%sd : !vec) outs(%e2 : !vec) : !vec
+
+  %mean_v = tensor.expand_shape %mean [[0, 1, 2]] output_shape [4, 1, 1] : !vec into !view
+  %inv_v = tensor.expand_shape %inv [[0, 1, 2]] output_shape [4, 1, 1] : !vec into !view
+  %scale_v = tensor.expand_shape %scale [[0, 1, 2]] output_shape [4, 1, 1] : !vec into !view
+
+  %e3 = tensor.empty() : !full
+  %c = hip.sub(%ctx) ins(%x, %mean_v : !full, !view) outs(%e3 : !full) : !full
+  %e4 = tensor.empty() : !full
+  %n = hip.mul(%ctx) ins(%c, %inv_v : !full, !view) outs(%e4 : !full) -> !full
+  %e5 = tensor.empty() : !full
+  %y = hip.mul(%ctx) ins(%n, %scale_v : !full, !view) outs(%e5 : !full) -> !full
+  return %y, %n : !full, !full
+}
+
+// The mean is already broadcast-shaped, so it is not a [C] vector.
+
+// CHECK-LABEL: func.func @no_fusion_parameter_not_vector
+// CHECK-NOT:     hip.batch_norm
+// CHECK:         hip.sub
+// CHECK-NOT:     hip.batch_norm
+// CHECK:         return
+func.func @no_fusion_parameter_not_vector(%ctx: !hip.context, %x: !full,
+                                          %mean_v: !view, %var: !vec) -> !full {
+  %eps = hip.constant {value = dense<1.0e-5> : tensor<f32>} : tensor<f32>
+  %e0 = tensor.empty() : !vec
+  %vpe = hip.add(%ctx) ins(%var, %eps : !vec, tensor<f32>) outs(%e0 : !vec) -> !vec
+  %e1 = tensor.empty() : !vec
+  %sd = hip.sqrt(%ctx) ins(%vpe : !vec) outs(%e1 : !vec) : !vec
+  %e2 = tensor.empty() : !vec
+  %inv = hip.reciprocal(%ctx) ins(%sd : !vec) outs(%e2 : !vec) : !vec
+
+  %inv_v = tensor.expand_shape %inv [[0, 1, 2]] output_shape [4, 1, 1] : !vec into !view
+
+  %e3 = tensor.empty() : !full
+  %c = hip.sub(%ctx) ins(%x, %mean_v : !full, !view) outs(%e3 : !full) : !full
+  %e4 = tensor.empty() : !full
+  %y = hip.mul(%ctx) ins(%c, %inv_v : !full, !view) outs(%e4 : !full) -> !full
+  return %y : !full
+}
+
+// The centering runs on another HIP context than the rest of the chain.
+
+// CHECK-LABEL: func.func @no_fusion_other_context
+// CHECK-NOT:     hip.batch_norm
+// CHECK:         hip.sub
+// CHECK-NOT:     hip.batch_norm
+// CHECK:         return
+func.func @no_fusion_other_context(%ctx: !hip.context, %other: !hip.context,
+                                   %x: !full, %mean: !vec, %var: !vec) -> !full {
   %eps = hip.constant {value = dense<1.0e-5> : tensor<f32>} : tensor<f32>
   %e0 = tensor.empty() : !vec
   %vpe = hip.add(%ctx) ins(%var, %eps : !vec, tensor<f32>) outs(%e0 : !vec) -> !vec
@@ -521,10 +611,10 @@ func.func @no_fusion_intermediate_has_other_use(%ctx: !hip.context, %x: !full,
   %inv_v = tensor.expand_shape %inv [[0, 1, 2]] output_shape [4, 1, 1] : !vec into !view
 
   %e3 = tensor.empty() : !full
-  %c = hip.sub(%ctx) ins(%x, %mean_v : !full, !view) outs(%e3 : !full) : !full
+  %c = hip.sub(%other) ins(%x, %mean_v : !full, !view) outs(%e3 : !full) : !full
   %e4 = tensor.empty() : !full
   %y = hip.mul(%ctx) ins(%c, %inv_v : !full, !view) outs(%e4 : !full) -> !full
-  return %y, %c : !full, !full
+  return %y : !full
 }
 
 // mean - x is the negated centering, not the batch normalization's x - mean.
