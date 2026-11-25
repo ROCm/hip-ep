@@ -178,6 +178,20 @@ llvm::orc::LLJITBuilder makeLLJITBuilder() {
   }
 
   builder.setObjectLinkingLayerCreator(ReservingObjectLayerCreator{});
+#else
+  // JITLink maps each linked object on its own, so an object's code can land
+  // more than 2 GB from a symbol another object defines -- LLJIT's
+  // __dso_handle, which runtime.bc's static constructors take the address
+  // of. With the small code model that reference is a 32-bit PC-relative
+  // fixup, and linking fails ("out of range of Delta32 fixup") once a process
+  // has mapped enough: many JIT instances, or a large model's memory. The
+  // large code model addresses data with 64-bit absolutes, at any distance.
+  if (auto jtmb = llvm::orc::JITTargetMachineBuilder::detectHost()) {
+    jtmb->setCodeModel(llvm::CodeModel::Large);
+    builder.setJITTargetMachineBuilder(std::move(*jtmb));
+  } else {
+    llvm::consumeError(jtmb.takeError());
+  }
 #endif
 
   return builder;
