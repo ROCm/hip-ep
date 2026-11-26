@@ -814,7 +814,7 @@ createSkipLayerNorm(mlir::PatternRewriter &rewriter, mlir::Location loc,
 /// bias, distinct from SkipSimplifiedLayerNormalization (which is RMS norm and
 /// maps to hip.skip_rms_norm). When the operands fit hip.skip_layer_norm
 /// (see canUseSkipLayerNorm) the whole op is one kernel; otherwise we
-/// compose:
+/// compose, in f32 for f16 / bf16 (hip.cast around it):
 ///   sum    = input + skip               (hip.add)
 ///   sum    = sum + bias                 (hip.add, only when bias is present)
 ///   output = LayerNorm(sum, gamma, beta, epsilon)   (hip.layer_norm)
@@ -822,12 +822,11 @@ createSkipLayerNorm(mlir::PatternRewriter &rewriter, mlir::Location loc,
 ///
 /// MS spec (com.microsoft.SkipLayerNormalization):
 ///   inputs (3-5): input, skip, gamma, [beta], [bias-on-input].
-///                 ORT's CPU kernel computes (input + skip) + bias in fp32
-///                 and rounds once; that sum is input_skip_bias_sum. Both
-///                 paths here do the same (the fallback casts f16 / bf16 to
-///                 f32 around its adds when there is a bias). Whisper uses
-///                 exactly 4 inputs (no bias); Stable Diffusion's text
-///                 encoder uses all 5.
+///                 ORT's CPU kernel computes (input + skip) + bias in fp32,
+///                 normalizes that fp32 sum, and rounds only the outputs.
+///                 Both paths here do the same. Whisper uses exactly 4
+///                 inputs (no bias); Stable Diffusion's text encoder uses
+///                 all 5.
 ///   outputs (1-4): output, [mean], [inv_std_var], [input_skip_bias_sum].
 ///                  Whisper consumes output[0] and output[3]. mean and
 ///                  inv_std_var are not produced: a graph that reads them
@@ -883,8 +882,8 @@ SkipLayerNormToHip::matchAndRewrite(mlir::Operation *op,
   // input_skip_bias_sum. It broadcasts on the trailing axis.
   mlir::Value inputBias = getOptionalOperand(op, 4);
 
-  // Epsilon (default 1e-5 per MS spec).
-  llvm::APFloat epsValue(9.99999974E-6f);
+  // Epsilon (default 1e-12, kDefaultSkipLayerNormEpsilon in ORT's schema).
+  llvm::APFloat epsValue(1e-12f);
   if (auto a = op->getAttrOfType<mlir::FloatAttr>("epsilon"))
     epsValue = a.getValue();
 
@@ -912,12 +911,13 @@ SkipLayerNormToHip::matchAndRewrite(mlir::Operation *op,
     return mlir::success();
   }
 
-  // === 1. sum = (input + skip) + bias. This is output[3]. ==================
-  // ORT's order and single rounding: with a bias, a narrow type is widened to
-  // f32 for both adds and the sum is rounded once. Dynamic extents live on
+  // === 1. sum = (input + skip) + bias, in f32. ==============================
+  // As ORT's CPU kernel: a narrow type is widened to f32 for both adds and
+  // the norm, and only the outputs are rounded. Dynamic extents live on
   // `input`; skip and bias broadcast to it, so the adds are sized from it.
   mlir::Type elemType = inputType.getElementType();
-  bool widen = inputBias && (elemType.isF16() || elemType.isBF16());
+  bool widen = elemType.isF16() || elemType.isBF16();
+  int64_t narrowTo = elemType.isF16() ? /*FLOAT16=*/10 : /*BFLOAT16=*/16;
   auto f32Like = [&](mlir::RankedTensorType type) {
     return mlir::RankedTensorType::get(type.getShape(), rewriter.getF32Type());
   };
@@ -943,27 +943,28 @@ SkipLayerNormToHip::matchAndRewrite(mlir::Operation *op,
               createEmptyTensor(rewriter, loc, addType, input))
               .getResult(0);
   }
-  if (widen)
-    sum = mlir::hip::CastOp::create(
-              rewriter, loc, context, sum,
-              createEmptyTensor(rewriter, loc, inputType, input),
-              rewriter.getI64IntegerAttr(elemType.isF16() ? /*FLOAT16=*/10
-                                                          : /*BFLOAT16=*/16))
-              ->getResult(0);
+  auto toNarrow = [&](mlir::Value v, mlir::RankedTensorType type) {
+    return mlir::hip::CastOp::create(
+               rewriter, loc, context, v,
+               createEmptyTensor(rewriter, loc, type, input),
+               rewriter.getI64IntegerAttr(narrowTo))
+        ->getResult(0);
+  };
 
   // === 2. output = LayerNorm(sum, gamma, beta, epsilon) =====================
   auto outputType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, input);
+  mlir::RankedTensorType normType = widen ? f32Like(outputType) : outputType;
+  mlir::Value outputInit = createEmptyTensor(rewriter, loc, normType, input);
 
   // hip.layer_norm uses AttrSizedOperandSegments: [ctx, input, scale, bias?,
   // outputs*]. Whisper requests only output[0], so a single output buffer.
   llvm::SmallVector<mlir::Value> operands;
   operands.push_back(context);
   operands.push_back(sum);
-  operands.push_back(gamma);
+  operands.push_back(widen ? toF32(gamma) : gamma);
   if (beta)
-    operands.push_back(beta);
+    operands.push_back(widen ? toF32(beta) : beta);
   operands.push_back(outputInit);
 
   llvm::SmallVector<int32_t> segmentSizes;
@@ -985,7 +986,7 @@ SkipLayerNormToHip::matchAndRewrite(mlir::Operation *op,
   mlir::OperationState state(loc, "hip.layer_norm");
   state.addOperands(operands);
   state.addAttributes(attrs);
-  state.addTypes(outputType);
+  state.addTypes(normType);
   state.addAttribute("operand_segment_sizes",
                      rewriter.getDenseI32ArrayAttr(segmentSizes));
   mlir::Operation *lnOp = rewriter.create(state);
@@ -994,9 +995,9 @@ SkipLayerNormToHip::matchAndRewrite(mlir::Operation *op,
   // === 3. Map results: output[0] = LN output; output[1..2] (mean, inv_std)
   //        are unused; output[3] (input_skip_bias_sum) = sum. ===============
   llvm::SmallVector<mlir::Value> replacements(numResults, mlir::Value{});
-  replacements[0] = output;
+  replacements[0] = widen ? toNarrow(output, outputType) : output;
   if (withSum)
-    replacements[3] = sum;
+    replacements[3] = widen ? toNarrow(sum, inputType) : sum;
   rewriter.replaceOp(op, replacements);
   return mlir::success();
 }

@@ -365,7 +365,8 @@ struct LayerNormOpLowering : public ConvertOpToLLVMPattern<LayerNormOp> {
 //                           outs(%output, [%sum])
 //   -> wrap_skip_layer_norm(state, input, skip, gamma, beta_or_null,
 //        bias_or_null, output, sum_or_null, input_num_elements,
-//        skip_num_elements, gamma_num_elements, element_size_bytes, epsilon)
+//        skip_num_elements, gamma_num_elements, element_size_bytes, epsilon,
+//        round_sum)
 struct SkipLayerNormOpLowering
     : public ConvertOpToLLVMPattern<SkipLayerNormOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -378,6 +379,7 @@ struct SkipLayerNormOpLowering
     Type ptrType = getPtrType();
     Type i64Type = rewriter.getI64Type();
     Type f32Type = rewriter.getF32Type();
+    Type i32Type = rewriter.getI32Type();
 
     auto outputs = adaptor.getOutputs();
     Value sumPtr = outputs.size() > 1
@@ -402,11 +404,12 @@ struct SkipLayerNormOpLowering
         i64Type, // skip_num_elements
         i64Type, // gamma_num_elements
         i64Type, // element_size_bytes
-        f32Type  // epsilon
+        f32Type, // epsilon
+        i32Type  // round_sum
     };
     FailureOr<LLVM::LLVMFuncOp> funcOp =
         LLVM::lookupOrCreateFn(rewriter, module, kWrapSkipLayerNorm, paramTypes,
-                               rewriter.getI32Type());
+                               i32Type);
     if (failed(funcOp))
       return failure();
 
@@ -424,7 +427,10 @@ struct SkipLayerNormOpLowering
         computeNumElements(gammaType, adaptor.getGamma(), rewriter, loc),
         LLVM::ConstantOp::create(rewriter, loc, i64Type,
                                  rewriter.getI64IntegerAttr(elementSizeBytes)),
-        LLVM::ConstantOp::create(rewriter, loc, f32Type, op.getEpsilonAttr())};
+        LLVM::ConstantOp::create(rewriter, loc, f32Type, op.getEpsilonAttr()),
+        LLVM::ConstantOp::create(
+            rewriter, loc, i32Type,
+            rewriter.getI32IntegerAttr(op.getRoundSum() ? 1 : 0))};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

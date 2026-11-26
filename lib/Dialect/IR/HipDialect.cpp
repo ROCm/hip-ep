@@ -1603,6 +1603,29 @@ LogicalResult SkipLayerNormOp::verify() {
     dataOperands.push_back(b);
   for (Value out : getOutputs())
     dataOperands.push_back(out);
+
+  // The runtime reads every operand as the input's element type, f16 or f32,
+  // and takes gamma's element count as the row length.
+  auto inputType = cast<ShapedType>(getInput().getType());
+  Type elemType = inputType.getElementType();
+  if (!elemType.isF16() && !elemType.isF32())
+    return emitOpError("expected f16 or f32 elements, got ") << elemType;
+  for (Value v : dataOperands)
+    if (cast<ShapedType>(v.getType()).getElementType() != elemType)
+      return emitOpError("expected all operands to have element type ")
+             << elemType;
+  if (inputType.getRank() >= 1) {
+    int64_t hidden = inputType.getDimSize(inputType.getRank() - 1);
+    for (Value v : {getGamma(), getBeta(), getBias()}) {
+      if (!v)
+        continue;
+      auto type = cast<ShapedType>(v.getType());
+      if (!ShapedType::isDynamic(hidden) && type.hasStaticShape() &&
+          type.getNumElements() != hidden)
+        return emitOpError("expected gamma / beta / bias to hold ")
+               << hidden << " elements (the last input dimension)";
+    }
+  }
   return verifyDpsComputeOp(*this, dataOperands, /*numInits=*/numOutputs);
 }
 

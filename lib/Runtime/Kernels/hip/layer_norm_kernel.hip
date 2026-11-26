@@ -9,9 +9,12 @@
  *   y = (x - mean) * rsqrt(var + epsilon) * scale + bias
  *
  * The same kernels serve the residual form (hip_skip_layer_norm), where the
- * normalized row is t = input + skip [+ bias], rounded to the element type
- * and optionally written to `input_skip_bias_sum`. Input row r reads skip
- * row r mod skip_rows, so a skip of fewer rows repeats over the input.
+ * normalized row is t = input + skip [+ bias], summed in fp32 and optionally
+ * written to `input_skip_bias_sum`. With round_sum, t is rounded to the
+ * element type before it is normalized, as a separate Add would; without it
+ * the fp32 sum is normalized, as ORT's SkipLayerNormalization does. Input row
+ * r reads skip row r mod skip_rows, so a skip of fewer rows repeats over the
+ * input.
  *
  * Layout: input is reshaped as `[outer, norm_size]` on the host
  *         (outer = input_num_elements / scale_num_elements,
@@ -78,17 +81,18 @@ __device__ inline void ln_store_stat(void *p, int64_t i, bool half, float v) {
     static_cast<float *>(p)[i] = v;
 }
 
-// Row element i: x[i], or round(x[i] + skip[i] [+ bias[i]]) for the residual
-// form: fp32 adds in ORT's order, one rounding.
+// Row element i: x[i], or x[i] + skip[i] [+ bias[i]] for the residual form:
+// fp32 adds in ORT's order, rounded once when round_sum.
 template <typename T>
 __device__ inline float ln_elem(const T *x, const T *skip, const T *bias,
-                                int64_t i) {
+                                bool round_sum, int64_t i) {
   float v = ln_load(x + i);
   if (skip) {
     v += ln_load(skip + i);
     if (bias)
       v += ln_load(bias + i);
-    v = ln_round(x, v);
+    if (round_sum)
+      v = ln_round(x, v);
   }
   return v;
 }
@@ -122,8 +126,8 @@ __global__ void hip_layer_norm_block_kernel(
     const T *__restrict__ skip_bias, const T *__restrict__ scale,
     const T *__restrict__ bias, T *__restrict__ output, T *__restrict__ sum_out,
     void *__restrict__ mean_out, void *__restrict__ inv_std_out,
-    bool stats_half, int64_t outer, int64_t skip_rows, int64_t norm_size,
-    float epsilon) {
+    bool stats_half, bool round_sum, int64_t outer, int64_t skip_rows,
+    int64_t norm_size, float epsilon) {
   int64_t row = blockIdx.x;
   if (row >= outer)
     return;
@@ -139,7 +143,7 @@ __global__ void hip_layer_norm_block_kernel(
 
   float local_sum = 0.0f;
   for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
-    float t = ln_elem(x_row, s_row, skip_bias, i);
+    float t = ln_elem(x_row, s_row, skip_bias, round_sum, i);
     if (sum_row)
       ln_store(sum_row + i, t);
     local_sum += t;
@@ -149,7 +153,7 @@ __global__ void hip_layer_norm_block_kernel(
   float local_d = 0.0f;
   float local_dsq = 0.0f;
   for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
-    float d = ln_elem(x_row, s_row, skip_bias, i) - m0;
+    float d = ln_elem(x_row, s_row, skip_bias, round_sum, i) - m0;
     local_d += d;
     local_dsq += d * d;
   }
@@ -164,7 +168,7 @@ __global__ void hip_layer_norm_block_kernel(
   }
 
   for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
-    float d = ln_elem(x_row, s_row, skip_bias, i) - m0;
+    float d = ln_elem(x_row, s_row, skip_bias, round_sum, i) - m0;
     float b = bias ? ln_load(bias + i) : 0.0f;
     ln_store(y_row + i, (d - c) * inv_std * ln_load(scale + i) + b);
   }
@@ -248,8 +252,8 @@ __global__ __launch_bounds__(RowBlock<G>::BS) void hip_layer_norm_row_kernel(
     const T *__restrict__ skip_bias, const T *__restrict__ scale,
     const T *__restrict__ bias, T *__restrict__ output, T *__restrict__ sum_out,
     void *__restrict__ mean_out, void *__restrict__ inv_std_out,
-    bool stats_half, int64_t outer, int64_t skip_rows, int64_t norm_size,
-    float epsilon) {
+    bool stats_half, bool round_sum, int64_t outer, int64_t skip_rows,
+    int64_t norm_size, float epsilon) {
   constexpr int N = Chunk<T>::N;
   constexpr int BS = RowBlock<G>::BS;
   __shared__ float s_wave[BS / kRowWave];
@@ -285,9 +289,11 @@ __global__ __launch_bounds__(RowBlock<G>::BS) void hip_layer_norm_row_kernel(
           for (int k = 0; k < N; ++k)
             v[c][k] += o[k];
         }
+        if (round_sum) {
 #pragma unroll
-        for (int k = 0; k < N; ++k)
-          v[c][k] = ln_round(x, v[c][k]);
+          for (int k = 0; k < N; ++k)
+            v[c][k] = ln_round(x, v[c][k]);
+        }
         if (sum_out)
           ln_st16(sum_out + base, idx, v[c]);
       }
@@ -357,6 +363,7 @@ struct LayerNormArgs {
   void *mean_out;
   void *inv_std_out;
   bool stats_half;
+  bool round_sum;
   int64_t outer;
   int64_t skip_rows;
   int64_t norm_size;
@@ -395,7 +402,7 @@ void launch_row(hipStream_t stream, const LayerNormArgs &a) {
       static_cast<const T *>(a.skip_bias), static_cast<const T *>(a.scale),
       static_cast<const T *>(a.bias), static_cast<T *>(a.output),
       static_cast<T *>(a.sum_out), a.mean_out, a.inv_std_out, a.stats_half,
-      a.outer, a.skip_rows, a.norm_size, a.epsilon);
+      a.round_sum, a.outer, a.skip_rows, a.norm_size, a.epsilon);
 }
 
 // Chunks per thread are rounded up to {1, 2, 4, 6, 8} to bound the number of
@@ -458,8 +465,8 @@ int launch_layer_norm(hipStream_t stream, const LayerNormArgs &a,
         static_cast<const T *>(a.skip), static_cast<const T *>(a.skip_bias),
         static_cast<const T *>(a.scale), static_cast<const T *>(a.bias),
         static_cast<T *>(a.output), static_cast<T *>(a.sum_out), a.mean_out,
-        a.inv_std_out, a.stats_half, a.outer, a.skip_rows, a.norm_size,
-        a.epsilon);
+        a.inv_std_out, a.stats_half, a.round_sum, a.outer, a.skip_rows,
+        a.norm_size, a.epsilon);
     break;
   }
 
@@ -504,6 +511,7 @@ extern "C" int hip_layer_norm(void *stream, const void *input,
                   mean_out,
                   inv_std_out,
                   stats_half,
+                  /*round_sum=*/false,
                   outer,
                   /*skip_rows=*/1,
                   norm_size,
@@ -517,7 +525,7 @@ extern "C" int hip_skip_layer_norm(void *stream, const void *input,
                                    void *output, void *input_skip_bias_sum,
                                    int64_t outer, int64_t skip_rows,
                                    int64_t norm_size, float epsilon,
-                                   int hip_dtype) {
+                                   int round_sum, int hip_dtype) {
   if (!skip || skip_rows <= 0) {
     fprintf(stderr, "[custom_kernels] hip_skip_layer_norm: null skip or "
                     "skip_rows=%lld\n",
@@ -534,6 +542,7 @@ extern "C" int hip_skip_layer_norm(void *stream, const void *input,
                   /*mean_out=*/nullptr,
                   /*inv_std_out=*/nullptr,
                   /*stats_half=*/false,
+                  round_sum != 0,
                   outer,
                   skip_rows,
                   norm_size,

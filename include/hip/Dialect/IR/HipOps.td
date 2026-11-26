@@ -1980,9 +1980,11 @@ def Hip_SkipLayerNormOp :
       input_skip_bias_sum = input + skip [+ bias]
       output = (sum - mean(sum)) / sqrt(var(sum) + epsilon) * gamma [+ beta]
 
-    The adds run in fp32 in that order, as ORT's SkipLayerNormalization
-    does, and the sum is rounded once to the element type before it is
-    normalized.
+    The adds run in fp32 in that order. Without `round_sum` the fp32 sum is
+    normalized, as ORT's SkipLayerNormalization does. With `round_sum` it is
+    first rounded to the element type, as a separate add would round it;
+    hip-fusion-transform sets it. input_skip_bias_sum is the sum rounded to
+    the element type either way.
 
     Inputs:
       input  (required, T) - [..., hidden]
@@ -2021,7 +2023,8 @@ def Hip_SkipLayerNormOp :
     // DPS output buffers: [output] or [output, input_skip_bias_sum]
     Variadic<Hip_TensorOrMemRef>:$outputs,
 
-    F32Attr:$epsilon
+    F32Attr:$epsilon,
+    UnitAttr:$round_sum
   );
 
   let assemblyFormat = [{

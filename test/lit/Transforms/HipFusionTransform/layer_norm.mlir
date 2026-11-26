@@ -67,3 +67,28 @@ func.func @chain_keeps_side_effecting_init(%ctx: !hip.context,
        outs(%e6 : tensor<2x8xf32>) -> tensor<2x8xf32>
   return %n : tensor<2x8xf32>
 }
+
+// -----
+
+// The norm writes into the sum, which is also read later: the fused op gets
+// a fresh output buffer, not its own sum result.
+// CHECK-LABEL: func.func @norm_writes_into_sum
+// CHECK: %[[R:.*]]:2 = hip.skip_layer_norm
+// CHECK-SAME: round_sum
+// CHECK: hip.mul(%{{.*}}) ins(%[[R]]#1,
+// CHECK: return %[[R]]#0,
+func.func @norm_writes_into_sum(%ctx: !hip.context, %x: tensor<2x8xf32>,
+                                %r: tensor<2x8xf32>, %g: tensor<8xf32>)
+    -> (tensor<2x8xf32>, tensor<2x8xf32>) {
+  %e = tensor.empty() : tensor<2x8xf32>
+  %s = hip.add(%ctx) ins(%x, %r : tensor<2x8xf32>, tensor<2x8xf32>)
+       outs(%e : tensor<2x8xf32>) -> tensor<2x8xf32>
+  %y = hip.layer_norm(%ctx) ins(%s, %g : tensor<2x8xf32>, tensor<8xf32>)
+       outs(%s : tensor<2x8xf32>)
+       {axis = -1 : i64, epsilon = 9.99999974e-06 : f32, stash_type = 1 : i64}
+       : tensor<2x8xf32>
+  %e2 = tensor.empty() : tensor<2x8xf32>
+  %z = hip.mul(%ctx) ins(%s, %x : tensor<2x8xf32>, tensor<2x8xf32>)
+       outs(%e2 : tensor<2x8xf32>) -> tensor<2x8xf32>
+  return %y, %z : tensor<2x8xf32>, tensor<2x8xf32>
+}

@@ -4,7 +4,7 @@
 // hip.skip_layer_norm lowers to one llvm.call @wrap_skip_layer_norm; absent
 // beta / bias / sum operands become null pointers. The skip's element count
 // is passed next to the input's, so the runtime can repeat a skip that holds
-// only the trailing rows.
+// only the trailing rows. round_sum is passed as a trailing i32.
 
 // RUN: hip-mlir-opt %s --convert-hip-to-llvm | FileCheck %s
 
@@ -26,7 +26,8 @@ module {
         outs(%output, %sum : memref<1x128x768xf16, 1>, memref<1x128x768xf16, 1>)
         {epsilon = 9.99999974E-6 : f32}
     // CHECK: llvm.mlir.constant(9.99999974E-6 : f32) : f32
-    // CHECK: llvm.call @wrap_skip_layer_norm({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, f32) -> i32
+    // CHECK: llvm.mlir.constant(0 : i32) : i32
+    // CHECK: llvm.call @wrap_skip_layer_norm({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, f32, i32) -> i32
     return
   }
 
@@ -41,9 +42,10 @@ module {
         ins(%input, %skip, %gamma : memref<?x768xf32, 1>,
             memref<?x768xf32, 1>, memref<768xf32, 1>)
         outs(%output : memref<?x768xf32, 1>)
-        {epsilon = 9.99999974E-6 : f32}
+        {epsilon = 9.99999974E-6 : f32, round_sum}
     // CHECK: llvm.mlir.zero : !llvm.ptr
     // CHECK: llvm.mlir.constant(4 : i64) : i64
+    // CHECK: llvm.mlir.constant(1 : i32) : i32
     // CHECK: llvm.call @wrap_skip_layer_norm
     return
   }

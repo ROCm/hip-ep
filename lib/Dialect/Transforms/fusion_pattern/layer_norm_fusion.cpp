@@ -655,7 +655,14 @@ struct ResidualLayerNormFusion
     }
 
     rewriter.setInsertionPoint(ln);
+    // The sum is replaced by this op's own result below, so it cannot also
+    // be the output's destination.
     Value outInit = ln.getOutputs().front();
+    if (outInit == sumValue)
+      outInit = mlir::tensor::EmptyOp::create(
+          rewriter, ln.getLoc(),
+          mlir::tensor::getMixedSizes(rewriter, ln.getLoc(), lhs),
+          resultType.getElementType());
     Value sumInit;
     if (withSum) {
       if (sumValue.getDefiningOp() == add &&
@@ -679,6 +686,8 @@ struct ResidualLayerNormFusion
     state.addTypes(withSum ? mlir::TypeRange{resultType, resultType}
                            : mlir::TypeRange{resultType});
     state.addAttribute("epsilon", ln.getEpsilonAttr());
+    // The original hip.add rounds the sum before the norm reads it.
+    state.addAttribute("round_sum", rewriter.getUnitAttr());
     state.addAttribute(
         "operand_segment_sizes",
         rewriter.getDenseI32ArrayAttr(

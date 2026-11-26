@@ -348,6 +348,7 @@ module {
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[A:.*]]: tensor<1x4x8xf16>, %[[B:.*]]: tensor<1x4x8xf16>, %[[C:.*]]: tensor<1x4x8xf16>, %[[G:.*]]: tensor<8xf16>, %[[BE:.*]]: tensor<8xf16>)
   // CHECK-NOT: hip.layer_norm
   // CHECK: %[[R:.*]]:2 = hip.skip_layer_norm(%[[CTX]]) ins(%[[A]], %[[B]], %[[G]] : tensor<1x4x8xf16>, tensor<1x4x8xf16>, tensor<8xf16>, beta %[[BE]] : tensor<8xf16>)
+  // CHECK-SAME: round_sum
   // CHECK: %[[NEXT:.*]] = hip.add(%[[CTX]]) ins(%[[R]]#1, %[[C]] :
   // CHECK: return %[[R]]#0, %[[NEXT]]
 

@@ -121,7 +121,8 @@ int wrap_skip_layer_norm(RuntimeState *state, void *input, void *skip,
                          void *gamma, void *beta, void *bias, void *output,
                          void *input_skip_bias_sum, int64_t input_num_elements,
                          int64_t skip_num_elements, int64_t gamma_num_elements,
-                         int64_t element_size_bytes, float epsilon) {
+                         int64_t element_size_bytes, float epsilon,
+                         int32_t round_sum) {
   OP_PROFILE(
       "skip_layernorm",
       [&] {
@@ -186,5 +187,5 @@ int wrap_skip_layer_norm(RuntimeState *state, void *input, void *skip,
   void *stream = hipdnn_ep_state_get_stream(state);
   return hip_skip_layer_norm(stream, input, skip, gamma, beta, bias, output,
                              input_skip_bias_sum, outer, skip_rows,
-                             gamma_num_elements, epsilon, hip_dtype);
+                             gamma_num_elements, epsilon, round_sum, hip_dtype);
 }
