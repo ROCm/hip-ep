@@ -6,9 +6,14 @@
 
 #include "./migraphx-backend.hpp"
 #include "./migraphx-plugin-abi.hpp"
+#include "morphizen-foundation/env_config.hpp"
 #include "morphizen-utils/morphizen_plugin.hpp"
 
+#include <filesystem>
 #include <stdexcept>
+
+// Directory holding the plugin; empty means the EP library's directory.
+DEF_ENV_PARAM_2(HIPDNN_EP_MIGRAPHX_PLUGIN_DIR, "", std::string)
 
 namespace morphizen {
 
@@ -32,8 +37,11 @@ const MigraphxPlugin *load_plugin(std::string &error) {
   static std::string load_error;
   static std::once_flag once;
   std::call_once(once, [] {
-    const auto path =
-        (get_morphizen_path().parent_path() / "hipep_migraphx").u8string();
+    const std::string &dir = ENV_PARAM(HIPDNN_EP_MIGRAPHX_PLUGIN_DIR);
+    const auto path = ((dir.empty() ? get_morphizen_path().parent_path()
+                                    : std::filesystem::u8path(dir)) /
+                       "hipep_migraphx")
+                          .u8string();
     auto *handle = Plugin::get(std::string(path.begin(), path.end()));
     if (handle == nullptr) {
       load_error = "MIGraphX backend plugin not found or not loadable at " +

@@ -96,6 +96,8 @@ libhipgpu.so (EP)                                  hipep_migraphx.so (plugin)
   use. When the plugin is missing or cannot load (for example MIGraphX's own
   libraries are not on the loader path), the MIGraphX path reports
   "unavailable" and `auto` keeps today's behaviour.
+  `HIPDNN_EP_MIGRAPHX_PLUGIN_DIR` overrides the directory (tests use it to
+  load a mock plugin).
 - **C ABI** (`morphizen/ort-bridge/src/migraphx-plugin-abi.hpp`,
   `HIPEP_MGX_PLUGIN_ABI_VERSION 1`): compile, output count, output shape, run,
   release. No MIGraphX or ORT type crosses it. Errors are returned as an int
@@ -161,3 +163,13 @@ changes; `libhipgpu` never links MIGraphX either way.
 | `MlirE2ETest.InvalidGpuBackendFailsSession` | No (mock) | A misspelt value fails session creation and names `gpu_backend` |
 | `MlirE2ETest.MigraphxWithoutPluginClaimsNothing` | No (mock) | `gpu_backend=migraphx` never falls back to HIP |
 | `MlirE2ETest.TwoLayerConvSession` | No (mock) | Default `auto` still routes a HIP-supported graph to HIP |
+| `MigraphxMockE2ETest` (`backend-mlir-compiler/test/test_e2e_migraphx_mock.cpp`) | No (mock runtime + mock plugin) | Whole-graph claim and input/output binding; `auto` picks MIGraphX only when HIP fails; `hip` never uses MIGraphX; each eligibility rule on a real ORT graph; in-memory sessions; CPU fallback unchanged; compile failure, output-count mismatch, run failure, EPContext rejection |
+
+`MigraphxMockE2ETest` loads `mock_migraphx_plugin.cpp`, which implements the
+plugin ABI without MIGraphX and writes
+`output[j] = sum_i (i + 1) * input[i] + 100 * (j + 1)`, so each test can tell
+which backend produced a result and how buffers were bound. Its models come
+from `backend-mlir-compiler/test/gen_migraphx_routing_models.py`. Like
+`MlirE2ETest`, it is run directly (`test-e2e-migraphx-mock`); CTest does not
+register tests under `backend-mlir-compiler/` because `enable_testing()` runs
+after that directory is added.
