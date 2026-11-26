@@ -3238,9 +3238,11 @@ int wrap_skip_layer_norm(RuntimeState *state, void *input, void *skip,
                          void *gamma, void *beta, void *bias, void *output,
                          void *input_skip_bias_sum, int64_t input_num_elements,
                          int64_t skip_num_elements, int64_t gamma_num_elements,
-                         int64_t element_size_bytes, float epsilon) {
+                         int64_t element_size_bytes, float epsilon,
+                         int32_t round_sum) {
   (void)input;
   (void)skip;
+  (void)round_sum;
   (void)gamma;
   (void)output;
   if (!state) {

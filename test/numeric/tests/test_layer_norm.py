@@ -944,6 +944,16 @@ class TestResidualLayerNorm:
         atol = 1e-5 if dtype == np.float32 else 4e-3
         compare_outputs(actual, expected, atol=atol, rtol=1e-3)
 
+    def test_residual_f16_normalizes_rounded_sum(self, model_runner):
+        """The Add rounds 1000 + 0.1 .. 1000 + 0.8 to f16 (steps of 0.5)
+        before the norm reads it, so the fused op must too."""
+        shape = [1, 2, 8]
+        model = _make_residual_layer_norm_model(shape, np.float16)
+        x = np.full(shape, 1000, np.float16)
+        r = np.tile(np.linspace(0.1, 0.8, 8), (1, 2, 1)).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [x, r])
+        compare_outputs(actual, expected, atol=4e-3, rtol=1e-3)
+
 
 class TestSkipLayerNormSizes:
     """Fused SkipLayerNormalization across the row kernel and the fallback."""
@@ -1067,6 +1077,23 @@ class TestSkipLayerNormSizes:
         s = np.tile(np.linspace(60000, 60032, hidden), (1, 2, 1)).astype(np.float16)
         actual, expected = model_runner.run_sample(model, [x, s])
         assert np.isfinite(actual[0]).all() and np.isfinite(actual[1]).all()
+        compare_outputs(actual, expected, atol=4e-3, rtol=1e-3)
+
+    @pytest.mark.parametrize("dynamic_hidden", [False, True])
+    def test_skip_layer_norm_f16_normalizes_unrounded_sum(
+        self, model_runner, dynamic_hidden
+    ):
+        """1000 + 0.1 .. 1000 + 0.8 rounds to steps of 0.5 in f16. ORT
+        normalizes the fp32 sum and rounds only the outputs; so do the fused
+        kernel and, for a dynamic hidden size, the fallback."""
+        hidden = 8
+        dim = "hidden" if dynamic_hidden else hidden
+        model = _make_skip_layer_norm_shapes_model(
+            [1, 2, dim], [1, 2, dim], np.float16, np.zeros([hidden], np.float16)
+        )
+        x = np.full([1, 2, hidden], 1000, np.float16)
+        s = np.tile(np.linspace(0.1, 0.8, hidden), (1, 2, 1)).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [x, s])
         compare_outputs(actual, expected, atol=4e-3, rtol=1e-3)
 
 
