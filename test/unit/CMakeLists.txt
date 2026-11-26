@@ -214,8 +214,9 @@ endif()
 
 # Problem-cache lookup. GPU-free: the test builds an RCAL buffer in memory
 # and checks exact string hits, nearest tiles, and group mismatches. It also
-# loads the same table as the external LUT JSON that --dump-problem-cache
-# writes, which is why it links LLVMSupport (llvm::json).
+# loads the same table as the external LUT JSON that
+# --enable-problem-cache-rw reads and writes, which is why it links LLVMSupport
+# (llvm::json).
 add_executable(test-nearest-conv-tune
   test_nearest_conv_tune.cpp
   ${CMAKE_SOURCE_DIR}/tools/problem-cache/nearest_conv_tune.cpp

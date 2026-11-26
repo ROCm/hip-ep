@@ -83,11 +83,11 @@ bool loadProblemCacheLut(const uint8_t *data, size_t size, ProblemCacheLut &lut,
                          std::string &error);
 
 // An external table: the LUT JSON document that `hip-rocmlir-compiler
-// --dump-problem-cache` writes (`schema_version`, `gpu_arch`, `kernel_abi`,
-// `weight_m/n/k`, `configs`, `points`, `fallbacks`). It applies the same
-// checks and skips the same rows as the FlatBuffer overload, so a dump loads
-// without a `.fb` conversion. Absent `schema_version` and weights take the
-// `.fbs` defaults (1, 1.0). `kernel_abi` is required.
+// --enable-problem-cache-rw` writes (`schema_version`, `gpu_arch`,
+// `kernel_abi`, `weight_m/n/k`, `configs`, `points`, `fallbacks`). It applies
+// the same checks and skips the same rows as the FlatBuffer overload, so the
+// file loads without a `.fb` conversion. Absent `schema_version` and weights
+// take the `.fbs` defaults (1, 1.0). `kernel_abi` is required.
 bool loadProblemCacheLutJson(std::string_view text, ProblemCacheLut &lut,
                              std::string &error);
 

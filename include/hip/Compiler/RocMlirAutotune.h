@@ -104,8 +104,8 @@ struct AutotuneOptions {
   // `log` because the per-candidate lines are one per config per kernel --
   // useful when tuning by hand, far too much for a normal compile.
   bool verbose = false;
-  // External rocMLIR LUT JSON, the document dumpProblemCache writes (not a
-  // .fb; only the shipped tables are FlatBuffers). hip-rocmlir-compiler sets
+  // External rocMLIR LUT JSON, the document updateProblemCacheFile writes (not
+  // a .fb; only the shipped tables are FlatBuffers). hip-rocmlir-compiler sets
   // this from --enable-problem-cache-rw or HIP_ROCMLIR_PROBLEM_CACHE. When
   // set, this file takes priority over the search and the shipped table is not
   // consulted. When empty, the shipped LUT is consulted unless
@@ -117,10 +117,6 @@ struct AutotuneOptions {
   // itself; hip-rocmlir-compiler calls updateProblemCacheFile once the embed
   // has succeeded. A missing or empty file is a new table, not an error.
   bool problemCacheRewrite = false;
-  // Where to write this compile's winners. Empty skips the dump. The autotuner
-  // does not write the file itself; hip-rocmlir-compiler calls
-  // dumpProblemCache when this is set.
-  std::string problemCacheDumpPath;
 };
 
 // Wall times accumulated by one autotuner. perfConfig compiles for the whole
@@ -156,11 +152,6 @@ public:
   void installInto(RocMlirEmbedOptions &opts);
 
   const AutotunePhaseTimes &phaseTimes() const;
-
-  // LUT JSON (configs, points, fallbacks), same document shape as the
-  // MatMulNBits and GQA tables. problem_cache_to_fb.py compiles it to a .fb.
-  // False when the device cannot be queried or the file cannot be written.
-  bool dumpProblemCache(StringRef path) const;
 
   // Merges this compile's search winners into AutotuneOptions::problemCachePath
   // and replaces that file, so the next compile (this tool or another run)

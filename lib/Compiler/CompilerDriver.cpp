@@ -122,20 +122,18 @@ void dumpPreFusionIR(mlir::ModuleOp module,
   module->print(os);
 }
 
-// The files that HIPDNN_EP_ROCMLIR_DUMP_HIP, HIPDNN_EP_ROCMLIR_DUMP_TOSA and
-// HIPDNN_EP_ROCMLIR_DUMP_PROBLEM_CACHE name for one compile. They are the
-// provider's counterparts of hip-rocmlir-compiler's --dump-hip, --dump-tosa
-// and --dump-problem-cache.
+// The files that HIPDNN_EP_ROCMLIR_DUMP_HIP and HIPDNN_EP_ROCMLIR_DUMP_TOSA
+// name for one compile. They are the provider's counterparts of
+// hip-rocmlir-compiler's --dump-hip and --dump-tosa.
 //
 // ORT can invoke the compiler more than once per session, and a single sink
 // would be overwritten by each call, so every compile that asks for a dump
 // takes a process-wide sequence number and inserts it before the extension
-// (/tmp/hip.mlir -> /tmp/hip.0.mlir). The three dumps of one compile share the
-// number, so hip.3.mlir, tosa.3.mlir and cache.3.json belong together.
+// (/tmp/hip.mlir -> /tmp/hip.0.mlir). The two dumps of one compile share the
+// number, so hip.3.mlir and tosa.3.mlir belong together.
 struct RocMlirDumpTargets {
   std::string hip;
   std::string tosa;
-  std::string problemCache;
 };
 
 std::string numberedDumpPath(llvm::StringRef path, unsigned seq) {
@@ -147,9 +145,8 @@ std::string numberedDumpPath(llvm::StringRef path, unsigned seq) {
 RocMlirDumpTargets rocMlirDumpTargetsFromEnv() {
   std::string hip = hip_get_env("HIPDNN_EP_ROCMLIR_DUMP_HIP");
   std::string tosa = hip_get_env("HIPDNN_EP_ROCMLIR_DUMP_TOSA");
-  std::string cache = hip_get_env("HIPDNN_EP_ROCMLIR_DUMP_PROBLEM_CACHE");
   RocMlirDumpTargets targets;
-  if (hip.empty() && tosa.empty() && cache.empty())
+  if (hip.empty() && tosa.empty())
     return targets;
   static std::atomic<unsigned> sDumpSeq{0};
   unsigned seq = sDumpSeq.fetch_add(1);
@@ -157,8 +154,6 @@ RocMlirDumpTargets rocMlirDumpTargetsFromEnv() {
     targets.hip = numberedDumpPath(hip, seq);
   if (!tosa.empty())
     targets.tosa = numberedDumpPath(tosa, seq);
-  if (!cache.empty())
-    targets.problemCache = numberedDumpPath(cache, seq);
   return targets;
 }
 
@@ -520,8 +515,7 @@ bool CompilerDriver::runMLIRPasses(
     // in that dump.
     mlir::hip::registerRocMlirDialects(*module.getContext());
 
-    // HIPDNN_EP_ROCMLIR_DUMP_HIP / _DUMP_TOSA / _DUMP_PROBLEM_CACHE: see
-    // RocMlirDumpTargets.
+    // HIPDNN_EP_ROCMLIR_DUMP_HIP / _DUMP_TOSA: see RocMlirDumpTargets.
     const RocMlirDumpTargets dumps = rocMlirDumpTargetsFromEnv();
 
     {
@@ -696,29 +690,6 @@ bool CompilerDriver::runMLIRPasses(
         !autotuner->updateProblemCacheFile())
       llvm::errs() << "[CompilerDriver] failed to update problem cache "
                    << problemCacheRw << "\n";
-
-    // HIPDNN_EP_ROCMLIR_DUMP_PROBLEM_CACHE=<file.json>: the winners this
-    // compile tuned, as --dump-problem-cache writes them. Written only after a
-    // successful embed, so a failed compile does not leave a partial table. A
-    // failure to write is reported and does not fail the compile.
-    if (!dumps.problemCache.empty()) {
-      if (!autotuner) {
-        llvm::errs() << "[CompilerDriver] HIPDNN_EP_ROCMLIR_DUMP_PROBLEM_CACHE "
-                        "needs rocMLIR autotune; unset "
-                        "HIP_ROCMLIR_SKIP_BENCHMARKING to get "
-                     << dumps.problemCache << "\n";
-      } else {
-        llvm::StringRef parent =
-            llvm::sys::path::parent_path(dumps.problemCache);
-        if (!parent.empty())
-          llvm::sys::fs::create_directories(parent);
-        llvm::errs() << "[CompilerDriver] "
-                     << (autotuner->dumpProblemCache(dumps.problemCache)
-                             ? "wrote problem cache to "
-                             : "failed to write problem cache to ")
-                     << dumps.problemCache << "\n";
-      }
-    }
 
     mlir::hip::OnnxToHipPipelineOptions tailOpts;
     tailOpts.externalizeMinNumElements =

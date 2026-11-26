@@ -81,7 +81,7 @@ There is no `+lut=` fingerprint. A provided `HIPDNN_EP_ROCMLIR_AUTOTUNE`
 skips the shipped `tools/problem-cache/lut/*.fb`; when it is unset, the shipped
 table is consulted before the search. `hip-rocmlir-compiler` still honors
 `--enable-problem-cache-rw` / `HIP_ROCMLIR_PROBLEM_CACHE` ahead of the search;
-that path is a LUT JSON file (the `--dump-problem-cache` document), not a `.fb`.
+that path is a LUT JSON file (the document the flag writes), not a `.fb`.
 The flag also merges the compile's search winners back into that file;
 `HIP_ROCMLIR_PROBLEM_CACHE` only reads it. The provider does not read
 `HIP_ROCMLIR_PROBLEM_CACHE`; its counterpart of the flag is

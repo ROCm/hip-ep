@@ -185,10 +185,11 @@ static void printUsage(llvm::raw_ostream &os, const char *prog) {
         "the\n"
      << "                       differences being searched for.\n"
      << "  --enable-problem-cache-rw <file.json>\n"
-     << "                       Read and update this LUT JSON (the format\n"
-     << "                       --dump-problem-cache writes; a .fb is not\n"
-     << "                       accepted). It takes priority over the "
-        "search and\n"
+     << "                       Read and update this LUT JSON (configs, "
+        "points,\n"
+     << "                       fallbacks); a .fb is not accepted. It takes "
+        "priority\n"
+     << "                       over the search and\n"
      << "                       replaces the shipped table. An identical\n"
      << "                       problem string is compiled as stored. A "
         "conv\n"
@@ -217,20 +218,9 @@ static void printUsage(llvm::raw_ostream &os, const char *prog) {
         "Needs\n"
      << "                       autotune. HIP_ROCMLIR_PROBLEM_CACHE names "
         "a file\n"
-     << "                       to read only.\n"
-     << "  --dump-problem-cache <file.json>\n"
-     << "                       After autotune, write the LUT JSON\n"
-     << "                       (configs, points, fallbacks) of everything "
-        "this\n"
-     << "                       compile used, including tiles taken from "
-        "a\n"
-     << "                       cache. It is written fresh, not merged. "
-        "Pass it\n"
-     << "                       to --enable-problem-cache-rw, or compile "
-        "it to a\n"
-     << "                       .fb with problem_cache_to_fb.py to ship "
-        "it as\n"
-     << "                       a LUT.\n"
+     << "                       to read only. problem_cache_to_fb.py "
+        "compiles the\n"
+     << "                       file to a .fb to ship it as a LUT.\n"
      << "  --verbose            Print per-config compile/benchmark lines "
         "and the\n"
      << "                       selected perfConfig.\n"
@@ -323,8 +313,6 @@ int main(int argc, char **argv) {
       llvm::errs() << "error: --enable-problem-cache-rw needs a JSON file "
                       "path\n";
       return 1;
-    } else if (arg == "--dump-problem-cache" && i + 1 < argc) {
-      autotune.problemCacheDumpPath = argv[++i];
     } else if (arg == "--autotune-runs" && i + 1 < argc) {
       if (llvm::StringRef(argv[++i]).getAsInteger(10, autotune.measuredRuns) ||
           autotune.measuredRuns == 0) {
@@ -353,8 +341,7 @@ int main(int argc, char **argv) {
   if (mlir::hip::rocMlirSkipBenchmarking())
     autotuneEnabled = false;
 #if !HIP_ROCMLIR_AUTOTUNE
-  if ((autotuneFlagSeen && autotuneEnabled) ||
-      !autotune.problemCacheDumpPath.empty() || autotune.problemCacheRewrite) {
+  if ((autotuneFlagSeen && autotuneEnabled) || autotune.problemCacheRewrite) {
     llvm::errs() << "error: autotune requires a real HIP build\n";
     return 1;
   }
@@ -368,10 +355,6 @@ int main(int argc, char **argv) {
                  << (autotune.problemCacheRewrite
                          ? "; the file is not updated\n"
                          : "\n");
-  if (!autotune.problemCacheDumpPath.empty() && !autotuneEnabled) {
-    llvm::errs() << "error: --dump-problem-cache requires autotune\n";
-    return 1;
-  }
   if (inputFilename.empty() || outputPath.empty()) {
     printUsage(llvm::errs(), argv[0]);
     return 1;
@@ -580,14 +563,11 @@ int main(int argc, char **argv) {
   }
   if (!embedOk)
     return 1;
-  // --enable-problem-cache-rw: only after a successful embed, for the same
-  // reason as the dump below. The file is replaced atomically, so a failure
-  // here leaves the previous table in place.
+  // --enable-problem-cache-rw: only after a successful embed, so a failed
+  // compile adds nothing. The file is replaced atomically, so a failure here
+  // leaves the previous table in place.
   if (autotuner && autotune.problemCacheRewrite &&
       !autotuner->updateProblemCacheFile())
-    return 1;
-  if (autotuner && !autotune.problemCacheDumpPath.empty() &&
-      !autotuner->dumpProblemCache(autotune.problemCacheDumpPath))
     return 1;
 
   // Stage 4: run the standard ONNX-to-HIP tail (shape inference, constant

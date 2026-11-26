@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 
-// HIPDNN_EP_ROCMLIR_DUMP_HIP, _DUMP_TOSA and _DUMP_PROBLEM_CACHE through
+// HIPDNN_EP_ROCMLIR_DUMP_HIP and _DUMP_TOSA through
 // CompilerDriver::compile, without a GPU: ROCK_ARCH names the target and
 // HIP_ROCMLIR_SKIP_BENCHMARKING compiles every kernel with its default
 // perfConfig. The driver is called several times in this one process because
@@ -12,18 +12,15 @@
 //
 //   - a compile without any dump variable writes nothing and leaves the
 //     counter alone, so the first dump is number 0;
-//   - one compile numbers all three dumps alike, and the skipped problem cache
-//     still names its numbered file;
+//   - one compile numbers both dumps alike;
 //   - repeated compiles write new files and leave the earlier ones in place;
 //   - a dump that cannot be written is reported and does not fail the
-//     compile, nor the other dumps;
-//   - the problem cache is not written, and says why, when autotuning is
-//     skipped.
+//     compile, nor the other dump.
 //
-// Writing the problem cache itself needs a device, so that file is covered by
-// the numeric tests instead. HIPDNN_EP_ROCMLIR_PROBLEM_CACHE_RW is covered
-// here only for the no-device case: it is ignored, with a message, when
-// autotune is skipped.
+// HIPDNN_EP_ROCMLIR_PROBLEM_CACHE_RW needs a device to read or update its
+// file, so that is covered by test-nearest-conv-tune (the merge) and the
+// numeric tests. Here it is covered only for the no-device case: it is
+// ignored, with a message, when autotune is skipped.
 
 #include "compilation_options_generated.h"
 #include "hip/Compiler/CompilerDriver.h"
@@ -88,8 +85,7 @@ void unsetEnv(const char *name) {
 }
 
 const char *const kDumpVars[] = {"HIPDNN_EP_ROCMLIR_DUMP_HIP",
-                                 "HIPDNN_EP_ROCMLIR_DUMP_TOSA",
-                                 "HIPDNN_EP_ROCMLIR_DUMP_PROBLEM_CACHE"};
+                                 "HIPDNN_EP_ROCMLIR_DUMP_TOSA"};
 
 void clearDumpVars() {
   for (const char *name : kDumpVars)
@@ -233,29 +229,21 @@ int main() {
   }
   check(plain.outputWritten, "baseline: the compile writes its output");
   check(!fs::exists(dumps), "no dump variable: nothing is dumped");
-  check(!contains(plain.log, "[CompilerDriver] wrote") &&
-            !contains(plain.log, "needs rocMLIR autotune"),
+  check(!contains(plain.log, "[CompilerDriver] wrote"),
         "no dump variable: the driver reports no dump");
 
-  // One compile, all three dumps, one number. The problem cache is skipped
-  // (no autotuner), but its message names the file it would have written.
+  // One compile, both dumps, one number.
   setEnv("HIPDNN_EP_ROCMLIR_DUMP_HIP", (dumps / "hip.mlir").string());
   setEnv("HIPDNN_EP_ROCMLIR_DUMP_TOSA", (dumps / "tosa.mlir").string());
-  setEnv("HIPDNN_EP_ROCMLIR_DUMP_PROBLEM_CACHE",
-         (dumps / "cache.json").string());
   CompileResult first = compileOnce(scratch);
-  check(first.ok, "all three dumps: the compile succeeds");
+  check(first.ok, "both dumps: the compile succeeds");
   const std::set<unsigned> hip1 = numbersOf(dumps, "hip", ".mlir");
   const std::set<unsigned> tosa1 = numbersOf(dumps, "tosa", ".mlir");
   check(hip1.size() == 1 && tosa1.size() == 1,
-        "all three dumps: one hip and one tosa file");
-  check(hip1 == tosa1, "all three dumps: hip and tosa share a number");
+        "both dumps: one hip and one tosa file");
+  check(hip1 == tosa1, "both dumps: hip and tosa share a number");
   check(!hip1.empty() && *hip1.begin() == 0,
         "the first dump is number 0, so dump-free compiles took no number");
-  check(!hip1.empty() &&
-            contains(first.log,
-                     "cache." + std::to_string(*hip1.begin()) + ".json"),
-        "all three dumps: the problem cache message carries the same number");
   check(fs::exists(dumps / "hip.mlir") == false &&
             fs::exists(dumps / "tosa.mlir") == false,
         "the unnumbered paths are never written");
@@ -269,18 +257,6 @@ int main() {
     check(contains(tosaText, "tosa."), "the tosa dump holds tosa ops");
   }
 
-  // Skip case: HIP_ROCMLIR_SKIP_BENCHMARKING means no autotuner, so no cache.
-  check(numbersOf(dumps, "cache", ".json").empty() &&
-            !fs::exists(dumps / "cache.json"),
-        "skipped autotune: no problem cache file is written");
-  check(contains(first.log,
-                 "HIPDNN_EP_ROCMLIR_DUMP_PROBLEM_CACHE needs rocMLIR "
-                 "autotune") &&
-            contains(first.log, "HIP_ROCMLIR_SKIP_BENCHMARKING"),
-        "skipped autotune: the driver says why there is no cache");
-  check(!contains(first.log, "wrote problem cache"),
-        "skipped autotune: no 'wrote problem cache' claim");
-
   // Repeated compiles: new numbers, earlier files kept.
   CompileResult second = compileOnce(scratch);
   CompileResult third = compileOnce(scratch);
@@ -291,9 +267,6 @@ int main() {
   check(hipAll == tosaAll, "each compile's hip and tosa files share a number");
   check(hipAll.count(0) == 1 && hipAll.count(1) == 1 && hipAll.count(2) == 1,
         "the numbers count up from 0");
-  check(contains(second.log, "cache.1.json") &&
-            contains(third.log, "cache.2.json"),
-        "each compile's cache message names its own number");
   check(contains(second.log, "hip.1.mlir") &&
             !contains(second.log, "hip.0.mlir"),
         "a later compile does not report an earlier file");

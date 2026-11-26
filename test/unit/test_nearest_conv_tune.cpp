@@ -299,9 +299,9 @@ int main() {
       !mlir::hip::loadProblemCacheLut(garbage, sizeof(garbage), loaded, error),
       "a non-RCAL buffer is rejected");
 
-  // The external table is the JSON that --dump-problem-cache writes. Build the
-  // same document as the RCAL buffer above, in the dump's own shape (points
-  // carry m/n/k, which the loader ignores).
+  // The external table is the LUT JSON that --enable-problem-cache-rw reads
+  // and writes. Build the same document as the RCAL buffer above, in that
+  // file's own shape (points carry m/n/k, which the loader ignores).
   const auto jsonText = [&](llvm::json::Object root) {
     std::string text;
     llvm::raw_string_ostream os(text);
@@ -593,7 +593,7 @@ int main() {
         if (c.getAsObject()->getString("perf_config") == tile32)
           ++tile32Configs;
     expect(tile32Configs == 1, "a perfConfig shared by points is stored once");
-    // Points are written sorted by problem, as --dump-problem-cache does.
+    // Points are written sorted by problem.
     std::vector<std::string> order;
     if (root && root->getArray("points"))
       for (const llvm::json::Value &p : *root->getArray("points"))

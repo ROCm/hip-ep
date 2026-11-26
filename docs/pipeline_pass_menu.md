@@ -119,9 +119,9 @@ overrides the search space. A given tuning type skips the shipped
 problem-cache LUT; with none given, the shipped LUT is consulted before the
 search. `--enable-problem-cache-rw <file.json>` / `HIP_ROCMLIR_PROBLEM_CACHE`
 still takes priority over the search and replaces the shipped table. It names a
-LUT JSON file, such as one `--dump-problem-cache` wrote; a `.fb` file is not
-accepted. The flag also writes back: after a successful compile the winners the
-search picked are merged into that file, so a later compile reads them. Only
+LUT JSON file, such as one this flag wrote; a `.fb` file is not accepted. The
+flag also writes back: after a successful compile the winners the search picked
+are merged into that file, so a later compile reads them. Only
 winners of a search are written. A tile taken from the file, even a nearest
 neighbour's, is not a measurement and is not stored as one. Points already in the
 file are kept, including ones this build cannot use. A missing or empty file is
@@ -133,13 +133,12 @@ reads. The provider does the same through
 update is reported and the compile still succeeds. A repeated problem in the same
 compile reuses the in-session winner, then a miss searches the selected space.
 A provider artifact records `+autotune=<space>` only.
-`--dump-problem-cache <file.json>` writes that JSON after autotune, one
-point per unique problem and one config per distinct perfConfig. The flag
-requires autotune; `HIP_ROCMLIR_SKIP_BENCHMARKING` does not produce a dump.
-The provider writes the same JSON for each compile when
-`HIPDNN_EP_ROCMLIR_DUMP_PROBLEM_CACHE=<file.json>` is set; see
-[rocmlir-fusion.md](design/rocmlir-fusion.md) for it and its hip and TOSA
-counterparts.
+A table starts from a path that does not exist yet. The file has one point per
+unique problem and one config per distinct perfConfig, and
+`problem_cache_to_fb.py` compiles it to a `.fb` to ship it as a LUT. The flag
+requires autotune; `HIP_ROCMLIR_SKIP_BENCHMARKING` writes nothing. The provider's
+hip and TOSA dumps, `HIPDNN_EP_ROCMLIR_DUMP_HIP` and `_DUMP_TOSA`, are described
+in [rocmlir-fusion.md](design/rocmlir-fusion.md).
 Set `HIP_ROCMLIR_SKIP_BENCHMARKING=1` (any present value other than `0`,
 including empty) to skip the GPU search and affix the first enumerated
 perfConfig. Neither the shipped LUT nor an external problem cache is consulted

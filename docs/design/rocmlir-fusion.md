@@ -432,19 +432,16 @@ and `int4-weights` are the fusion switches.
 - `HIPDNN_EP_ROCMLIR_PRE_FUSION_DUMP=<dir>` writes the IR that the fusion
   reads, with the fusion options on its first line, so that
   `hip-mlir-opt --hip-rocmlir-fusion` replays the fusion without a GPU.
-- `HIPDNN_EP_ROCMLIR_DUMP_HIP=<file>`, `HIPDNN_EP_ROCMLIR_DUMP_TOSA=<file>`
-  and `HIPDNN_EP_ROCMLIR_DUMP_PROBLEM_CACHE=<file.json>` are the provider's
-  counterparts of `hip-rocmlir-compiler --dump-hip`, `--dump-tosa` and
-  `--dump-problem-cache`. The first writes the hip MLIR after the ONNX->HIP head
-  and this fusion. The second writes the hip->tosa conversion of the whole
-  module, a clone that only this dump pays for. The third writes the winners
-  the compile's autotune found, once the kernels are embedded; it needs
-  autotune on, so `HIP_ROCMLIR_SKIP_BENCHMARKING` leaves nothing to write.
-  `HIPDNN_EP_IR_DUMP_PATH` does not show these stages: it is attached to the
-  tail pass manager only. ORT can compile more than once per session, so each
-  compile inserts a sequence number before the extension (`hip.mlir` becomes
-  `hip.0.mlir`) and the three dumps of one compile share it. A dump that cannot
-  be written is reported and the compile goes on.
+- `HIPDNN_EP_ROCMLIR_DUMP_HIP=<file>` and `HIPDNN_EP_ROCMLIR_DUMP_TOSA=<file>`
+  are the provider's counterparts of `hip-rocmlir-compiler --dump-hip` and
+  `--dump-tosa`. The first writes the hip MLIR after the ONNX->HIP head and this
+  fusion. The second writes the hip->tosa conversion of the whole module, a
+  clone that only this dump pays for. `HIPDNN_EP_IR_DUMP_PATH` does not show
+  these stages: it is attached to the tail pass manager only. ORT can compile
+  more than once per session, so each compile inserts a sequence number before
+  the extension (`hip.mlir` becomes `hip.0.mlir`) and the two dumps of one
+  compile share it. A dump that cannot be written is reported and the compile
+  goes on.
 - `HIPDNN_EP_ROCMLIR_PROBLEM_CACHE_RW=<file.json>` is the provider's
   counterpart of `hip-rocmlir-compiler --enable-problem-cache-rw`. The file is
   the external problem cache for the compile's autotune, and once the kernels

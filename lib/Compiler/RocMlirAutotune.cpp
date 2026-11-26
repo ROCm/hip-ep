@@ -599,7 +599,6 @@ struct RocMlirAutotuner::Impl {
   std::optional<std::string>
   lookupProblemCache(StringRef problem,
                      const std::vector<std::string> &rejected);
-  bool dumpProblemCache(StringRef path) const;
   bool updateProblemCacheFile() const;
   bool finish(llvm::StringMap<CompiledKernel> &byKernel) {
     return compileAndBenchmarkSearches(byKernel) &&
@@ -1320,8 +1319,8 @@ const ProblemCacheLut &RocMlirAutotuner::Impl::loadedProblemCache() {
       return problemCache;
   }
   std::string error;
-  // The external table is the LUT JSON that --dump-problem-cache writes. Only
-  // the shipped tables above are FlatBuffers.
+  // The external table is the LUT JSON that updateProblemCacheFile writes.
+  // Only the shipped tables above are FlatBuffers.
   if (!loadProblemCacheLutJsonFile(options.problemCachePath, problemCache,
                                    error)) {
     llvm::errs() << "warning: " << error << "\n";
@@ -1345,92 +1344,6 @@ static StringRef problemOfCacheKey(StringRef cacheKey) {
   return cacheKey;
 }
 
-bool RocMlirAutotuner::Impl::dumpProblemCache(StringRef path) const {
-  const HipRuntime &fns = hipRuntime();
-  int device = 0;
-  hipDeviceProp_t properties{};
-  if (!fns.complete ||
-      !reportError(fns.hipGetDevice(&device), "hipGetDevice") ||
-      !reportError(fns.hipGetDeviceProperties(&properties, device),
-                   "hipGetDeviceProperties"))
-    return false;
-
-  StringRef deviceArch(properties.gcnArchName);
-  StringRef gfxName = deviceArch.split(':').first;
-
-  std::vector<std::pair<std::string, std::string>> pairs;
-  pairs.reserve(winnerCache.size());
-  for (const auto &entry : winnerCache) {
-    StringRef problem = problemOfCacheKey(entry.getKey());
-    if (problem.empty() || entry.getValue().empty())
-      continue;
-    pairs.emplace_back(problem.str(), entry.getValue());
-  }
-  std::sort(pairs.begin(), pairs.end(),
-            [](const auto &a, const auto &b) { return a.first < b.first; });
-
-  llvm::json::Array configs;
-  llvm::StringMap<int64_t> configIndex;
-  llvm::json::Array points;
-  for (const auto &pair : pairs) {
-    int64_t index = 0;
-    auto existing = configIndex.find(pair.second);
-    if (existing == configIndex.end()) {
-      index = static_cast<int64_t>(configs.size());
-      configIndex[pair.second] = index;
-      llvm::json::Object config;
-      config["perf_config"] = pair.second;
-      configs.push_back(std::move(config));
-    } else {
-      index = existing->second;
-    }
-    int64_t gemmM = 0, gemmN = 0, gemmK = 0;
-    implicitGemmDims(pair.first, gemmM, gemmN, gemmK);
-    llvm::json::Object point;
-    point["problem"] = pair.first;
-    point["config"] = index;
-    point["m"] = gemmM;
-    point["n"] = gemmN;
-    point["k"] = gemmK;
-    points.push_back(std::move(point));
-  }
-
-  const size_t nConfigs = configs.size();
-  const size_t nPoints = points.size();
-  llvm::json::Object root;
-  root["schema_version"] = static_cast<int64_t>(1);
-  root["gpu_arch"] = gfxName.str();
-  root["rocm_version"] = static_cast<int64_t>(0);
-  root["kernel_abi"] = "rocmlir-conv-v1";
-  root["model_key"] = "";
-  root["weight_m"] = 1.0;
-  root["weight_n"] = 1.0;
-  root["weight_k"] = 1.0;
-  root["configs"] = std::move(configs);
-  root["points"] = std::move(points);
-  root["fallbacks"] = llvm::json::Array();
-
-  std::error_code ec;
-  llvm::raw_fd_ostream os(path, ec);
-  if (ec) {
-    llvm::errs() << "error: cannot open '" << path
-                 << "' to dump problem cache: " << ec.message() << "\n";
-    return false;
-  }
-  os << llvm::formatv("{0:2}", llvm::json::Value(std::move(root))) << "\n";
-  os.flush();
-  if (os.has_error()) {
-    llvm::errs() << "error: failed writing problem cache to " << path << ": "
-                 << os.error().message() << "\n";
-    os.clear_error();
-    return false;
-  }
-  if (log())
-    *log() << options.logPrefix << " wrote " << nPoints << " LUT points ("
-           << nConfigs << " configs) to " << path << "\n";
-  return true;
-}
-
 RocMlirAutotuner::RocMlirAutotuner(StringRef arch,
                                    const AutotuneOptions &options)
     : impl(std::make_unique<Impl>(arch, options)) {
@@ -1450,10 +1363,6 @@ bool RocMlirAutotuner::isUsable() const { return impl->usable; }
 
 const AutotunePhaseTimes &RocMlirAutotuner::phaseTimes() const {
   return impl->times;
-}
-
-bool RocMlirAutotuner::dumpProblemCache(StringRef path) const {
-  return impl->dumpProblemCache(path);
 }
 
 bool RocMlirAutotuner::Impl::updateProblemCacheFile() const {
@@ -1519,7 +1428,6 @@ bool RocMlirAutotuner::isUsable() const { return false; }
 const AutotunePhaseTimes &RocMlirAutotuner::phaseTimes() const {
   return impl->times;
 }
-bool RocMlirAutotuner::dumpProblemCache(StringRef) const { return false; }
 bool RocMlirAutotuner::updateProblemCacheFile() const { return false; }
 void RocMlirAutotuner::installInto(RocMlirEmbedOptions &) {}
 
