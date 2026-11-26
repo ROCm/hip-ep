@@ -78,7 +78,8 @@ Whisper and VLM models require Microsoft's `onnxruntime-genai` Python example sc
 (`examples/python/whisper.py`, `examples/python/model-mm.py`) to do audio/image
 feature extraction via `og.Audios.open()` / `create_multimodal_processor()`. These scripts
 need a Python-importable `onnxruntime_genai` package. The prebuilt package builds and stages
-the ORT and OGA wheels under `wheels/` (`.github/workflows/linux-build.yml:554-567`), but
+the ORT and OGA wheels under `wheels/` (the "Stage Linux GPU test package" step of
+`.github/workflows/linux-build.yml`; the wheels are built in `.github/workflows/linux-deps.yml`), but
 does not install them into your Python environment automatically. Use pip install to do so.
 To build them yourself from source, follow the steps below.
 
