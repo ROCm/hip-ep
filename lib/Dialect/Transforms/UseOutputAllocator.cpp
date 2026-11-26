@@ -39,8 +39,20 @@
 // value that comes from a block argument or a view of an input, not from an
 // alloc) is copied into a fresh `hip.alloc_output`: the EP output allocator
 // requires every graph output to be allocated in-graph, and an aliased input
-// never calls that callback. The function signature is not touched here --
-// `convert-hip-to-llvm` builds the `-> i32` entry wrapper later.
+// never calls that callback. The same holds for a view (or a repeat) of
+// another output's buffer returned in a different slot, such as
+// `return %a, %a` or `return %a, view(%a)`: each slot needs its own
+// callback request, so only the lowest slot keeps the alloc itself and the
+// others are copied. Likewise, when the callback cannot describe the returned
+// shape (a chain of several reshapes with a dynamic extent, or a
+// rank-increasing view such as `memref.reshape` whose extents are only known
+// at the view), the compute buffer stays a plain `memref.alloc` and every
+// returned view of it is copied into a returned-shape `hip.alloc_output`. A
+// single `expand_shape` that splits one dynamic extent into several instead
+// allocates the output at the external rank and collapses it for the compute
+// (see createExternalRankAllocationForMultiDynExpand). The function signature
+// is not touched here -- `convert-hip-to-llvm` builds the `-> i32` entry
+// wrapper later.
 //
 // Before:
 //   func.func @main_graph(%ctx: !hip.context, ...) -> memref<?x?xf16> {
@@ -98,31 +110,59 @@ namespace {
 //
 // Static (any chain of collapse_shape / expand_shape between two fully static
 // shapes, e.g. a [1, H, K, V] state returned as [1, 1, 1, H*K*V], which no
-// single reassociation spans): abi_shape is the returned shape and abi_groups
+// single reassociation spans): abi_shape is the shape of the outermost reshape
+// (a trailing memref.cast may have erased its static extents) and abi_groups
 // is empty; every external dim is a constant.
-static void stampAbiReshapeAttrs(AllocOutputOp allocOutput, Value retVal,
-                                 OpBuilder &builder) {
-  Value root = allocOutput.getResult();
+//
+// A chain of several reshapes with a dynamic extent on either end cannot be
+// described by these attributes (the callback would receive the internal
+// shape, so the caller would silently get the wrong shape). planAbiReshape
+// reports that as NeedsCopy; the caller then keeps the compute buffer internal
+// and phase 3 copies the returned view into an output of the returned shape.
+struct AbiReshapePlan {
+  enum class Kind {
+    None,      // Nothing to stamp; the internal shape is the returned shape.
+    Stamp,     // Stamp `shape` / `groups` on the hip.alloc_output.
+    NeedsCopy, // The callback cannot describe the returned shape.
+  };
+  Kind kind = Kind::None;
+  SmallVector<int64_t> shape;
+  SmallVector<int64_t> groups;
+};
+
+/// Decide how the output allocator callback learns the returned shape of
+/// \p retVal, a view chain rooted at \p root. Pure analysis: it does not touch
+/// the IR, so one function answers both "must this output be copied" and
+/// "what is stamped".
+static AbiReshapePlan planAbiReshape(Value root, Value retVal, int64_t outIdx) {
+  AbiReshapePlan plan;
   auto rootType = dyn_cast<MemRefType>(root.getType());
   if (!rootType)
-    return;
+    return plan;
 
   memref::CollapseShapeOp collapse;
   memref::ExpandShapeOp expand;
   int64_t reshapes = 0;
+  // Type of the outermost reshape: a memref.cast above it can hide static
+  // extents that the callback still knows.
+  MemRefType outerReshapeType;
   Value cur = retVal;
   while (cur != root) {
     Operation *def = cur.getDefiningOp();
     if (!def)
-      return;
+      return plan;
     if (auto c = dyn_cast<memref::CollapseShapeOp>(def)) {
       collapse = c;
+      if (!outerReshapeType)
+        outerReshapeType = c.getResultType();
       ++reshapes;
       cur = c.getSrc();
       continue;
     }
     if (auto e = dyn_cast<memref::ExpandShapeOp>(def)) {
       expand = e;
+      if (!outerReshapeType)
+        outerReshapeType = e.getResultType();
       ++reshapes;
       cur = e.getSrc();
       continue;
@@ -131,34 +171,40 @@ static void stampAbiReshapeAttrs(AllocOutputOp allocOutput, Value retVal,
       cur = castOp.getSource();
       continue;
     }
-    return;
+    return plan;
   }
   if (reshapes == 0)
-    return;
+    return plan;
 
   auto extType = cast<MemRefType>(retVal.getType());
   if (reshapes > 1) {
-    if (!rootType.hasStaticShape() || !extType.hasStaticShape() ||
-        rootType.getShape() == extType.getShape())
-      return;
-    allocOutput->setAttr(kAbiShapeAttrName,
-                         builder.getDenseI64ArrayAttr(extType.getShape()));
-    allocOutput->setAttr(kAbiGroupsAttrName, builder.getDenseI64ArrayAttr({}));
-    return;
+    // Equal types prove equal runtime shapes only with at most one dynamic
+    // extent, which the element count then determines. With several, `?x?`
+    // may come back as the same type with the extents swapped.
+    if (rootType.getShape() == outerReshapeType.getShape() &&
+        rootType.getNumDynamicDims() <= 1)
+      return plan;
+    if (!rootType.hasStaticShape() || !outerReshapeType.hasStaticShape()) {
+      plan.kind = AbiReshapePlan::Kind::NeedsCopy;
+      return plan;
+    }
+    plan.kind = AbiReshapePlan::Kind::Stamp;
+    plan.shape.assign(outerReshapeType.getShape().begin(),
+                      outerReshapeType.getShape().end());
+    return plan;
   }
   if (extType.getRank() == rootType.getRank())
-    return;
+    return plan;
 
-  if (auto module = allocOutput->getParentOfType<ModuleOp>()) {
+  if (auto module = root.getDefiningOp()->getParentOfType<ModuleOp>()) {
     auto outputShapes =
         module->getAttrOfType<ArrayAttr>("hipdnn.output_shapes");
-    int64_t outIdx = allocOutput.getOutIdx();
     if (outputShapes && outIdx >= 0 &&
         outIdx < static_cast<int64_t>(outputShapes.size())) {
       if (auto metaShape = dyn_cast<DenseI64ArrayAttr>(
               outputShapes[static_cast<unsigned>(outIdx)])) {
         if (static_cast<int64_t>(metaShape.size()) != extType.getRank())
-          return;
+          return plan;
       }
     }
   }
@@ -172,7 +218,7 @@ static void stampAbiReshapeAttrs(AllocOutputOp allocOutput, Value retVal,
     }
     if (total != rootType.getRank() ||
         static_cast<int64_t>(groups.size()) != extType.getRank())
-      return;
+      return plan;
   } else {
     int64_t total = 0;
     for (ArrayRef<int64_t> g : expand.getReassociationIndices()) {
@@ -181,13 +227,24 @@ static void stampAbiReshapeAttrs(AllocOutputOp allocOutput, Value retVal,
     }
     if (total != extType.getRank() ||
         static_cast<int64_t>(groups.size()) != rootType.getRank())
-      return;
+      return plan;
   }
 
+  plan.kind = AbiReshapePlan::Kind::Stamp;
+  plan.shape.assign(extType.getShape().begin(), extType.getShape().end());
+  plan.groups = std::move(groups);
+  return plan;
+}
+
+static void stampAbiReshapeAttrs(AllocOutputOp allocOutput,
+                                 const AbiReshapePlan &plan,
+                                 OpBuilder &builder) {
+  if (plan.kind != AbiReshapePlan::Kind::Stamp)
+    return;
   allocOutput->setAttr(kAbiShapeAttrName,
-                       builder.getDenseI64ArrayAttr(extType.getShape()));
+                       builder.getDenseI64ArrayAttr(plan.shape));
   allocOutput->setAttr(kAbiGroupsAttrName,
-                       builder.getDenseI64ArrayAttr(groups));
+                       builder.getDenseI64ArrayAttr(plan.groups));
 }
 
 /// Return the single rank-increasing expand_shape in the view chain from
@@ -326,31 +383,69 @@ static Value skipViews(Value value) {
   return value;
 }
 
-/// Copy a returned buffer that is not rooted at `hip.alloc_output` into a new
-/// one and return the copy. The source is typically a graph input returned
-/// directly or through a view. The copy is what makes the output allocator run
-/// for this output index.
-static void materializePassthroughOutput(func::ReturnOp returnOp, Value ctx,
-                                         int64_t outIdx, OpBuilder &builder) {
-  Value source = returnOp.getOperand(outIdx);
-  if (skipViews(source).getDefiningOp<AllocOutputOp>())
-    return;
+/// The buffer the output allocator hands out has the identity layout, even when
+/// the returned type carries a layout (for example after a cast).
+static MemRefType identityAllocTypeFor(MemRefType returned) {
+  return MemRefType::get(returned.getShape(), returned.getElementType(),
+                         MemRefLayoutAttrInterface{},
+                         returned.getMemorySpace());
+}
 
-  auto type = dyn_cast<MemRefType>(source.getType());
-  if (!type)
-    return;
+/// Whether an output-allocator buffer can be returned as \p returned: either
+/// it already has the identity layout, or a memref.cast converts to it. A view
+/// with static non-identity strides (for example a subview) cannot be.
+static LogicalResult checkReturnableFromAllocator(func::ReturnOp returnOp,
+                                                  int64_t outIdx) {
+  auto returned = dyn_cast<MemRefType>(returnOp.getOperand(outIdx).getType());
+  if (!returned)
+    return success();
+  MemRefType allocType = identityAllocTypeFor(returned);
+  if (allocType == returned ||
+      memref::CastOp::areCastCompatible(allocType, returned))
+    return success();
+  return returnOp.emitError()
+         << "cannot return output " << outIdx << " of type " << returned
+         << " from an identity-layout output allocation";
+}
+
+/// Copy a returned buffer that is not this slot's `hip.alloc_output` into a new
+/// one and return the copy. The source is typically a graph input returned
+/// directly or through a view, or a view of another output's buffer (a buffer
+/// returned in several slots is requested from the allocator only for its
+/// lowest slot). The copy is what makes the output allocator run for this
+/// output index.
+static LogicalResult materializePassthroughOutput(func::ReturnOp returnOp,
+                                                  Value ctx, int64_t outIdx,
+                                                  OpBuilder &builder) {
+  Value source = returnOp.getOperand(outIdx);
+  auto root = skipViews(source).getDefiningOp<AllocOutputOp>();
+  if (root && root.getOutIdx() == outIdx)
+    return success();
+
+  auto sourceType = dyn_cast<MemRefType>(source.getType());
+  if (!sourceType)
+    return success();
+
+  if (failed(checkReturnableFromAllocator(returnOp, outIdx)))
+    return failure();
+  MemRefType allocType = identityAllocTypeFor(sourceType);
 
   builder.setInsertionPoint(returnOp);
   Location loc = returnOp.getLoc();
   SmallVector<Value> dynamicSizes;
-  for (int64_t dim = 0; dim < type.getRank(); ++dim)
-    if (type.isDynamicDim(dim))
+  for (int64_t dim = 0; dim < sourceType.getRank(); ++dim)
+    if (sourceType.isDynamicDim(dim))
       dynamicSizes.push_back(memref::DimOp::create(builder, loc, source, dim));
 
-  auto allocOutput = AllocOutputOp::create(
-      builder, loc, type, ctx, dynamicSizes, builder.getI64IntegerAttr(outIdx));
+  auto allocOutput =
+      AllocOutputOp::create(builder, loc, allocType, ctx, dynamicSizes,
+                            builder.getI64IntegerAttr(outIdx));
   memref::CopyOp::create(builder, loc, source, allocOutput.getResult());
-  returnOp.setOperand(outIdx, allocOutput.getResult());
+  Value result = allocOutput.getResult();
+  if (allocType != sourceType)
+    result = memref::CastOp::create(builder, loc, sourceType, result);
+  returnOp.setOperand(outIdx, result);
+  return success();
 }
 
 struct UseOutputAllocatorPass
@@ -420,6 +515,27 @@ struct UseOutputAllocatorPass
     func::ReturnOp returnOp;
     funcOp.walk([&](func::ReturnOp r) { returnOp = r; });
 
+    // Reject, before any rewrite, a slot that phase 3 is certain to copy but
+    // cannot return as an allocator buffer. A slot is certainly copied unless
+    // an alloc below is requested for exactly this slot (a view chain that
+    // needs a copy is also copied, but its type is identity-layout or
+    // castable, so it cannot fail the check). A failed pass must leave the IR
+    // unchanged.
+    if (returnOp)
+      for (int64_t slot = 0;
+           slot < static_cast<int64_t>(returnOp.getNumOperands()); ++slot) {
+        auto rootAlloc = skipViews(returnOp.getOperand(slot))
+                             .getDefiningOp<memref::AllocOp>();
+        bool requestedHere = rootAlloc && llvm::any_of(outputs, [&](auto &o) {
+                               return o.first == rootAlloc && o.second == slot;
+                             });
+        if (!requestedHere &&
+            failed(checkReturnableFromAllocator(returnOp, slot))) {
+          signalPassFailure();
+          return;
+        }
+      }
+
     // Phase 2 -- rewrite (IR mutation only; the analysis is no longer queried).
     OpBuilder builder(funcOp.getContext());
     DominanceInfo dominance(funcOp);
@@ -441,7 +557,16 @@ struct UseOutputAllocatorPass
       }
 
       AllocOutputOp allocOutput;
+      AbiReshapePlan abiPlan;
       if (!replacement) {
+        if (retVal) {
+          abiPlan = planAbiReshape(allocOp.getResult(), retVal, outIdx);
+          // The callback cannot describe the returned shape: keep the compute
+          // buffer internal; phase 3 copies the view into an output of the
+          // returned shape.
+          if (abiPlan.kind == AbiReshapePlan::Kind::NeedsCopy)
+            continue;
+        }
         auto retType =
             retVal ? dyn_cast<MemRefType>(retVal.getType()) : MemRefType();
         if (retType && retType.getRank() > allocOp.getType().getRank() &&
@@ -469,7 +594,7 @@ struct UseOutputAllocatorPass
       // output-allocator callback at the returned graph rank (see
       // stampAbiReshapeAttrs).
       if (allocOutput && retVal)
-        stampAbiReshapeAttrs(allocOutput, retVal, builder);
+        stampAbiReshapeAttrs(allocOutput, abiPlan, builder);
 
       allocOp.erase();
     }
@@ -480,7 +605,11 @@ struct UseOutputAllocatorPass
     if (returnOp)
       for (int64_t outIdx = 0;
            outIdx < static_cast<int64_t>(returnOp.getNumOperands()); ++outIdx)
-        materializePassthroughOutput(returnOp, ctx, outIdx, builder);
+        if (failed(
+                materializePassthroughOutput(returnOp, ctx, outIdx, builder))) {
+          signalPassFailure();
+          return;
+        }
   }
 };
 

@@ -94,12 +94,15 @@ func.func @returned_alloc_with_dealloc(%ctx: !hip.context, %M: index) -> memref<
   return %out : memref<?xf16>
 }
 
-// --- Aliased multi-output (same alloc returned twice): exactly one
-//     hip.alloc_output (dedupe / no double-erase), both results alias it. ---
+// --- Same alloc returned twice: the buffer is requested for its lowest slot
+//     only, so slot 1 is copied into its own hip.alloc_output (the runtime
+//     rejects an output slot the model never requested). ---
 // CHECK-LABEL: func.func @aliased_output
-// CHECK-COUNT-1: hip.alloc_output
+// CHECK:         %[[OUT0:.*]] = hip.alloc_output(%{{.*}}, %{{.*}}) {out_idx = 0 : i64} : memref<?xf16>
+// CHECK:         %[[OUT1:.*]] = hip.alloc_output(%{{.*}}, %{{.*}}) {out_idx = 1 : i64} : memref<?xf16>
+// CHECK-NEXT:    memref.copy %[[OUT0]], %[[OUT1]]
 // CHECK-NOT:     hip.alloc_output
-// CHECK:         return %[[OUT:.*]], %[[OUT]]
+// CHECK:         return %[[OUT0]], %[[OUT1]]
 func.func @aliased_output(%ctx: !hip.context, %M: index) -> (memref<?xf16>, memref<?xf16>) {
   %a = memref.alloc(%M) : memref<?xf16>
   return %a, %a : memref<?xf16>, memref<?xf16>
@@ -353,7 +356,7 @@ func.func @chain_output(%ctx: !hip.context) -> memref<?xf32> {
 // CHECK-LABEL: func.func @long_chain_output
 // CHECK-SAME:    (%[[CTX:.*]]: !hip.context)
 // CHECK-NOT:     memref.alloc
-// CHECK:         %[[OUT:.*]] = hip.alloc_output(%[[CTX]]) {out_idx = 0 : i64} : memref<2x4x8xf32>
+// CHECK:         %[[OUT:.*]] = hip.alloc_output(%[[CTX]]) {hipdnn.abi_groups = array<i64>, hipdnn.abi_shape = array<i64: 8, 8>, out_idx = 0 : i64} : memref<2x4x8xf32>
 // CHECK:         %[[COL:.*]] = memref.collapse_shape %[[OUT]]
 // CHECK:         %[[EXP:.*]] = memref.expand_shape %[[COL]]
 // CHECK:         %[[CST:.*]] = memref.cast %[[EXP]]
@@ -477,4 +480,184 @@ func.func @reshape_rank_increase(%ctx: !hip.context, %n: index,
   %ret = memref.reshape %data(%shape)
       : (memref<?x4xf32>, memref<3xi64>) -> memref<?x?x4xf32>
   return %ret : memref<?x?x4xf32>
+}
+
+// --- A view of an output returned in a second slot. The alloc is requested for
+//     slot 0 only; slot 1 (a different shape) gets its own hip.alloc_output
+//     and a copy, so the callback sees each slot's returned shape. ---
+// CHECK-LABEL: func.func @view_in_second_slot
+// CHECK:         %[[OUT0:.*]] = hip.alloc_output(%{{.*}}) {out_idx = 0 : i64} : memref<2x4xf32>
+// CHECK:         %[[VIEW:.*]] = memref.collapse_shape %[[OUT0]]
+// CHECK:         %[[OUT1:.*]] = hip.alloc_output(%{{.*}}) {out_idx = 1 : i64} : memref<8xf32>
+// CHECK-NEXT:    memref.copy %[[VIEW]], %[[OUT1]]
+// CHECK:         return %[[OUT0]], %[[OUT1]]
+func.func @view_in_second_slot(%ctx: !hip.context)
+    -> (memref<2x4xf32>, memref<8xf32>) {
+  %a = memref.alloc() : memref<2x4xf32>
+  %v = memref.collapse_shape %a [[0, 1]] : memref<2x4xf32> into memref<8xf32>
+  return %a, %v : memref<2x4xf32>, memref<8xf32>
+}
+
+// --- The view comes first: the alloc takes the lowest slot (0) and is
+//     stamped for the view's shape; slot 1 is the plain buffer and is copied. ---
+// CHECK-LABEL: func.func @view_in_first_slot
+// CHECK:         %[[OUT0:.*]] = hip.alloc_output(%{{.*}}) {hipdnn.abi_groups = array<i64: 2>, hipdnn.abi_shape = array<i64: 8>, out_idx = 0 : i64} : memref<2x4xf32>
+// CHECK:         %[[VIEW:.*]] = memref.collapse_shape %[[OUT0]]
+// CHECK:         %[[OUT1:.*]] = hip.alloc_output(%{{.*}}) {out_idx = 1 : i64} : memref<2x4xf32>
+// CHECK-NEXT:    memref.copy %[[OUT0]], %[[OUT1]]
+// CHECK:         return %[[VIEW]], %[[OUT1]]
+func.func @view_in_first_slot(%ctx: !hip.context)
+    -> (memref<8xf32>, memref<2x4xf32>) {
+  %a = memref.alloc() : memref<2x4xf32>
+  %v = memref.collapse_shape %a [[0, 1]] : memref<2x4xf32> into memref<8xf32>
+  return %v, %a : memref<8xf32>, memref<2x4xf32>
+}
+
+// --- Dynamic chain of two reshapes returned alone: the callback cannot
+//     describe [?,8,1] from the internal [?,1,8] buffer, so the compute buffer
+//     stays internal and the returned view is copied into an output of the
+//     returned shape. ---
+// CHECK-LABEL: func.func @dynamic_reshape_chain
+// CHECK:         %[[DATA:.*]] = memref.alloc(%{{.*}}) : memref<?x1x8xf32>
+// CHECK:         %[[COL:.*]] = memref.collapse_shape %[[DATA]]
+// CHECK:         %[[VIEW:.*]] = memref.expand_shape %[[COL]]
+// CHECK:         %[[D0:.*]] = memref.dim %[[VIEW]], %c0
+// CHECK:         %[[OUT:.*]] = hip.alloc_output(%{{.*}}, %[[D0]]) {out_idx = 0 : i64} : memref<?x8x1xf32>
+// CHECK:         memref.copy %[[VIEW]], %[[OUT]]
+// CHECK:         return %[[OUT]]
+func.func @dynamic_reshape_chain(%ctx: !hip.context, %n: index)
+    -> memref<?x8x1xf32> {
+  %data = memref.alloc(%n) : memref<?x1x8xf32>
+  %col = memref.collapse_shape %data [[0, 1], [2]]
+       : memref<?x1x8xf32> into memref<?x8xf32>
+  %view = memref.expand_shape %col [[0], [1, 2]] output_shape [%n, 8, 1]
+        : memref<?x8xf32> into memref<?x8x1xf32>
+  return %view : memref<?x8x1xf32>
+}
+
+// --- The same chain behind a memref.cast that erases the static extents. ---
+// CHECK-LABEL: func.func @dynamic_reshape_chain_cast
+// CHECK:         %[[DATA:.*]] = memref.alloc(%{{.*}}) : memref<?x1x8xf32>
+// CHECK:         %[[CST:.*]] = memref.cast
+// CHECK:         %[[OUT:.*]] = hip.alloc_output(%{{.*}}, %{{.*}}, %{{.*}}) {out_idx = 0 : i64} : memref<?x?x?xf32>
+// CHECK:         memref.copy %[[CST]], %[[OUT]]
+// CHECK:         return %[[OUT]]
+func.func @dynamic_reshape_chain_cast(%ctx: !hip.context, %n: index)
+    -> memref<?x?x?xf32> {
+  %data = memref.alloc(%n) : memref<?x1x8xf32>
+  %col = memref.collapse_shape %data [[0, 1], [2]]
+       : memref<?x1x8xf32> into memref<?x8xf32>
+  %view = memref.expand_shape %col [[0], [1, 2]] output_shape [%n, 8, 1]
+        : memref<?x8xf32> into memref<?x8x1xf32>
+  %cast = memref.cast %view : memref<?x8x1xf32> to memref<?x?x?xf32>
+  return %cast : memref<?x?x?xf32>
+}
+
+// --- A view with a strided type returned in a second slot: the copy target
+//     has the identity layout (a layout-carrying type cannot be allocated) and
+//     is cast back to the returned type. ---
+// CHECK-LABEL: func.func @strided_cast_second_slot
+// CHECK:         %[[OUT0:.*]] = hip.alloc_output(%{{.*}}) {out_idx = 0 : i64} : memref<?x8xf32>
+// CHECK:         %[[VIEW:.*]] = memref.cast %[[OUT0]] : memref<?x8xf32> to memref<?x8xf32, strided<[8, 1], offset: ?>>
+// CHECK:         %[[OUT1:.*]] = hip.alloc_output(%{{.*}}) {out_idx = 1 : i64} : memref<?x8xf32>
+// CHECK-NEXT:    memref.copy %[[VIEW]], %[[OUT1]]
+// CHECK-NEXT:    %[[RES:.*]] = memref.cast %[[OUT1]] : memref<?x8xf32> to memref<?x8xf32, strided<[8, 1], offset: ?>>
+// CHECK:         return %[[OUT0]], %[[RES]]
+func.func @strided_cast_second_slot(%ctx: !hip.context, %n: index)
+    -> (memref<?x8xf32>, memref<?x8xf32, strided<[8, 1], offset: ?>>) {
+  %a = memref.alloc(%n) : memref<?x8xf32>
+  %v = memref.cast %a
+     : memref<?x8xf32> to memref<?x8xf32, strided<[8, 1], offset: ?>>
+  return %a, %v
+       : memref<?x8xf32>, memref<?x8xf32, strided<[8, 1], offset: ?>>
+}
+
+// --- Negative: two reshapes that restore the same dynamic shape need no copy
+//     and no stamp; the single zero-copy hip.alloc_output stays. ---
+// CHECK-LABEL: func.func @equal_shape_reshape_chain
+// CHECK-NOT:     memref.alloc
+// CHECK:         hip.alloc_output(%{{.*}}) {out_idx = 0 : i64} : memref<?x4xf32>
+// CHECK-NOT:     hip.alloc_output
+// CHECK-NOT:     memref.copy
+func.func @equal_shape_reshape_chain(%ctx: !hip.context, %n: index)
+    -> memref<?x4xf32> {
+  %data = memref.alloc(%n) : memref<?x4xf32>
+  %col = memref.collapse_shape %data [[0, 1]] : memref<?x4xf32> into memref<?xf32>
+  %view = memref.expand_shape %col [[0, 1]] output_shape [%n, 4]
+        : memref<?xf32> into memref<?x4xf32>
+  return %view : memref<?x4xf32>
+}
+
+// --- Two reshapes return to the same type, but with two dynamic extents the
+//     type does not prove the runtime shape: here [%m, %n] comes back as
+//     [%n, %m]. The returned view is copied into an output of its own shape. ---
+// CHECK-LABEL: func.func @equal_type_swapped_extents
+// CHECK:         %[[DATA:.*]] = memref.alloc(%{{.*}}, %{{.*}}) : memref<?x?xf32>
+// CHECK:         %[[VIEW:.*]] = memref.expand_shape
+// CHECK:         %[[OUT:.*]] = hip.alloc_output(%{{.*}}, %{{.*}}, %{{.*}}) {out_idx = 0 : i64} : memref<?x?xf32>
+// CHECK:         memref.copy %[[VIEW]], %[[OUT]]
+// CHECK:         return %[[OUT]]
+func.func @equal_type_swapped_extents(%ctx: !hip.context, %m: index,
+                                      %n: index) -> memref<?x?xf32> {
+  %a = memref.alloc(%m, %n) : memref<?x?xf32>
+  %c = memref.collapse_shape %a [[0, 1]] : memref<?x?xf32> into memref<?xf32>
+  %e = memref.expand_shape %c [[0, 1]] output_shape [%n, %m]
+     : memref<?xf32> into memref<?x?xf32>
+  return %e : memref<?x?xf32>
+}
+
+// --- The lowest slot holds a view that needs a copy, and the plain buffer is
+//     returned in a higher slot: the alloc stays a memref.alloc and both slots
+//     are copied (each gets its own request). ---
+// CHECK-LABEL: func.func @needs_copy_view_and_buffer
+// CHECK:         %[[DATA:.*]] = memref.alloc(%{{.*}}) : memref<?x1x8xf32>
+// CHECK:         %[[VIEW:.*]] = memref.expand_shape
+// CHECK:         %[[OUT0:.*]] = hip.alloc_output(%{{.*}}, %{{.*}}) {out_idx = 0 : i64} : memref<?x8x1xf32>
+// CHECK-NEXT:    memref.copy %[[VIEW]], %[[OUT0]]
+// CHECK:         %[[OUT1:.*]] = hip.alloc_output(%{{.*}}) {out_idx = 1 : i64} : memref<?x1x8xf32>
+// CHECK-NEXT:    memref.copy %[[DATA]], %[[OUT1]]
+// CHECK:         return %[[OUT0]], %[[OUT1]]
+func.func @needs_copy_view_and_buffer(%ctx: !hip.context, %n: index)
+    -> (memref<?x8x1xf32>, memref<?x1x8xf32>) {
+  %data = memref.alloc(%n) : memref<?x1x8xf32>
+  %col = memref.collapse_shape %data [[0, 1], [2]]
+       : memref<?x1x8xf32> into memref<?x8xf32>
+  %view = memref.expand_shape %col [[0], [1, 2]] output_shape [%n, 8, 1]
+        : memref<?x8xf32> into memref<?x8x1xf32>
+  return %view, %data : memref<?x8x1xf32>, memref<?x1x8xf32>
+}
+
+// --- Three slots: the buffer keeps slot 0; each later slot is copied. ---
+// CHECK-LABEL: func.func @three_slots
+// CHECK:         %[[OUT0:.*]] = hip.alloc_output(%{{.*}}) {out_idx = 0 : i64} : memref<2x4xf32>
+// CHECK:         %[[VIEW:.*]] = memref.collapse_shape %[[OUT0]]
+// CHECK:         %[[OUT1:.*]] = hip.alloc_output(%{{.*}}) {out_idx = 1 : i64} : memref<8xf32>
+// CHECK-NEXT:    memref.copy %[[VIEW]], %[[OUT1]]
+// CHECK:         %[[OUT2:.*]] = hip.alloc_output(%{{.*}}) {out_idx = 2 : i64} : memref<8xf32>
+// CHECK-NEXT:    memref.copy %[[VIEW]], %[[OUT2]]
+// CHECK:         return %[[OUT0]], %[[OUT1]], %[[OUT2]]
+func.func @three_slots(%ctx: !hip.context)
+    -> (memref<2x4xf32>, memref<8xf32>, memref<8xf32>) {
+  %a = memref.alloc() : memref<2x4xf32>
+  %v = memref.collapse_shape %a [[0, 1]] : memref<2x4xf32> into memref<8xf32>
+  return %a, %v, %v : memref<2x4xf32>, memref<8xf32>, memref<8xf32>
+}
+
+// --- A single expand that splits one dynamic extent into two is allocated at
+//     the external rank (no copy for slot 0); the plain buffer returned in slot
+//     1 is copied. ---
+// CHECK-LABEL: func.func @multi_dyn_expand_and_buffer
+// CHECK:         %[[OUT0:.*]] = hip.alloc_output(%{{.*}}, %{{.*}}) {out_idx = 0 : i64} : memref<?x?x4xf32>
+// CHECK:         %[[COL:.*]] = memref.collapse_shape %[[OUT0]]
+// CHECK:         %[[EXP:.*]] = memref.expand_shape %[[COL]]
+// CHECK:         %[[OUT1:.*]] = hip.alloc_output(%{{.*}}) {out_idx = 1 : i64} : memref<?x4xf32>
+// CHECK-NEXT:    memref.copy %[[COL]], %[[OUT1]]
+// CHECK:         return %[[EXP]], %[[OUT1]]
+func.func @multi_dyn_expand_and_buffer(%ctx: !hip.context, %m: index)
+    -> (memref<?x?x4xf32>, memref<?x4xf32>) {
+  %n = arith.muli %m, %m : index
+  %a = memref.alloc(%n) : memref<?x4xf32>
+  %e = memref.expand_shape %a [[0, 1], [2]] output_shape [%m, %m, 4]
+     : memref<?x4xf32> into memref<?x?x4xf32>
+  return %e, %a : memref<?x?x4xf32>, memref<?x4xf32>
 }
