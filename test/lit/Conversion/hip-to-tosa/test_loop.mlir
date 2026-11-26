@@ -58,7 +58,7 @@ module {
   // CHECK-LABEL: func.func @loop_using_iter
   // CHECK: tosa.while_loop
   // CHECK: ^bb0(%[[ITER:[a-zA-Z0-9_]+]]: tensor<i64>,
-  // CHECK: tosa.cast %[[ITER]] : (tensor<i64>) -> tensor<f32>
+  // CHECK: tosa.cast %[[ITER]] input_unsigned(false) : (tensor<i64>) -> tensor<f32>
   // CHECK: tosa.add
   // CHECK-NOT: hip.loop
   // CHECK-NOT: hip.cast

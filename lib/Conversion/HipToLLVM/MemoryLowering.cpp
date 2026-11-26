@@ -317,6 +317,8 @@ struct AllocOutputOpLowering : public ConvertOpToLLVMPattern<AllocOutputOp> {
     //   * expand (internal rank < external): groups[i] = # external dims
     //     expanded from internal dim i; each dynamic external dim in that
     //     group takes the corresponding internal size (static dims from attr).
+    //   * static (no groups): both shapes static; the external dims are the
+    //     attr's constants.
     // Absent / malformed attrs -> internal rank/sizes verbatim.
     auto abiShapeAttr = op->getAttrOfType<DenseI64ArrayAttr>(kAbiShapeAttrName);
     auto abiGroupsAttr =
@@ -331,8 +333,20 @@ struct AllocOutputOpLowering : public ConvertOpToLLVMPattern<AllocOutputOp> {
       int64_t groupsRank = static_cast<int64_t>(abiGroups.size());
       bool ok = false;
 
+      // Static: no groups, every external dim a constant spanning the same
+      // elements as the static internal shape.
+      if (groupsRank == 0 && memRefType.hasStaticShape() &&
+          llvm::none_of(abiShape, ShapedType::isDynamic) &&
+          ShapedType::getNumElements(abiShape) == memRefType.getNumElements()) {
+        for (int64_t extent : abiShape)
+          callbackSizes.push_back(LLVM::ConstantOp::create(
+              rewriter, loc, i64Type, rewriter.getI64IntegerAttr(extent)));
+        callbackRank = extRank;
+        ok = true;
+      }
+
       // Collapse: one group entry per external dim.
-      if (groupsRank == extRank && extRank < rank) {
+      if (!ok && groupsRank == extRank && extRank < rank) {
         int64_t internalDim = 0;
         ok = true;
         for (int64_t e : llvm::seq<int64_t>(0, extRank)) {

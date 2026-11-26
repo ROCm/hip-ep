@@ -18,13 +18,13 @@
 // Concat past with the input, take the last k-1 as present_state, then a
 // zero-pad depthwise conv in NHWC.
 // CHECK-LABEL: func.func @causal_conv_with_past
-// CHECK: %[[PADDED:.*]] = tosa.concat %arg4, %arg1 {axis = 2 : i32}
+// CHECK: %[[PADDED:.*]] = tosa.concat %arg4, %arg1 axis(2)
 // CHECK-SAME: tensor<1x4x11xf32>
 // CHECK: tosa.slice %[[PADDED]]
 // CHECK-SAME: tensor<1x4x3xf32>
 // CHECK: tosa.depthwise_conv2d
-// CHECK-SAME: acc_type = f32
-// CHECK-SAME: pad = array<i64: 0, 0, 0, 0>
+// CHECK-SAME: pad([0, 0, 0, 0])
+// CHECK-SAME: acc_type(f32)
 // CHECK-NOT: hip.causal_conv_with_state
 func.func @causal_conv_with_past(
     %ctx: !hip.context, %input: tensor<1x4x8xf32>, %weight: tensor<4x1x4xf32>,
@@ -32,9 +32,9 @@ func.func @causal_conv_with_past(
     %y_init: tensor<1x4x8xf32>, %s_init: tensor<1x4x3xf32>)
     -> (tensor<1x4x8xf32>, tensor<1x4x3xf32>) attributes {rock.kernel} {
   %y, %s = hip.causal_conv_with_state(%ctx)
-      ins(%input, %weight, %bias, %past :
-          tensor<1x4x8xf32>, tensor<4x1x4xf32>, tensor<4xf32>,
-          tensor<1x4x3xf32>)
+      ins(%input, %weight : tensor<1x4x8xf32>, tensor<4x1x4xf32>)
+      bias(%bias : tensor<4xf32>)
+      past_state(%past : tensor<1x4x3xf32>)
       outs(%y_init, %s_init : tensor<1x4x8xf32>, tensor<1x4x3xf32>)
       {activation = "none", ndim = 1 : i64}
       : tensor<1x4x8xf32>, tensor<1x4x3xf32>
@@ -43,7 +43,7 @@ func.func @causal_conv_with_past(
 
 // Missing past_state is a zero tensor of length k-1.
 // CHECK-LABEL: func.func @causal_conv_zero_past
-// CHECK: "tosa.const"() <{values = dense<0.000000e+00> : tensor<1x4x3xf32>}>
+// CHECK: tosa.const values(dense<0.000000e+00> : tensor<1x4x3xf32>)
 // CHECK: tosa.concat
 // CHECK: tosa.depthwise_conv2d
 // CHECK-NOT: hip.causal_conv_with_state
@@ -71,9 +71,9 @@ func.func @causal_conv_silu(
     %y_init: tensor<1x4x8xf16>, %s_init: tensor<1x4x3xf16>)
     -> (tensor<1x4x8xf16>, tensor<1x4x3xf16>) attributes {rock.kernel} {
   %y, %s = hip.causal_conv_with_state(%ctx)
-      ins(%input, %weight, %bias, %past :
-          tensor<1x4x8xf16>, tensor<4x1x4xf16>, tensor<4xf16>,
-          tensor<1x4x3xf16>)
+      ins(%input, %weight : tensor<1x4x8xf16>, tensor<4x1x4xf16>)
+      bias(%bias : tensor<4xf16>)
+      past_state(%past : tensor<1x4x3xf16>)
       outs(%y_init, %s_init : tensor<1x4x8xf16>, tensor<1x4x3xf16>)
       {activation = "silu"}
       : tensor<1x4x8xf16>, tensor<1x4x3xf16>
@@ -82,10 +82,10 @@ func.func @causal_conv_silu(
 
 // channels_last input/output are (B, L, C); past/present stay (B, C, k-1).
 // CHECK-LABEL: func.func @causal_conv_channels_last
-// CHECK: tosa.transpose %arg1 {perms = array<i32: 0, 2, 1>}
+// CHECK: tosa.transpose %arg1 perms([0, 2, 1])
 // CHECK: tosa.concat
 // CHECK: tosa.depthwise_conv2d
-// CHECK: tosa.transpose {{.*}} {perms = array<i32: 0, 2, 1>}
+// CHECK: tosa.transpose {{.*}} perms([0, 2, 1])
 // CHECK-NOT: hip.causal_conv_with_state
 func.func @causal_conv_channels_last(
     %ctx: !hip.context, %input: tensor<1x8x4xf32>, %weight: tensor<4x1x4xf32>,
@@ -93,9 +93,9 @@ func.func @causal_conv_channels_last(
     %y_init: tensor<1x8x4xf32>, %s_init: tensor<1x4x3xf32>)
     -> (tensor<1x8x4xf32>, tensor<1x4x3xf32>) attributes {rock.kernel} {
   %y, %s = hip.causal_conv_with_state(%ctx)
-      ins(%input, %weight, %bias, %past :
-          tensor<1x8x4xf32>, tensor<4x1x4xf32>, tensor<4xf32>,
-          tensor<1x4x3xf32>)
+      ins(%input, %weight : tensor<1x8x4xf32>, tensor<4x1x4xf32>)
+      bias(%bias : tensor<4xf32>)
+      past_state(%past : tensor<1x4x3xf32>)
       outs(%y_init, %s_init : tensor<1x8x4xf32>, tensor<1x4x3xf32>)
       {channels_last = true}
       : tensor<1x8x4xf32>, tensor<1x4x3xf32>
@@ -115,9 +115,9 @@ func.func @causal_conv_outlined(
   %y_init = tensor.empty() : tensor<1x4x8xf32>
   %s_init = tensor.empty() : tensor<1x4x3xf32>
   %y, %s = hip.causal_conv_with_state(%ctx)
-      ins(%input, %weight, %bias, %past :
-          tensor<1x4x8xf32>, tensor<4x1x4xf32>, tensor<4xf32>,
-          tensor<1x4x3xf32>)
+      ins(%input, %weight : tensor<1x4x8xf32>, tensor<4x1x4xf32>)
+      bias(%bias : tensor<4xf32>)
+      past_state(%past : tensor<1x4x3xf32>)
       outs(%y_init, %s_init : tensor<1x4x8xf32>, tensor<1x4x3xf32>)
       : tensor<1x4x8xf32>, tensor<1x4x3xf32>
   return %y, %s : tensor<1x4x8xf32>, tensor<1x4x3xf32>

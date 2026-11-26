@@ -1,16 +1,17 @@
 diff --git a/cmake/triton.cmake b/cmake/triton.cmake
-index 8849f7a..9c9795c 100644
+index 5ad94cf..24364c5 100644
 --- a/cmake/triton.cmake
 +++ b/cmake/triton.cmake
-@@ -24,18 +24,15 @@ set(ROCMLIR_TRITON_GIT_REPOSITORY "https://github.com/ROCm/triton"
- set(ROCMLIR_TRITON_GIT_BRANCH "rmt-2026-10-19"
-     CACHE STRING "Git branch/tag/commit for the Triton sources")
+@@ -32,19 +32,16 @@ set(ROCMLIR_AMD_CODEGEN_LLVM_REVISION "${ROCMLIR_AMD_CODEGEN_LLVM_GIT_BRANCH}-1"
+     CACHE STRING
+     "Revision string baked into triton_amd_codegen (triton_amdgpu_revision())")
  
 -message(STATUS "Fetching LLVM/MLIR: ${ROCMLIR_LLVM_GIT_REPOSITORY}@${ROCMLIR_LLVM_GIT_BRANCH}")
  message(STATUS "Fetching Triton:    ${ROCMLIR_TRITON_GIT_REPOSITORY}@${ROCMLIR_TRITON_GIT_BRANCH}")
+ message(STATUS "Fetching AMD Codegen LLVM/MLIR: ${ROCMLIR_AMD_CODEGEN_LLVM_GIT_REPOSITORY}@${ROCMLIR_AMD_CODEGEN_LLVM_GIT_BRANCH}")
  
 -FetchContent_Declare(
--  rocmlir_llvm_project
+-  llvm-project
 -  URL "${ROCMLIR_LLVM_GIT_REPOSITORY}/archive/refs/heads/${ROCMLIR_LLVM_GIT_BRANCH}.tar.gz"
 -  # GIT_REPOSITORY "${ROCMLIR_LLVM_GIT_REPOSITORY}"
 -  # GIT_TAG "${ROCMLIR_LLVM_GIT_BRANCH}"
@@ -27,15 +28,15 @@ index 8849f7a..9c9795c 100644
 +endif()
  
  FetchContent_Declare(
-   rocmlir_triton
-@@ -47,21 +44,48 @@ FetchContent_Declare(
-   # Download only: no CMakeLists.txt here, so MakeAvailable skips add_subdirectory.
-   SOURCE_SUBDIR do-not-auto-add)
+   triton
+@@ -67,21 +64,48 @@ FetchContent_Declare(
+   SOURCE_SUBDIR do-no-auto-add
+ )
  
--FetchContent_MakeAvailable(rocmlir_llvm_project rocmlir_triton)
+-FetchContent_MakeAvailable(llvm-project triton amd-codegen-llvm)
 +if(ROCMLIR_EXTERNAL_LLVM)
-+  message(STATUS "External LLVM/MLIR already provided; skipping rocmlir_llvm_project download")
-+  FetchContent_MakeAvailable(rocmlir_triton)
++  message(STATUS "External LLVM/MLIR already provided; skipping llvm-project download")
++  FetchContent_MakeAvailable(triton amd-codegen-llvm)
 +  # Parent from-source builds expose the llvm-project checkout. An installed
 +  # prefix has headers on LLVM_INCLUDE_DIRS and no source tree to point at.
 +  if(DEFINED llvm-project_SOURCE_DIR)
@@ -48,7 +49,7 @@ index 8849f7a..9c9795c 100644
 +else()
 +  message(STATUS "Fetching LLVM/MLIR: ${ROCMLIR_LLVM_GIT_REPOSITORY}@${ROCMLIR_LLVM_GIT_BRANCH}")
 +  FetchContent_Declare(
-+    rocmlir_llvm_project
++    llvm-project
 +    URL "${ROCMLIR_LLVM_GIT_REPOSITORY}/archive/refs/heads/${ROCMLIR_LLVM_GIT_BRANCH}.tar.gz"
 +    # GIT_REPOSITORY "${ROCMLIR_LLVM_GIT_REPOSITORY}"
 +    # GIT_TAG "${ROCMLIR_LLVM_GIT_BRANCH}"
@@ -56,16 +57,16 @@ index 8849f7a..9c9795c 100644
 +    # GIT_PROGRESS TRUE
 +    # Download only: no CMakeLists.txt here, so MakeAvailable skips add_subdirectory.
 +    SOURCE_SUBDIR do-not-auto-add)
-+  FetchContent_MakeAvailable(rocmlir_llvm_project rocmlir_triton)
-+  set(ROCMLIR_LLVM_PROJECT_DIR "${rocmlir_llvm_project_SOURCE_DIR}")
++  FetchContent_MakeAvailable(llvm-project triton amd-codegen-llvm)
++  set(ROCMLIR_LLVM_PROJECT_DIR "${llvm-project_SOURCE_DIR}")
 +endif()
  
  #===----------------------------------------------------------------------===//
  # Paths for building rocmlirTriton
  #===----------------------------------------------------------------------===//
  
--set(ROCMLIR_LLVM_PROJECT_DIR "${rocmlir_llvm_project_SOURCE_DIR}")
- set(TRITON_PROJECT_DIR "${rocmlir_triton_SOURCE_DIR}")
+-set(ROCMLIR_LLVM_PROJECT_DIR "${llvm-project_SOURCE_DIR}")
+ set(TRITON_PROJECT_DIR "${triton_SOURCE_DIR}")
  set(TRITON_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/external/triton")
  
  # Keep the *_EXTERNAL_SRC_DIR variables (set in the top-level CMakeLists before
@@ -81,7 +82,7 @@ index 8849f7a..9c9795c 100644
  set(TRITON_EXTERNAL_SRC_DIR "${TRITON_PROJECT_DIR}")
  
  #===----------------------------------------------------------------------===//
-@@ -76,6 +100,49 @@ set(TRITON_EXTERNAL_SRC_DIR "${TRITON_PROJECT_DIR}")
+@@ -96,6 +120,49 @@ set(TRITON_EXTERNAL_SRC_DIR "${TRITON_PROJECT_DIR}")
  # code keep working unchanged.
  #===----------------------------------------------------------------------===//
  
@@ -131,7 +132,7 @@ index 8849f7a..9c9795c 100644
  if(NOT EXISTS "${ROCMLIR_LLVM_PROJECT_DIR}/llvm/CMakeLists.txt")
    message(FATAL_ERROR
      "${ROCMLIR_LLVM_PROJECT_DIR}/llvm/CMakeLists.txt is missing.\n"
-@@ -216,6 +283,8 @@ message(STATUS "LLD_DIR: ${LLD_DIR}")
+@@ -236,6 +303,8 @@ message(STATUS "LLD_DIR: ${LLD_DIR}")
  message(STATUS "MLIR_INCLUDE_DIRS: ${MLIR_INCLUDE_DIRS}")
  message(STATUS "LLVM_INCLUDE_DIRS: ${LLVM_INCLUDE_DIRS}")
  
@@ -140,7 +141,7 @@ index 8849f7a..9c9795c 100644
  #===----------------------------------------------------------------------===//
  # ROCm Configuration
  #
-@@ -452,25 +521,63 @@ endif()
+@@ -533,25 +602,63 @@ message(STATUS "triton_amd_codegen: ${ROCMLIR_TRITON_AMD_CODEGEN_LIBRARY}")
  # Helper Functions for rocMLIR Libraries
  #===----------------------------------------------------------------------===//
  
@@ -204,7 +205,7 @@ index 8849f7a..9c9795c 100644
    add_mlir_library(${name}
      ${ARGN}
      EXCLUDE_FROM_LIBMLIR
-@@ -501,6 +608,7 @@ endfunction()
+@@ -582,6 +689,7 @@ endfunction()
  # Helper function for Rock-to-Triton libraries
  function(add_rocmlir_triton_library name)
    set_property(GLOBAL APPEND PROPERTY ROCMLIR_TRITON_LIBS ${name})

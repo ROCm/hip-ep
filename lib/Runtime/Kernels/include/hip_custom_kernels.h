@@ -913,6 +913,15 @@ HIP_KERNEL_API int hip_swiglu_promoted(void *stream, const void *gate,
                                       const void *up, void *output,
                                       int64_t num_elements, int hip_dtype);
 
+// Clamped SwiGLU, computed in FP32 and rounded once:
+//   g = min(gate, limit), u = clamp(up, -limit, limit),
+//   output = g / (1 + exp(-alpha * g)) * (u + beta).
+// limit may be +inf. HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16, HIP_DTYPE_BFLOAT16.
+HIP_KERNEL_API int hip_swiglu_clamped(void *stream, const void *gate,
+                                      const void *up, void *output,
+                                      int64_t num_elements, int hip_dtype,
+                                      float alpha, float beta, float limit);
+
 /* =========================================================================
  * Softplus activation
  * =========================================================================
@@ -1208,21 +1217,33 @@ HIP_KERNEL_API int hip_gqa_softmax_inplace(
 /* Row-wise softmax over a flattened [rows, cols] row-major fp16 buffer,
  * reading `input` and writing normalized probabilities to `output`. Matches
  * ONNX Softmax semantics for axis = -1 on the flattened input. `input` may
- * equal `output`. Used by the standalone `hip_miopen_softmax` runtime entry
+ * equal `output`. Used by the standalone `hip_softmax_typed` runtime entry
  * point, which is destination-passing and would otherwise have to copy its
  * input over its output before running an in-place kernel. */
 HIP_KERNEL_API int hip_softmax_row_2d(void* stream, const void* input, void* output, int rows, int cols);
 
-/* fp32 variant of the above — for models where Softmax input is fp32.
- * Qwen VLM vision encoder attention scores are fp32; using the fp16 kernel
- * there misinterprets the data and produces completely wrong outputs.
- * Called by hip_miopen_softmax when elem_size_bytes == 4. */
+/* fp32 and bf16 variants of the above, with the same contract. All three
+ * compute in fp32; hip_softmax_typed selects one from its data_type. */
 HIP_KERNEL_API int hip_softmax_row_2d_fp32(void* stream, const void* input, void* output, int rows, int cols);
+HIP_KERNEL_API int hip_softmax_row_2d_bf16(void* stream, const void* input, void* output, int rows, int cols);
 
-/* Single-buffer forms of the two above, for callers that softmax a buffer
+/* Single-buffer forms of the fp16 and fp32 kernels, for callers that softmax a buffer
  * in place. Equivalent to passing `data` as both source and destination. */
 HIP_KERNEL_API int hip_softmax_row_2d_inplace(void* stream, void* data, int rows, int cols);
 HIP_KERNEL_API int hip_softmax_row_2d_inplace_fp32(void* stream, void* data, int rows, int cols);
+
+/* Last-axis softmax over [outer, R, C] scores with the scale and an id mask
+ * applied on the way in:
+ *   out[o,r,c] = softmax_c(row_ids[r] == col_ids[c] ? x[o,r,c] * scale : fill)
+ * The scaled value is rounded to the element type first. An id vector of
+ * length 1 broadcasts; any other length must be R (row_ids) or C (col_ids).
+ * elem_size_bytes: 2 for fp16, 4 for fp32. `input` may equal `output`.
+ * Returns -1 on invalid arguments. */
+HIP_KERNEL_API int hip_softmax_row_scaled_masked(
+    void* stream, const void* input, void* output, const int64_t* row_ids,
+    int64_t row_ids_len, const int64_t* col_ids, int64_t col_ids_len,
+    int64_t outer, int64_t R, int64_t C, float scale, float fill,
+    int elem_size_bytes);
 
 /* Column-wise softmax: fp32 input -> fp16 output.
  * Reads fp32 Score matrix (no fp16 overflow/inf), writes fp16 probabilities.
@@ -2342,7 +2363,21 @@ HIP_KERNEL_API int hip_batch_norm(
  * Mean/var over each (N, group). channels_last 0 is NCHW, 1 is NHWC.
  * activation 1 applies SiLU after the affine transform.
  * `hip_dtype`: FLOAT16, BFLOAT16, FLOAT32, or FLOAT64.
+ *
+ * Large groups use a split reduction whose partials live in `workspace`
+ * (device memory, 256-byte aligned). Query the size with
+ * hip_group_norm_workspace_bytes for the current device. A null or smaller
+ * workspace is valid: the kernel shrinks the split or uses a slower
+ * one-block-per-group path.
  */
+HIP_KERNEL_API size_t hip_group_norm_workspace_bytes(
+    int64_t n,
+    int64_t c,
+    int64_t spatial,
+    int64_t groups,
+    int channels_last,
+    int hip_dtype);
+
 HIP_KERNEL_API int hip_group_norm(
     void* stream,
     const void* input,
@@ -2356,6 +2391,8 @@ HIP_KERNEL_API int hip_group_norm(
     int channels_last,
     int activation,
     float epsilon,
+    void* workspace,
+    size_t workspace_bytes,
     int hip_dtype);
 
 /* =========================================================================

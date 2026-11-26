@@ -56,9 +56,9 @@ module {
     // CHECK-SAME: %[[CTX:.*]]: !llvm.ptr
 
     hip.causal_conv_with_state(%ctx)
-        ins(%input, %weight, %bias, %past_state :
-            memref<1x64x128xf16, 1>, memref<64x1x4xf16, 1>,
-            memref<64xf16, 1>, memref<1x64x3xf16, 1>)
+        ins(%input, %weight : memref<1x64x128xf16, 1>, memref<64x1x4xf16, 1>)
+        bias(%bias : memref<64xf16, 1>)
+        past_state(%past_state : memref<1x64x3xf16, 1>)
         outs(%output, %present_state :
              memref<1x64x128xf16, 1>, memref<1x64x3xf16, 1>)
         {activation = "silu", ndim = 1 : i64}
@@ -101,9 +101,9 @@ module {
     // CHECK-LABEL: llvm.func @causal_conv_no_activation
 
     hip.causal_conv_with_state(%ctx)
-        ins(%input, %weight, %bias, %past_state :
-            memref<2x128x64xf16, 1>, memref<128x1x3xf16, 1>,
-            memref<128xf16, 1>, memref<2x128x2xf16, 1>)
+        ins(%input, %weight : memref<2x128x64xf16, 1>, memref<128x1x3xf16, 1>)
+        bias(%bias : memref<128xf16, 1>)
+        past_state(%past_state : memref<2x128x2xf16, 1>)
         outs(%output, %present_state :
              memref<2x128x64xf16, 1>, memref<2x128x2xf16, 1>)
         {activation = "none", ndim = 1 : i64}
@@ -133,9 +133,9 @@ module {
     // CHECK-LABEL: llvm.func @causal_conv_dynamic_activations
 
     hip.causal_conv_with_state(%ctx)
-        ins(%input, %weight, %bias, %past_state :
-            memref<?x?x?xf16, 1>, memref<64x1x4xf16, 1>,
-            memref<64xf16, 1>, memref<?x?x3xf16, 1>)
+        ins(%input, %weight : memref<?x?x?xf16, 1>, memref<64x1x4xf16, 1>)
+        bias(%bias : memref<64xf16, 1>)
+        past_state(%past_state : memref<?x?x3xf16, 1>)
         outs(%output, %present_state :
              memref<?x?x?xf16, 1>, memref<?x?x3xf16, 1>)
         {activation = "silu", ndim = 1 : i64}
@@ -204,9 +204,9 @@ module {
     // CHECK-LABEL: llvm.func @causal_conv_channels_last
 
     hip.causal_conv_with_state(%ctx)
-        ins(%input, %weight, %bias, %past_state :
-            memref<2x128x64xf16, 1>, memref<64x1x4xf16, 1>,
-            memref<64xf16, 1>, memref<2x64x3xf16, 1>)
+        ins(%input, %weight : memref<2x128x64xf16, 1>, memref<64x1x4xf16, 1>)
+        bias(%bias : memref<64xf16, 1>)
+        past_state(%past_state : memref<2x64x3xf16, 1>)
         outs(%output, %present_state :
              memref<2x128x64xf16, 1>, memref<2x64x3xf16, 1>)
         {activation = "silu", ndim = 1 : i64, channels_last = true}
@@ -259,9 +259,8 @@ module {
     // CHECK-LABEL: llvm.func @causal_conv_state_channels_last
 
     hip.causal_conv_with_state(%ctx)
-        ins(%input, %weight, %past_state :
-            memref<2x128x64xf16, 1>, memref<64x1x4xf16, 1>,
-            memref<2x9x64xf16, 1>)
+        ins(%input, %weight : memref<2x128x64xf16, 1>, memref<64x1x4xf16, 1>)
+        past_state(%past_state : memref<2x9x64xf16, 1>)
         outs(%output, %present_state :
              memref<2x128x64xf16, 1>, memref<2x9x64xf16, 1>)
         {activation = "silu", ndim = 1 : i64, channels_last = true,

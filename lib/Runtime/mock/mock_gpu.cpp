@@ -1697,19 +1697,42 @@ int wrap_swiglu(RuntimeState *state, void *gate, void *up, void *output,
 
 // Mock impl of the runtime symbol referenced by the hip.miopen.softmax
 // lowering. Signature must match lib/Runtime/real/activation.cpp.
-extern "C" int hip_miopen_softmax(RuntimeState *state, const void *input,
-                                  void *output, int64_t rows, int64_t cols,
-                                  int64_t data_type) {
+extern "C" int hip_softmax_typed(RuntimeState *state, const void *input,
+                                 void *output, int64_t rows, int64_t cols,
+                                 int64_t data_type) {
   if (!state) {
-    fprintf(stderr, "Invalid state in hip_miopen_softmax\n");
+    fprintf(stderr, "Invalid state in hip_softmax_typed\n");
     return -1;
   }
   (void)input;
   (void)output;
-  MOCK_PRINT("[MOCK] hip_miopen_softmax(rows=%lld, cols=%lld, "
+  MOCK_PRINT("[MOCK] hip_softmax_typed(rows=%lld, cols=%lld, "
              "data_type=%s(%lld))\n",
              (long long)rows, (long long)cols,
              hipdnn_ep_datatype_name(data_type), (long long)data_type);
+  return 0;
+}
+
+// Signature must match lib/Runtime/real/activation.cpp.
+extern "C" int hip_scaled_masked_softmax(
+    RuntimeState *state, const void *input, const void *row_ids,
+    const void *col_ids, void *output, int64_t outer, int64_t rows,
+    int64_t cols, int64_t row_ids_len, int64_t col_ids_len,
+    int64_t elem_size_bytes, float scale, float fill) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in hip_scaled_masked_softmax\n");
+    return -1;
+  }
+  (void)input;
+  (void)row_ids;
+  (void)col_ids;
+  (void)output;
+  MOCK_PRINT("[MOCK] hip_scaled_masked_softmax(outer=%lld, rows=%lld, "
+             "cols=%lld, row_ids=%lld, col_ids=%lld, elem_size=%lld, "
+             "scale=%g, fill=%g)\n",
+             (long long)outer, (long long)rows, (long long)cols,
+             (long long)row_ids_len, (long long)col_ids_len,
+             (long long)elem_size_bytes, (double)scale, (double)fill);
   return 0;
 }
 
@@ -3303,5 +3326,16 @@ int wrap_swiglu_promoted(RuntimeState *state, void *gate, void *up,
     return -1;
   MOCK_PRINT("[MOCK] wrap_swiglu_promoted(num_elements=%lld)\n",
              (long long)num_elements);
+  return 0;
+}
+
+int wrap_swiglu_clamped(RuntimeState *state, void *gate, void *up, void *output,
+                        int64_t num_elements, int64_t data_type, float alpha,
+                        float beta, float limit) {
+  if (!state || !gate || !up || !output)
+    return -1;
+  MOCK_PRINT("[MOCK] wrap_swiglu_clamped(num_elements=%lld, data_type=%lld, "
+             "alpha=%g, beta=%g, limit=%g)\n",
+             (long long)num_elements, (long long)data_type, alpha, beta, limit);
   return 0;
 }

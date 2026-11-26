@@ -46,7 +46,7 @@ func.func @gemm_no_c(%ctx: !hip.context, %a: tensor<4x8xf32>,
 
 // transA swaps A's dims before the matmul; A is [K, M] on the way in.
 // CHECK-LABEL: func.func @gemm_trans_a
-// CHECK: %[[AT:.*]] = tosa.transpose %arg1 {perms = array<i32: 1, 0>} : (tensor<8x4xf32>) -> tensor<4x8xf32>
+// CHECK: %[[AT:.*]] = tosa.transpose %arg1 perms([1, 0]) : (tensor<8x4xf32>) -> tensor<4x8xf32>
 // CHECK: tosa.reshape %[[AT]], {{.*}} -> tensor<1x4x8xf32>
 // CHECK: tosa.matmul
 // CHECK-NOT: hip.gemm
@@ -62,7 +62,7 @@ func.func @gemm_trans_a(%ctx: !hip.context, %a: tensor<8x4xf32>,
 
 // transB swaps B's dims; B is [N, K] on the way in.
 // CHECK-LABEL: func.func @gemm_trans_b
-// CHECK: %[[BT:.*]] = tosa.transpose %arg2 {perms = array<i32: 1, 0>} : (tensor<16x8xf32>) -> tensor<8x16xf32>
+// CHECK: %[[BT:.*]] = tosa.transpose %arg2 perms([1, 0]) : (tensor<16x8xf32>) -> tensor<8x16xf32>
 // CHECK: tosa.reshape %[[BT]], {{.*}} -> tensor<1x8x16xf32>
 // CHECK: tosa.matmul
 // CHECK-NOT: hip.gemm
@@ -78,9 +78,9 @@ func.func @gemm_trans_b(%ctx: !hip.context, %a: tensor<4x8xf32>,
 
 // alpha scales the product and beta scales C, each as a splat multiply.
 // CHECK-LABEL: func.func @gemm_alpha_beta
-// CHECK: %[[ALPHA:.*]] = "tosa.const"() <{values = dense<2.000000e+00> : tensor<4x16xf32>}>
+// CHECK: %[[ALPHA:.*]] = tosa.const values(dense<2.000000e+00> : tensor<4x16xf32>)
 // CHECK: %[[SCALED:.*]] = tosa.mul {{.*}}, %[[ALPHA]]
-// CHECK: %[[BETA:.*]] = "tosa.const"() <{values = dense<5.000000e-01> : tensor<1x16xf32>}>
+// CHECK: %[[BETA:.*]] = tosa.const values(dense<5.000000e-01> : tensor<1x16xf32>)
 // CHECK: %[[CB:.*]] = tosa.mul {{.*}}, %[[BETA]]
 // CHECK: tosa.add %[[SCALED]], %[[CB]]
 // CHECK-NOT: hip.gemm
@@ -185,9 +185,9 @@ func.func @gemm_f64(%ctx: !hip.context, %a: tensor<4x8xf64>,
 // CHECK-LABEL: func.func @gemm_f16_alpha
 // CHECK: %[[MM:.*]] = tosa.matmul
 // CHECK: %[[R:.*]] = tosa.reshape %[[MM]]
-// CHECK: %[[UP:.*]] = tosa.cast %[[R]] : (tensor<4x16xf16>) -> tensor<4x16xf32>
+// CHECK: %[[UP:.*]] = tosa.cast %[[R]] input_unsigned(false) : (tensor<4x16xf16>) -> tensor<4x16xf32>
 // CHECK: %[[MUL:.*]] = tosa.mul %[[UP]]
-// CHECK: tosa.cast %[[MUL]] : (tensor<4x16xf32>) -> tensor<4x16xf16>
+// CHECK: tosa.cast %[[MUL]] input_unsigned(false) : (tensor<4x16xf32>) -> tensor<4x16xf16>
 func.func @gemm_f16_alpha(%ctx: !hip.context, %a: tensor<4x8xf16>,
                           %b: tensor<8x16xf16>, %init: tensor<4x16xf16>)
     -> tensor<4x16xf16> attributes {rock.kernel} {

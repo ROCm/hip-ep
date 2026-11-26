@@ -5,6 +5,8 @@
 
 #include "HipToLLVMUtils.h"
 
+#include <limits>
+
 namespace mlir {
 namespace hip {
 namespace {
@@ -459,6 +461,8 @@ struct PowOpLowering : public ConvertOpToLLVMPattern<PowOp> {
 
 // hip.swiglu(ctx, gate, up, output)
 //   -> wrap_swiglu(state, gate, up, output, num_elements, data_type)
+// The clamped form (activation_alpha / activation_beta / swiglu_limit):
+//   -> wrap_swiglu_clamped(<same>, alpha, beta, limit : f32)
 struct SwigluOpLowering : public ConvertOpToLLVMPattern<SwigluOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -508,6 +512,37 @@ struct SwigluOpLowering : public ConvertOpToLLVMPattern<SwigluOp> {
           op, "promoted SwiGLU requires f16 input/output");
 
     Value dataTypeVal = createI64Const(dataType);
+    if (op.isClamped()) {
+      // wrap_swiglu_clamped(..., alpha, beta, limit : f32); limit 0 (no
+      // clamp) is passed as +inf.
+      Type f32Type = rewriter.getF32Type();
+      auto createF32Const = [&](float value) -> Value {
+        return LLVM::ConstantOp::create(rewriter, loc, f32Type,
+                                        rewriter.getF32FloatAttr(value));
+      };
+      const float limit = op.getSwigluLimit().convertToFloat();
+      SmallVector<Type, 9> clampedTypes = {ptrType, ptrType, ptrType,
+                                           ptrType, i64Type, i64Type,
+                                           f32Type, f32Type, f32Type};
+      FailureOr<LLVM::LLVMFuncOp> clampedFn = LLVM::lookupOrCreateFn(
+          rewriter, module, kWrapSwigluClamped, clampedTypes, i32Type);
+      if (failed(clampedFn))
+        return failure();
+      SmallVector<Value, 9> clampedArgs = {
+          statePtr,
+          gatePtr,
+          upPtr,
+          outputPtr,
+          numElements,
+          dataTypeVal,
+          createF32Const(op.getActivationAlpha().convertToFloat()),
+          createF32Const(op.getActivationBeta().convertToFloat()),
+          createF32Const(
+              limit != 0.0f ? limit : std::numeric_limits<float>::infinity())};
+      LLVM::CallOp::create(rewriter, loc, *clampedFn, clampedArgs);
+      rewriter.eraseOp(op);
+      return success();
+    }
     SmallVector<Type, 6> paramTypes = {ptrType, ptrType, ptrType,
                                        ptrType, i64Type, i64Type};
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
@@ -555,12 +590,11 @@ struct SiluOpLowering : public ConvertOpToLLVMPattern<SiluOp> {
 };
 
 // hip.miopen.softmax(%handle) ins(%input) outs(%output)
-//   -> hip_miopen_softmax(handle, input, output, rows, cols, elem_size_bytes)
-// Rank-generic: softmax over last dim. For 3D [B,S,D], rows = B*S, cols = D.
-// elem_size_bytes is derived from the MemRef element type (2=fp16, 4=fp32)
-// and passed to the runtime so it can copy + dispatch with the right dtype.
-// Previously this was not passed, causing fp32 Softmax inputs (e.g. Qwen VLM
-// attention scores) to be misread as fp16, producing completely wrong outputs.
+//   -> hip_softmax_typed(handle, input, output, rows, cols, data_type)
+// Rank-generic: softmax over last dim. For 3D [B,S,D], rows = B*S, cols = D;
+// a rank-1 input is a single row. data_type is the HIPDNN_EP_DATATYPE_* code
+// of the element type: f16 and bf16 have the same size but need different
+// kernels, so the byte size alone cannot select one.
 struct MiopenSoftmaxOpLowering
     : public ConvertOpToLLVMPattern<MiopenSoftmaxOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -577,7 +611,7 @@ struct MiopenSoftmaxOpLowering
     SmallVector<Type> paramTypes = {ptrType,   ptrType,   ptrType,
                                     indexType, indexType, indexType};
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kMiopenSoftmax, paramTypes, voidType);
+        rewriter, module, kSoftmaxTyped, paramTypes, voidType);
     if (failed(funcOp))
       return failure();
 
@@ -585,29 +619,24 @@ struct MiopenSoftmaxOpLowering
     int rank = inputMemrefType.getRank();
     MemRefDescriptor inputDesc(adaptor.getInput());
 
-    // cols = last dim; rows = product of all other dims
+    Type elemType = inputMemrefType.getElementType();
+    if (!elemType.isF16() && !elemType.isBF16() && !elemType.isF32())
+      return op.emitOpError("hip_softmax_typed: unsupported element type; "
+                            "only fp16/bf16/fp32 are supported");
+    if (rank < 1)
+      return op.emitOpError("hip_softmax_typed: expected rank >= 1");
+
+    // cols = last dim; rows = product of all other dims (1 for rank 1).
     Value cols = inputDesc.size(rewriter, loc, rank - 1);
-    Value rows = inputDesc.size(rewriter, loc, 0);
-    for (int i = 1; i < rank - 1; i++)
+    Value rows = LLVM::ConstantOp::create(
+        rewriter, loc, indexType, rewriter.getIntegerAttr(indexType, 1));
+    for (int i : llvm::seq(0, rank - 1))
       rows = LLVM::MulOp::create(rewriter, loc, rows,
                                  inputDesc.size(rewriter, loc, i));
 
-    // Determine element size in bytes from the MemRef element type.
-    // Only fp16/bf16 (2 bytes) and fp32 (4 bytes) are supported by the
-    // runtime kernels.  Unsupported types are rejected here at compile time
-    // rather than silently producing wrong outputs at runtime.
-    Type elemType = inputMemrefType.getElementType();
-    int64_t elemSizeBytes;
-    if (elemType.isF16() || elemType.isBF16())
-      elemSizeBytes = 2;
-    else if (elemType.isF32())
-      elemSizeBytes = 4;
-    else
-      return op.emitOpError("hip_miopen_softmax: unsupported element type; "
-                            "only fp16/bf16/fp32 are supported");
-    Value elemSize = LLVM::ConstantOp::create(
+    Value dataType = LLVM::ConstantOp::create(
         rewriter, loc, indexType,
-        rewriter.getIntegerAttr(indexType, elemSizeBytes));
+        rewriter.getIntegerAttr(indexType, getHipdnnDataType(elemType)));
 
     SmallVector<Value> args = {
         adaptor.getCtx(),
@@ -615,7 +644,76 @@ struct MiopenSoftmaxOpLowering
         extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc),
         rows,
         cols,
-        elemSize};
+        dataType};
+
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+// hip.scaled_masked_softmax(ctx, input, row_ids, col_ids, output)
+//   -> hip_scaled_masked_softmax(state, input, row_ids, col_ids, output,
+//                                outer, R, C, row_ids_len, col_ids_len,
+//                                elem_size_bytes, scale, fill)
+// R and C are the last two input axes and outer is the product of the rest.
+struct ScaledMaskedSoftmaxOpLowering
+    : public ConvertOpToLLVMPattern<ScaledMaskedSoftmaxOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(ScaledMaskedSoftmaxOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type indexType = getIndexType();
+    Type f32Type = rewriter.getF32Type();
+
+    auto inputType = cast<MemRefType>(op.getInput().getType());
+    int rank = inputType.getRank();
+    int64_t elemSizeBytes = inputType.getElementType().isF16() ? 2 : 4;
+
+    SmallVector<Type> paramTypes = {ptrType,   ptrType,   ptrType,   ptrType,
+                                    ptrType,   indexType, indexType, indexType,
+                                    indexType, indexType, indexType, f32Type,
+                                    f32Type};
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kScaledMaskedSoftmax, paramTypes, getVoidType());
+    if (failed(funcOp))
+      return failure();
+
+    MemRefDescriptor inputDesc(adaptor.getInput());
+    Value cols = inputDesc.size(rewriter, loc, rank - 1);
+    Value rows = inputDesc.size(rewriter, loc, rank - 2);
+    Value outer = createIndexAttrConstant(rewriter, loc, indexType, 1);
+    for (int i = 0; i < rank - 2; ++i)
+      outer = LLVM::MulOp::create(rewriter, loc, outer,
+                                  inputDesc.size(rewriter, loc, i));
+    Value rowIdsLen =
+        MemRefDescriptor(adaptor.getRowIds()).size(rewriter, loc, 0);
+    Value colIdsLen =
+        MemRefDescriptor(adaptor.getColIds()).size(rewriter, loc, 0);
+    auto f32Const = [&](llvm::APFloat value) -> Value {
+      return LLVM::ConstantOp::create(
+          rewriter, loc, f32Type,
+          rewriter.getF32FloatAttr(value.convertToFloat()));
+    };
+
+    SmallVector<Value> args = {
+        adaptor.getCtx(),
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getRowIds(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getColIds(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc),
+        outer,
+        rows,
+        cols,
+        rowIdsLen,
+        colIdsLen,
+        createIndexAttrConstant(rewriter, loc, indexType, elemSizeBytes),
+        f32Const(op.getScale()),
+        f32Const(op.getFill())};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
@@ -719,8 +817,8 @@ void populateActivationLoweringPatterns(const LLVMTypeConverter &converter,
                                         RewritePatternSet &patterns) {
   patterns.add<SoftplusOpLowering, GeluOpLowering, LeakyReluOpLowering,
                PReluOpLowering, LRNOpLowering, SwishOpLowering, PowOpLowering,
-               SwigluOpLowering, SiluOpLowering, MiopenSoftmaxOpLowering>(
-      converter);
+               SwigluOpLowering, SiluOpLowering, MiopenSoftmaxOpLowering,
+               ScaledMaskedSoftmaxOpLowering>(converter);
 }
 
 } // namespace hip

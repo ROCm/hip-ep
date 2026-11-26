@@ -8,8 +8,8 @@
  *   y = scale[c] * (x - mean) * rsqrt(var + epsilon) + bias[c]
  *
  * Layout: input/output are (N, C, spatial) row-major. One block per (n, c)
- * row; two-pass FP32 (or FP64 for f64) reduction, matching the LayerNorm
- * small-N kernel.
+ * row; FP32 (or FP64 for f64) Welford reduction keeps the mean and variance
+ * stable when |mean| >> stddev.
  */
 
 #include "hip_custom_kernels.h"
@@ -75,51 +75,58 @@ __global__ void hip_instance_norm_kernel(const T *__restrict__ input,
   const T *x_row = input + row * spatial;
   T *y_row = output + row * spatial;
 
-  __shared__ Compute s_sum;
-  __shared__ Compute s_sumsq;
-  __shared__ Compute s_mean;
   __shared__ Compute s_inv_std;
-  __shared__ Compute s_reduce[kInstanceNormBlockSize];
+  __shared__ Compute s_mean[kInstanceNormBlockSize];
+  __shared__ Compute s_m2[kInstanceNormBlockSize];
+  __shared__ int64_t s_count[kInstanceNormBlockSize];
 
-  Compute local_sum = Compute(0);
-  Compute local_sumsq = Compute(0);
+  Compute local_mean = Compute(0);
+  Compute local_m2 = Compute(0);
+  int64_t local_count = 0;
   for (int64_t i = threadIdx.x; i < spatial; i += blockDim.x) {
-    Compute v = Tr::load(x_row[i]);
-    local_sum += v;
-    local_sumsq += v * v;
+    Compute value = Tr::load(x_row[i]);
+    ++local_count;
+    Compute delta = value - local_mean;
+    local_mean += delta / static_cast<Compute>(local_count);
+    local_m2 += delta * (value - local_mean);
   }
 
-  s_reduce[threadIdx.x] = local_sum;
+  s_mean[threadIdx.x] = local_mean;
+  s_m2[threadIdx.x] = local_m2;
+  s_count[threadIdx.x] = local_count;
   __syncthreads();
+  // Merge the per-thread Welford statistics using Chan's formula.
   for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-    if (threadIdx.x < stride)
-      s_reduce[threadIdx.x] += s_reduce[threadIdx.x + stride];
+    if (threadIdx.x < stride) {
+      int64_t count_a = s_count[threadIdx.x];
+      int64_t count_b = s_count[threadIdx.x + stride];
+      if (count_b != 0) {
+        if (count_a == 0) {
+          s_mean[threadIdx.x] = s_mean[threadIdx.x + stride];
+          s_m2[threadIdx.x] = s_m2[threadIdx.x + stride];
+          s_count[threadIdx.x] = count_b;
+        } else {
+          Compute count = static_cast<Compute>(count_a + count_b);
+          Compute delta = s_mean[threadIdx.x + stride] - s_mean[threadIdx.x];
+          Compute weight_b = static_cast<Compute>(count_b) / count;
+          s_mean[threadIdx.x] += delta * weight_b;
+          s_m2[threadIdx.x] +=
+              s_m2[threadIdx.x + stride] +
+              delta * delta * static_cast<Compute>(count_a) * weight_b;
+          s_count[threadIdx.x] = count_a + count_b;
+        }
+      }
+    }
     __syncthreads();
   }
-  if (threadIdx.x == 0)
-    s_sum = s_reduce[0];
-  __syncthreads();
 
-  s_reduce[threadIdx.x] = local_sumsq;
-  __syncthreads();
-  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-    if (threadIdx.x < stride)
-      s_reduce[threadIdx.x] += s_reduce[threadIdx.x + stride];
-    __syncthreads();
-  }
   if (threadIdx.x == 0) {
-    s_sumsq = s_reduce[0];
-    Compute mean = s_sum / static_cast<Compute>(spatial);
-    Compute var =
-        s_sumsq / static_cast<Compute>(spatial) - mean * mean;
-    if (var < Compute(0))
-      var = Compute(0);
-    s_mean = mean;
+    Compute var = s_m2[0] / static_cast<Compute>(spatial);
     s_inv_std = Tr::rsqrt_fn(var + static_cast<Compute>(epsilon));
   }
   __syncthreads();
 
-  Compute mean = s_mean;
+  Compute mean = s_mean[0];
   Compute inv_std = s_inv_std;
   Compute s = Tr::load(scale[channel]);
   Compute b = Tr::load(bias[channel]);
