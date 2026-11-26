@@ -451,7 +451,7 @@ int softmax_pow2_ceil(int n) {
 template <typename T>
 int launch_masked_wave(hipStream_t stream, const T* in, T* out, int rows,
                        int cols, int wave) {
-  const int grid = (rows + kWavesPerBlock - 1) / kWavesPerBlock;
+  const int grid = 1 + (rows - 1) / kWavesPerBlock;
   const int block = kWavesPerBlock * wave;
   switch (softmax_pow2_ceil((cols + wave - 1) / wave)) {
   case 1:
