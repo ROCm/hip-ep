@@ -86,10 +86,14 @@ bool loadProblemCacheLut(const uint8_t *data, size_t size, ProblemCacheLut &lut,
 
 // An external table: the LUT JSON document that `hip-rocmlir-compiler
 // --enable-problem-cache-rw` writes (`schema_version`, `gpu_arch`,
-// `kernel_abi`, `weight_m/n/k`, `configs`, `points`, `fallbacks`). It applies
-// the same checks and skips the same rows as the FlatBuffer overload, so the
-// file loads without a `.fb` conversion. Absent `schema_version` and weights
-// take the `.fbs` defaults (1, 1.0). `kernel_abi` is required.
+// `kernel_abi`, `weight_m/n/k`, `configs`, `points`, `fallbacks`). It checks
+// the document as mergeProblemCacheJson does, so the loader and the rewrite
+// accept and refuse the same files: a missing `configs` or `points`, or a
+// record that cannot be read, is an error rather than a skipped row. Rows whose
+// perfConfig is not gemm:/attn: are valid and skipped, as in the FlatBuffer
+// overload. Absent `schema_version`, `gpu_arch` and weights take the `.fbs`
+// defaults (1, any GPU, 1.0); present ones must have the right type.
+// `kernel_abi` is required.
 bool loadProblemCacheLutJson(std::string_view text, ProblemCacheLut &lut,
                              std::string &error);
 

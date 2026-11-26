@@ -450,7 +450,7 @@ and `int4-weights` are the fusion switches.
   compiles, so unlike the dumps its path is not numbered. It needs autotune on;
   with `HIP_ROCMLIR_SKIP_BENCHMARKING` it is ignored and says so. The file is
   checked before the compile: one the rewrite would refuse (not a LUT, another
-  `gpu_arch`, malformed, or a `.fb`) is reported, then neither read nor
+  `gpu_arch`, malformed, read-only, or a `.fb`) is reported, then neither read nor
   updated, and the compile goes on. A failed write is reported the same way.
 - `HIPDNN_EP_ROCMLIR_FUSION_REPORT=<file>` (pipeline option `report`)
   appends one JSON line for each kernel and each host function. Two runs make

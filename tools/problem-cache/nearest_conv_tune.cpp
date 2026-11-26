@@ -14,8 +14,11 @@
 #include "llvm/Support/JSON.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <cerrno>
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -23,7 +26,19 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <system_error>
 #include <utility>
+
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#include <process.h>
+#include <share.h>
+#include <sys/stat.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 namespace mlir {
 namespace hip {
@@ -916,11 +931,121 @@ bool readLutHeaderJson(const llvm::json::Object &root, ProblemCacheLut &lut,
     error = "rocmlir LUT has a non-positive or non-finite distance weight";
     return false;
   }
-  if (std::optional<llvm::StringRef> arch = root.getString("gpu_arch"))
+  if (root.get("gpu_arch") != nullptr) {
+    // A gpu_arch that is not a string would otherwise read as absent, and an
+    // absent arch matches every GPU.
+    std::optional<llvm::StringRef> arch = root.getString("gpu_arch");
+    if (!arch) {
+      error = "rocmlir LUT gpu_arch is not a string";
+      return false;
+    }
     lut.gpuArch = arch->str();
+  }
   lut.weightM = weightM;
   lut.weightN = weightN;
   lut.weightK = weightK;
+  return true;
+}
+
+// The rows of a LUT document. The objects point into the parsed document,
+// which must outlive them.
+struct LutPointRecord {
+  const llvm::json::Object *object = nullptr;
+  std::string problem;
+  size_t config = 0;
+};
+struct LutFallbackRecord {
+  const llvm::json::Object *object = nullptr;
+  size_t config = 0;
+};
+struct LutRows {
+  std::vector<std::string> perfConfigs;
+  std::vector<LutPointRecord> points;
+  std::vector<LutFallbackRecord> fallbacks;
+  bool hasFallbacks = false;
+};
+
+// Reads `configs`, `points` and `fallbacks` and checks every record. The
+// loader and the rewrite both read the rows through here, so they accept and
+// refuse the same documents: a record that cannot be read is an error, never
+// skipped. A point whose perfConfig is not gemm:/attn: is still a valid row;
+// only the lookup ignores it.
+bool readLutRows(const llvm::json::Object &root, LutRows &rows,
+                 std::string &error) {
+  const auto malformed = [&error](const std::string &what) {
+    error = "problem cache is malformed: " + what;
+    return false;
+  };
+  const llvm::json::Array *configs = root.getArray("configs");
+  const llvm::json::Array *points = root.getArray("points");
+  if (configs == nullptr)
+    return malformed("`configs` is missing or not an array");
+  if (points == nullptr)
+    return malformed("`points` is missing or not an array");
+
+  rows.perfConfigs.reserve(configs->size());
+  for (size_t i = 0; i < configs->size(); ++i) {
+    const llvm::json::Object *object = (*configs)[i].getAsObject();
+    std::optional<llvm::StringRef> perfConfig =
+        object != nullptr ? object->getString("perf_config") : std::nullopt;
+    if (!perfConfig)
+      return malformed("configs[" + std::to_string(i) +
+                       "] is not an object with a string `perf_config`");
+    rows.perfConfigs.push_back(perfConfig->str());
+  }
+
+  const auto configIndexOf = [&](const llvm::json::Object &object,
+                                 const std::string &where, size_t &config) {
+    std::optional<int64_t> index = object.getInteger("config");
+    if (!index)
+      return malformed(where + " has no integer `config`");
+    if (*index < 0 || static_cast<size_t>(*index) >= rows.perfConfigs.size())
+      return malformed(where + " has `config` " + std::to_string(*index) +
+                       ", outside the " +
+                       std::to_string(rows.perfConfigs.size()) + " configs");
+    config = static_cast<size_t>(*index);
+    return true;
+  };
+  rows.points.reserve(points->size());
+  for (size_t i = 0; i < points->size(); ++i) {
+    const std::string where = "points[" + std::to_string(i) + "]";
+    LutPointRecord record;
+    record.object = (*points)[i].getAsObject();
+    if (record.object == nullptr)
+      return malformed(where + " is not an object");
+    std::optional<llvm::StringRef> problem =
+        record.object->getString("problem");
+    if (!problem)
+      return malformed(where + " has no string `problem`");
+    record.problem = problem->str();
+    if (!configIndexOf(*record.object, where, record.config))
+      return false;
+    for (const char *dim : {"m", "n", "k"}) {
+      const llvm::json::Value *value = record.object->get(dim);
+      if (value != nullptr && !value->getAsInteger())
+        return malformed(where + " has a non-integer `m`, `n` or `k`");
+    }
+    rows.points.push_back(std::move(record));
+  }
+
+  // `fallbacks` is optional, but one that is present is index-linked to
+  // `configs` like the points.
+  if (const llvm::json::Value *value = root.get("fallbacks")) {
+    const llvm::json::Array *array = value->getAsArray();
+    if (array == nullptr)
+      return malformed("`fallbacks` is not an array");
+    rows.hasFallbacks = true;
+    for (size_t i = 0; i < array->size(); ++i) {
+      const std::string where = "fallbacks[" + std::to_string(i) + "]";
+      LutFallbackRecord record;
+      record.object = (*array)[i].getAsObject();
+      if (record.object == nullptr)
+        return malformed(where + " is not an object");
+      if (!configIndexOf(*record.object, where, record.config))
+        return false;
+      rows.fallbacks.push_back(record);
+    }
+  }
   return true;
 }
 
@@ -942,35 +1067,15 @@ bool loadProblemCacheLutJson(std::string_view text, ProblemCacheLut &lut,
     return false;
   }
 
-  const llvm::json::Array *configs = root->getArray("configs");
-  const llvm::json::Array *points = root->getArray("points");
-  if (configs == nullptr || points == nullptr)
-    return true;
-
-  // perf_config per config index. A config with no string stays empty, and the
-  // points that name it are skipped, as in the FlatBuffer overload.
-  std::vector<std::string> perfConfigs;
-  perfConfigs.reserve(configs->size());
-  for (const llvm::json::Value &config : *configs) {
-    const llvm::json::Object *object = config.getAsObject();
-    std::optional<llvm::StringRef> perfConfig =
-        object != nullptr ? object->getString("perf_config") : std::nullopt;
-    perfConfigs.push_back(perfConfig ? perfConfig->str() : std::string());
+  LutRows rows;
+  if (!readLutRows(*root, rows, error)) {
+    lut = {};
+    return false;
   }
-
-  for (const llvm::json::Value &point : *points) {
-    const llvm::json::Object *object = point.getAsObject();
-    if (object == nullptr)
-      continue;
-    std::optional<llvm::StringRef> problem = object->getString("problem");
-    std::optional<int64_t> index = object->getInteger("config");
-    if (!problem || !index || *index < 0 ||
-        static_cast<size_t>(*index) >= perfConfigs.size())
-      continue;
-    const std::string &solution = perfConfigs[static_cast<size_t>(*index)];
-    if (solution.empty() || !isConvSolution(solution))
-      continue;
-    lut.entries.push_back({problem->str(), solution});
+  for (const LutPointRecord &point : rows.points) {
+    const std::string &solution = rows.perfConfigs[point.config];
+    if (isConvSolution(solution))
+      lut.entries.push_back({point.problem, solution});
   }
   return true;
 }
@@ -1060,14 +1165,6 @@ bool mergeProblemCacheJson(std::string_view existing, std::string_view gpuArch,
   bool hadFallbacks = false;
   llvm::json::Object root;
 
-  // An existing document is checked in full before anything is built from it.
-  // The rewrite replaces the file, so a record it cannot represent has to stop
-  // the rewrite, not be dropped from the result.
-  const auto malformed = [&error](const std::string &what) {
-    error = "problem cache is malformed: " + what + "; refusing to rewrite it";
-    return false;
-  };
-
   if (isBlank(existing)) {
     root["schema_version"] = static_cast<int64_t>(1);
     root["gpu_arch"] = std::string(gpuArch);
@@ -1092,93 +1189,45 @@ bool mergeProblemCacheJson(std::string_view existing, std::string_view gpuArch,
               std::string(gpuArch) + "; refusing to rewrite it";
       return false;
     }
-    root = *parsedRoot;
-
-    // The loader reads a document with no `configs` or `points` as an empty
-    // table. A rewrite would then build both from the winners alone and
-    // replace whatever those keys held, so they must be real arrays here.
-    const llvm::json::Array *configs = parsedRoot->getArray("configs");
-    const llvm::json::Array *points = parsedRoot->getArray("points");
-    if (configs == nullptr)
-      return malformed("`configs` is missing or not an array");
-    if (points == nullptr)
-      return malformed("`points` is missing or not an array");
-
-    std::vector<std::string> perfConfigs;
-    perfConfigs.reserve(configs->size());
-    for (size_t i = 0; i < configs->size(); ++i) {
-      const llvm::json::Object *object = (*configs)[i].getAsObject();
-      std::optional<llvm::StringRef> perfConfig =
-          object != nullptr ? object->getString("perf_config") : std::nullopt;
-      if (!perfConfig)
-        return malformed("configs[" + std::to_string(i) +
-                         "] is not an object with a string `perf_config`");
-      perfConfigs.push_back(perfConfig->str());
+    // An existing document is checked in full before anything is built from
+    // it. The rewrite replaces the file, so a record it cannot represent has
+    // to stop the rewrite, not be dropped from the result. The loader reads
+    // the same rows, so a document with no `configs` or `points` is refused by
+    // both instead of being rebuilt from the winners alone.
+    LutRows parsed;
+    if (!readLutRows(*parsedRoot, parsed, error)) {
+      error += "; refusing to rewrite it";
+      return false;
     }
+    root = *parsedRoot;
 
     // Every point is kept, whatever kind of perfConfig it names: the loader
     // skips points whose perfConfig is not gemm:/attn:, but a rewrite must not
     // delete them.
-    const auto configIndexOf = [&](const llvm::json::Object &object,
-                                   const std::string &where,
-                                   std::string &perfConfig) {
-      std::optional<int64_t> index = object.getInteger("config");
-      if (!index)
-        return malformed(where + " has no integer `config`");
-      if (*index < 0 || static_cast<size_t>(*index) >= perfConfigs.size())
-        return malformed(where + " has `config` " + std::to_string(*index) +
-                         ", outside the " + std::to_string(perfConfigs.size()) +
-                         " configs");
-      perfConfig = perfConfigs[static_cast<size_t>(*index)];
-      return true;
-    };
-    for (size_t i = 0; i < points->size(); ++i) {
-      const std::string where = "points[" + std::to_string(i) + "]";
-      const llvm::json::Object *object = (*points)[i].getAsObject();
-      if (object == nullptr)
-        return malformed(where + " is not an object");
-      std::optional<llvm::StringRef> problem = object->getString("problem");
-      if (!problem)
-        return malformed(where + " has no string `problem`");
+    rows.reserve(parsed.points.size());
+    for (const LutPointRecord &point : parsed.points) {
       StoredPoint stored;
-      stored.problem = problem->str();
-      if (!configIndexOf(*object, where, stored.perfConfig))
-        return false;
-      // m, n and k are advisory. Each one that is present must be an integer
-      // and is kept as it is. Each one that is absent is worked out from the
-      // problem string, so a point with only some of them keeps the ones it
-      // has.
-      const llvm::json::Value *dims[3] = {object->get("m"), object->get("n"),
-                                          object->get("k")};
-      for (const llvm::json::Value *dim : dims)
-        if (dim != nullptr && !dim->getAsInteger())
-          return malformed(where + " has a non-integer `m`, `n` or `k`");
-      implicitGemmDims(problem->str(), stored.m, stored.n, stored.k);
+      stored.problem = point.problem;
+      stored.perfConfig = parsed.perfConfigs[point.config];
+      // m, n and k are advisory. Each one that is present is kept as it is.
+      // Each one that is absent is worked out from the problem string, so a
+      // point with only some of them keeps the ones it has.
+      implicitGemmDims(point.problem, stored.m, stored.n, stored.k);
+      const char *names[3] = {"m", "n", "k"};
       int64_t *outDims[3] = {&stored.m, &stored.n, &stored.k};
       for (int i = 0; i < 3; ++i)
-        if (dims[i] != nullptr)
-          *outDims[i] = *dims[i]->getAsInteger();
+        if (std::optional<int64_t> dim = point.object->getInteger(names[i]))
+          *outDims[i] = *dim;
       rows.push_back(std::move(stored));
     }
 
-    // `fallbacks` is optional, but one that is present is index-linked to
-    // `configs` and has to be renumbered with it.
-    if (const llvm::json::Value *value = parsedRoot->get("fallbacks")) {
-      const llvm::json::Array *array = value->getAsArray();
-      if (array == nullptr)
-        return malformed("`fallbacks` is not an array");
-      hadFallbacks = true;
-      for (size_t i = 0; i < array->size(); ++i) {
-        const std::string where = "fallbacks[" + std::to_string(i) + "]";
-        const llvm::json::Object *object = (*array)[i].getAsObject();
-        if (object == nullptr)
-          return malformed(where + " is not an object");
-        StoredFallback fallback;
-        if (!configIndexOf(*object, where, fallback.perfConfig))
-          return false;
-        fallback.record = *object;
-        fallbacks.push_back(std::move(fallback));
-      }
+    // A fallback is index-linked to `configs` and is renumbered with it.
+    hadFallbacks = parsed.hasFallbacks;
+    for (const LutFallbackRecord &record : parsed.fallbacks) {
+      StoredFallback fallback;
+      fallback.record = *record.object;
+      fallback.perfConfig = parsed.perfConfigs[record.config];
+      fallbacks.push_back(std::move(fallback));
     }
   }
 
@@ -1346,6 +1395,20 @@ bool readRewriteTarget(const std::string &path,
   return true;
 }
 
+// The part of a temporary's name after `.tmp`: `<pid>-<counter>`, or the
+// digits alone that earlier builds wrote.
+bool isTemporarySuffix(std::string_view suffix) {
+  const auto digits = [](std::string_view text) {
+    return !text.empty() &&
+           std::all_of(text.begin(), text.end(),
+                       [](unsigned char c) { return std::isdigit(c) != 0; });
+  };
+  const size_t dash = suffix.find('-');
+  if (dash == std::string_view::npos)
+    return digits(suffix);
+  return digits(suffix.substr(0, dash)) && digits(suffix.substr(dash + 1));
+}
+
 // Removes temporary files that an earlier rewrite of \p target left behind
 // when it was killed between writing and renaming. Only old ones: a recent
 // one may belong to a rewrite that another process is doing right now.
@@ -1362,15 +1425,115 @@ void removeStaleTemporaries(const std::filesystem::path &target) {
     const std::string name = it->path().filename().string();
     if (name.size() <= prefix.size() || name.compare(0, prefix.size(), prefix))
       continue;
-    if (!std::all_of(name.begin() + static_cast<std::ptrdiff_t>(prefix.size()),
-                     name.end(),
-                     [](unsigned char c) { return std::isdigit(c) != 0; }))
+    if (!isTemporarySuffix(std::string_view(name).substr(prefix.size())))
       continue;
     std::error_code fileEc;
     const auto written = fs::last_write_time(it->path(), fileEc);
     if (!fileEc && now - written > kStaleAfter)
       fs::remove(it->path(), fileEc);
   }
+}
+
+// Whether this process may write \p target itself. The rewrite renames a new
+// file over it, which needs write access to the directory only, so a file that
+// was made read-only would otherwise be replaced anyway.
+bool isWritable(const std::filesystem::path &target) {
+#ifdef _WIN32
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  const fs::perms perms = fs::status(target, ec).permissions();
+  return !ec && (perms & fs::perms::owner_write) != fs::perms::none;
+#else
+  return ::access(target.c_str(), W_OK) == 0;
+#endif
+}
+
+std::string errnoMessage() { return std::generic_category().message(errno); }
+
+// Creates \p path, which must not exist yet, writes \p text to it and flushes
+// it to the disk, so that a crash after the rename cannot leave an empty or
+// partial table in its place. \p exists is set when the name was taken. On any
+// other failure the caller removes the file.
+bool writeNewFile(const std::filesystem::path &path, std::string_view text,
+                  bool &exists, std::string &error) {
+  exists = false;
+#ifdef _WIN32
+  int fd = -1;
+  if (_wsopen_s(&fd, path.c_str(),
+                _O_WRONLY | _O_CREAT | _O_EXCL | _O_BINARY | _O_NOINHERIT,
+                _SH_DENYNO, _S_IREAD | _S_IWRITE) != 0) {
+    exists = errno == EEXIST;
+    error = errnoMessage();
+    return false;
+  }
+  const auto writeSome = [fd](const char *data, size_t size) {
+    return static_cast<long long>(_write(
+        fd, data, static_cast<unsigned>(std::min<size_t>(size, INT_MAX))));
+  };
+  const auto sync = [fd] { return _commit(fd) == 0; };
+  const auto closeFile = [fd] { return _close(fd) == 0; };
+#else
+  const int fd =
+      ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0666);
+  if (fd < 0) {
+    exists = errno == EEXIST;
+    error = errnoMessage();
+    return false;
+  }
+  const auto writeSome = [fd](const char *data, size_t size) {
+    return static_cast<long long>(
+        ::write(fd, data, std::min<size_t>(size, INT_MAX)));
+  };
+  const auto sync = [fd] { return ::fsync(fd) == 0; };
+  const auto closeFile = [fd] { return ::close(fd) == 0; };
+#endif
+  const char *data = text.data();
+  size_t left = text.size();
+  while (left > 0) {
+    const long long written = writeSome(data, left);
+    if (written < 0) {
+      if (errno == EINTR)
+        continue;
+      error = errnoMessage();
+      closeFile();
+      return false;
+    }
+    data += written;
+    left -= static_cast<size_t>(written);
+  }
+  if (!sync()) {
+    error = errnoMessage();
+    closeFile();
+    return false;
+  }
+  if (!closeFile()) {
+    error = errnoMessage();
+    return false;
+  }
+  return true;
+}
+
+// Flushes the directory entry that the rename changed. Best effort: the table
+// itself is already on the disk, and some file systems refuse this.
+void syncDirectory(const std::filesystem::path &dir) {
+#ifndef _WIN32
+  const int fd = ::open(dir.empty() ? "." : dir.c_str(),
+                        O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (fd < 0)
+    return;
+  ::fsync(fd);
+  ::close(fd);
+#else
+  (void)dir;
+#endif
+}
+
+int processId() {
+#ifdef _WIN32
+  return _getpid();
+#else
+  return static_cast<int>(::getpid());
+#endif
 }
 
 } // namespace
@@ -1387,7 +1550,13 @@ bool checkProblemCacheJsonFile(const std::string &path,
   bool present = false;
   if (!readRewriteTarget(path, target, existing, present, error))
     return false;
-  if (!present || isBlank(existing))
+  if (!present)
+    return true;
+  if (!isWritable(target)) {
+    error = "problem cache " + path + " is not writable; refusing to use it";
+    return false;
+  }
+  if (isBlank(existing))
     return true;
   if (looksLikeFlatBuffer(existing)) {
     error = flatBufferRewriteError(path);
@@ -1422,6 +1591,11 @@ bool updateProblemCacheJsonFile(const std::string &path,
   bool present = false;
   if (!readRewriteTarget(path, target, existing, present, error))
     return false;
+  if (present && !isWritable(target)) {
+    error =
+        "problem cache " + path + " is not writable; refusing to replace it";
+    return false;
+  }
   if (looksLikeFlatBuffer(existing)) {
     error = flatBufferRewriteError(path);
     return false;
@@ -1446,21 +1620,26 @@ bool updateProblemCacheJsonFile(const std::string &path,
   removeStaleTemporaries(target);
 
   // Write beside the target and rename over it, so the old file survives a
-  // failed or interrupted write.
-  fs::path temporary = target;
-  temporary +=
-      ".tmp" + std::to_string(
-                   std::chrono::steady_clock::now().time_since_epoch().count());
-  {
-    std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
-    out.write(merged.data(), static_cast<std::streamsize>(merged.size()));
-    out.flush();
-    if (!out) {
-      out.close();
+  // failed or interrupted write. The name carries the process id and is
+  // created exclusively, so two processes never write the same temporary.
+  static std::atomic<unsigned> counter{0};
+  constexpr int kMaxNameAttempts = 100;
+  fs::path temporary;
+  for (int attempt = 0;; ++attempt) {
+    temporary = target;
+    temporary += ".tmp" + std::to_string(processId()) + "-" +
+                 std::to_string(counter.fetch_add(1));
+    bool exists = false;
+    std::string reason;
+    if (writeNewFile(temporary, merged, exists, reason))
+      break;
+    if (exists && attempt + 1 < kMaxNameAttempts)
+      continue;
+    if (!exists)
       fs::remove(temporary, ec);
-      error = "failed writing problem cache: " + temporary.string();
-      return false;
-    }
+    error =
+        "failed writing problem cache: " + temporary.string() + ": " + reason;
+    return false;
   }
   // The rename swaps in a new file, so give it the mode the old one had rather
   // than the default one. Best effort: a failure here is not worth losing the
@@ -1477,6 +1656,7 @@ bool updateProblemCacheJsonFile(const std::string &path,
     error = "cannot replace problem cache " + path + ": " + reason;
     return false;
   }
+  syncDirectory(target.parent_path());
   return true;
 }
 

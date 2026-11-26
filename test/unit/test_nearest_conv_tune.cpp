@@ -30,6 +30,10 @@
 #include <thread>
 #include <vector>
 
+#ifndef _WIN32
+#include <unistd.h>
+#endif
+
 namespace {
 
 int gFailures = 0;
@@ -459,28 +463,58 @@ int main() {
                defaulted.entries.size() == 2,
            "absent schema_version, weights, and gpu_arch take the defaults");
   }
-  {
-    // A point naming a config that does not exist is skipped, not an error,
-    // as in the RCAL loader.
-    llvm::json::Object doc = dumpDoc();
-    llvm::json::Array &pts = *doc.getArray("points");
-    pts.push_back(
-        llvm::json::Object{{"problem", "out-of-range"}, {"config", 99}});
-    pts.push_back(llvm::json::Object{{"problem", "negative"}, {"config", -1}});
-    mlir::hip::ProblemCacheLut skipped;
-    expect(mlir::hip::loadProblemCacheLutJson(jsonText(std::move(doc)), skipped,
-                                              error) &&
-               skipped.entries.size() == 2,
-           "points with a bad config index are skipped");
-  }
-
+  // The loader refuses what the rewrite refuses: a record it cannot read is
+  // an error, not a row to skip.
   const auto rejects = [&](llvm::json::Object doc, const char *message) {
+    const std::string text = jsonText(std::move(doc));
     mlir::hip::ProblemCacheLut bad;
-    expect(!mlir::hip::loadProblemCacheLutJson(jsonText(std::move(doc)), bad,
-                                               error) &&
-               bad.entries.empty(),
+    std::string merged;
+    std::string mergeError;
+    expect(!mlir::hip::loadProblemCacheLutJson(text, bad, error) &&
+               bad.entries.empty() &&
+               !mlir::hip::mergeProblemCacheJson(text, "gfx1151", {}, merged,
+                                                 mergeError),
            message);
   };
+  for (const int64_t index : {99, -1}) {
+    llvm::json::Object doc = dumpDoc();
+    doc.getArray("points")->push_back(
+        llvm::json::Object{{"problem", "bad-index"}, {"config", index}});
+    rejects(std::move(doc), "a point with a bad config index is rejected");
+  }
+  for (const char *section : {"configs", "points"}) {
+    llvm::json::Object doc = dumpDoc();
+    doc.erase(section);
+    rejects(std::move(doc), "a table missing configs or points is rejected");
+  }
+  {
+    llvm::json::Object doc = dumpDoc();
+    doc.getArray("configs")->push_back(llvm::json::Object{{"other", 1}});
+    rejects(std::move(doc), "a config with no perf_config is rejected");
+  }
+  {
+    llvm::json::Object doc = dumpDoc();
+    doc.getArray("points")->push_back(llvm::json::Object{{"config", 0}});
+    rejects(std::move(doc), "a point with no problem is rejected");
+  }
+  {
+    llvm::json::Object doc = dumpDoc();
+    (*doc.getArray("points"))[0].getAsObject()->operator[]("m") = "wide";
+    rejects(std::move(doc), "a point with a non-integer m is rejected");
+  }
+  {
+    llvm::json::Object doc = dumpDoc();
+    doc.getArray("fallbacks")
+        ->push_back(llvm::json::Object{{"kind", "conv"}, {"config", 7}});
+    rejects(std::move(doc), "a fallback with a bad config index is rejected");
+  }
+  {
+    // A gpu_arch that is not a string must not read as absent, which would
+    // match every GPU.
+    llvm::json::Object doc = dumpDoc();
+    doc["gpu_arch"] = 5;
+    rejects(std::move(doc), "a non-string gpu_arch is rejected");
+  }
   {
     llvm::json::Object doc = dumpDoc();
     doc["schema_version"] = 2;
@@ -1488,6 +1522,64 @@ int main() {
              "a rewrite beside leftover temporaries succeeds");
       expect(!fs::exists(stale) && fs::exists(recent) && fs::exists(unrelated),
              "only old temporaries of this file are removed");
+    }
+
+    // A file made read-only is refused, both before the compile and at the
+    // rewrite, and keeps its bytes. The rename would otherwise replace it,
+    // since that needs write access to the directory only. Root can write any
+    // file, so the check has nothing to refuse there.
+#ifdef _WIN32
+    const bool root = false;
+#else
+    const bool root = ::geteuid() == 0;
+#endif
+    if (!root) {
+      namespace fs = std::filesystem;
+      const std::string locked = (dir / "locked.json").string();
+      const std::string lockedText = jsonText(dumpDoc());
+      {
+        std::ofstream out(locked, std::ios::binary);
+        out << lockedText;
+      }
+      fs::permissions(locked, fs::perms::owner_read | fs::perms::group_read |
+                                  fs::perms::others_read);
+      mlir::hip::ProblemCacheLut lockedLut;
+      expect(!mlir::hip::checkProblemCacheJsonFile(locked, "gfx1151", lockedLut,
+                                                   error) &&
+                 error.find("not writable") != std::string::npos,
+             "a read-only file fails the check before the compile");
+      expect(!mlir::hip::updateProblemCacheJsonFile(
+                 locked, "gfx1151", {{"fresh", tile32}}, error) &&
+                 error.find("not writable") != std::string::npos,
+             "a read-only file is not replaced");
+      std::ifstream in(locked, std::ios::binary);
+      std::string kept((std::istreambuf_iterator<char>(in)),
+                       std::istreambuf_iterator<char>());
+      expect(kept == lockedText, "the read-only file keeps its bytes");
+      fs::permissions(locked, fs::perms::owner_write, fs::perm_options::add);
+    }
+
+    // Temporaries are named `<file>.tmp<pid>-<n>`; an old one is removed like
+    // the digits-only names, and the rewrite leaves none of its own.
+    {
+      namespace fs = std::filesystem;
+      const fs::path cache = dir / "named.json";
+      const fs::path stale = dir / "named.json.tmp4242-7";
+      {
+        std::ofstream out(stale, std::ios::binary);
+        out << "partial";
+      }
+      fs::last_write_time(stale, fs::file_time_type::clock::now() -
+                                     std::chrono::hours(2));
+      expect(mlir::hip::updateProblemCacheJsonFile(cache.string(), "gfx1151",
+                                                   {{exact, tile32}}, error),
+             "a rewrite beside a stale pid-named temporary succeeds");
+      size_t leftovers = 0;
+      for (const auto &entry : fs::directory_iterator(dir))
+        if (entry.path().filename().string().rfind("named.json.", 0) == 0)
+          ++leftovers;
+      expect(!fs::exists(stale) && leftovers == 0,
+             "the stale temporary is removed and no new one is left");
     }
 
     // An empty file, as `touch` makes it, is a fresh table.
