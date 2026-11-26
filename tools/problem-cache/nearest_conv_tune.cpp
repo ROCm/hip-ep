@@ -969,6 +969,14 @@ struct StoredPoint {
   int64_t k = 0;
 };
 
+// One fallback record of the document being rewritten. `record` is the whole
+// object, so fields this code does not know survive; only its `config` index is
+// replaced when the configs are renumbered.
+struct StoredFallback {
+  llvm::json::Object record;
+  std::string perfConfig;
+};
+
 bool isBlank(std::string_view text) {
   return std::all_of(text.begin(), text.end(),
                      [](unsigned char c) { return std::isspace(c) != 0; });
@@ -982,7 +990,17 @@ bool mergeProblemCacheJson(std::string_view existing, std::string_view gpuArch,
   out.clear();
   // Sorted by problem, which is also the output order.
   std::map<std::string, StoredPoint> table;
+  std::vector<StoredFallback> fallbacks;
+  bool hadFallbacks = false;
   llvm::json::Object root;
+
+  // An existing document is checked in full before anything is built from it.
+  // The rewrite replaces the file, so a record it cannot represent has to stop
+  // the rewrite, not be dropped from the result.
+  const auto malformed = [&error](const std::string &what) {
+    error = "problem cache is malformed: " + what + "; refusing to rewrite it";
+    return false;
+  };
 
   if (isBlank(existing)) {
     root["schema_version"] = static_cast<int64_t>(1);
@@ -993,7 +1011,7 @@ bool mergeProblemCacheJson(std::string_view existing, std::string_view gpuArch,
     root["weight_m"] = 1.0;
     root["weight_n"] = 1.0;
     root["weight_k"] = 1.0;
-    root["fallbacks"] = llvm::json::Array();
+    hadFallbacks = true;
   } else {
     llvm::json::Value document(nullptr);
     const llvm::json::Object *parsedRoot = nullptr;
@@ -1010,42 +1028,91 @@ bool mergeProblemCacheJson(std::string_view existing, std::string_view gpuArch,
     }
     root = *parsedRoot;
 
-    // Keep every well-formed point. The loader skips points whose perfConfig is
-    // not gemm:/attn:, but a rewrite must not delete them.
+    // The loader reads a document with no `configs` or `points` as an empty
+    // table. A rewrite would then build both from the winners alone and
+    // replace whatever those keys held, so they must be real arrays here.
     const llvm::json::Array *configs = parsedRoot->getArray("configs");
     const llvm::json::Array *points = parsedRoot->getArray("points");
-    if (configs != nullptr && points != nullptr) {
-      std::vector<std::string> perfConfigs;
-      perfConfigs.reserve(configs->size());
-      for (const llvm::json::Value &config : *configs) {
-        const llvm::json::Object *object = config.getAsObject();
-        std::optional<llvm::StringRef> perfConfig =
-            object != nullptr ? object->getString("perf_config") : std::nullopt;
-        perfConfigs.push_back(perfConfig ? perfConfig->str() : std::string());
+    if (configs == nullptr)
+      return malformed("`configs` is missing or not an array");
+    if (points == nullptr)
+      return malformed("`points` is missing or not an array");
+
+    std::vector<std::string> perfConfigs;
+    perfConfigs.reserve(configs->size());
+    for (size_t i = 0; i < configs->size(); ++i) {
+      const llvm::json::Object *object = (*configs)[i].getAsObject();
+      std::optional<llvm::StringRef> perfConfig =
+          object != nullptr ? object->getString("perf_config") : std::nullopt;
+      if (!perfConfig)
+        return malformed("configs[" + std::to_string(i) +
+                         "] is not an object with a string `perf_config`");
+      perfConfigs.push_back(perfConfig->str());
+    }
+
+    // Every point is kept, whatever kind of perfConfig it names: the loader
+    // skips points whose perfConfig is not gemm:/attn:, but a rewrite must not
+    // delete them.
+    const auto configIndexOf = [&](const llvm::json::Object &object,
+                                   const std::string &where,
+                                   std::string &perfConfig) {
+      std::optional<int64_t> index = object.getInteger("config");
+      if (!index)
+        return malformed(where + " has no integer `config`");
+      if (*index < 0 || static_cast<size_t>(*index) >= perfConfigs.size())
+        return malformed(where + " has `config` " + std::to_string(*index) +
+                         ", outside the " + std::to_string(perfConfigs.size()) +
+                         " configs");
+      perfConfig = perfConfigs[static_cast<size_t>(*index)];
+      return true;
+    };
+    for (size_t i = 0; i < points->size(); ++i) {
+      const std::string where = "points[" + std::to_string(i) + "]";
+      const llvm::json::Object *object = (*points)[i].getAsObject();
+      if (object == nullptr)
+        return malformed(where + " is not an object");
+      std::optional<llvm::StringRef> problem = object->getString("problem");
+      if (!problem)
+        return malformed(where + " has no string `problem`");
+      StoredPoint stored;
+      if (!configIndexOf(*object, where, stored.perfConfig))
+        return false;
+      // m, n and k are advisory. Absent, they are worked out from the problem
+      // string; present, they must be integers and are kept as they are.
+      const llvm::json::Value *dims[3] = {object->get("m"), object->get("n"),
+                                          object->get("k")};
+      for (const llvm::json::Value *dim : dims)
+        if (dim != nullptr && !dim->getAsInteger())
+          return malformed(where + " has a non-integer `m`, `n` or `k`");
+      if (dims[0] != nullptr && dims[1] != nullptr && dims[2] != nullptr) {
+        stored.m = *dims[0]->getAsInteger();
+        stored.n = *dims[1]->getAsInteger();
+        stored.k = *dims[2]->getAsInteger();
+      } else {
+        implicitGemmDims(problem->str(), stored.m, stored.n, stored.k);
       }
-      for (const llvm::json::Value &point : *points) {
-        const llvm::json::Object *object = point.getAsObject();
+      // A lookup returns the first row for a problem, so a repeated problem
+      // keeps its first row.
+      table.emplace(problem->str(), std::move(stored));
+    }
+
+    // `fallbacks` is optional, but one that is present is index-linked to
+    // `configs` and has to be renumbered with it.
+    if (const llvm::json::Value *value = parsedRoot->get("fallbacks")) {
+      const llvm::json::Array *array = value->getAsArray();
+      if (array == nullptr)
+        return malformed("`fallbacks` is not an array");
+      hadFallbacks = true;
+      for (size_t i = 0; i < array->size(); ++i) {
+        const std::string where = "fallbacks[" + std::to_string(i) + "]";
+        const llvm::json::Object *object = (*array)[i].getAsObject();
         if (object == nullptr)
-          continue;
-        std::optional<llvm::StringRef> problem = object->getString("problem");
-        std::optional<int64_t> index = object->getInteger("config");
-        if (!problem || !index || *index < 0 ||
-            static_cast<size_t>(*index) >= perfConfigs.size() ||
-            perfConfigs[static_cast<size_t>(*index)].empty())
-          continue;
-        StoredPoint stored;
-        stored.perfConfig = perfConfigs[static_cast<size_t>(*index)];
-        std::optional<int64_t> m = object->getInteger("m");
-        std::optional<int64_t> n = object->getInteger("n");
-        std::optional<int64_t> k = object->getInteger("k");
-        if (m && n && k) {
-          stored.m = *m;
-          stored.n = *n;
-          stored.k = *k;
-        } else {
-          implicitGemmDims(problem->str(), stored.m, stored.n, stored.k);
-        }
-        table[problem->str()] = std::move(stored);
+          return malformed(where + " is not an object");
+        StoredFallback fallback;
+        if (!configIndexOf(*object, where, fallback.perfConfig))
+          return false;
+        fallback.record = *object;
+        fallbacks.push_back(std::move(fallback));
       }
     }
   }
@@ -1061,29 +1128,40 @@ bool mergeProblemCacheJson(std::string_view existing, std::string_view gpuArch,
     table[winner.problem] = std::move(stored);
   }
 
+  // The configs that remain are the ones a point or a fallback uses, each once.
+  // A point and a fallback that name the same perfConfig share an entry, and
+  // both are renumbered from it.
   llvm::json::Array outConfigs;
-  llvm::json::Array outPoints;
   std::map<std::string, int64_t> configIndex;
-  for (const auto &row : table) {
-    const std::string &problem = row.first;
-    const StoredPoint &stored = row.second;
-    auto found = configIndex.find(stored.perfConfig);
+  const auto indexOf = [&](const std::string &perfConfig) {
+    auto found = configIndex.find(perfConfig);
     if (found == configIndex.end()) {
       found = configIndex
-                  .emplace(stored.perfConfig,
-                           static_cast<int64_t>(outConfigs.size()))
+                  .emplace(perfConfig, static_cast<int64_t>(outConfigs.size()))
                   .first;
-      outConfigs.push_back(
-          llvm::json::Object{{"perf_config", stored.perfConfig}});
+      outConfigs.push_back(llvm::json::Object{{"perf_config", perfConfig}});
     }
-    outPoints.push_back(llvm::json::Object{{"problem", problem},
-                                           {"config", found->second},
-                                           {"m", stored.m},
-                                           {"n", stored.n},
-                                           {"k", stored.k}});
+    return found->second;
+  };
+  llvm::json::Array outPoints;
+  for (const auto &row : table) {
+    const StoredPoint &stored = row.second;
+    outPoints.push_back(
+        llvm::json::Object{{"problem", row.first},
+                           {"config", indexOf(stored.perfConfig)},
+                           {"m", stored.m},
+                           {"n", stored.n},
+                           {"k", stored.k}});
+  }
+  llvm::json::Array outFallbacks;
+  for (StoredFallback &fallback : fallbacks) {
+    fallback.record["config"] = indexOf(fallback.perfConfig);
+    outFallbacks.push_back(std::move(fallback.record));
   }
   root["configs"] = std::move(outConfigs);
   root["points"] = std::move(outPoints);
+  if (hadFallbacks)
+    root["fallbacks"] = std::move(outFallbacks);
 
   out = llvm::formatv("{0:2}", llvm::json::Value(std::move(root))).str();
   out += "\n";

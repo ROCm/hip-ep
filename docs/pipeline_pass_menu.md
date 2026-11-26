@@ -125,9 +125,10 @@ are merged into that file, so a later compile reads them. Only
 winners of a search are written. A tile taken from the file, even a nearest
 neighbour's, is not a measurement and is not stored as one. Points already in the
 file are kept, including ones this build cannot use. A missing or empty file is
-created; a file that is not a LUT, or is for another `gpu_arch`, makes the compile
-fail with the file untouched. The file is replaced atomically, but two compiles
-writing it at once can lose one set of winners. `HIP_ROCMLIR_PROBLEM_CACHE` only
+created; a file that is not a LUT, is for another `gpu_arch`, or has a malformed
+`configs`, `points` or `fallbacks` section makes the compile fail with the file
+untouched. Fallbacks and the configs they name are kept. The file is replaced
+atomically, but two compiles writing it at once can lose one set of winners. `HIP_ROCMLIR_PROBLEM_CACHE` only
 reads. The provider does the same through
 `HIPDNN_EP_ROCMLIR_PROBLEM_CACHE_RW=<file.json>`, except that a file it cannot
 update is reported and the compile still succeeds. A repeated problem in the same

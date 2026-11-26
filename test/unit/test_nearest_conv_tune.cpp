@@ -21,6 +21,7 @@
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <set>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -629,6 +630,210 @@ int main() {
            "a winner with no problem or no perfConfig is ignored");
   }
   {
+    // A rewrite replaces the file, so a document it cannot represent is refused
+    // whole. Nothing is dropped from the result, and `configs` and `points` are
+    // never rebuilt from the winners alone.
+    const auto refused = [&](llvm::json::Object doc, const char *needle,
+                             const char *what) {
+      std::string merged;
+      std::string why;
+      expect(!mlir::hip::mergeProblemCacheJson(jsonText(std::move(doc)),
+                                               "gfx1151", {{exact, tile32}},
+                                               merged, why) &&
+                 merged.empty() && why.find(needle) != std::string::npos &&
+                 why.find("refusing to rewrite") != std::string::npos,
+             what);
+    };
+    const auto withPoints = [&](llvm::json::Value point) {
+      llvm::json::Object doc = dumpDoc();
+      llvm::json::Array points;
+      points.push_back(std::move(point));
+      doc["points"] = std::move(points);
+      return doc;
+    };
+    const auto withConfigs = [&](llvm::json::Value config) {
+      llvm::json::Object doc = dumpDoc();
+      llvm::json::Array configs;
+      configs.push_back(std::move(config));
+      doc["configs"] = std::move(configs);
+      return doc;
+    };
+    const auto withFallbacks = [&](llvm::json::Value fallback) {
+      llvm::json::Object doc = dumpDoc();
+      llvm::json::Array fallbacks;
+      fallbacks.push_back(std::move(fallback));
+      doc["fallbacks"] = std::move(fallbacks);
+      return doc;
+    };
+
+    llvm::json::Object noPoints = dumpDoc();
+    noPoints.erase("points");
+    refused(std::move(noPoints), "points",
+            "a table with no points array is refused");
+    llvm::json::Object noConfigs = dumpDoc();
+    noConfigs.erase("configs");
+    refused(std::move(noConfigs), "configs",
+            "a table with no configs array is refused");
+    llvm::json::Object pointsNotArray = dumpDoc();
+    pointsNotArray["points"] = "not an array";
+    refused(std::move(pointsNotArray), "points",
+            "a table whose points are not an array is refused");
+    llvm::json::Object configsNotArray = dumpDoc();
+    configsNotArray["configs"] = 5;
+    refused(std::move(configsNotArray), "configs",
+            "a table whose configs are not an array is refused");
+
+    refused(withConfigs(5), "configs[0]",
+            "a config that is not an object is refused");
+    refused(withConfigs(llvm::json::Object{{"other", "x"}}), "configs[0]",
+            "a config with no perf_config is refused");
+    refused(withConfigs(llvm::json::Object{{"perf_config", 3}}), "configs[0]",
+            "a config whose perf_config is not a string is refused");
+
+    refused(withPoints(5), "points[0]",
+            "a point that is not an object is refused");
+    refused(withPoints(llvm::json::Object{{"config", 0}}), "points[0]",
+            "a point with no problem is refused");
+    refused(withPoints(llvm::json::Object{{"problem", exact}}), "points[0]",
+            "a point with no config is refused");
+    refused(withPoints(llvm::json::Object{{"problem", exact}, {"config", "0"}}),
+            "points[0]", "a point whose config is not an integer is refused");
+    refused(withPoints(llvm::json::Object{{"problem", exact}, {"config", -1}}),
+            "points[0]", "a point with a negative config is refused");
+    refused(withPoints(llvm::json::Object{{"problem", exact}, {"config", 99}}),
+            "points[0]", "a point whose config is out of range is refused");
+    refused(
+        withPoints(llvm::json::Object{
+            {"problem", exact}, {"config", 0}, {"m", "x"}, {"n", 1}, {"k", 2}}),
+        "points[0]", "a point with a non-integer m is refused");
+
+    llvm::json::Object fallbacksNotArray = dumpDoc();
+    fallbacksNotArray["fallbacks"] = "not an array";
+    refused(std::move(fallbacksNotArray), "fallbacks",
+            "fallbacks that are not an array are refused");
+    refused(withFallbacks(5), "fallbacks[0]",
+            "a fallback that is not an object is refused");
+    refused(withFallbacks(llvm::json::Object{{"kind", "x"}}), "fallbacks[0]",
+            "a fallback with no config is refused");
+    refused(withFallbacks(llvm::json::Object{{"kind", "x"}, {"config", 99}}),
+            "fallbacks[0]",
+            "a fallback whose config is out of range is refused");
+  }
+  {
+    // Fallbacks index into `configs`, which a rewrite renumbers. A config that
+    // only a fallback uses stays, and every fallback is renumbered with the
+    // points, so it still names the same perfConfig.
+    const std::string fallbackOnly =
+        "gemm:mPerBlock=16,nPerBlock=16,kPerBlock=4";
+    llvm::json::Object doc = dumpDoc();
+    llvm::json::Array configs;
+    for (const std::string &perf : {fallbackOnly, tile32, gemmTile})
+      configs.push_back(llvm::json::Object{{"perf_config", perf}});
+    llvm::json::Array points;
+    points.push_back(llvm::json::Object{{"problem", exact}, {"config", 1}});
+    points.push_back(llvm::json::Object{{"problem", gemmKey}, {"config", 2}});
+    llvm::json::Array fallbacks;
+    fallbacks.push_back(llvm::json::Object{
+        {"kind", "prefill"}, {"config", 0}, {"note", "keep"}});
+    fallbacks.push_back(llvm::json::Object{{"kind", "decode"}, {"config", 1}});
+    fallbacks.push_back(llvm::json::Object{{"kind", "shared"}, {"config", 2}});
+    doc["configs"] = std::move(configs);
+    doc["points"] = std::move(points);
+    doc["fallbacks"] = std::move(fallbacks);
+    const std::string base = jsonText(std::move(doc));
+
+    // The winner moves `exact` off tile32, so only a fallback uses tile32 now,
+    // and config 0 was never used by a point.
+    std::string merged;
+    expect(mlir::hip::mergeProblemCacheJson(base, "gfx1151", {{exact, tileBig}},
+                                            merged, error),
+           "a table with fallbacks is rewritten");
+    llvm::json::Value out = parseDoc(merged);
+    const llvm::json::Object *root = out.getAsObject();
+    const llvm::json::Array *outConfigs =
+        root != nullptr ? root->getArray("configs") : nullptr;
+    const llvm::json::Array *outFallbacks =
+        root != nullptr ? root->getArray("fallbacks") : nullptr;
+    expect(outConfigs != nullptr && outFallbacks != nullptr &&
+               outFallbacks->size() == 3,
+           "the rewritten table keeps all three fallbacks");
+    std::vector<std::string> fallbackPerf;
+    std::vector<std::string> fallbackKind;
+    bool inRange = true;
+    if (outConfigs != nullptr && outFallbacks != nullptr)
+      for (const llvm::json::Value &value : *outFallbacks) {
+        const llvm::json::Object *record = value.getAsObject();
+        std::optional<int64_t> index =
+            record != nullptr ? record->getInteger("config") : std::nullopt;
+        if (!index || *index < 0 ||
+            static_cast<size_t>(*index) >= outConfigs->size()) {
+          inRange = false;
+          continue;
+        }
+        fallbackPerf.push_back((*outConfigs)[static_cast<size_t>(*index)]
+                                   .getAsObject()
+                                   ->getString("perf_config")
+                                   .value_or("")
+                                   .str());
+        fallbackKind.push_back(record->getString("kind").value_or("").str());
+      }
+    expect(inRange, "every fallback still indexes a config");
+    expect(
+        fallbackPerf ==
+                std::vector<std::string>({fallbackOnly, tile32, gemmTile}) &&
+            fallbackKind ==
+                std::vector<std::string>({"prefill", "decode", "shared"}),
+        "each fallback keeps its perfConfig and its place after renumbering");
+    expect(outFallbacks != nullptr && outFallbacks->size() == 3 &&
+               (*outFallbacks)[0].getAsObject()->getString("note") == "keep",
+           "fields of a fallback other than config are kept");
+    const auto rows = pointMap(merged);
+    expect(rows.size() == 2 && rows.at(exact) == tileBig &&
+               rows.at(gemmKey) == gemmTile,
+           "points keep their perfConfigs when the configs are renumbered");
+    std::set<std::string> distinct;
+    if (outConfigs != nullptr)
+      for (const llvm::json::Value &config : *outConfigs)
+        distinct.insert(
+            config.getAsObject()->getString("perf_config").value_or("").str());
+    expect(outConfigs != nullptr && distinct.size() == outConfigs->size() &&
+               distinct.count(gemmTile) == 1,
+           "a perfConfig used by a point and a fallback is stored once");
+
+    std::string again;
+    expect(mlir::hip::mergeProblemCacheJson(merged, "gfx1151",
+                                            {{exact, tileBig}}, again, error) &&
+               again == merged,
+           "rewriting a table with fallbacks again changes nothing");
+
+    // Without a `fallbacks` key the rewrite does not add one.
+    llvm::json::Object plain = dumpDoc();
+    plain.erase("fallbacks");
+    expect(mlir::hip::mergeProblemCacheJson(jsonText(std::move(plain)),
+                                            "gfx1151", {{gemmAt(8), tile16}},
+                                            merged, error) &&
+               parseDoc(merged).getAsObject() != nullptr &&
+               parseDoc(merged).getAsObject()->get("fallbacks") == nullptr &&
+               pointMap(merged).size() == 4,
+           "a table with no fallbacks key is rewritten without adding one");
+  }
+  {
+    // A problem that appears twice keeps its first row, which is the one a
+    // lookup returns, so the rewrite does not change the answer.
+    llvm::json::Object doc = dumpDoc();
+    llvm::json::Array points;
+    points.push_back(llvm::json::Object{{"problem", exact}, {"config", 0}});
+    points.push_back(llvm::json::Object{{"problem", exact}, {"config", 2}});
+    doc["points"] = std::move(points);
+    std::string merged;
+    expect(mlir::hip::mergeProblemCacheJson(jsonText(std::move(doc)), "gfx1151",
+                                            {}, merged, error),
+           "a table with a repeated problem is rewritten");
+    const auto rows = pointMap(merged);
+    expect(rows.size() == 1 && rows.at(exact) == tile32,
+           "a repeated problem keeps its first row");
+  }
+  {
     // The file overload across compiles: create, accumulate, replace, and keep
     // the old file when the rewrite is refused.
     const std::filesystem::path dir =
@@ -700,6 +905,33 @@ int main() {
                        std::istreambuf_iterator<char>());
       expect(kept == "this is not json", "the rejected file keeps its text");
     }
+
+    // A table whose `points` array is missing is refused whole. Without the
+    // check the rewrite would write the winners alone over it.
+    const std::string partial = (dir / "partial.json").string();
+    llvm::json::Object partialDoc = dumpDoc();
+    partialDoc.erase("points");
+    const std::string partialText = jsonText(std::move(partialDoc));
+    {
+      std::ofstream out(partial, std::ios::binary);
+      out << partialText;
+    }
+    expect(!mlir::hip::updateProblemCacheJsonFile(partial, "gfx1151",
+                                                  {{exact, tile32}}, error) &&
+               error.find(partial) != std::string::npos &&
+               error.find("points") != std::string::npos,
+           "a table with no points array is not rewritten");
+    {
+      std::ifstream in(partial, std::ios::binary);
+      std::string kept((std::istreambuf_iterator<char>(in)),
+                       std::istreambuf_iterator<char>());
+      expect(kept == partialText, "the refused table keeps its bytes");
+    }
+    size_t partialTemps = 0;
+    for (const auto &entry : std::filesystem::directory_iterator(dir))
+      if (entry.path().filename().string().rfind("partial.json.", 0) == 0)
+        ++partialTemps;
+    expect(partialTemps == 0, "a refused table leaves no temporary file");
 
     // An empty file, as `touch` makes it, is a fresh table.
     const std::string blank = (dir / "blank.json").string();

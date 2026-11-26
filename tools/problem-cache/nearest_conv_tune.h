@@ -105,17 +105,27 @@ struct ProblemCacheWinner {
 // Merges \p winners into the LUT JSON document \p existing and returns the new
 // document in \p out. Blank \p existing starts a new document for \p gpuArch.
 //
-// Every well-formed point already in \p existing is kept, whatever kind of
-// perfConfig it names, so a rewrite never drops data the loader would skip. A
-// winner replaces the point of the same problem string, and a new problem is
-// added. `configs` is rebuilt without duplicates and `points` is sorted by
-// problem, as `--dump-problem-cache` writes it, so the output is deterministic.
-// Top-level fields other than `configs` and `points` (weights, `model_key`,
-// `fallbacks`, ...) are carried over untouched.
+// Every point already in \p existing is kept, whatever kind of perfConfig it
+// names, so a rewrite never drops data the loader would skip. A winner replaces
+// the point of the same problem string, and a new problem is added. If a
+// problem appears twice, its first row is kept, as a lookup returns that one.
+//
+// `configs` is rebuilt without duplicates, so its indices change. It holds
+// every perfConfig a point or a fallback uses. The `config` of each point and
+// each fallback is renumbered together, so a fallback keeps naming the same
+// perfConfig, even one that no point uses. `points` is sorted by problem, so
+// the output is deterministic. `fallbacks` is written only if \p existing had
+// it, and its other fields are kept. Top-level fields besides `configs`,
+// `points` and `fallbacks` (weights, `model_key`, ...) are carried over.
 //
 // Fails, leaving \p out empty, without producing a document when \p existing is
 // not a supported LUT (invalid JSON, wrong `schema_version` or `kernel_abi`, a
-// bad weight) or names a different non-empty `gpu_arch` than \p gpuArch.
+// bad weight), names a different non-empty `gpu_arch` than \p gpuArch, or has a
+// structure that cannot be rewritten without losing data: `configs` or
+// `points` missing or not an array, a config without a string `perf_config`, a
+// point that is not an object or lacks a string `problem` or an in-range
+// integer `config` (or has a non-integer `m`, `n` or `k`), or `fallbacks`
+// that is not an array of objects with an in-range integer `config`.
 bool mergeProblemCacheJson(std::string_view existing, std::string_view gpuArch,
                            const std::vector<ProblemCacheWinner> &winners,
                            std::string &out, std::string &error);
