@@ -25,8 +25,8 @@ target_compile_features(test-e2e-mlir PRIVATE cxx_std_17)
 # Model path (using Git LFS committed model)
 set(TWO_LAYER_CONV_MODEL_PATH "${CMAKE_CURRENT_SOURCE_DIR}/models/two_layer_conv.onnx")
 
-# Config file path (absolute path to etc/morphizen_config_mlir.json)
-set(MORPHIZEN_CONFIG_MLIR_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../../etc/morphizen_config_mlir.json")
+# Config file path (absolute path to etc/morphizen_config.json)
+set(MORPHIZEN_CONFIG_MLIR_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../../etc/morphizen_config.json")
 
 # Get the MorphiZen EP target (set by parent morphizen build system)
 if(NOT DEFINED morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET)
