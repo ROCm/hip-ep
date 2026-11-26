@@ -119,20 +119,20 @@ overrides the search space. A given tuning type skips the shipped
 problem-cache LUT; with none given, the shipped LUT is consulted before the
 search. `--enable-problem-cache-rw <file.json>` still takes priority over the
 search and replaces the shipped table. The flag names a LUT JSON file, such as
-one it wrote. It also writes back: after a
-successful compile the winners the search picked are merged into that file, so
-a later compile reads them. Only winners of a search are written. A tile taken
-from the file, even a nearest neighbour's, is not a measurement and is not
-stored as one. Points already in the file are kept in their order, including
-ones this build cannot use, and so are fallbacks and the configs they name; new
-problems are appended. With no new winners the file is not rewritten. A missing
-or empty file is created. A file that is not a LUT, is for another `gpu_arch`,
-has a malformed `configs`, `points` or `fallbacks` section, is read-only, or is
-a `.fb` is refused before the compile starts, with the file untouched; a write
-that fails after the compile is a warning, and the output is still written. The
-file is replaced atomically and flushed to disk before the rename. Compiles in one process take turns, but two processes
-writing it at once can lose one set of winners. The provider does the same as
-the flag through
+one it wrote. It also writes back: after a successful compile the winners the
+search picked are merged into that file, so a later compile reads them. Only
+winners of a search are written. A tile taken from the file, even a nearest
+neighbour's, is not a measurement and is not stored as one. Points already in
+the file are kept in their order, including ones this build cannot use, and so
+are fallbacks and the configs they name; new problems are appended. With no new
+winners the file is not rewritten. A missing or empty file is created. A file
+that is not a LUT, is for another `gpu_arch`, has a malformed `configs`,
+`points` or `fallbacks` section, is read-only, or is a `.fb` is refused before
+the compile starts, with the file untouched; a write that fails after the
+compile is a warning, and the output is still written. The file is replaced
+atomically and flushed to disk before the rename. Compiles in one process take
+turns, but two processes writing it at once can lose one set of winners. The
+provider does the same as the flag through
 `HIPDNN_EP_ROCMLIR_PROBLEM_CACHE_RW=<file.json>`, except that a file it cannot
 use or update is reported and the compile still succeeds. A repeated problem in the same
 compile reuses the in-session winner, then a miss searches the selected space.
