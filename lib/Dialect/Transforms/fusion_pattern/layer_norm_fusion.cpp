@@ -24,7 +24,7 @@
 //
 // A rank>4 elementwise op is packed to rank 4 as collapse -> hip op ->
 // expand before this pass. One collapse/expand pair is skipped so the match
-// still sees the original tensors.
+// still sees the original tensors, provided its unpacked side has x's shape.
 //
 // A same-shape hip.add that produces the norm input becomes
 // hip.skip_layer_norm. Later users of that add, in the same block and after
@@ -46,6 +46,7 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/STLExtras.h"
@@ -66,7 +67,25 @@ void keep(llvm::SmallVectorImpl<Operation *> &ops,
     ops.push_back(op);
 }
 
+/// Erases the ops of \p ops that became dead, until none does. An op with
+/// side effects (a call producing a destination tensor) stays.
+void eraseDeadOps(mlir::PatternRewriter &rewriter,
+                  llvm::SmallVectorImpl<Operation *> &ops) {
+  bool progress = true;
+  while (progress) {
+    progress = false;
+    for (Operation *&op : ops) {
+      if (!op || !mlir::isOpTriviallyDead(op))
+        continue;
+      rewriter.eraseOp(op);
+      op = nullptr;
+      progress = true;
+    }
+  }
+}
+
 /// Skip one rank>4 pack step: collapse into the op, expand out of it.
+/// fuseLayerNorm checks afterwards that each skipped reshape is a pack.
 Value definingCompute(Value v, llvm::SmallVectorImpl<Operation *> &pack,
                       llvm::SmallPtrSetImpl<Operation *> &seen) {
   if (auto collapse = v.getDefiningOp<mlir::tensor::CollapseShapeOp>()) {
@@ -78,6 +97,39 @@ Value definingCompute(Value v, llvm::SmallVectorImpl<Operation *> &pack,
     v = expand.getSrc();
   }
   return v;
+}
+
+/// True when every reshape in \p ops is a pack of an x-shaped value: its
+/// unpacked side has x's extents, with 1 allowed on the reduced last axis.
+/// Reshapes keep row-major order, so a packed elementwise op then computes
+/// what the unpacked op would. A reshape to any other shape could move
+/// elements across rows ([1, 2, 2] -> [1, 4] -> [1, 1, 4] reduces both rows
+/// together).
+bool reshapesArePacks(llvm::ArrayRef<Operation *> ops,
+                      mlir::RankedTensorType xType) {
+  auto unpacked = [&](mlir::Type type) {
+    auto t = mlir::dyn_cast<mlir::RankedTensorType>(type);
+    if (!t || t.getRank() != xType.getRank())
+      return false;
+    int64_t last = t.getRank() - 1;
+    for (int64_t i = 0; i < last; ++i)
+      if (t.getDimSize(i) != xType.getDimSize(i))
+        return false;
+    return t.getDimSize(last) == xType.getDimSize(last) ||
+           t.getDimSize(last) == 1;
+  };
+  for (Operation *op : ops) {
+    if (auto collapse =
+            mlir::dyn_cast_or_null<mlir::tensor::CollapseShapeOp>(op)) {
+      if (!unpacked(collapse.getSrcType()))
+        return false;
+    } else if (auto expand =
+                   mlir::dyn_cast_or_null<mlir::tensor::ExpandShapeOp>(op)) {
+      if (!unpacked(expand.getResultType()))
+        return false;
+    }
+  }
+  return true;
 }
 
 Operation *onlyUser(Value v) {
@@ -417,6 +469,8 @@ mlir::LogicalResult fuseLayerNorm(Operation *root, Value rawD, Value rawA,
     keep(chain, seen, root);
   if (n.getType() != xType)
     return rewriter.notifyMatchFailure(root, "norm result type");
+  if (!reshapesArePacks(chain, xType))
+    return rewriter.notifyMatchFailure(root, "reshape regroups rows");
 
   rewriter.setInsertionPoint(last);
   if (!gamma) {
@@ -481,21 +535,8 @@ mlir::LogicalResult fuseLayerNorm(Operation *root, Value rawD, Value rawA,
     }
   }
 
-  auto eraseDead = [&](llvm::SmallVectorImpl<Operation *> &list) {
-    bool progress = true;
-    while (progress) {
-      progress = false;
-      for (Operation *&op : list) {
-        if (!op || !op->use_empty())
-          continue;
-        rewriter.eraseOp(op);
-        op = nullptr;
-        progress = true;
-      }
-    }
-  };
-  eraseDead(chain);
-  eraseDead(side);
+  eraseDeadOps(rewriter, chain);
+  eraseDeadOps(rewriter, side);
   return mlir::success();
 }
 
@@ -647,17 +688,7 @@ struct ResidualLayerNormFusion
     keep(pack, seen, add);
     if (Operation *init = add.getOutput().getDefiningOp())
       keep(pack, seen, init);
-    bool progress = true;
-    while (progress) {
-      progress = false;
-      for (Operation *&op : pack) {
-        if (!op || !op->use_empty())
-          continue;
-        rewriter.eraseOp(op);
-        op = nullptr;
-        progress = true;
-      }
-    }
+    eraseDeadOps(rewriter, pack);
     return mlir::success();
   }
 };

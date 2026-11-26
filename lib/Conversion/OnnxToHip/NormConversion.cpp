@@ -730,23 +730,41 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
 //===----------------------------------------------------------------------===//
 
 /// True when hip.skip_layer_norm can take these operands: f16 or f32
-/// throughout, `skip` and the result typed like `input`, and gamma / beta /
-/// bias each a static vector of the (static) hidden size. Equal dynamic types
-/// do not prove equal extents; the spec's other legal skip, [1, S, H] against
-/// [B, S, H], holds the trailing rows, and the runtime repeats it.
+/// throughout, the result typed like `input`, and gamma / beta / bias each a
+/// static vector of the (static) hidden size. `skip` is typed like `input`,
+/// or is a rank >= 2 block of whole rows whose last two extents match the
+/// input's ([S, H] or [1, S, H] against [B, S, H], as ORT accepts). The kernel
+/// reads input row r against skip row r mod skip_rows, which is ORT's
+/// broadcast, and the runtime rejects a skip that does not tile the input.
 static bool canUseSkipLayerNorm(mlir::Value input, mlir::Value skip,
                                 mlir::Value gamma, mlir::Value beta,
                                 mlir::Value bias, mlir::Type outputType) {
   auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
-  if (!inputType || inputType.getRank() < 1 || skip.getType() != inputType ||
+  auto skipType = mlir::dyn_cast<mlir::RankedTensorType>(skip.getType());
+  if (!inputType || !skipType || inputType.getRank() < 1 ||
       outputType != inputType)
     return false;
   mlir::Type elemType = inputType.getElementType();
   if (!elemType.isF16() && !elemType.isF32())
     return false;
-  int64_t hidden = inputType.getDimSize(inputType.getRank() - 1);
+  int64_t rank = inputType.getRank();
+  int64_t hidden = inputType.getDimSize(rank - 1);
   if (mlir::ShapedType::isDynamic(hidden))
     return false;
+  if (skipType != inputType) {
+    int64_t skipRank = skipType.getRank();
+    if (skipType.getElementType() != elemType || skipRank < 2 ||
+        skipRank > rank || skipType.getDimSize(skipRank - 1) != hidden)
+      return false;
+    int64_t rows = inputType.getDimSize(rank - 2);
+    int64_t skipRows = skipType.getDimSize(skipRank - 2);
+    if (!mlir::ShapedType::isDynamic(rows) &&
+        !mlir::ShapedType::isDynamic(skipRows) && rows != skipRows)
+      return false;
+    if (inputType.hasStaticShape() && skipType.hasStaticShape() &&
+        inputType.getNumElements() % skipType.getNumElements() != 0)
+      return false;
+  }
   auto isHiddenVector = [&](mlir::Value v) {
     if (!v)
       return true;
@@ -804,13 +822,16 @@ createSkipLayerNorm(mlir::PatternRewriter &rewriter, mlir::Location loc,
 ///
 /// MS spec (com.microsoft.SkipLayerNormalization):
 ///   inputs (3-5): input, skip, gamma, [beta], [bias-on-input].
-///                 ORT computes input + skip + bias in that order, and that
-///                 sum is input_skip_bias_sum. Whisper uses exactly 4
-///                 inputs (no bias), so the sum is input + skip. Stable
-///                 Diffusion's text encoder uses all 5.
+///                 ORT's CPU kernel computes (input + skip) + bias in fp32
+///                 and rounds once; that sum is input_skip_bias_sum. Both
+///                 paths here do the same (the fallback casts f16 / bf16 to
+///                 f32 around its adds when there is a bias). Whisper uses
+///                 exactly 4 inputs (no bias); Stable Diffusion's text
+///                 encoder uses all 5.
 ///   outputs (1-4): output, [mean], [inv_std_var], [input_skip_bias_sum].
-///                  Whisper consumes output[0] and output[3]; mean/inv_std are
-///                  emitted as None and never materialized.
+///                  Whisper consumes output[0] and output[3]. mean and
+///                  inv_std_var are not produced: a graph that reads them
+///                  is left unconverted.
 ///
 /// We emit hip.* ops DIRECTLY (not onnx.*): the greedy driver applies these
 /// patterns with ExistingOps strictness, so a freshly-emitted onnx.* op would
@@ -869,40 +890,66 @@ SkipLayerNormToHip::matchAndRewrite(mlir::Operation *op,
 
   auto inputType = mlir::cast<mlir::RankedTensorType>(input.getType());
 
+  // Outputs are positional: [1] mean, [2] inv_std_var, [3] the sum.
   unsigned numResults = op->getNumResults();
+  for (unsigned i = 1; i < std::min(numResults, 3u); ++i)
+    if (!op->getResult(i).use_empty())
+      return rewriter.notifyMatchFailure(
+          op, "mean / inv_std_var outputs are not supported");
+  bool withSum = numResults > 3 &&
+                 !mlir::isa<mlir::NoneType>(op->getResult(3).getType());
+
   if (canUseSkipLayerNorm(input, skip, gamma, beta, inputBias,
                           op->getResult(0).getType())) {
-    bool withSum = false;
-    for (unsigned i = 1; i < numResults; ++i)
-      withSum |= !mlir::isa<mlir::NoneType>(op->getResult(i).getType());
     mlir::Operation *fused =
         createSkipLayerNorm(rewriter, loc, context, input, skip, gamma, beta,
                             inputBias, epsValue.convertToFloat(), withSum);
-    llvm::SmallVector<mlir::Value> replacements = {fused->getResult(0)};
-    for (unsigned i = 1; i < numResults; ++i)
-      replacements.push_back(
-          mlir::isa<mlir::NoneType>(op->getResult(i).getType())
-              ? mlir::Value{}
-              : fused->getResult(1));
+    llvm::SmallVector<mlir::Value> replacements(numResults, mlir::Value{});
+    replacements[0] = fused->getResult(0);
+    if (withSum)
+      replacements[3] = fused->getResult(1);
     rewriter.replaceOp(op, replacements);
     return mlir::success();
   }
 
   // === 1. sum = (input + skip) + bias. This is output[3]. ==================
-  // ORT's order, which the fused kernel also uses. Each hip.add rounds, so an
-  // f16 sum can differ from ORT's single rounding in the last bit. Dynamic
-  // extents live on `input`; skip and bias broadcast to it, so the empty
-  // tensors are sized from the input.
-  mlir::Value sumInit = createEmptyTensor(rewriter, loc, inputType, input);
-  mlir::Value sum = mlir::hip::AddOp::create(rewriter, loc, inputType, context,
-                                             input, skip, sumInit)
-                        .getResult(0);
+  // ORT's order and single rounding: with a bias, a narrow type is widened to
+  // f32 for both adds and the sum is rounded once. Dynamic extents live on
+  // `input`; skip and bias broadcast to it, so the adds are sized from it.
+  mlir::Type elemType = inputType.getElementType();
+  bool widen = inputBias && (elemType.isF16() || elemType.isBF16());
+  auto f32Like = [&](mlir::RankedTensorType type) {
+    return mlir::RankedTensorType::get(type.getShape(), rewriter.getF32Type());
+  };
+  auto toF32 = [&](mlir::Value v) {
+    auto type = mlir::cast<mlir::RankedTensorType>(v.getType());
+    return mlir::hip::CastOp::create(
+               rewriter, loc, context, v,
+               createEmptyTensor(rewriter, loc, f32Like(type), v),
+               rewriter.getI64IntegerAttr(/*FLOAT=*/1))
+        ->getResult(0);
+  };
+  mlir::RankedTensorType addType = widen ? f32Like(inputType) : inputType;
+  mlir::Value lhs = widen ? toF32(input) : input;
+  mlir::Value rhs = widen ? toF32(skip) : skip;
+  mlir::Value sum =
+      mlir::hip::AddOp::create(rewriter, loc, addType, context, lhs, rhs,
+                               createEmptyTensor(rewriter, loc, addType, input))
+          .getResult(0);
   if (inputBias) {
-    mlir::Value biasInit = createEmptyTensor(rewriter, loc, inputType, input);
-    sum = mlir::hip::AddOp::create(rewriter, loc, inputType, context, sum,
-                                   inputBias, biasInit)
+    mlir::Value bias = widen ? toF32(inputBias) : inputBias;
+    sum = mlir::hip::AddOp::create(
+              rewriter, loc, addType, context, sum, bias,
+              createEmptyTensor(rewriter, loc, addType, input))
               .getResult(0);
   }
+  if (widen)
+    sum = mlir::hip::CastOp::create(
+              rewriter, loc, context, sum,
+              createEmptyTensor(rewriter, loc, inputType, input),
+              rewriter.getI64IntegerAttr(elemType.isF16() ? /*FLOAT16=*/10
+                                                          : /*BFLOAT16=*/16))
+              ->getResult(0);
 
   // === 2. output = LayerNorm(sum, gamma, beta, epsilon) =====================
   auto outputType =
@@ -945,19 +992,11 @@ SkipLayerNormToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value output = lnOp->getResult(0);
 
   // === 3. Map results: output[0] = LN output; output[1..2] (mean, inv_std)
-  //        are None and dropped; output[3] (input_skip_bias_sum) = sum. =====
-  llvm::SmallVector<mlir::Value> replacements;
-  replacements.push_back(output); // output[0]
-  for (unsigned i = 1; i < numResults; ++i) {
-    mlir::Type origType = op->getResult(i).getType();
-    if (mlir::isa<mlir::NoneType>(origType)) {
-      replacements.push_back(mlir::Value{}); // mean / inv_std -> None
-      continue;
-    }
-    // The last real (non-None) result is input_skip_bias_sum.
-    replacements.push_back(sum);
-  }
-
+  //        are unused; output[3] (input_skip_bias_sum) = sum. ===============
+  llvm::SmallVector<mlir::Value> replacements(numResults, mlir::Value{});
+  replacements[0] = output;
+  if (withSum)
+    replacements[3] = sum;
   rewriter.replaceOp(op, replacements);
   return mlir::success();
 }

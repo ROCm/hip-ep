@@ -447,6 +447,30 @@ module {
   // CHECK: %[[Y:.*]] = hip.layer_norm(%[[CTX]]) ins(%[[X]], %[[G]] : {{.*}}) outs(%[[E]] :
   // CHECK: return %[[Y]]
 
+  // The squares are reshaped to [1, 1, 4] before the variance, so both rows
+  // share one variance. That is not a LayerNorm over x's rows: not fused.
+  func.func @reshape_regroups_rows(%x: tensor<1x2x2xf32>) -> tensor<1x2x2xf32> {
+    %eps = "onnx.Constant"() {value = dense<1.0E-5> : tensor<f32>} : () -> tensor<f32>
+    %flat = "onnx.Constant"() {value = dense<[1, 4]> : tensor<2xi64>} : () -> tensor<2xi64>
+    %row = "onnx.Constant"() {value = dense<[1, 1, 4]> : tensor<3xi64>} : () -> tensor<3xi64>
+    %mean = "onnx.ReduceMean"(%x) {axes = [-1], keepdims = 1 : si64} : (tensor<1x2x2xf32>) -> tensor<1x2x1xf32>
+    %d = "onnx.Sub"(%x, %mean) : (tensor<1x2x2xf32>, tensor<1x2x1xf32>) -> tensor<1x2x2xf32>
+    %df = "onnx.Reshape"(%d, %flat) : (tensor<1x2x2xf32>, tensor<2xi64>) -> tensor<1x4xf32>
+    %sqf = "onnx.Mul"(%df, %df) : (tensor<1x4xf32>, tensor<1x4xf32>) -> tensor<1x4xf32>
+    %sq = "onnx.Reshape"(%sqf, %row) : (tensor<1x4xf32>, tensor<3xi64>) -> tensor<1x1x4xf32>
+    %var = "onnx.ReduceMean"(%sq) {axes = [-1], keepdims = 1 : si64} : (tensor<1x1x4xf32>) -> tensor<1x1x1xf32>
+    %ve = "onnx.Add"(%var, %eps) : (tensor<1x1x1xf32>, tensor<f32>) -> tensor<1x1x1xf32>
+    %s = "onnx.Sqrt"(%ve) : (tensor<1x1x1xf32>) -> tensor<1x1x1xf32>
+    %n = "onnx.Div"(%d, %s) : (tensor<1x2x2xf32>, tensor<1x1x1xf32>) -> tensor<1x2x2xf32>
+    return %n : tensor<1x2x2xf32>
+  }
+
+  // CHECK-LABEL: func.func @reshape_regroups_rows
+  // CHECK-NOT: hip.layer_norm
+  // CHECK: hip.reduce_mean
+  // CHECK: hip.div
+  // CHECK: return
+
   // The runtime LayerNorm reads any 2-byte element as fp16: bf16 is not fused.
   func.func @bf16_chain_kept(%x: tensor<2x8xbf16>, %g: tensor<8xbf16>) -> tensor<2x8xbf16> {
     %eps = "onnx.Constant"() {value = dense<1.0E-5> : tensor<bf16>} : () -> tensor<bf16>

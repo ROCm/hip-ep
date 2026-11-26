@@ -10,20 +10,24 @@
  *
  * The same kernels serve the residual form (hip_skip_layer_norm), where the
  * normalized row is t = input + skip [+ bias], rounded to the element type
- * and optionally written to `input_skip_bias_sum`.
+ * and optionally written to `input_skip_bias_sum`. Input row r reads skip
+ * row r mod skip_rows, so a skip of fewer rows repeats over the input.
  *
  * Layout: input is reshaped as `[outer, norm_size]` on the host
  *         (outer = input_num_elements / scale_num_elements,
  *          norm_size = scale_num_elements).
  *
- * Numerics (both kernels): shifted two-pass statistics in FP32.
- *   mean:  shifted_mean = sum(t - t[0]) / norm_size
- *   var:   sum(((t - t[0]) - shifted_mean)^2) / norm_size
- *   y:     ((t - t[0]) - shifted_mean) * inv_std * scale + bias
- * Shifting by a sample of the row keeps the mean precise when
- * |mean| >> stddev (e.g. t = [8192, 8193]); centering the second pass avoids
- * the E[t^2] - E[t]^2 cancellation and cannot overflow for rows whose plain
- * sum of squares is finite (e.g. t = [1e19, -1e19]).
+ * Numerics (both kernels): corrected two-pass statistics in FP32.
+ *   m0:    sum(t) / norm_size
+ *   d:     t - m0
+ *   c:     sum(d) / norm_size            (the rounding error left in m0)
+ *   var:   sum(d^2) / norm_size - c^2
+ *   y:     (d - c) * inv_std * scale + bias;  mean = m0 + c
+ * Centering the second pass avoids the E[t^2] - E[t]^2 cancellation when
+ * |mean| >> stddev (e.g. t = [8192, 8193]) and cannot overflow for rows
+ * whose plain sum of squares is finite (e.g. t = [1e19, -1e19]). The
+ * correction c recovers the mean when the first pass rounds, as when one
+ * large sample dominates the row (e.g. [1e8, 1, 1, ...]).
  *
  * Kernels:
  *   Row kernel (default): a group of G threads (one wave for hidden sizes up
@@ -89,6 +93,12 @@ __device__ inline float ln_elem(const T *x, const T *skip, const T *bias,
   return v;
 }
 
+// mean(d^2) - c^2, which rounding can push just below zero. NaN stays NaN.
+__device__ inline float ln_var(float mean_dsq, float c) {
+  float var = mean_dsq - c * c;
+  return var < 0.0f ? 0.0f : var;
+}
+
 __device__ inline float ln_block_sum(float partial, float *s_reduce) {
   s_reduce[threadIdx.x] = partial;
   __syncthreads();
@@ -112,49 +122,51 @@ __global__ void hip_layer_norm_block_kernel(
     const T *__restrict__ skip_bias, const T *__restrict__ scale,
     const T *__restrict__ bias, T *__restrict__ output, T *__restrict__ sum_out,
     void *__restrict__ mean_out, void *__restrict__ inv_std_out,
-    bool stats_half, int64_t outer, int64_t norm_size, float epsilon) {
+    bool stats_half, int64_t outer, int64_t skip_rows, int64_t norm_size,
+    float epsilon) {
   int64_t row = blockIdx.x;
   if (row >= outer)
     return;
 
   const int64_t base = row * norm_size;
   const T *x_row = input + base;
-  const T *s_row = skip ? skip + base : nullptr;
+  const T *s_row = skip ? skip + (row % skip_rows) * norm_size : nullptr;
   T *y_row = output + base;
   T *sum_row = sum_out ? sum_out + base : nullptr;
+  const float n = static_cast<float>(norm_size);
 
   __shared__ float s_reduce[kLayerNormBlockSize];
 
-  const float shift = ln_elem(x_row, s_row, skip_bias, 0);
   float local_sum = 0.0f;
   for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
     float t = ln_elem(x_row, s_row, skip_bias, i);
     if (sum_row)
       ln_store(sum_row + i, t);
-    local_sum += t - shift;
+    local_sum += t;
   }
-  const float shifted_mean =
-      ln_block_sum(local_sum, s_reduce) / static_cast<float>(norm_size);
+  const float m0 = ln_block_sum(local_sum, s_reduce) / n;
 
-  float local_sumsq = 0.0f;
+  float local_d = 0.0f;
+  float local_dsq = 0.0f;
   for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
-    float d = (ln_elem(x_row, s_row, skip_bias, i) - shift) - shifted_mean;
-    local_sumsq += d * d;
+    float d = ln_elem(x_row, s_row, skip_bias, i) - m0;
+    local_d += d;
+    local_dsq += d * d;
   }
-  const float var =
-      ln_block_sum(local_sumsq, s_reduce) / static_cast<float>(norm_size);
-  const float inv_std = rsqrtf(var + epsilon);
+  const float c = ln_block_sum(local_d, s_reduce) / n;
+  const float inv_std =
+      rsqrtf(ln_var(ln_block_sum(local_dsq, s_reduce) / n, c) + epsilon);
   if (threadIdx.x == 0) {
     if (mean_out)
-      ln_store_stat(mean_out, row, stats_half, shift + shifted_mean);
+      ln_store_stat(mean_out, row, stats_half, m0 + c);
     if (inv_std_out)
       ln_store_stat(inv_std_out, row, stats_half, inv_std);
   }
 
   for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
-    float v = ln_elem(x_row, s_row, skip_bias, i) - shift;
+    float d = ln_elem(x_row, s_row, skip_bias, i) - m0;
     float b = bias ? ln_load(bias + i) : 0.0f;
-    ln_store(y_row + i, (v - shifted_mean) * inv_std * ln_load(scale + i) + b);
+    ln_store(y_row + i, (d - c) * inv_std * ln_load(scale + i) + b);
   }
 }
 
@@ -236,7 +248,8 @@ __global__ __launch_bounds__(RowBlock<G>::BS) void hip_layer_norm_row_kernel(
     const T *__restrict__ skip_bias, const T *__restrict__ scale,
     const T *__restrict__ bias, T *__restrict__ output, T *__restrict__ sum_out,
     void *__restrict__ mean_out, void *__restrict__ inv_std_out,
-    bool stats_half, int64_t outer, int64_t norm_size, float epsilon) {
+    bool stats_half, int64_t outer, int64_t skip_rows, int64_t norm_size,
+    float epsilon) {
   constexpr int N = Chunk<T>::N;
   constexpr int BS = RowBlock<G>::BS;
   __shared__ float s_wave[BS / kRowWave];
@@ -249,10 +262,11 @@ __global__ __launch_bounds__(RowBlock<G>::BS) void hip_layer_norm_row_kernel(
   const int64_t nchunks = norm_size / N;
   const int64_t base = (active ? row : 0) * norm_size;
   const T *x = input + base;
-  const T *s = skip ? skip + base : nullptr;
+  const T *s =
+      skip ? skip + ((active ? row : 0) % skip_rows) * norm_size : nullptr;
+  const float n = static_cast<float>(norm_size);
 
   float v[C][N];
-  const float shift = active ? ln_elem(x, s, skip_bias, 0) : 0.0f;
   float sum = 0.0f;
 #pragma unroll
   for (int c = 0; c < C; ++c) {
@@ -278,35 +292,34 @@ __global__ __launch_bounds__(RowBlock<G>::BS) void hip_layer_norm_row_kernel(
           ln_st16(sum_out + base, idx, v[c]);
       }
 #pragma unroll
-      for (int k = 0; k < N; ++k) {
-        v[c][k] -= shift;
+      for (int k = 0; k < N; ++k)
         sum += v[c][k];
-      }
     }
   }
-  const float shifted_mean =
-      ln_group_sum<G>(sum, s_wave) / static_cast<float>(norm_size);
+  const float m0 = ln_group_sum<G>(sum, s_wave) / n;
 
-  float sumsq = 0.0f;
+  float dsum = 0.0f;
+  float dsq = 0.0f;
 #pragma unroll
   for (int c = 0; c < C; ++c) {
     const int64_t idx = lane + static_cast<int64_t>(c) * G;
     if (active && idx < nchunks) {
 #pragma unroll
       for (int k = 0; k < N; ++k) {
-        v[c][k] -= shifted_mean;
-        sumsq += v[c][k] * v[c][k];
+        v[c][k] -= m0;
+        dsum += v[c][k];
+        dsq += v[c][k] * v[c][k];
       }
     }
   }
-  const float var =
-      ln_group_sum<G>(sumsq, s_wave) / static_cast<float>(norm_size);
+  const float corr = ln_group_sum<G>(dsum, s_wave) / n;
+  const float mean_dsq = ln_group_sum<G>(dsq, s_wave) / n;
   if (!active)
     return;
-  const float inv_std = rsqrtf(var + epsilon);
+  const float inv_std = rsqrtf(ln_var(mean_dsq, corr) + epsilon);
   if (lane == 0) {
     if (mean_out)
-      ln_store_stat(mean_out, row, stats_half, shift + shifted_mean);
+      ln_store_stat(mean_out, row, stats_half, m0 + corr);
     if (inv_std_out)
       ln_store_stat(inv_std_out, row, stats_half, inv_std);
   }
@@ -327,7 +340,7 @@ __global__ __launch_bounds__(RowBlock<G>::BS) void hip_layer_norm_row_kernel(
       }
 #pragma unroll
       for (int k = 0; k < N; ++k)
-        v[c][k] = v[c][k] * inv_std * g[k] + b[k];
+        v[c][k] = (v[c][k] - corr) * inv_std * g[k] + b[k];
       ln_st16(y, idx, v[c]);
     }
   }
@@ -345,6 +358,7 @@ struct LayerNormArgs {
   void *inv_std_out;
   bool stats_half;
   int64_t outer;
+  int64_t skip_rows;
   int64_t norm_size;
   float epsilon;
 };
@@ -381,7 +395,7 @@ void launch_row(hipStream_t stream, const LayerNormArgs &a) {
       static_cast<const T *>(a.skip_bias), static_cast<const T *>(a.scale),
       static_cast<const T *>(a.bias), static_cast<T *>(a.output),
       static_cast<T *>(a.sum_out), a.mean_out, a.inv_std_out, a.stats_half,
-      a.outer, a.norm_size, a.epsilon);
+      a.outer, a.skip_rows, a.norm_size, a.epsilon);
 }
 
 // Chunks per thread are rounded up to {1, 2, 4, 6, 8} to bound the number of
@@ -444,7 +458,8 @@ int launch_layer_norm(hipStream_t stream, const LayerNormArgs &a,
         static_cast<const T *>(a.skip), static_cast<const T *>(a.skip_bias),
         static_cast<const T *>(a.scale), static_cast<const T *>(a.bias),
         static_cast<T *>(a.output), static_cast<T *>(a.sum_out), a.mean_out,
-        a.inv_std_out, a.stats_half, a.outer, a.norm_size, a.epsilon);
+        a.inv_std_out, a.stats_half, a.outer, a.skip_rows, a.norm_size,
+        a.epsilon);
     break;
   }
 
@@ -490,6 +505,7 @@ extern "C" int hip_layer_norm(void *stream, const void *input,
                   inv_std_out,
                   stats_half,
                   outer,
+                  /*skip_rows=*/1,
                   norm_size,
                   epsilon};
   return dispatch_layer_norm(stream, a, hip_dtype, "hip_layer_norm");
@@ -499,10 +515,13 @@ extern "C" int hip_skip_layer_norm(void *stream, const void *input,
                                    const void *skip, const void *gamma,
                                    const void *beta, const void *bias,
                                    void *output, void *input_skip_bias_sum,
-                                   int64_t outer, int64_t norm_size,
-                                   float epsilon, int hip_dtype) {
-  if (!skip) {
-    fprintf(stderr, "[custom_kernels] hip_skip_layer_norm: null skip\n");
+                                   int64_t outer, int64_t skip_rows,
+                                   int64_t norm_size, float epsilon,
+                                   int hip_dtype) {
+  if (!skip || skip_rows <= 0) {
+    fprintf(stderr, "[custom_kernels] hip_skip_layer_norm: null skip or "
+                    "skip_rows=%lld\n",
+            (long long)skip_rows);
     return -1;
   }
   LayerNormArgs a{input,
@@ -516,6 +535,7 @@ extern "C" int hip_skip_layer_norm(void *stream, const void *input,
                   /*inv_std_out=*/nullptr,
                   /*stats_half=*/false,
                   outer,
+                  skip_rows,
                   norm_size,
                   epsilon};
   return dispatch_layer_norm(stream, a, hip_dtype, "hip_skip_layer_norm");
