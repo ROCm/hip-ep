@@ -31,7 +31,7 @@
 // Four launch shapes, picked by width in `launch_softmax` at the bottom:
 //   wave     one wavefront per row, the row in registers, 16-byte accesses,
 //            no LDS and no barrier. cols == wave * {1,2,4} vectors per lane.
-//   masked   one wavefront per row of any width up to wave * kMaskedLanes,
+//   masked   one wavefront per row of any width up to wave * kMaskedMaxPerLane,
 //            lanes past `cols` masked. Same shuffle-only reductions.
 //   block    one block per row, up to kBlockMaxElems elements per thread in
 //            registers, vector accesses. 256 threads up to kRowCols columns,
@@ -68,14 +68,14 @@
 static constexpr int kWavesPerBlock = 8;
 
 // Masked wave kernel: up to kMaxWaveElems values per lane, for rows of at most
-// kMaskedLanes * wave columns. Wider rows go to a block per row. A wavefront
+// kMaskedMaxPerLane * wave columns. Wider rows go to a block per row. A wavefront
 // per row packs eight rows into one block with no LDS and no barrier, which
 // wins by 25-45% on rows of up to 64 columns and ties at 96. Beyond that a
 // block with 8- or 16-byte vector loads is 5-20% faster than the masked
 // kernel's element-sized loads, so the limit is three values per lane
 // (measured on gfx1151, fp16 and fp32, 65536 rows).
 static constexpr int kMaxWaveElems = 4;
-static constexpr int kMaskedLanes = 3;
+static constexpr int kMaskedMaxPerLane = 3;
 
 // Largest per-thread element count of the block kernel. 32 fp32 values per
 // thread stay well clear of a register spill at either block size.
@@ -542,9 +542,9 @@ int launch_softmax(void* stream_ptr, const void* input, void* output, int rows,
       return launch_wave<T, kVecElems * 4>(stream, in, out, rows, cols, wave);
   }
 
-  // One wavefront per row for a row of at most kMaskedLanes values per lane,
+  // One wavefront per row for a row of at most kMaskedMaxPerLane values per lane,
   // with the lanes past `cols` masked.
-  if (cols <= wave * kMaskedLanes)
+  if (cols <= wave * kMaskedMaxPerLane)
     return launch_masked_wave<T>(stream, in, out, rows, cols, wave);
 
   // Row in registers: the fewest elements per thread, then the smallest block,
