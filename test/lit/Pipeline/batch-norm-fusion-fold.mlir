@@ -9,7 +9,7 @@
 
 // A convolution followed by a batch normalization written as elementwise ops.
 // hip-fusion-transform turns the chain into hip.batch_norm, and the
-// hip-fold-batchnorm run after it folds that into the convolution, before
+// hip-fold-into-conv run after it folds that into the convolution, before
 // hip-externalize-constants makes the parameters unreadable.
 //
 // scale = [1, 2], B = [0.5, 1], mean = [1, 0], var = [3, 0], epsilon = 1, so
