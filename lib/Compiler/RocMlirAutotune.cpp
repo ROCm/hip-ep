@@ -34,7 +34,6 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
-#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/JSON.h"
@@ -595,6 +594,7 @@ struct RocMlirAutotuner::Impl {
   bool compileAndBenchmarkSearches(llvm::StringMap<CompiledKernel> &byKernel);
   bool compileDeferredCacheHits(llvm::StringMap<CompiledKernel> &byKernel);
   const ProblemCacheLut &loadedProblemCache();
+  bool checkProblemCacheFile(std::string &error);
   bool problemCacheActive() const;
   std::optional<std::string>
   lookupProblemCache(StringRef problem,
@@ -1305,24 +1305,44 @@ bool RocMlirAutotuner::Impl::compileDeferredCacheHits(
   return true;
 }
 
+bool RocMlirAutotuner::Impl::checkProblemCacheFile(std::string &error) {
+  if (!options.problemCacheRewrite || options.problemCachePath.empty())
+    return true;
+  // The file this compile will rewrite. Load it the way the rewrite will read
+  // it, so a file the rewrite would refuse is found now, before the search,
+  // rather than after it. A missing or blank file is a new, empty table.
+  problemCacheLoaded = true;
+  if (!checkProblemCacheJsonFile(options.problemCachePath, deviceGfx,
+                                 problemCache, error)) {
+    problemCache = {};
+    return false;
+  }
+  if (log())
+    *log() << options.logPrefix << " nearest-tune loaded "
+           << problemCache.entries.size() << " entries from "
+           << options.problemCachePath << "\n";
+  return true;
+}
+
 const ProblemCacheLut &RocMlirAutotuner::Impl::loadedProblemCache() {
   if (problemCacheLoaded)
     return problemCache;
-  problemCacheLoaded = true;
-  if (options.problemCachePath.empty())
+  if (options.problemCachePath.empty()) {
+    problemCacheLoaded = true;
     return problemCache;
-  if (options.problemCacheRewrite) {
-    // A first run, or a file created empty: there is nothing to read yet and
-    // the compile will write it, so this is not worth a warning.
-    uint64_t size = 0;
-    if (llvm::sys::fs::file_size(options.problemCachePath, size) || size == 0)
-      return problemCache;
   }
   std::string error;
-  // The external table is the LUT JSON that updateProblemCacheFile writes.
-  // Only the shipped tables above are FlatBuffers.
-  if (!loadProblemCacheLutJsonFile(options.problemCachePath, problemCache,
-                                   error)) {
+  if (options.problemCacheRewrite) {
+    // Normally checked by the caller before the compile; this covers a caller
+    // that did not. The rewrite at the end refuses the same file again.
+    if (!checkProblemCacheFile(error))
+      llvm::errs() << "warning: problem cache ignored: " << error << "\n";
+    return problemCache;
+  }
+  problemCacheLoaded = true;
+  // A table that is only read can be the LUT JSON or, as before the JSON
+  // format, an RCAL FlatBuffer.
+  if (!loadProblemCacheLutFile(options.problemCachePath, problemCache, error)) {
     llvm::errs() << "warning: " << error << "\n";
     problemCache = {};
   } else if (log()) {
@@ -1333,8 +1353,8 @@ const ProblemCacheLut &RocMlirAutotuner::Impl::loadedProblemCache() {
   return problemCache;
 }
 
-// The in-process winner key is "<kind>\n<problem>". The dump stores the
-// problem text getTuningProblemStr produced, which is what a later lookup
+// The in-process winner key is "<kind>\n<problem>". The problem cache stores
+// the problem text getTuningProblemStr produced, which is what a later lookup
 // compares.
 static StringRef problemOfCacheKey(StringRef cacheKey) {
   auto split = cacheKey.split('\n');
@@ -1392,6 +1412,10 @@ bool RocMlirAutotuner::Impl::updateProblemCacheFile() const {
   return true;
 }
 
+bool RocMlirAutotuner::checkProblemCacheFile(std::string &error) {
+  return impl->checkProblemCacheFile(error);
+}
+
 bool RocMlirAutotuner::updateProblemCacheFile() const {
   return impl->updateProblemCacheFile();
 }
@@ -1427,6 +1451,10 @@ RocMlirAutotuner::~RocMlirAutotuner() = default;
 bool RocMlirAutotuner::isUsable() const { return false; }
 const AutotunePhaseTimes &RocMlirAutotuner::phaseTimes() const {
   return impl->times;
+}
+bool RocMlirAutotuner::checkProblemCacheFile(std::string &error) {
+  error = "autotune requires a real HIP build";
+  return false;
 }
 bool RocMlirAutotuner::updateProblemCacheFile() const { return false; }
 void RocMlirAutotuner::installInto(RocMlirEmbedOptions &) {}

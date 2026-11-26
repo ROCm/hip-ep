@@ -619,6 +619,7 @@ bool CompilerDriver::runMLIRPasses(
     mlir::hip::AutotuneSpace autotuneSpace;
     const std::string problemCacheRw =
         hip_get_env("HIPDNN_EP_ROCMLIR_PROBLEM_CACHE_RW");
+    bool updateProblemCache = !problemCacheRw.empty();
     if (mlir::hip::rocMlirAutotuneFromEnv(autotuneSpace)) {
       mlir::hip::AutotuneOptions autotuneOpts;
       autotuneOpts.space = autotuneSpace;
@@ -654,6 +655,17 @@ bool CompilerDriver::runMLIRPasses(
                         "default perfConfig";
         return false;
       }
+      // Before the compile, so a file the rewrite would refuse is found now.
+      // As with every update failure here, it does not fail the compile: the
+      // file is not used and not updated.
+      std::string cacheError;
+      if (!problemCacheRw.empty() &&
+          !autotuner->checkProblemCacheFile(cacheError)) {
+        llvm::errs() << "[CompilerDriver] HIPDNN_EP_ROCMLIR_PROBLEM_CACHE_RW "
+                        "ignored, not read or updated: "
+                     << cacheError << "\n";
+        updateProblemCache = false;
+      }
       autotuner->installInto(embedOpts);
     }
     if (!autotuner && !problemCacheRw.empty())
@@ -686,8 +698,7 @@ bool CompilerDriver::runMLIRPasses(
     // compile adds nothing. The file is one table across compiles, so unlike
     // the dumps it is not numbered. A failure to update it is reported and
     // does not fail the compile, as with the dumps.
-    if (autotuner && !problemCacheRw.empty() &&
-        !autotuner->updateProblemCacheFile())
+    if (autotuner && updateProblemCache && !autotuner->updateProblemCacheFile())
       llvm::errs() << "[CompilerDriver] failed to update problem cache "
                    << problemCacheRw << "\n";
 

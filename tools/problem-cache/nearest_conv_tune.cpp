@@ -22,6 +22,7 @@
 #include <iterator>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <utility>
 
 namespace mlir {
@@ -988,6 +989,13 @@ bool loadProblemCacheLutJsonFile(const std::string &path, ProblemCacheLut &lut,
     error = "failed reading problem cache: " + path;
     return false;
   }
+  if (text.size() >= 8 &&
+      hipdnn_ep::rocmlir_autotune::fbs::RocmlirAutotuneLutBufferHasIdentifier(
+          text.data())) {
+    lut = {};
+    error = path + " is an RCAL FlatBuffer (.fb), not the LUT JSON";
+    return false;
+  }
   if (!loadProblemCacheLutJson(text, lut, error)) {
     error = path + ": " + error;
     return false;
@@ -999,6 +1007,7 @@ namespace {
 
 // One row of the table being rewritten.
 struct StoredPoint {
+  std::string problem;
   std::string perfConfig;
   int64_t m = 0;
   int64_t n = 0;
@@ -1024,11 +1033,12 @@ bool mergeProblemCacheJson(std::string_view existing, std::string_view gpuArch,
                            const std::vector<ProblemCacheWinner> &winners,
                            std::string &out, std::string &error) {
   out.clear();
-  // Sorted by problem, which is also the output order. A problem can have
-  // several rows, in file order: a lookup returns the first one it can use, so
-  // a later row is an alternative for when the first is filtered out or turns
-  // out not to compile.
-  std::map<std::string, std::vector<StoredPoint>> table;
+  // Every row, in file order, which is also the output order. Lookup reads the
+  // rows in order: an exact match takes the first row it can use, so a later
+  // row of the same problem is the alternative when the first is filtered out
+  // or does not compile, and a nearest-neighbour tie keeps the earlier row.
+  // Reordering the rows could therefore change what a lookup returns.
+  std::vector<StoredPoint> rows;
   std::vector<StoredFallback> fallbacks;
   bool hadFallbacks = false;
   llvm::json::Object root;
@@ -1114,6 +1124,7 @@ bool mergeProblemCacheJson(std::string_view existing, std::string_view gpuArch,
       if (!problem)
         return malformed(where + " has no string `problem`");
       StoredPoint stored;
+      stored.problem = problem->str();
       if (!configIndexOf(*object, where, stored.perfConfig))
         return false;
       // m, n and k are advisory. Each one that is present must be an integer
@@ -1130,7 +1141,7 @@ bool mergeProblemCacheJson(std::string_view existing, std::string_view gpuArch,
       for (int i = 0; i < 3; ++i)
         if (dims[i] != nullptr)
           *outDims[i] = *dims[i]->getAsInteger();
-      table[problem->str()].push_back(std::move(stored));
+      rows.push_back(std::move(stored));
     }
 
     // `fallbacks` is optional, but one that is present is index-linked to
@@ -1155,17 +1166,37 @@ bool mergeProblemCacheJson(std::string_view existing, std::string_view gpuArch,
   }
 
   // A winner is a fresh measurement of its problem, so it replaces every row
-  // the file had for it, and a new problem is added. A later winner for the
-  // same problem wins over an earlier one. Problems with no winner keep all
-  // their rows.
+  // the file had for it: it takes the place of the first such row, and the
+  // others go. A later winner for the same problem wins over an earlier one.
+  // Problems with no winner keep all their rows where they were. New problems
+  // go at the end, sorted by problem, so the output does not depend on the
+  // order the winners came in.
+  std::map<std::string, StoredPoint> fresh;
   for (const ProblemCacheWinner &winner : winners) {
     if (winner.problem.empty() || winner.perfConfig.empty())
       continue;
     StoredPoint stored;
+    stored.problem = winner.problem;
     stored.perfConfig = winner.perfConfig;
     implicitGemmDims(winner.problem, stored.m, stored.n, stored.k);
-    table[winner.problem] = {std::move(stored)};
+    fresh[winner.problem] = std::move(stored);
   }
+  std::vector<StoredPoint> merged;
+  merged.reserve(rows.size() + fresh.size());
+  for (StoredPoint &row : rows) {
+    auto replacement = fresh.find(row.problem);
+    if (replacement == fresh.end()) {
+      merged.push_back(std::move(row));
+    } else if (!replacement->second.problem.empty()) {
+      merged.push_back(std::move(replacement->second));
+      // Moved from: marks the winner as placed, so later rows of the same
+      // problem are dropped rather than replaced again.
+      replacement->second.problem.clear();
+    }
+  }
+  for (auto &[problem, stored] : fresh)
+    if (!stored.problem.empty())
+      merged.push_back(std::move(stored));
 
   // The configs that remain are the ones a point or a fallback uses, each once.
   // A point and a fallback that name the same perfConfig share an entry, and
@@ -1183,14 +1214,13 @@ bool mergeProblemCacheJson(std::string_view existing, std::string_view gpuArch,
     return found->second;
   };
   llvm::json::Array outPoints;
-  for (const auto &row : table)
-    for (const StoredPoint &stored : row.second)
-      outPoints.push_back(
-          llvm::json::Object{{"problem", row.first},
-                             {"config", indexOf(stored.perfConfig)},
-                             {"m", stored.m},
-                             {"n", stored.n},
-                             {"k", stored.k}});
+  for (const StoredPoint &stored : merged)
+    outPoints.push_back(
+        llvm::json::Object{{"problem", stored.problem},
+                           {"config", indexOf(stored.perfConfig)},
+                           {"m", stored.m},
+                           {"n", stored.n},
+                           {"k", stored.k}});
   llvm::json::Array outFallbacks;
   for (StoredFallback &fallback : fallbacks) {
     fallback.record["config"] = indexOf(fallback.perfConfig);
@@ -1253,34 +1283,161 @@ bool resolveWriteTarget(const std::string &path, std::filesystem::path &target,
 
 } // namespace
 
+namespace {
+
+// An RCAL FlatBuffer, the format of the shipped tables, by its file identifier.
+bool looksLikeFlatBuffer(std::string_view bytes) {
+  namespace fbs = hipdnn_ep::rocmlir_autotune::fbs;
+  return bytes.size() >= 8 &&
+         fbs::RocmlirAutotuneLutBufferHasIdentifier(bytes.data());
+}
+
+std::string flatBufferRewriteError(const std::string &path) {
+  return path +
+         " is an RCAL FlatBuffer (.fb). --enable-problem-cache-rw reads and "
+         "writes the LUT JSON; decode the .fb with flatc --json --raw-binary "
+         "problem_cache.fbs -- <file>, or start from a new file";
+}
+
+// Reads \p target, the resolved path of \p path, for a rewrite. \p present is
+// false when nothing is there. A stat that fails for a reason other than "no
+// such file" is an error: the file may be there, and writing a new table over
+// it would lose it.
+bool readRewriteTarget(const std::string &path,
+                       const std::filesystem::path &target, std::string &text,
+                       bool &present, std::string &error) {
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  text.clear();
+  present = fs::exists(target, ec);
+  if (ec) {
+    error = "cannot inspect problem cache " + path + ": " + ec.message();
+    return false;
+  }
+  if (!present)
+    return true;
+  std::ifstream in(target, std::ios::binary);
+  if (!in) {
+    error = "cannot read problem cache: " + path;
+    return false;
+  }
+  if (!readStreamText(in, text)) {
+    error = "failed reading problem cache: " + path;
+    return false;
+  }
+  return true;
+}
+
+// Removes temporary files that an earlier rewrite of \p target left behind
+// when it was killed between writing and renaming. Only old ones: a recent
+// one may belong to a rewrite that another process is doing right now.
+void removeStaleTemporaries(const std::filesystem::path &target) {
+  namespace fs = std::filesystem;
+  constexpr auto kStaleAfter = std::chrono::hours(1);
+  std::error_code ec;
+  const fs::path dir =
+      target.has_parent_path() ? target.parent_path() : fs::path(".");
+  const std::string prefix = target.filename().string() + ".tmp";
+  const auto now = fs::file_time_type::clock::now();
+  for (fs::directory_iterator it(dir, ec), end; !ec && it != end;
+       it.increment(ec)) {
+    const std::string name = it->path().filename().string();
+    if (name.size() <= prefix.size() || name.compare(0, prefix.size(), prefix))
+      continue;
+    if (!std::all_of(name.begin() + static_cast<std::ptrdiff_t>(prefix.size()),
+                     name.end(),
+                     [](unsigned char c) { return std::isdigit(c) != 0; }))
+      continue;
+    std::error_code fileEc;
+    const auto written = fs::last_write_time(it->path(), fileEc);
+    if (!fileEc && now - written > kStaleAfter)
+      fs::remove(it->path(), fileEc);
+  }
+}
+
+// Serializes rewrites within one process. The file is read, merged and
+// renamed over, so two compiles that overlap would otherwise each start from
+// the same old table and the second rename would drop the first one's
+// winners. Separate processes are not covered.
+std::mutex &rewriteMutex() {
+  static std::mutex mutex;
+  return mutex;
+}
+
+} // namespace
+
+bool loadProblemCacheLutFile(const std::string &path, ProblemCacheLut &lut,
+                             std::string &error) {
+  lut = {};
+  std::ifstream in(path, std::ios::binary);
+  if (!in) {
+    error = "problem cache not found: " + path;
+    return false;
+  }
+  std::string bytes;
+  if (!readStreamText(in, bytes)) {
+    error = "failed reading problem cache: " + path;
+    return false;
+  }
+  const bool ok =
+      looksLikeFlatBuffer(bytes)
+          ? loadProblemCacheLut(reinterpret_cast<const uint8_t *>(bytes.data()),
+                                bytes.size(), lut, error)
+          : loadProblemCacheLutJson(bytes, lut, error);
+  if (!ok)
+    error = path + ": " + error;
+  return ok;
+}
+
+bool checkProblemCacheJsonFile(const std::string &path,
+                               std::string_view gpuArch, ProblemCacheLut &lut,
+                               std::string &error) {
+  lut = {};
+  std::filesystem::path target;
+  if (!resolveWriteTarget(path, target, error))
+    return false;
+  std::string existing;
+  bool present = false;
+  if (!readRewriteTarget(path, target, existing, present, error))
+    return false;
+  if (!present || isBlank(existing))
+    return true;
+  if (looksLikeFlatBuffer(existing)) {
+    error = flatBufferRewriteError(path);
+    return false;
+  }
+  // The same checks the rewrite makes, so a file it would refuse is refused
+  // before the compile spends its time on a search.
+  std::string merged;
+  if (!mergeProblemCacheJson(existing, gpuArch, {}, merged, error)) {
+    error = path + ": " + error;
+    return false;
+  }
+  if (!loadProblemCacheLutJson(existing, lut, error)) {
+    error = path + ": " + error;
+    return false;
+  }
+  return true;
+}
+
 bool updateProblemCacheJsonFile(const std::string &path,
                                 std::string_view gpuArch,
                                 const std::vector<ProblemCacheWinner> &winners,
                                 std::string &error) {
   namespace fs = std::filesystem;
+  std::lock_guard<std::mutex> lock(rewriteMutex());
   std::error_code ec;
   fs::path target;
   if (!resolveWriteTarget(path, target, error))
     return false;
 
-  // A stat that fails for a reason other than "no such file" is an error: the
-  // file may be there, and writing a new table over it would lose it.
   std::string existing;
-  const bool present = fs::exists(target, ec);
-  if (ec) {
-    error = "cannot inspect problem cache " + path + ": " + ec.message();
+  bool present = false;
+  if (!readRewriteTarget(path, target, existing, present, error))
     return false;
-  }
-  if (present) {
-    std::ifstream in(target, std::ios::binary);
-    if (!in) {
-      error = "cannot read problem cache: " + path;
-      return false;
-    }
-    if (!readStreamText(in, existing)) {
-      error = "failed reading problem cache: " + path;
-      return false;
-    }
+  if (looksLikeFlatBuffer(existing)) {
+    error = flatBufferRewriteError(path);
+    return false;
   }
 
   std::string merged;
@@ -1288,9 +1445,18 @@ bool updateProblemCacheJsonFile(const std::string &path,
     error = path + ": " + error;
     return false;
   }
+  // Nothing new: leave an existing file as it is rather than rewrite it with
+  // the same contents. A missing one is still created, as a new table.
+  const bool anyWinner =
+      std::any_of(winners.begin(), winners.end(), [](const auto &winner) {
+        return !winner.problem.empty() && !winner.perfConfig.empty();
+      });
+  if (present && !anyWinner)
+    return true;
 
   if (target.has_parent_path())
     fs::create_directories(target.parent_path(), ec);
+  removeStaleTemporaries(target);
 
   // Write beside the target and rename over it, so the old file survives a
   // failed or interrupted write.

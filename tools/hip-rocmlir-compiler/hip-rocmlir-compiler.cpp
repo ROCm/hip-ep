@@ -185,42 +185,31 @@ static void printUsage(llvm::raw_ostream &os, const char *prog) {
         "the\n"
      << "                       differences being searched for.\n"
      << "  --enable-problem-cache-rw <file.json>\n"
-     << "                       Read and update this LUT JSON (configs, "
-        "points,\n"
-     << "                       fallbacks); a .fb is not accepted. It takes "
-        "priority\n"
-     << "                       over the search and\n"
-     << "                       replaces the shipped table. An identical\n"
-     << "                       problem string is compiled as stored. A "
-        "conv\n"
-     << "                       miss requires matching arch, dtype, -F,\n"
-     << "                       layouts, stride, dilation, and fusions, "
-        "then the\n"
-     << "                       nearest M/N/K tile (weights 1) that fits. "
-        "A tile\n"
-     << "                       that fails to compile is skipped for the\n"
-     << "                       next nearest; otherwise the search runs.\n"
-     << "                       After a successful compile the winners "
-        "that the\n"
-     << "                       search picked are merged into the file "
-        "itself,\n"
-     << "                       so the next compile reads them back. Tiles "
-        "taken\n"
-     << "                       from the file are not written as winners. "
-        "A\n"
-     << "                       missing or empty file is created. The file "
-        "is\n"
-     << "                       replaced atomically, and left untouched "
-        "if it is\n"
-     << "                       not a LUT or is for another GPU. With "
-        "several\n"
-     << "                       compiles at once the last writer wins. "
-        "Needs\n"
-     << "                       autotune. HIP_ROCMLIR_PROBLEM_CACHE names "
-        "a file\n"
-     << "                       to read only. problem_cache_to_fb.py "
-        "compiles the\n"
-     << "                       file to a .fb to ship it as a LUT.\n"
+     << "                       Read and update this LUT JSON (configs,\n"
+     << "                       points, fallbacks). It takes priority over\n"
+     << "                       the search and replaces the shipped table. An\n"
+     << "                       identical problem string is compiled as\n"
+     << "                       stored. A conv miss requires matching arch,\n"
+     << "                       dtype, -F, layouts, stride, dilation, and\n"
+     << "                       fusions, then the nearest M/N/K tile (weights\n"
+     << "                       1) that fits. A tile that fails to compile is\n"
+     << "                       skipped for the next nearest; otherwise the\n"
+     << "                       search runs. After a successful compile the\n"
+     << "                       winners that the search picked are merged\n"
+     << "                       into the file itself, so the next compile\n"
+     << "                       reads them back. Tiles taken from the file\n"
+     << "                       are not written as winners. A missing or\n"
+     << "                       empty file is created. A file that is not a\n"
+     << "                       LUT, is malformed, is for another GPU, or is\n"
+     << "                       a .fb stops the compile before it starts,\n"
+     << "                       with the file untouched. A failed write is a\n"
+     << "                       warning. The file is replaced atomically;\n"
+     << "                       with several processes at once the last\n"
+     << "                       writer wins. Needs autotune.\n"
+     << "                       HIP_ROCMLIR_PROBLEM_CACHE names a file to\n"
+     << "                       read only, JSON or .fb.\n"
+     << "                       problem_cache_to_fb.py compiles the JSON to a\n"
+     << "                       .fb to ship it as a LUT.\n"
      << "  --verbose            Print per-config compile/benchmark lines "
         "and the\n"
      << "                       selected perfConfig.\n"
@@ -306,10 +295,14 @@ int main(int argc, char **argv) {
         llvm::errs() << "error: invalid --autotune-warmup value\n";
         return 1;
       }
-    } else if (arg == "--enable-problem-cache-rw" && i + 1 < argc) {
+    } else if (arg == "--enable-problem-cache-rw" && i + 1 < argc &&
+               argv[i + 1][0] != '-') {
       autotune.problemCachePath = argv[++i];
       autotune.problemCacheRewrite = true;
     } else if (arg == "--enable-problem-cache-rw") {
+      // No value, or the next argument is an option:
+      // `--enable-problem-cache-rw -o out` must not take `-o` as the file. A
+      // path that starts with '-' can be given as ./-name.
       llvm::errs() << "error: --enable-problem-cache-rw needs a JSON file "
                       "path\n";
       return 1;
@@ -538,6 +531,14 @@ int main(int argc, char **argv) {
       llvm::errs() << "error: autotune could not reach a HIP device\n";
       return 1;
     }
+    // Before the compile, so a file the rewrite would refuse costs nothing
+    // rather than a whole search.
+    std::string cacheError;
+    if (!autotuner->checkProblemCacheFile(cacheError)) {
+      llvm::errs() << "error: --enable-problem-cache-rw: " << cacheError
+                   << "\n";
+      return 1;
+    }
     autotuner->installInto(embedOpts);
   }
 #else
@@ -564,11 +565,14 @@ int main(int argc, char **argv) {
   if (!embedOk)
     return 1;
   // --enable-problem-cache-rw: only after a successful embed, so a failed
-  // compile adds nothing. The file is replaced atomically, so a failure here
-  // leaves the previous table in place.
+  // compile adds nothing. The file was checked before the compile, so a
+  // failure here is a write error. It is reported, and the compile still
+  // produces its output: the kernels are good, and the file is replaced
+  // atomically, so the previous table is still in place.
   if (autotuner && autotune.problemCacheRewrite &&
       !autotuner->updateProblemCacheFile())
-    return 1;
+    llvm::errs() << "warning: the problem cache was not updated; the output "
+                    "is written anyway\n";
 
   // Stage 4: run the standard ONNX-to-HIP tail (shape inference, constant
   // externalization, bufferization, output-allocator rewrite, pooling, extern-

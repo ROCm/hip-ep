@@ -15,6 +15,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -26,6 +27,7 @@
 #include <set>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -723,14 +725,42 @@ int main() {
         if (c.getAsObject()->getString("perf_config") == tile32)
           ++tile32Configs;
     expect(tile32Configs == 1, "a perfConfig shared by points is stored once");
-    // Points are written sorted by problem.
-    std::vector<std::string> order;
-    if (root && root->getArray("points"))
-      for (const llvm::json::Value &p : *root->getArray("points"))
-        order.push_back(
-            p.getAsObject()->getString("problem").value_or("").str());
-    expect(std::is_sorted(order.begin(), order.end()),
-           "points are written sorted by problem");
+    // Rows keep their place, a winner included, and new problems go at the
+    // end, sorted. A nearest-neighbour tie keeps the earlier row, so moving
+    // rows around could change what a lookup returns.
+    const auto orderOf = [&](const std::string &text) {
+      std::vector<std::string> order;
+      llvm::json::Value doc = parseDoc(text);
+      const llvm::json::Object *top = doc.getAsObject();
+      if (top && top->getArray("points"))
+        for (const llvm::json::Value &p : *top->getArray("points"))
+          order.push_back(
+              p.getAsObject()->getString("problem").value_or("").str());
+      return order;
+    };
+    expect(orderOf(merged) ==
+               std::vector<std::string>({exact, "{\"lens\":[1,2]}", gemmKey,
+                                         gemmAt(24), gemmAt(48)}),
+           "rows keep their order and new problems are appended");
+    std::string reversed;
+    expect(mlir::hip::mergeProblemCacheJson(
+               base, "gfx1151",
+               {{gemmAt(48), tile32}, {gemmAt(24), tile32}, {exact, tileBig}},
+               reversed, error) &&
+               reversed == merged,
+           "the output does not depend on the order of the winners");
+    // An unsorted table is not sorted by a rewrite with nothing new.
+    llvm::json::Object unsorted = dumpDoc();
+    llvm::json::Array backwards;
+    backwards.push_back(
+        llvm::json::Object{{"problem", gemmKey}, {"config", 2}});
+    backwards.push_back(llvm::json::Object{{"problem", exact}, {"config", 0}});
+    unsorted["points"] = std::move(backwards);
+    std::string kept;
+    expect(mlir::hip::mergeProblemCacheJson(jsonText(std::move(unsorted)),
+                                            "gfx1151", {}, kept, error) &&
+               orderOf(kept) == std::vector<std::string>({gemmKey, exact}),
+           "a rewrite does not reorder the rows it keeps");
   }
   {
     std::string merged;
@@ -1113,6 +1143,21 @@ int main() {
                                             {{exact, tile16}}, merged, error) &&
                rowsOf(merged) == Rows({{exact, tile16}}),
            "a winner replaces every row of its problem");
+
+    // Rows of a repeated problem with another problem between them keep their
+    // exact places; a winner takes the place of the first one.
+    const std::string interleaved =
+        build({{exact, tile32}, {gemmAt(8), tile16}, {exact, tileBig}});
+    expect(
+        mlir::hip::mergeProblemCacheJson(interleaved, "gfx1151", {}, merged,
+                                         error) &&
+            rowsOf(merged) ==
+                Rows({{exact, tile32}, {gemmAt(8), tile16}, {exact, tileBig}}),
+        "interleaved rows keep their places");
+    expect(mlir::hip::mergeProblemCacheJson(interleaved, "gfx1151",
+                                            {{exact, tile16}}, merged, error) &&
+               rowsOf(merged) == Rows({{exact, tile16}, {gemmAt(8), tile16}}),
+           "a winner takes the place of the first row of its problem");
   }
   {
     // The file overload across compiles: create, accumulate, replace, and keep
@@ -1303,6 +1348,148 @@ int main() {
              "rewriting a directory reports an error");
       expect(std::filesystem::is_directory(asDir),
              "a refused directory is left in place");
+    }
+
+    // An RCAL FlatBuffer (the shipped format) can still be read as a table
+    // that is only looked up, but it cannot be rewritten: a rewrite would turn
+    // it into JSON, or refuse it as invalid JSON with no hint why.
+    {
+      const std::string fbPath = (dir / "table.fb").string();
+      std::string fbBytes(
+          reinterpret_cast<const char *>(builder.GetBufferPointer()),
+          builder.GetSize());
+      {
+        std::ofstream out(fbPath, std::ios::binary);
+        out << fbBytes;
+      }
+      mlir::hip::ProblemCacheLut fromFb;
+      expect(mlir::hip::loadProblemCacheLutFile(fbPath, fromFb, error) &&
+                 fromFb.entries.size() == 2 && fromFb.gpuArch == "gfx1151",
+             "a read-only table may be an RCAL FlatBuffer");
+      mlir::hip::ProblemCacheLut fromJsonFile;
+      expect(mlir::hip::loadProblemCacheLutFile(file, fromJsonFile, error) &&
+                 fromJsonFile.entries.size() == 3,
+             "a read-only table may be the LUT JSON");
+      expect(!mlir::hip::loadProblemCacheLutJsonFile(fbPath, fromFb, error) &&
+                 error.find("FlatBuffer") != std::string::npos,
+             "the JSON loader names a FlatBuffer as one");
+      expect(!mlir::hip::checkProblemCacheJsonFile(fbPath, "gfx1151", fromFb,
+                                                   error) &&
+                 error.find("FlatBuffer") != std::string::npos,
+             "a FlatBuffer cannot be the file the compile rewrites");
+      expect(!mlir::hip::updateProblemCacheJsonFile(fbPath, "gfx1151",
+                                                    {{exact, tile32}}, error) &&
+                 error.find("FlatBuffer") != std::string::npos,
+             "a FlatBuffer is not rewritten");
+      std::ifstream in(fbPath, std::ios::binary);
+      std::string after((std::istreambuf_iterator<char>(in)),
+                        std::istreambuf_iterator<char>());
+      expect(after == fbBytes, "a refused FlatBuffer keeps its bytes");
+    }
+
+    // The check before a compile: what the rewrite would refuse is refused up
+    // front, and what it would accept is loaded for lookup.
+    {
+      mlir::hip::ProblemCacheLut checked;
+      expect(mlir::hip::checkProblemCacheJsonFile(file, "gfx1151", checked,
+                                                  error) &&
+                 checked.entries.size() == 3,
+             "a valid file passes the check and is loaded");
+      expect(!mlir::hip::checkProblemCacheJsonFile(file, "gfx942", checked,
+                                                   error) &&
+                 checked.entries.empty(),
+             "a file for another gpu_arch fails the check");
+      expect(!mlir::hip::checkProblemCacheJsonFile(junk, "gfx1151", checked,
+                                                   error),
+             "a file that is not a LUT fails the check");
+      expect(!mlir::hip::checkProblemCacheJsonFile(partial, "gfx1151", checked,
+                                                   error) &&
+                 error.find("points") != std::string::npos,
+             "a malformed table fails the check");
+      expect(
+          mlir::hip::checkProblemCacheJsonFile(
+              (dir / "not_there.json").string(), "gfx1151", checked, error) &&
+              checked.entries.empty() &&
+              !std::filesystem::exists(dir / "not_there.json"),
+          "a missing file passes the check as an empty table");
+      const std::string spaces = (dir / "spaces.json").string();
+      {
+        std::ofstream out(spaces, std::ios::binary);
+        out << " \n\t\n";
+      }
+      expect(mlir::hip::checkProblemCacheJsonFile(spaces, "gfx1151", checked,
+                                                  error) &&
+                 checked.entries.empty(),
+             "a whitespace-only file passes the check as an empty table");
+    }
+
+    // With no winners an existing file is left exactly as it is, even when
+    // its formatting is not what a rewrite would write.
+    {
+      const std::string compact = (dir / "compact.json").string();
+      const std::string compactText = jsonText(dumpDoc());
+      {
+        std::ofstream out(compact, std::ios::binary);
+        out << compactText;
+      }
+      expect(
+          mlir::hip::updateProblemCacheJsonFile(compact, "gfx1151", {}, error),
+          "a compile with no winners succeeds");
+      std::ifstream in(compact, std::ios::binary);
+      std::string after((std::istreambuf_iterator<char>(in)),
+                        std::istreambuf_iterator<char>());
+      expect(after == compactText,
+             "a compile with no winners does not rewrite");
+      const std::filesystem::path fresh = dir / "fresh" / "new.json";
+      expect(mlir::hip::updateProblemCacheJsonFile(fresh.string(), "gfx1151",
+                                                   {}, error) &&
+                 std::filesystem::is_regular_file(fresh),
+             "a missing file is still created with no winners");
+    }
+
+    // Rewrites in one process are serialized: compiles that overlap each keep
+    // their own winners.
+    {
+      const std::string shared = (dir / "shared.json").string();
+      constexpr int kThreads = 8;
+      std::vector<std::thread> threads;
+      std::vector<int> ok(kThreads, 0);
+      for (int t = 0; t < kThreads; ++t)
+        threads.emplace_back([&, t] {
+          std::string threadError;
+          ok[t] = mlir::hip::updateProblemCacheJsonFile(
+              shared, "gfx1151", {{gemmAt(100 + t), tile16}}, threadError);
+        });
+      for (std::thread &thread : threads)
+        thread.join();
+      mlir::hip::ProblemCacheLut sharedLut;
+      expect(std::count(ok.begin(), ok.end(), 1) == kThreads &&
+                 mlir::hip::loadProblemCacheLutJsonFile(shared, sharedLut,
+                                                        error) &&
+                 sharedLut.entries.size() == kThreads,
+             "overlapping rewrites in one process keep every winner");
+    }
+
+    // A temporary file left by a rewrite that was killed is cleaned up once it
+    // is old; a recent one may be another rewrite in progress and stays.
+    {
+      namespace fs = std::filesystem;
+      const fs::path cache = dir / "tidy.json";
+      const fs::path stale = dir / "tidy.json.tmp12345";
+      const fs::path recent = dir / "tidy.json.tmp67890";
+      const fs::path unrelated = dir / "tidy.json.tmp-notes";
+      for (const fs::path &p : {stale, recent, unrelated}) {
+        std::ofstream out(p, std::ios::binary);
+        out << "partial";
+      }
+      const auto old = fs::file_time_type::clock::now() - std::chrono::hours(2);
+      fs::last_write_time(stale, old);
+      fs::last_write_time(unrelated, old);
+      expect(mlir::hip::updateProblemCacheJsonFile(cache.string(), "gfx1151",
+                                                   {{exact, tile32}}, error),
+             "a rewrite beside leftover temporaries succeeds");
+      expect(!fs::exists(stale) && fs::exists(recent) && fs::exists(unrelated),
+             "only old temporaries of this file are removed");
     }
 
     // An empty file, as `touch` makes it, is a fresh table.

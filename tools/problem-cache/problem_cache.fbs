@@ -7,13 +7,13 @@
 // review, compiled with `flatc --binary --strict-json` to a `.fb`.
 // `tools/problem-cache/lut/<gpu_arch>.fb` is embedded in LibHipCompiler.
 // hip-rocmlir-compiler and the ONNX Runtime provider both check it before the
-// in-process winner cache and the tuning space. Only hip-rocmlir-compiler
-// accepts an external file (--enable-problem-cache-rw / HIP_ROCMLIR_PROBLEM_CACHE),
-// and that file replaces this table. The external file is the JSON document
-// itself, read directly (loadProblemCacheLutJson) and, with the flag, merged
-// with the compile's search winners and rewritten in place
-// (updateProblemCacheJsonFile); it is not compiled to a `.fb`. The provider
-// does not read one. A lookup
+// in-process winner cache and the tuning space. An external file replaces this
+// table: hip-rocmlir-compiler takes one through --enable-problem-cache-rw or
+// HIP_ROCMLIR_PROBLEM_CACHE, and the provider through
+// HIPDNN_EP_ROCMLIR_PROBLEM_CACHE_RW. A file that is rewritten with the
+// compile's search winners is the JSON document itself
+// (updateProblemCacheJsonFile), not a `.fb`; a file that is only read
+// (HIP_ROCMLIR_PROBLEM_CACHE) may be either. A lookup
 // matches the categorical fields of the rocMLIR problem string exactly, then
 // takes the nearest measured point of the same kernel kind. Distance 0 is an
 // exact hit, not a separate tier.

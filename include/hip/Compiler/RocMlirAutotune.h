@@ -104,12 +104,13 @@ struct AutotuneOptions {
   // `log` because the per-candidate lines are one per config per kernel --
   // useful when tuning by hand, far too much for a normal compile.
   bool verbose = false;
-  // External rocMLIR LUT JSON, the document updateProblemCacheFile writes (not
-  // a .fb; only the shipped tables are FlatBuffers). hip-rocmlir-compiler sets
-  // this from --enable-problem-cache-rw or HIP_ROCMLIR_PROBLEM_CACHE. When
-  // set, this file takes priority over the search and the shipped table is not
-  // consulted. When empty, the shipped LUT is consulted unless
-  // tuningTypeProvided.
+  // External rocMLIR LUT JSON, the document updateProblemCacheFile writes.
+  // hip-rocmlir-compiler sets this from --enable-problem-cache-rw or
+  // HIP_ROCMLIR_PROBLEM_CACHE. A file that is only read (the environment
+  // variable) may also be an RCAL FlatBuffer, the shipped tables' format; the
+  // file that is rewritten has to be JSON. When set, this file takes priority
+  // over the search and the shipped table is not consulted. When empty, the
+  // shipped LUT is consulted unless tuningTypeProvided.
   std::string problemCachePath;
   // Write this compile's benchmarked winners back into `problemCachePath`
   // itself. Set by --enable-problem-cache-rw; HIP_ROCMLIR_PROBLEM_CACHE leaves
@@ -153,6 +154,16 @@ public:
 
   const AutotunePhaseTimes &phaseTimes() const;
 
+  // Call before the compile when options.problemCacheRewrite is set. Checks
+  // that updateProblemCacheFile will be able to rewrite
+  // AutotuneOptions::problemCachePath, and loads it as the lookup table. A
+  // missing or blank file is a new, empty table. False, with \p error set and
+  // the table left empty, for a file the rewrite would refuse: not a LUT, for
+  // another gpu_arch, malformed, an RCAL FlatBuffer, or unreadable. Finding
+  // that here, rather than after the search, saves the search. True, doing
+  // nothing, without the rewrite option.
+  bool checkProblemCacheFile(std::string &error);
+
   // Merges this compile's search winners into AutotuneOptions::problemCachePath
   // and replaces that file, so the next compile (this tool or another run)
   // reads them back. A no-op returning true unless options.problemCacheRewrite
@@ -161,9 +172,10 @@ public:
   // into the file, and neither does any problem the search did not run for.
   // The file is read again at write time, so winners another compile added in
   // between are kept, and every point already in it is kept, including ones
-  // this build cannot use. Replaced atomically via a temporary file. False,
-  // with the file untouched, when it cannot be read, is not a LUT, is for
-  // another gpu_arch, or cannot be written.
+  // this build cannot use. Replaced atomically via a temporary file. With no
+  // winners an existing file is left as it is. False, with the file untouched,
+  // when it cannot be read, is not a LUT, is for another gpu_arch, is an RCAL
+  // FlatBuffer, or cannot be written.
   bool updateProblemCacheFile() const;
 
 private:

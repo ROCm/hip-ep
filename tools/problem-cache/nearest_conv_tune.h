@@ -71,9 +71,9 @@ struct NearestConvTuneHit {
 };
 
 // Primary M, N, and K of a conv, gemm, attention, or gemm-elementwise-gemm
-// problem string. False, and m/n/k left at 0, for any other string. The dump
-// writes these into each LUT point. The lookup re-parses the problem string
-// and does not read the stored values.
+// problem string. False, and m/n/k left at 0, for any other string. The
+// rewrite writes these into each LUT point. The lookup re-parses the problem
+// string and does not read the stored values.
 bool implicitGemmDims(std::string_view problem, int64_t &m, int64_t &n,
                       int64_t &k);
 
@@ -94,9 +94,15 @@ bool loadProblemCacheLutJson(std::string_view text, ProblemCacheLut &lut,
                              std::string &error);
 
 // Reads \p path and parses it with loadProblemCacheLutJson. A `.fb` file is
-// not accepted here and reports a JSON parse error.
+// not accepted here and is reported as a FlatBuffer.
 bool loadProblemCacheLutJsonFile(const std::string &path, ProblemCacheLut &lut,
                                  std::string &error);
+
+// Reads a table that is only looked up, not rewritten
+// (HIP_ROCMLIR_PROBLEM_CACHE): an RCAL FlatBuffer, recognised by its file
+// identifier, or else the LUT JSON. Both formats load into the same table.
+bool loadProblemCacheLutFile(const std::string &path, ProblemCacheLut &lut,
+                             std::string &error);
 
 // A problem string and the perfConfig the search picked for it.
 struct ProblemCacheWinner {
@@ -112,15 +118,17 @@ struct ProblemCacheWinner {
 // winners do not touch keeps all its rows, in file order, even when it repeats:
 // a lookup returns the first row it can use, so a later row is the alternative
 // when the first is filtered out or rejected. A winner is a fresh measurement,
-// so it replaces every row of its problem string, and a new problem is added.
+// so it takes the place of the first row of its problem string and the other
+// rows of that problem go. Rows keep their order, because a nearest-neighbour
+// tie keeps the earlier row; new problems go at the end, sorted by problem.
 //
 // `configs` is rebuilt without duplicates, so its indices change. It holds
 // every perfConfig a point or a fallback uses. The `config` of each point and
 // each fallback is renumbered together, so a fallback keeps naming the same
-// perfConfig, even one that no point uses. `points` is sorted by problem, so
-// the output is deterministic. `fallbacks` is written only if \p existing had
-// it, and its other fields are kept. Top-level fields besides `configs`,
-// `points` and `fallbacks` (weights, `model_key`, ...) are carried over.
+// perfConfig, even one that no point uses. `fallbacks` is written only if
+// \p existing had it, and its other fields are kept. Top-level fields besides
+// `configs`, `points` and `fallbacks` (weights, `model_key`, ...) are carried
+// over.
 //
 // Fails, leaving \p out empty, without producing a document when \p existing is
 // not a supported LUT (invalid JSON, wrong `schema_version` or `kernel_abi`, a
@@ -134,14 +142,29 @@ bool mergeProblemCacheJson(std::string_view existing, std::string_view gpuArch,
                            const std::vector<ProblemCacheWinner> &winners,
                            std::string &out, std::string &error);
 
+// Checks, before a compile, that updateProblemCacheJsonFile can rewrite \p path
+// for \p gpuArch, and loads it into \p lut for lookup. A missing or blank file
+// is an empty table. Fails, with \p lut empty, for a file that the rewrite
+// would refuse (see mergeProblemCacheJson), for an RCAL FlatBuffer, and for a
+// file that cannot be read.
+bool checkProblemCacheJsonFile(const std::string &path,
+                               std::string_view gpuArch, ProblemCacheLut &lut,
+                               std::string &error);
+
 // Reads \p path (a missing or empty file starts a new table), merges
 // \p winners with mergeProblemCacheJson, and replaces \p path with the result.
+// With no winners an existing file is left as it is. An RCAL FlatBuffer is
+// refused.
 // The new contents go to a sibling temporary file that is renamed over \p path,
 // so a failed or interrupted write leaves the old file intact. The file is read
 // again at write time, not taken from an earlier load, so entries another
 // compile added in between are kept. Missing parent directories are created. A
 // symlinked \p path is rewritten at its target, which is created if the link
-// is dangling, and the link stays. A symlink loop is refused.
+// is dangling, and the link stays. A symlink loop is refused. Rewrites in one
+// process are serialized, so overlapping compiles there do not lose each
+// other's winners; separate processes can, and the last one to finish wins.
+// Temporary files older than an hour, left by a rewrite that was killed, are
+// removed.
 bool updateProblemCacheJsonFile(const std::string &path,
                                 std::string_view gpuArch,
                                 const std::vector<ProblemCacheWinner> &winners,
