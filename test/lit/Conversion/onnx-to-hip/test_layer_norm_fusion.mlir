@@ -468,7 +468,8 @@ module {
   // CHECK-LABEL: func.func @reshape_regroups_rows
   // CHECK-NOT: hip.layer_norm
   // CHECK: hip.reduce_mean
-  // CHECK: hip.div
+  // CHECK: tensor.expand_shape {{.*}} into tensor<1x1x4xf32>
+  // CHECK: hip.reciprocal
   // CHECK: return
 
   // The runtime LayerNorm reads any 2-byte element as fp16: bf16 is not fused.
