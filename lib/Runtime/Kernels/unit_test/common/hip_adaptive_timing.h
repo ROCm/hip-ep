@@ -213,8 +213,8 @@ double adaptiveRotatedMeanMs(hipStream_t stream, const Copies& copies,
       float ms = 0.0f;
       checkHip(hipEventElapsedTime(&ms, events.start, events.stop), "elapsed time");
       if (!(ms > 0.0f) || !std::isfinite(ms)) {
-        // Return the invalid sample to the policy unchanged: it still counts
-        // against the existing invalid-batch allowance. Repair only the event
+        // Return the invalid sample to the policy unchanged: it counts
+        // against the warm-up or measurement allowance. Repair only the event
         // resources before the policy decides whether another batch is legal.
         std::fprintf(stderr,
             "UT_TIMING_INVALID leaf=%s shape=%s batch_calls=%u elapsed_ms=%.9g action=renew_events\n",
@@ -252,7 +252,7 @@ double adaptiveRotatedMeanMs(hipStream_t stream, const Copies& copies,
               "\"target_ms\":%.17g,\"soft_limit_ms\":%.17g,\"warmup_ms\":%.17g,"
               "\"min_calls_per_group\":%u,\"call_goal\":%llu,\"floor_ms\":%.17g,"
               "\"max_spread\":%s,\"invalid_retry_limit\":%u,"
-              "\"invalid_batch_fraction\":%.17g,"
+              "\"invalid_batch_fraction\":%.17g,\"warmup_invalid_limit\":%u,"
               "\"events_per_batch\":2,\"batch_call_cap\":%u,"
               "\"largest_batch_calls\":%u,\"pilot_ms\":%.17g,"
               "\"pilot_calls\":%llu,\"pilot_batches\":%llu,\"prep_calls\":%llu,"
@@ -261,6 +261,7 @@ double adaptiveRotatedMeanMs(hipStream_t stream, const Copies& copies,
               "\"batches\":%llu,\"gpu_ms\":%.17g,\"wall_ms\":%.17g,"
               "\"median_ms\":%.17g,\"spread_fraction\":%.17g,"
               "\"invalid_batches\":%llu,\"invalid_calls\":%llu,"
+              "\"warmup_invalid_batches\":%llu,"
               "\"soft_limit_exceeded\":%s,\"early_stop\":%s,\"converged\":%s,"
               "\"group_means_ms\":[",
               kPolicyVersion, policy.name(), static_cast<unsigned long long>(record_id),
@@ -279,6 +280,7 @@ double adaptiveRotatedMeanMs(hipStream_t stream, const Copies& copies,
               policy.warmup_ms,
               policy.min_calls_per_group, static_cast<unsigned long long>(policy.call_goal),
               policy.floor_ms, max_spread, policy.invalid_retries, policy.invalid_fraction,
+              policy.warmup_invalid_limit,
               policy.max_calls_per_batch,
               result.largest_batch_calls, result.pilot_ms,
               static_cast<unsigned long long>(result.pilot_calls),
@@ -290,6 +292,7 @@ double adaptiveRotatedMeanMs(hipStream_t stream, const Copies& copies,
               result.mean_ms, result.spread_fraction,
               static_cast<unsigned long long>(result.invalid_batches),
               static_cast<unsigned long long>(result.invalid_calls),
+              static_cast<unsigned long long>(result.warmup_invalid_batches),
               result.exceeded_soft_limit ? "true" : "false",
               result.early_stop ? "true" : "false",
               result.converged ? "true" : "false");

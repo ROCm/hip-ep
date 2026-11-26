@@ -629,8 +629,10 @@ void ConvertOnnxToHipPass::runOnOperation() {
         populateQsaPairFoldPatterns(preLoweringPatterns, ctx);
         populateFastGeluFusionPatterns(preLoweringPatterns, ctx);
         populateErfGeluFusionPatterns(preLoweringPatterns, ctx);
+        populateGroupNormDecompositionFusionPatterns(preLoweringPatterns, ctx);
         populateProjectorOpsRewritePatterns(preLoweringPatterns, ctx);
         populateLpNormalizationConversionPatterns(preLoweringPatterns, ctx);
+        populateReduceSumSquareConversionPatterns(preLoweringPatterns, ctx);
         populatePowDecompositionPatterns(preLoweringPatterns, ctx);
         populateHardSigmoidConversionPatterns(preLoweringPatterns, ctx);
         ChangeFlagListener listener;

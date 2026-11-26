@@ -74,11 +74,14 @@ more calls, a slower device fewer, based on its own pilot and subsequent batches
 large call can overshoot, and the minimum complete calls take precedence. Never truncate
 a running call or report a projected iteration as completed. A batch with an
 invalid, zero, negative or nonfinite duration is discarded and repeated with half
-the calls; it never enters a group. The cell fails only when its invalid batches,
-pilot included, exceed max(2, 1% of the batches attempted so far)
-(`invalid_retry_limit`, `invalid_batch_fraction`), so a sporadic driver timing
-glitch in a long `confirm` measurement no longer aborts the leaf, while a timer
-that is invalid for a large share of batches still fails. HIP errors fail the
+the calls; it never enters a group. Invalid excluded warm-up batches are
+counted separately (`warmup_invalid_batches`) and fail the cell only above
+`warmup_invalid_limit` (8), so a few invalid events before the first valid
+warm-up sample of a microsecond kernel do not abort the leaf. After warm-up the
+cell fails when its invalid batches exceed max(2, 1% of the batches attempted
+so far) (`invalid_retry_limit`, `invalid_batch_fraction`), so a sporadic driver
+timing glitch in a long `confirm` measurement no longer aborts the leaf, while a
+timer that is invalid for a large share of batches still fails. HIP errors fail the
 measurement. Spread decides only whether the first round may end the
 measurement; neither spread nor soft-limit overshoot rejects data or acts as a
 thermal/clock gate. No fixed steady-clock percentage
@@ -259,6 +262,7 @@ unchanged. This handshake runs outside the timer and adds no sampling controls.
 When a HIP event pair returns a nonpositive or nonfinite duration, the shared
 runner synchronizes and replaces that pair before the next policy-controlled
 batch. `UT_TIMING_INVALID` identifies the leaf, shape and batch. The invalid
-sample is still returned to the policy and counted against the same allowance;
-no sample, retry threshold, batch cap or timing preset is relaxed. Persistent
+sample is still returned to the policy and counted against the warm-up or
+measurement allowance; no measured sample, measurement retry threshold, batch cap
+or timing preset is relaxed. Persistent
 invalid durations still fail the cell. HIP API errors continue to propagate.

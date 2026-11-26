@@ -321,3 +321,46 @@ class TestQLinearMatMulRequantize:
         info = np.iinfo(a_dtype)
         low = info.min if a_dtype == np.int8 else 0
         assert (got == low).any() and (got == info.max).any()
+
+
+@pytest.mark.parametrize(
+    "b_dtype,b_zps",
+    [
+        (np.uint8, [128]),
+        (np.uint8, [131]),
+        (np.uint8, [70, 128, 190, 101, 140]),
+        (np.int8, [-7]),
+    ],
+    ids=["u8-zp128", "u8-tensor", "u8-column", "i8-tensor"],
+)
+def test_asymmetric_b(model_runner, b_dtype, b_zps):
+    """u8 B and non-zero B zero points, as in a quantized classifier head.
+
+    With HIPDNN_EP_ROCMLIR=1 the matmul splits into an integer matmul on
+    B - offset and a second one over the shifted zero points, which subtracts
+    zb' times the row sums of A. B - zb stays within +-63 for the CPU
+    reference's int16 pair sums.
+    """
+    rng = np.random.default_rng(1000 + b_zps[0])
+    k, n = 24, 5
+    zp = np.array(b_zps, dtype=np.int64)
+    b = (rng.integers(-63, 64, size=(k, n)) + zp).astype(b_dtype)
+    b_zp = np.array(b_zps if len(b_zps) > 1 else b_zps[0], dtype=b_dtype)
+    b_scale = (
+        rng.uniform(0.002, 0.02, size=(n,)).astype(np.float32)
+        if len(b_zps) > 1
+        else np.float32(0.0137)
+    )
+    model = _make_qlinear_matmul_arrays(
+        (3, k),
+        b,
+        np.float32(0.0173),
+        np.uint8(115),
+        b_scale,
+        b_zp,
+        np.float32(0.0912),
+        np.uint8(128),
+    )
+    a = rng.integers(0, 256, size=(3, k), dtype=np.uint8)
+    actual, expected = model_runner.run_sample(model, [a])
+    compare_outputs(actual, expected, atol=0, rtol=0)

@@ -26,7 +26,7 @@
 
 // Per-tensor dequant, no zero_point: cast then mul.
 // CHECK-LABEL: func.func @dequantize_no_zp
-// CHECK: %[[CAST:.*]] = tosa.cast %arg1 : (tensor<2x8xi8>) -> tensor<2x8xf32>
+// CHECK: %[[CAST:.*]] = tosa.cast %arg1 input_unsigned(false) : (tensor<2x8xi8>) -> tensor<2x8xf32>
 // CHECK: tosa.mul %[[CAST]]
 // CHECK-NOT: hip.dequantize_linear
 func.func @dequantize_no_zp(%ctx: !hip.context, %x: tensor<2x8xi8>,
@@ -65,7 +65,7 @@ func.func @dequantize_per_axis(%ctx: !hip.context, %x: tensor<1x64x32xi8>,
 // CHECK: tosa.mul
 // CHECK-NOT: fp_to_int_cast
 // CHECK: tosa.cast {{.*}} -> tensor<2x8xi32>
-// CHECK: tosa.clamp {{.*}} {max_val = 127 : i32, min_val = -128 : i32
+// CHECK: tosa.clamp {{.*}} min_val(-128 : i32) max_val(127 : i32)
 // CHECK: tosa.cast {{.*}} -> tensor<2x8xi8>
 // CHECK-NOT: hip.quantize_linear
 func.func @quantize_no_zp(%ctx: !hip.context, %x: tensor<2x8xf32>,
@@ -158,7 +158,7 @@ func.func @dequantize_rank1_scale1_default_axis(%ctx: !hip.context,
 // CHECK-NOT: ui8
 // CHECK: tosa.const{{.*}}dense<-128>
 // CHECK-NOT: ui8
-// CHECK: tosa.custom {{.*}}operator_name = "unsigned_cast"
+// CHECK: tosa.custom {{.*}}operator_name("unsigned_cast")
 // CHECK-NOT: ui8
 // CHECK: return
 func.func @dequantize_ui8_signless(%x: tensor<2x8xui8>, %scale: tensor<f32>)
@@ -178,8 +178,8 @@ func.func @dequantize_ui8_signless(%x: tensor<2x8xui8>, %scale: tensor<f32>)
 // unsigned_cast after the [0, 255] clamp.
 // CHECK-LABEL: func.func @quantize_ui8_signless
 // CHECK-SAME: -> tensor<2x8xi8>
-// CHECK: tosa.clamp {{.*}} {max_val = 255 : i32, min_val = 0 : i32
-// CHECK: tosa.custom {{.*}}operator_name = "unsigned_cast"{{.*}} -> tensor<2x8xi8>
+// CHECK: tosa.clamp {{.*}} min_val(0 : i32) max_val(255 : i32)
+// CHECK: tosa.custom {{.*}}operator_name("unsigned_cast"){{.*}} -> tensor<2x8xi8>
 // CHECK-NOT: ui8
 // CHECK: return
 func.func @quantize_ui8_signless(%x: tensor<2x8xf32>, %scale: tensor<f32>)
@@ -224,12 +224,19 @@ func.func @dequantize_dynamic(%ctx: !hip.context, %x: tensor<?x8xi8>,
 
 // -----
 
-func.func @dequantize_packed_int4(%ctx: !hip.context, %x: tensor<2x8xi8>,
-                                   %scale: tensor<f32>, %init: tensor<2x8xf32>)
+// A packed-int4 dequantize lowers only on a kernel argument and without a
+// zero point (see dequantize_packed_int4_argument); a packed zero point has no
+// i4 form inside the kernel.
+func.func @dequantize_packed_int4_zero_point(%ctx: !hip.context,
+                                             %x: tensor<2x8xi8>,
+                                             %scale: tensor<f32>,
+                                             %zp: tensor<i8>,
+                                             %init: tensor<2x8xf32>)
     -> tensor<2x8xf32> attributes {rock.kernel} {
   // expected-error @+1 {{failed to legalize operation 'hip.dequantize_linear'}}
   %r = hip.dequantize_linear(%ctx)
          ins(%x, %scale : tensor<2x8xi8>, tensor<f32>)
+         zero_point(%zp : tensor<i8>)
          outs(%init : tensor<2x8xf32>)
          {axis = 1 : i64, block_size = 0 : i64, packed_int4}
          : tensor<2x8xf32>
@@ -262,4 +269,48 @@ func.func @quantize_no_saturate(%ctx: !hip.context, %x: tensor<2x8xf32>,
          {axis = 1 : i64, block_size = 0 : i64, precision = 0 : i64,
           saturate = 0 : i64} : tensor<2x8xi8>
   return %r : tensor<2x8xi8>
+}
+
+// -----
+
+// The packed-int4 weight dequantize that the anchor pass leaves on a kernel
+// argument: the argument becomes signless i4 with the same bytes, and the
+// dequantize casts it with sitofp.
+// CHECK-LABEL: func.func @dequantize_packed_int4_argument
+// CHECK-SAME: %arg0: tensor<32x16x1x1xi4>
+// CHECK: tosa.cast %arg0 input_unsigned(false) : (tensor<32x16x1x1xi4>) -> tensor<32x16x1x1xf32>
+// CHECK: tosa.mul
+// CHECK-NOT: packed_int4
+func.func @dequantize_packed_int4_argument(%w: tensor<32x16x1x1xi8>,
+                                           %init: tensor<32x16x1x1xf32>)
+    -> tensor<32x16x1x1xf32> attributes {rock.kernel} {
+  %ctx = ub.poison : !hip.context
+  %one = hip.constant {value = dense<1.000000e+00> : tensor<f32>} : tensor<f32>
+  %r = hip.dequantize_linear(%ctx) ins(%w, %one : tensor<32x16x1x1xi8>,
+                                                 tensor<f32>)
+      outs(%init : tensor<32x16x1x1xf32>)
+      {axis = 0 : i64, block_size = 0 : i64, packed_int4}
+      : tensor<32x16x1x1xf32>
+  return %r : tensor<32x16x1x1xf32>
+}
+
+// -----
+
+// UINT4 weights (ui8 storage): the argument becomes ui4, so the cast to float
+// is rocMLIR's zero-extending unsigned_cast, and the kernel then ends signless.
+// CHECK-LABEL: func.func @dequantize_packed_uint4_argument
+// CHECK-SAME: %arg0: tensor<64x32xi4>
+// CHECK: tosa.custom %arg0 {{.*}}operator_name("unsigned_cast"){{.*}} : (tensor<64x32xi4>) -> tensor<64x32xf32>
+// CHECK-NOT: packed_int4
+func.func @dequantize_packed_uint4_argument(%w: tensor<64x32xui8>,
+                                            %init: tensor<64x32xf32>)
+    -> tensor<64x32xf32> attributes {rock.kernel} {
+  %ctx = ub.poison : !hip.context
+  %one = hip.constant {value = dense<1.000000e+00> : tensor<f32>} : tensor<f32>
+  %r = hip.dequantize_linear(%ctx) ins(%w, %one : tensor<64x32xui8>,
+                                                 tensor<f32>)
+      outs(%init : tensor<64x32xf32>)
+      {axis = 1 : i64, block_size = 0 : i64, packed_int4}
+      : tensor<64x32xf32>
+  return %r : tensor<64x32xf32>
 }

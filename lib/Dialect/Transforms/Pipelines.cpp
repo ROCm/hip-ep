@@ -334,6 +334,16 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   // across the module.
   pm.addPass(mlir::hip::createMaterializeHostScalarsPass());
 
+  // 5c. Drop the memref.copy that bufferized concat inserts for a packed
+  //     slot. The producer and every other reader of that buffer are
+  //     retargeted at an identity hip.packed_view of the slot, so a skip
+  //     connection reads the concat buffer. Chained concats become a prefix
+  //     view of the outer buffer, and a dense block shares one buffer. Runs
+  //     after host-scalar placement, which cannot see a host store through a
+  //     packed view, and before hip-optimize-memrefs so the private alloc is
+  //     erased instead of being pooled.
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createForwardConcatSlotsPass());
+
   // 6. Reuse compatible buffers after host-scalar placement.
   pm.addNestedPass<func::FuncOp>(mlir::hip::createOptimizeMemRefsPass());
 
@@ -569,6 +579,7 @@ void mlir::hip::buildRocMlirPipeline(
 void mlir::hip::addRocMlirFusionPasses(
     OpPassManager &pm, const FuseRocMlirAnchorPassOptions &fuseOptions,
     llvm::StringRef reportPath) {
+  pm.addNestedPass<func::FuncOp>(createHoistPointwiseOverViewsPass());
   pm.addNestedPass<func::FuncOp>(createRocMlirPrepareQuantPass());
   pm.addNestedPass<func::FuncOp>(createFuseRocMlirElementwisePass());
   pm.addNestedPass<func::FuncOp>(createFuseRocMlirAnchorPass(fuseOptions));
@@ -586,6 +597,8 @@ void mlir::hip::buildRocMlirFusionPipeline(
   fuseOptions.arch = options.arch;
   fuseOptions.gemmGemmAccelTypes.assign(options.gemmGemmAccelTypes.begin(),
                                         options.gemmGemmAccelTypes.end());
+  fuseOptions.standaloneElementwise = options.standaloneElementwise;
+  fuseOptions.int4Weights = options.int4Weights;
   addRocMlirFusionPasses(pm, fuseOptions, options.report);
 }
 

@@ -20,7 +20,7 @@ data dtype set is:
     Tile      : f16, f32, i32, i64
     Expand    : f16, f32, i32, i64
     Pad       : f16, f32, i32, i64       (modes: constant, reflect, edge, wrap)
-    GatherND  : f16, f32, i32, i64       (indices: int64 only)
+    GatherND  : f16, f32, i32, i64, i8, u8 (indices: int64 only)
     Slice     : f16, f32, i32, i64       (starts/ends/axes/steps: int32 or int64)
     ScatterND : f16, f32, i32, i64       (indices: int64 only;
                                           reductions: none, add, mul, min, max)
@@ -174,6 +174,12 @@ class TestTile:
             (np.float32, [1, 4], [3, 2]),
             (np.int32, [1, 4], [4, 1]),
             (np.int64, [1, 1, 4], [1, 2, 3]),
+            # Repeats on a unit extent only: a plain broadcast.
+            (np.float32, [1, 8, 1, 4, 4], [1, 1, 2, 1, 1]),
+            # Repeated and kept extents mixed.
+            (np.float16, [2, 3, 4], [3, 1, 2]),
+            # Too many repeated extents for the broadcast form; stays hip.tile.
+            (np.float32, [2, 2, 2, 2, 2], [2, 2, 2, 2, 2]),
         ],
     )
     def test_tile(self, model_runner, dtype, shape, repeats):
@@ -213,6 +219,21 @@ class TestExpand:
             (np.int64, [1, 1, 1], [2, 3, 4]),
             # Llama-style attention-mask expand: [1, 1, S] -> [1, H, S]
             (np.int32, [1, 1, 16], [1, 8, 16]),
+            # Per-channel broadcast; the innermost run is broadcast and a
+            # multiple of the vector width.
+            (np.float16, [1, 6, 1, 1], [1, 6, 136, 128]),
+            # Same pattern with an innermost run off the vector width.
+            (np.float16, [1, 6, 1, 1], [2, 6, 17, 3]),
+            # Middle broadcast with a contiguous, vectorisable innermost run.
+            (np.float32, [3, 1, 64], [3, 5, 64]),
+            # Middle broadcast with a short contiguous innermost run.
+            (np.float32, [3, 1, 6], [3, 5, 6]),
+            # Alternating broadcast and copied dims, 8-byte elements.
+            (np.int64, [4, 1, 3, 1, 2], [4, 3, 3, 5, 2]),
+            # Every dim collapses away.
+            (np.float16, [1, 1], [1, 1]),
+            # No broadcast at all: a plain copy.
+            (np.float16, [5, 8], [5, 8]),
         ],
     )
     def test_expand(self, model_runner, dtype, in_shape, out_shape):
@@ -487,6 +508,30 @@ class TestGatherND:
         x = rng.uniform(-2.0, 2.0, data_shape).astype(np.float16)
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=0)
+
+    @pytest.mark.parametrize("dtype", [np.uint8, np.int8], ids=["u8", "i8"])
+    def test_gather_nd_byte_dtypes(self, model_runner, dtype):
+        """1-byte data through the shared byte-copy kernel.
+
+        Uses the full dtype range so u8 values above 127 and negative i8
+        values would be corrupted by any sign/width mix-up. The numeric
+        backend disables CPU fallback, so an unsupported dtype fails the
+        session instead of silently running on the CPU.
+        """
+        data_shape = [2, 3, 4]
+        indices = np.array([[1, 2], [0, 0], [1, 0], [0, 2]], dtype=np.int64)
+        out_shape = [4, 4]
+        model = _make_gather_nd_model(
+            dtype, data_shape, list(indices.shape), indices, out_shape
+        )
+        info = np.iinfo(dtype)
+        x = np.linspace(info.min, info.max, num=24).round().astype(dtype)
+        x = x.reshape(data_shape)
+        actual, expected = model_runner.run_sample(model, [x])
+        ref = x[indices[:, 0], indices[:, 1]]
+        np.testing.assert_array_equal(expected[0], ref)
+        assert actual[0].dtype == dtype
+        np.testing.assert_array_equal(actual[0], ref)
 
 
 # ---------------------------------------------------------------------------

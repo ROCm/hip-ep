@@ -16,6 +16,7 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/SymbolTable.h"
 
@@ -110,6 +111,36 @@ void AllocOutputOp::getEffects(
                        SideEffects::DefaultResource::get());
 }
 
+Value PackedViewOp::getViewSource() { return getSource(); }
+
+LogicalResult PackedViewOp::verify() {
+  auto sourceType = dyn_cast<MemRefType>(getSource().getType());
+  auto resultType = dyn_cast<MemRefType>(getResult().getType());
+  if (!sourceType || !resultType)
+    return emitOpError("requires ranked memref source and result");
+  if (!sourceType.getLayout().isIdentity() ||
+      !resultType.getLayout().isIdentity())
+    return emitOpError("requires identity layout on the source and the result");
+  if (sourceType.getElementType() != resultType.getElementType() ||
+      sourceType.getMemorySpace() != resultType.getMemorySpace())
+    return emitOpError(
+        "source and result element type and memory space must match");
+  // No operands carry result extents, so the lowering can only build a
+  // static descriptor.
+  if (!resultType.hasStaticShape())
+    return emitOpError("requires a statically shaped result");
+  if (sourceType.hasStaticShape()) {
+    if (auto offset = getConstantIntValue(getElementOffset())) {
+      int64_t end = *offset + resultType.getNumElements();
+      if (*offset < 0 || end > sourceType.getNumElements())
+        return emitOpError("span [")
+               << *offset << ", " << end << ") is outside the source's "
+               << sourceType.getNumElements() << " elements";
+    }
+  }
+  return success();
+}
+
 LogicalResult AllocOutputOp::verify() {
   // Operand convention matches hip.alloc: exactly one Index per dynamic dim of
   // the result memref (static dims come from the type, dynamic dims from
@@ -170,12 +201,24 @@ LogicalResult RocMlirElementwiseOp::verify() {
   auto yield = cast<YieldOp>(body.getTerminator());
   if (yield.getValues().getTypes() != getResultTypes())
     return emitOpError("yields types that do not match the results");
+  // A static unit-stride slice is the input view that the anchor pass folds
+  // into the kernel's loads (absorbInputViews).
+  auto isStaticSlice = [](Operation &op) {
+    auto slice = dyn_cast<tensor::ExtractSliceOp>(op);
+    return slice && slice.getType().hasStaticShape() &&
+           slice.getSourceType().hasStaticShape() &&
+           slice.getSourceType().getRank() == slice.getType().getRank() &&
+           llvm::none_of(slice.getStaticOffsets(), ShapedType::isDynamic) &&
+           llvm::all_of(slice.getStaticStrides(),
+                        [](int64_t stride) { return stride == 1; });
+  };
   for (Operation &op : body.without_terminator()) {
     StringRef dialect = op.getDialect() ? op.getDialect()->getNamespace() : "";
     bool allowed = op.getNumRegions() == 0 &&
                    (dialect == HipDialect::getDialectNamespace() ||
                     isa<tensor::EmptyOp, tensor::ExpandShapeOp,
-                        tensor::CollapseShapeOp, arith::ConstantOp>(op));
+                        tensor::CollapseShapeOp, arith::ConstantOp>(op) ||
+                    isStaticSlice(op));
     if (!allowed)
       return op.emitOpError("is not allowed in a hip.rocmlir_elementwise body");
   }
@@ -2754,6 +2797,77 @@ void SwigluOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult SwigluOp::verify() {
+  if (!isClamped())
+    return success();
+  if (getPromoteActivation())
+    return emitOpError("promote_activation does not combine with the clamped "
+                       "form (activation_alpha, activation_beta, "
+                       "swiglu_limit)");
+  if (!std::isfinite(getActivationAlpha().convertToFloat()) ||
+      !std::isfinite(getActivationBeta().convertToFloat()))
+    return emitOpError("activation_alpha and activation_beta must be finite");
+  float limit = getSwigluLimit().convertToFloat();
+  if (!std::isfinite(limit) || limit < 0.0f)
+    return emitOpError("swiglu_limit must be finite and not negative (0 "
+                       "clamps nothing)");
+  Type element = getElementTypeOrSelf(getOutput().getType());
+  if (!element.isF32() && !element.isF16() && !element.isBF16())
+    return emitOpError("the clamped form takes f32, f16 or bf16, not ")
+           << element;
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// ScaledMaskedSoftmaxOp: ins(input, row_ids, col_ids), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ScaledMaskedSoftmaxOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ScaledMaskedSoftmaxOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult ScaledMaskedSoftmaxOp::verify() {
+  if (failed(verifyDpsComputeOp(
+          *this, {getInput(), getRowIds(), getColIds(), getOutput()},
+          /*numInits=*/1)))
+    return failure();
+  auto inputType = dyn_cast<ShapedType>(getInput().getType());
+  auto outputType = dyn_cast<ShapedType>(getOutput().getType());
+  if (!inputType || !outputType || !inputType.hasRank() ||
+      inputType.getRank() < 2)
+    return emitOpError("input must be ranked with rank >= 2");
+  Type elemType = inputType.getElementType();
+  if (!elemType.isF16() && !elemType.isF32())
+    return emitOpError("input must be f16 or f32");
+  if (!outputType.hasRank() || outputType.getElementType() != elemType ||
+      failed(
+          verifyCompatibleShape(inputType.getShape(), outputType.getShape())))
+    return emitOpError("output must match the input shape and element type");
+  int64_t rank = inputType.getRank();
+  for (auto [ids, axis] :
+       {std::pair(getRowIds(), rank - 2), std::pair(getColIds(), rank - 1)}) {
+    auto idsType = dyn_cast<ShapedType>(ids.getType());
+    if (!idsType || !idsType.hasRank() || idsType.getRank() != 1 ||
+        !idsType.getElementType().isInteger(64))
+      return emitOpError("row_ids and col_ids must be rank-1 i64");
+    // Where's broadcast rule: an id vector spans its scores axis or is 1 long.
+    int64_t len = idsType.getDimSize(0);
+    int64_t extent = inputType.getDimSize(axis);
+    if (!ShapedType::isDynamic(len) && !ShapedType::isDynamic(extent) &&
+        len != 1 && len != extent)
+      return emitOpError("id vector of length ")
+             << len << " neither broadcasts nor matches scores axis " << axis
+             << " of size " << extent;
+  }
+  return success();
 }
 
 //===----------------------------------------------------------------------===//

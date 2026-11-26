@@ -944,8 +944,33 @@ int wrap_group_query_attention_host_length(
     // window masks; null when absent. key_bias_len must cover seq_len_kv.
     void *key_bias, int64_t key_bias_batch, int64_t key_bias_len);
 
-// Compiler-selected entry for proven FP16 Ring candidates. Other shapes and
-// devices fall back to GQA with the same optional host-length contract.
+// Physical-width ABI with compiler-proven FP16 tensor types and the same
+// optional host-length contract as dense GQA.
+int wrap_group_query_attention_v5(
+    RuntimeState *state, int op_state_slot,
+    // Inputs 1-7 (core GQA)
+    void *query, void *key, void *value, void *past_key, void *past_value,
+    void *seqlens_k, void *total_seq_len,
+    // Inputs 8-10 (RoPE)
+    void *cos_cache, void *sin_cache, void *position_ids,
+    // Inputs 11-14 (advanced features)
+    void *attention_bias, void *head_sink, void *k_scale, void *v_scale,
+    // Outputs
+    void *output, void *present_key, void *present_value, void *output_qk,
+    // Attributes (13)
+    int64_t num_heads, int64_t kv_num_heads, float scale, int64_t do_rotary,
+    int64_t rotary_interleaved, float softcap, int64_t local_window_size,
+    int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
+    int64_t v_quant_type, int64_t kv_cache_bit_width, int32_t no_causal,
+    // Shape values (6)
+    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
+    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
+    int64_t attn_bias_batch, int64_t attn_bias_num_heads, int64_t kv_bnsd,
+    int64_t seq_len_new_kv, int32_t has_host_length, int32_t host_length_value,
+    void *key_bias, int64_t key_bias_batch, int64_t key_bias_len,
+    int64_t past_key_width, int64_t past_value_width, int64_t present_key_width,
+    int64_t present_value_width, int32_t fp16_tensors);
+
 int wrap_group_query_attention_ring_f16(
     RuntimeState *state, int op_state_slot,
     // Inputs 1-7 (core GQA)
@@ -1461,6 +1486,14 @@ int wrap_swiglu(RuntimeState *state, void *gate, void *up, void *output,
 // Half buffers with FP32 sigmoid and multiply intermediates.
 int wrap_swiglu_promoted(RuntimeState *state, void *gate, void *up,
                          void *output, int64_t num_elements, int64_t data_type);
+
+// Clamped SwiGLU (hip.swiglu with activation_alpha / activation_beta /
+// swiglu_limit): g = min(gate, limit), u = clamp(up, -limit, limit),
+// output = g / (1 + exp(-alpha * g)) * (u + beta), in FP32. limit may be
+// +inf. FLOAT, HALF and BFLOAT16.
+int wrap_swiglu_clamped(RuntimeState *state, void *gate, void *up, void *output,
+                        int64_t num_elements, int64_t data_type, float alpha,
+                        float beta, float limit);
 
 // Window-pool wrapper (uses custom HIP kernel).
 // Generic ONNX MaxPool / AveragePool / LpPool over (N, C, D_1[, D_2[, D_3]])
@@ -2200,6 +2233,11 @@ int wrap_sigmoid(RuntimeState *state, void *input, void *output,
                  int64_t num_elements, int64_t data_type);
 int wrap_tanh(RuntimeState *state, void *input, void *output,
               int64_t num_elements, int64_t data_type);
+
+// Row-wise softmax over a contiguous [rows, cols] buffer (last axis).
+// data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF, BFLOAT16)
+int hip_softmax_typed(RuntimeState *state, const void *input, void *output,
+                      int64_t rows, int64_t cols, int64_t data_type);
 
 int wrap_log(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);

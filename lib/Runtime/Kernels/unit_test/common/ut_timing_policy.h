@@ -52,6 +52,10 @@ struct Policy {
   // max(invalid_retries, invalid_fraction * attempted batches).
   uint32_t invalid_retries = 2;
   double invalid_fraction = 0.01;
+  // Excluded warm-up batches have their own bound, so a short run of invalid
+  // events before the first valid warm-up sample does not consume the
+  // measurement allowance above.
+  uint32_t warmup_invalid_limit = 8;
 
   static Policy screen() {
     Policy p;
@@ -94,7 +98,7 @@ struct Policy {
         !(max_spread > 0.0) ||
         min_calls_per_group < 2 || max_calls_per_batch == 0 ||
         invalid_retries > 2 || !(invalid_fraction >= 0.0) ||
-        !(invalid_fraction < 1.0))
+        !(invalid_fraction < 1.0) || warmup_invalid_limit > 8)
       throw std::invalid_argument("invalid UT timing policy");
   }
 };
@@ -118,6 +122,7 @@ struct Result {
   uint64_t batches = 0;
   uint64_t invalid_batches = 0;
   uint64_t invalid_calls = 0;
+  uint64_t warmup_invalid_batches = 0;
   uint32_t largest_batch_calls = 0;
   bool early_stop = false;
   bool converged = false;
@@ -168,19 +173,24 @@ std::vector<Result> measureInterleaved(const Policy& policy, size_t candidates,
   std::vector<uint64_t> attempted(candidates, 0);
   std::vector<double> per_call_ms(candidates, 0.0);
   size_t round = 0;
-  auto validBatch = [&](size_t candidate, uint32_t& count) {
+  auto validBatch = [&](size_t candidate, uint32_t& count, bool warmup) {
     Result& result = results[candidate];
     for (;;) {
       result.largest_batch_calls = std::max(result.largest_batch_calls, count);
       const double ms = runner(candidate, count);
       ++attempted[candidate];
       if (ms > 0.0 && std::isfinite(ms)) return ms;
-      ++result.invalid_batches;
-      result.invalid_calls += count;
-      const double allowed = std::max(double(policy.invalid_retries),
-          std::ceil(policy.invalid_fraction * double(attempted[candidate])));
-      if (double(result.invalid_batches) > allowed)
-        throw InvalidTimingShare();
+      if (warmup) {
+        if (++result.warmup_invalid_batches > policy.warmup_invalid_limit)
+          throw InvalidTimingShare();
+      } else {
+        ++result.invalid_batches;
+        result.invalid_calls += count;
+        const double allowed = std::max(double(policy.invalid_retries),
+            std::ceil(policy.invalid_fraction * double(attempted[candidate])));
+        if (double(result.invalid_batches) > allowed)
+          throw InvalidTimingShare();
+      }
       count = std::max(uint32_t(1), count / 2);
     }
   };
@@ -188,7 +198,7 @@ std::vector<Result> measureInterleaved(const Policy& policy, size_t candidates,
     for (size_t turn = 0; turn < candidates; ++turn) {
       const size_t candidate = (round + turn) % candidates;
       uint32_t actual = count;
-      const double ms = validBatch(candidate, actual);
+      const double ms = validBatch(candidate, actual, pilot);
       Result& result = results[candidate];
       if (pilot) {
         result.pilot_ms += ms;
@@ -212,7 +222,7 @@ std::vector<Result> measureInterleaved(const Policy& policy, size_t candidates,
       uint64_t done = 0;
       while (done < total) {
         uint32_t actual = static_cast<uint32_t>(std::min<uint64_t>(total - done, policy.max_calls_per_batch));
-        const double ms = validBatch(candidate, actual);
+        const double ms = validBatch(candidate, actual, false);
         auto& result = results[candidate];
         result.groups[group].elapsed_ms += ms;
         result.groups[group].calls += actual;

@@ -41,9 +41,9 @@ the bias. The grouping then puts the bias add and the ops after it in a
 module, and the matmul becomes an anchor that can take that module as its
 epilogue. Any other `hip.matmul_nbits` keeps the custom kernel.
 
-The pass then prepares the quantize trees for integer kernels. It runs two
+The pass then prepares the quantize trees for integer kernels. It runs four
 rewrites in this order, because the first fixes the final shape of each tree
-and the second plans the integer anchors on that shape.
+and the last plans the integer anchors on that shape.
 
 1. Each per-tensor `hip.quantize_linear` with inline scalar parameters moves
    back through the single-use ops that only move elements
@@ -56,12 +56,42 @@ and the second plans the integer anchors on that shape.
    kernel then takes into its epilogue. Any other leaf leaves the tree
    unchanged, and no quantize-dequantize pair is removed (see
    [element-move-interface.md](element-move-interface.md)).
-2. Each connected ui8 tree that reaches an integer anchor becomes i8, and
+2. Each `hip.qlinear_conv` and `hip.qlinear_matmul` with a static result and
+   inline scalar scales whose requantize multiplier is below 2^-33 on every
+   channel or column becomes a constant of the output zero point. Every i32
+   accumulator then scales to at most 0.25 and rounds to 0, so the
+   rewrite is exact for any input and bias. No integer plan takes such an op:
+   its integer op, scaled by 0, would fold away and leave a rocMLIR kernel
+   with no conv or matmul, which rocMLIR rejects. The producers that only
+   the op read are erased as well, because the anchor fusion would outline a
+   dead conv into a kernel with no result.
+3. Each `hip.qlinear_conv` and `hip.qlinear_matmul` with ui8 weights or a
+   non-zero weight zero point, static shapes and inline constant parameters,
+   weights and bias becomes integer ops. rocMLIR takes only i8 weights and has
+   no zero-point operand, so the weights become `w' = w - offset` and the
+   zero point `zw' = zw - offset` (offset 128 for ui8, 0 for i8); both fit
+   i8, and `w' - zw' = w - zw`. The sum is then
+
+   ```text
+   sum (x' - z')(w' - zw') = quant(x, w') - quant(x, zw') - z' * sum(w')
+                             + z' * zw' * taps
+   ```
+
+   over the taps that read the input. `quant(x, zw')` is a second
+   `hip.quant_conv` (or `hip.quant_matmul`) over a filter of `zw'` in the
+   weights' shape; it is left out when every `zw'` is 0. A `hip.sub` takes the difference, and the constant terms
+   join the i32 bias of the requantize epilogue. The rewrite is exact and
+   is declined when an i32 sum could overflow. Each integer op becomes a
+   rocMLIR kernel, and the subtraction and the requantize join the epilogue
+   of one of them.
+4. Each connected ui8 tree that reaches an integer anchor becomes i8, and
    every zero point in it drops by 128. The producers of the tree are
    per-tensor quantizes with an inline scalar zero point and the results of
    the QLinear convs and matmuls that become integer anchors. Its interior is
-   the same element-move ops. Its readers are per-tensor dequantizes and the
-   data operands of those QLinear ops. A tree with a function argument, a
+   the same element-move ops. Its readers are per-tensor dequantizes, the
+   data operands of those QLinear ops, and the data operands of
+   `hip.quant_conv` and `hip.quant_matmul`, which read a ui8 value as
+   `value - 128`. A tree with a function argument, a
    return or another reader keeps ui8, and so does a tree with no integer
    anchor among its readers. The rewrite is exact, and the anchor reads
    signed bytes with no shift.
@@ -224,6 +254,36 @@ argument as `i4` at the unpacked shape, with the same bytes, and rocMLIR
 extracts the nibbles. A `hip.dequant_bnb4` stays outside, because its
 codebook lookup lowers to a `tosa.gather` that rocMLIR rejects.
 
+With the `int4-weights` option, an anchor also takes the packed-int4
+dequantize of its weights when they come from a constant or an argument:
+
+- the filter of a 1x1 convolution (stride 1, no padding, one group), with a
+  scale and zero point per tensor or per output channel (axis 0) and an even
+  input-channel count;
+- the B operand `[K, N]` of a `hip.matmul` or `hip.gemm` that does not
+  transpose it, with a scale and zero point per tensor, per column (axis 1,
+  `[N]`), or per block of K (axis 0, `block_size`, `[K / bs, N]`, with K a
+  multiple of the block), and an even N.
+
+The weights are signed int4 (signless `i8` storage) or unsigned int4 (`ui8`
+storage); two nibbles share a byte along the innermost dimension. After the
+trial passes, the pass splits the dequantize into
+`(dequantize(w, 1) - dequantize(zp, 1)) * scale`. The kernel takes the
+dequantize of the weights, the subtract and the multiply; the zero-point
+dequantize runs once outside, because rocMLIR cannot pack an i4 value that a
+broadcast reads. For blocked weights the kernel views the dequantized `[K, N]`
+as `[K / bs, bs, N]`, broadcasts the `[K / bs, 1, N]` scale and zero point,
+and views the result back; the dequantize itself stays per element, so no i4
+value meets a broadcast. Both differences are of small integers, so the
+weights equal those of the original dequantize exactly. HIP-to-TOSA then types
+the packed argument as `i4` (from `i8`) or `ui4` (from `ui8`) with the same
+bytes, and the dequantize casts it with `sitofp` or with rocMLIR's
+zero-extending `unsigned_cast`; the signless rewrite later keeps the `ui4`
+argument as `i4`. rocMLIR packs an i4 operand under only some perfConfigs, and
+the default one is not among them for f32, so `CompilerDriver` and
+`hip-rocmlir-compiler` set the option only when they autotune, which skips the
+configurations that fail.
+
 A rank-0 kernel operand is reshaped to rank 1 at the dispatch, and all such
 reshapes in `main_graph` share one shape constant.
 
@@ -231,7 +291,8 @@ reshapes in `main_graph` share one shape constant.
 
 After the plans outline, each module that is still in `main_graph` becomes a
 `rock.kernel` function with the `rock.elementwise` attribute, behind
-`hip.rocmlir`, when these conditions are true:
+`hip.rocmlir`, when `standalone-elementwise` is on and these conditions are
+true:
 
 - Every module op, other than a `tensor.empty` and a static reshape, is a
   pointwise op that `convert-hip-to-tosa` lowers, a TOSA-lowerable per-tensor
@@ -241,6 +302,44 @@ After the plans outline, each module that is still in `main_graph` becomes a
 - A module with more than one result has no result that is a transpose of a
   module input, through static reshapes only. rocMLIR cannot store such a
   result next to the other results of the kernel.
+
+rocMLIR tiles an elementwise kernel over its flattened output, so a transpose
+that moves the innermost dimension makes one side of the kernel access memory
+with a stride. When the innermost dimension of the transpose input or output is
+small, the tile still reads or writes a few contiguous streams. So before such
+a module outlines, its boundary transposes of this kind leave the kernel and run
+as HIP transposes when the input innermost dimension has at least 8 elements
+(`peel-min-input-elements`) and the output innermost dimension at least 32
+(`peel-min-output-elements`). These limits are where peeling starts to win in a
+sweep of 2 to 256 elements on gfx1151; the crossover was the same for f16, f32
+and i8.
+The peeled transposes are:
+
+- a result transpose, with the static reshapes around it, that only module
+  results read; the kernel stores the value that the transpose read;
+- an input transpose, with the static reshapes before it, of a module input;
+  the kernel reads the transposed tensor.
+
+The HIP transpose copies whole bytes and handles at most eight dimensions, so a
+transpose of a sub-byte element (an `i1` mask) or of rank above eight stays in
+the kernel. The remaining ops form the module again, and the conditions above
+apply once more. The remainder can end up as HIP ops: when it saves no launch,
+or when a peeled transpose leaves a result that only moves an argument. The
+HIP elementwise kernels cover f16 and f32 up to rank four, and `hip.silu` has
+no HIP runtime entry. A module therefore keeps its transposes when no compute
+op is left, or when any remaining compute op has an operand or result outside
+f16 and f32 up to rank four, or is a `hip.silu`.
+
+A module input that comes from a chain of static, unit-stride slices and static
+reshapes, with at least one slice, would otherwise run as a strided copy before
+the kernel; a crop of a pixel-shuffle output is the common case. The module gets
+its own copy of that chain and reads the chain's source, and rocMLIR folds the
+slice into the kernel's loads. Another reader of the slice keeps the original.
+A slice counts as a view, not a launch, when the module is checked again.
+A slice with SSA offsets, sizes or strides stays outside, since in the module
+those operands are kernel arguments, not constants. A chain that ends in a `ui8`
+Where condition also stays outside: the kernel views that argument as `i8` only
+when it reads the condition directly.
 
 The inline scalar constants that the module reads are cloned into the kernel.
 Any other module is inlined back. The rocMLIR compile does not autotune an
@@ -259,7 +358,10 @@ These ops become integer anchors:
   output reads (`[1,K,1,1]` when every output reads the same taps,
   `[1,K,OH,OW]` at a padded border), an f32 multiply by
   `x_scale * w_scale / y_scale`, and a unit-scale `hip.quantize_linear` with
-  the output zero point.
+  the output zero point. A channel whose multiplier is below 2^-33 writes the
+  output zero point for any i32 accumulator, so it gets multiplier 0 and bias
+  0; its correction then cannot overflow (a quantizer can saturate the bias of
+  a dead channel to INT32_MIN).
 - A `hip.qlinear_matmul` with inline constant parameters and a zero B zero
   point takes the same form around `hip.quant_matmul`, with a `[1,N]`
   correction `-(a_zp - offset) * sum_k(b[k,n])`. B must be an inline constant
@@ -280,7 +382,9 @@ result is at most one unit from ONNX Runtime CPU for each quantize: a sum that
 rounds at a half can differ by one unit where the compiler does not fuse a
 multiply-add.
 
-Any other `hip.qlinear_conv` or `hip.qlinear_matmul` keeps its HIP kernel. A
+The QLinear ops with ui8 weights or a non-zero weight zero point are already
+integer ops at this point (see `hip-rocmlir-prepare-quant` above). Any other
+`hip.qlinear_conv` or `hip.qlinear_matmul` keeps its HIP kernel. A
 `hip.quant_conv`, `hip.quant_matmul` or `hip.rocmlir_elementwise` that is
 left after the outline fails the pass. `convert-hip-to-tosa` then makes the
 unsigned integers in the kernel signless, because rocMLIR takes only signless
@@ -310,12 +414,15 @@ the A operand of the second gemm through pointwise ops and row-only reshapes
 
 ## Options
 
-The fusion rules have no switches. The two options describe the target.
+`arch` and `gemm-gemm-accel-types` describe the target. `standalone-elementwise`
+and `int4-weights` are the fusion switches.
 
 | Option | EP value | Effect |
 |---|---|---|
 | `arch=<gfx>` | detected | Stamps `rock.arch` on each kernel. |
 | `gemm-gemm-accel-types=<types>` | detected | The element types for the gemm-gemm gate. |
+| `standalone-elementwise=<bool>` | `true`; `false` with `HIPDNN_EP_ROCMLIR_NO_STANDALONE_ELEMENTWISE=1` | Outlines a module that no anchor takes as an elementwise kernel. |
+| `int4-weights=<bool>` | on when rocMLIR autotuning is on | Takes packed-int4 weight dequantizes into the kernel. |
 
 ## Tests and tools
 

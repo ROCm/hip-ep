@@ -39,8 +39,8 @@ module {
     // CHECK-LABEL: llvm.func @alloc_static
     // CHECK-SAME:  (%[[CTX:[a-zA-Z0-9_]+]]: !llvm.ptr)
     // CHECK-SAME:  -> !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-    // CHECK:       %[[D0:.*]] = llvm.mlir.constant(3 : index) : i64
-    // CHECK:       %[[D1:.*]] = llvm.mlir.constant(5 : index) : i64
+    // CHECK:       %[[D0:.*]] = llvm.mlir.constant(3 : i64) : i64
+    // CHECK:       %[[D1:.*]] = llvm.mlir.constant(5 : i64) : i64
     // CHECK:       %[[SHAPE:.*]] = llvm.alloca %{{.*}} x !llvm.array<2 x i64> {alignment = 8 : i64}
     // CHECK:       %[[G0:.*]] = llvm.getelementptr %[[SHAPE]][%{{.*}}] : (!llvm.ptr, i32) -> !llvm.ptr, i64
     // CHECK:       llvm.store %[[D0]], %[[G0]] : i64, !llvm.ptr
@@ -83,7 +83,7 @@ module {
   func.func @alloc_mixed(%ctx: !hip.context, %m: index) -> memref<?x128xf32, 1> {
     // CHECK-LABEL: llvm.func @alloc_mixed
     // CHECK-SAME:  (%[[CTX:[a-zA-Z0-9_]+]]: !llvm.ptr, %[[M:[a-zA-Z0-9_]+]]: i64)
-    // CHECK:       %[[D1:.*]] = llvm.mlir.constant(128 : index) : i64
+    // CHECK:       %[[D1:.*]] = llvm.mlir.constant(128 : i64) : i64
     // CHECK:       %[[SHAPE:.*]] = llvm.alloca %{{.*}} x !llvm.array<2 x i64> {alignment = 8 : i64}
     // CHECK:       %[[G0:.*]] = llvm.getelementptr %[[SHAPE]][%{{.*}}] : (!llvm.ptr, i32) -> !llvm.ptr, i64
     // CHECK:       llvm.store %[[M]], %[[G0]] : i64, !llvm.ptr
@@ -135,7 +135,7 @@ module {
   func.func @alloc_dim(%ctx: !hip.context, %src: memref<?x64xf32, 1>) -> memref<?x64xf32, 1> {
     // CHECK-LABEL: llvm.func @alloc_dim
     // CHECK:       %[[DIM:.*]] = llvm.extractvalue %{{.*}}[3, 0] : !llvm.struct<(ptr<1>, ptr<1>, i64, array<2 x i64>, array<2 x i64>)>
-    // CHECK:       %[[D1:.*]] = llvm.mlir.constant(64 : index) : i64
+    // CHECK:       %[[D1:.*]] = llvm.mlir.constant(64 : i64) : i64
     // CHECK:       %[[SHAPE:.*]] = llvm.alloca %{{.*}} x !llvm.array<2 x i64> {alignment = 8 : i64}
     // CHECK:       llvm.store %[[DIM]], %{{.*}} : i64, !llvm.ptr
     // CHECK:       llvm.store %[[D1]], %{{.*}} : i64, !llvm.ptr
