@@ -123,7 +123,7 @@ int main() {
   };
   hit = mlir::hip::findNearestConvTune(query64, spatial);
   expect(hit.has_value() && !hit->exact && hit->solution == tile96 &&
-             hit->distance > 0.0f,
+             hit->distance > 0.0,
          "H/W=64 picks the 96 row over 128");
 
   hit = mlir::hip::findNearestConvTune(padded, table);
@@ -208,6 +208,48 @@ int main() {
   hit = mlir::hip::findNearestConvTune(gemmQuery, gemms);
   expect(hit.has_value() && !hit->exact && hit->solution == gemmNear,
          "gemm M=96 skips an oversized closer tile for M=64");
+
+  {
+    // The weights come from the table and can be anything a float holds. The
+    // nearer row (M=64) is listed second, so a distance that overflowed to
+    // infinity, or underflowed to zero, would tie and keep the first row
+    // (M=256) instead.
+    std::vector<ProblemCacheConvEntry> farFirst = {
+        {gemmProblem("f16", 256, 128, 256), gemmFar},
+        {gemmProblem("f16", 64, 128, 256), gemmNear},
+    };
+    for (const double weight : {1e20, 3e38, 1.0, 1e-30, 1e-40, 2e-45}) {
+      const auto nearest = mlir::hip::findNearestConvTune(gemmQuery, farFirst,
+                                                          {}, weight, 1.0, 1.0);
+      expect(nearest.has_value() && !nearest->exact &&
+                 nearest->solution == gemmNear &&
+                 std::isfinite(nearest->distance) && nearest->distance > 0.0,
+             "a large or small weight still picks the nearer row");
+      // The same through the other weight axes, and the conv path below.
+      const auto byN = mlir::hip::findNearestConvTune(
+          gemmProblem("f16", 96, 256, 256),
+          {
+              {gemmProblem("f16", 96, 1024, 256), gemmFar},
+              {gemmProblem("f16", 96, 512, 256), gemmNear},
+          },
+          {}, 1.0, weight, 1.0);
+      expect(byN.has_value() && byN->solution == gemmNear &&
+                 byN->distance > 0.0,
+             "a large or small N weight still picks the nearer row");
+    }
+    // Conv rows: H/W 128 before 96, query 64.
+    std::vector<ProblemCacheConvEntry> convFarFirst = {
+        {spatial128, tile128},
+        {spatial96, tile96},
+    };
+    for (const double weight : {1e20, 3e38, 1e-30, 1e-40, 2e-45}) {
+      const auto nearest = mlir::hip::findNearestConvTune(
+          query64, convFarFirst, {}, weight, weight, weight);
+      expect(nearest.has_value() && nearest->solution == tile96 &&
+                 nearest->distance > 0.0,
+             "a large or small conv weight still picks the nearer row");
+    }
+  }
 
   hit = mlir::hip::findNearestConvTune(gemmProblem("f32", 96, 128, 256), gemms);
   expect(!hit.has_value(), "gemm f32 does not borrow an f16 row");
@@ -486,6 +528,15 @@ int main() {
     llvm::json::Object doc = dumpDoc();
     doc["weight_m"] = 1e50;
     rejects(std::move(doc), "a JSON weight that overflows a float is rejected");
+  }
+  {
+    // Negative and non-finite: -1e300 is finite and far outside the float
+    // range, so it must be refused before it is converted.
+    for (const double bad : {-1e300, -1e-300, -1.0, -0.0}) {
+      llvm::json::Object doc = dumpDoc();
+      doc["weight_k"] = bad;
+      rejects(std::move(doc), "a negative JSON weight is rejected");
+    }
   }
   {
     // The largest float is still a finite weight, and one more step is not.
@@ -894,6 +945,61 @@ int main() {
                parseDoc(merged).getAsObject()->get("fallbacks") == nullptr &&
                pointMap(merged).size() == 4,
            "a table with no fallbacks key is rewritten without adding one");
+  }
+  {
+    // m, n and k are advisory and each is kept on its own. A point with only
+    // some of them keeps those, and the rest are worked out from the problem.
+    const auto dimsOf = [&](const std::string &text,
+                            const std::string &problem) {
+      std::vector<int64_t> dims;
+      llvm::json::Value doc = parseDoc(text);
+      const llvm::json::Object *root = doc.getAsObject();
+      if (!root || !root->getArray("points"))
+        return dims;
+      for (const llvm::json::Value &p : *root->getArray("points")) {
+        const llvm::json::Object *o = p.getAsObject();
+        if (o && o->getString("problem") == problem)
+          for (const char *name : {"m", "n", "k"})
+            dims.push_back(o->getInteger(name).value_or(-1));
+      }
+      return dims;
+    };
+    const auto rewrite = [&](llvm::json::Object point) {
+      llvm::json::Object doc = dumpDoc();
+      llvm::json::Array points;
+      points.push_back(std::move(point));
+      doc["points"] = std::move(points);
+      std::string merged;
+      expect(mlir::hip::mergeProblemCacheJson(jsonText(std::move(doc)),
+                                              "gfx1151", {}, merged, error),
+             "a point with some dimensions is rewritten");
+      return merged;
+    };
+    using Dims = std::vector<int64_t>;
+    const std::string problem = gemmAt(8); // m=8, n=1000, k=1280
+    expect(dimsOf(rewrite(llvm::json::Object{
+                      {"problem", problem}, {"config", 0}, {"m", 7}}),
+                  problem) == Dims({7, 1000, 1280}),
+           "a point with only m keeps m and gets n and k from the problem");
+    expect(dimsOf(rewrite(llvm::json::Object{
+                      {"problem", problem}, {"config", 0}, {"k", 5}}),
+                  problem) == Dims({8, 1000, 5}),
+           "a point with only k keeps k and gets m and n from the problem");
+    expect(dimsOf(rewrite(llvm::json::Object{
+                      {"problem", problem}, {"config", 0}, {"m", 7}, {"k", 5}}),
+                  problem) == Dims({7, 1000, 5}),
+           "a point with m and k keeps both and gets n from the problem");
+    expect(dimsOf(rewrite(llvm::json::Object{{"problem", problem},
+                                             {"config", 0},
+                                             {"m", 7},
+                                             {"n", 6},
+                                             {"k", 5}}),
+                  problem) == Dims({7, 6, 5}),
+           "a point with all three keeps all three");
+    expect(
+        dimsOf(rewrite(llvm::json::Object{{"problem", problem}, {"config", 0}}),
+               problem) == Dims({8, 1000, 1280}),
+        "a point with none gets all three from the problem");
   }
   {
     // A problem can have several rows. A lookup returns the first one it can

@@ -219,11 +219,16 @@ bool sameGroup(const ConvFields &query, const ConvFields &row) {
          query.supportsSplitK == row.supportsSplitK;
 }
 
-float gemmDistance(const GemmShape &query, const GemmShape &row, float weightM,
-                   float weightN, float weightK) {
-  auto term = [](float weight, int64_t a, int64_t b) {
-    const float delta = weight * (std::log2(static_cast<float>(a)) -
-                                  std::log2(static_cast<float>(b)));
+// The distances are doubles end to end. A weight that fits a float, up to
+// about 3.4e38 or down to about 1.4e-45, would overflow or underflow the same
+// arithmetic in float: with weight_m = 1e20 every row would be infinitely far
+// from the query, and the "keep the earlier row on a tie" rule would then pick
+// the first row instead of the nearest.
+double gemmDistance(const GemmShape &query, const GemmShape &row,
+                    double weightM, double weightN, double weightK) {
+  auto term = [](double weight, int64_t a, int64_t b) {
+    const double delta = weight * (std::log2(static_cast<double>(a)) -
+                                   std::log2(static_cast<double>(b)));
     return delta * delta;
   };
   return std::sqrt(term(weightM, query.m, row.m) +
@@ -454,14 +459,14 @@ bool tileLegal(const ConvFields &problem, std::string_view solution) {
   return tileFits(tile, shape.m, shape.n, shape.k, 0, false);
 }
 
-float axesDistance(const Axes &query, const Axes &row, float weightM,
-                   float weightN, float weightK) {
-  const float weights[4] = {weightM, weightN, weightK, weightN};
-  float sum = 0;
+double axesDistance(const Axes &query, const Axes &row, double weightM,
+                    double weightN, double weightK) {
+  const double weights[4] = {weightM, weightN, weightK, weightN};
+  double sum = 0;
   for (int i = 0; i < query.n; ++i) {
-    const float delta =
-        weights[i] * (std::log2(static_cast<float>(query.v[i])) -
-                      std::log2(static_cast<float>(row.v[i])));
+    const double delta =
+        weights[i] * (std::log2(static_cast<double>(query.v[i])) -
+                      std::log2(static_cast<double>(row.v[i])));
     sum += delta * delta;
   }
   return std::sqrt(sum);
@@ -723,8 +728,8 @@ template <typename Fields>
 std::optional<NearestConvTuneHit>
 searchNearest(std::string_view problemKey, const Fields &query,
               const std::vector<ProblemCacheConvEntry> &entries,
-              const std::vector<std::string> &rejectedSolutions, float weightM,
-              float weightN, float weightK,
+              const std::vector<std::string> &rejectedSolutions, double weightM,
+              double weightN, double weightK,
               std::optional<Fields> (*parse)(std::string),
               bool (*sameGroupOf)(const Fields &, const Fields &),
               Axes (*axesOf)(const Fields &),
@@ -732,7 +737,7 @@ searchNearest(std::string_view problemKey, const Fields &query,
   const Axes queryAxes = axesOf(query);
   const ProblemCacheConvEntry *best = nullptr;
   Fields bestFields{};
-  float bestDistance = 0;
+  double bestDistance = 0;
   for (const auto &entry : entries) {
     if (!isConvSolution(entry.solution) || entry.problem == problemKey)
       continue;
@@ -743,7 +748,7 @@ searchNearest(std::string_view problemKey, const Fields &query,
     if (!fields || !sameGroupOf(query, *fields) ||
         !legal(query, entry.solution))
       continue;
-    const float distance =
+    const double distance =
         axesDistance(queryAxes, axesOf(*fields), weightM, weightN, weightK);
     if (best != nullptr && distance >= bestDistance)
       continue;
@@ -893,7 +898,9 @@ bool readLutHeaderJson(const llvm::json::Object &root, ProblemCacheLut &lut,
     // double but rounds to zero, which the FlatBuffer loader rejects. Either
     // would corrupt the distance (an infinite or a dropped axis), so check the
     // range before converting and the converted value after.
-    if (!std::isfinite(*value) ||
+    // The lower end matters as much as the upper one: -1e300 is finite and
+    // outside the float range, and converting it is just as undefined.
+    if (!std::isfinite(*value) || !(*value > 0.0) ||
         *value > static_cast<double>(std::numeric_limits<float>::max()))
       return false;
     const float narrowed = static_cast<float>(*value);
@@ -1109,20 +1116,20 @@ bool mergeProblemCacheJson(std::string_view existing, std::string_view gpuArch,
       StoredPoint stored;
       if (!configIndexOf(*object, where, stored.perfConfig))
         return false;
-      // m, n and k are advisory. Absent, they are worked out from the problem
-      // string; present, they must be integers and are kept as they are.
+      // m, n and k are advisory. Each one that is present must be an integer
+      // and is kept as it is. Each one that is absent is worked out from the
+      // problem string, so a point with only some of them keeps the ones it
+      // has.
       const llvm::json::Value *dims[3] = {object->get("m"), object->get("n"),
                                           object->get("k")};
       for (const llvm::json::Value *dim : dims)
         if (dim != nullptr && !dim->getAsInteger())
           return malformed(where + " has a non-integer `m`, `n` or `k`");
-      if (dims[0] != nullptr && dims[1] != nullptr && dims[2] != nullptr) {
-        stored.m = *dims[0]->getAsInteger();
-        stored.n = *dims[1]->getAsInteger();
-        stored.k = *dims[2]->getAsInteger();
-      } else {
-        implicitGemmDims(problem->str(), stored.m, stored.n, stored.k);
-      }
+      implicitGemmDims(problem->str(), stored.m, stored.n, stored.k);
+      int64_t *outDims[3] = {&stored.m, &stored.n, &stored.k};
+      for (int i = 0; i < 3; ++i)
+        if (dims[i] != nullptr)
+          *outDims[i] = *dims[i]->getAsInteger();
       table[problem->str()].push_back(std::move(stored));
     }
 
@@ -1356,7 +1363,7 @@ std::optional<NearestConvTuneHit>
 findNearestConvTune(std::string_view problemKey,
                     const std::vector<ProblemCacheConvEntry> &entries,
                     const std::vector<std::string> &rejectedSolutions,
-                    float weightM, float weightN, float weightK) {
+                    double weightM, double weightN, double weightK) {
   // The stored perfConfig was benchmarked for this exact kernel. Do not
   // re-check the block against the derived GEMM; rocMLIR pads past it.
   for (const auto &entry : entries) {
@@ -1381,7 +1388,7 @@ findNearestConvTune(std::string_view problemKey,
 
     const ProblemCacheConvEntry *best = nullptr;
     ConvFields bestFields;
-    float bestDistance = 0;
+    double bestDistance = 0;
     for (const auto &entry : entries) {
       if (!isConvSolution(entry.solution) || entry.problem == problemKey)
         continue;
@@ -1392,8 +1399,8 @@ findNearestConvTune(std::string_view problemKey,
       if (!fields || !sameGroup(*query, *fields) ||
           !tileLegal(*query, entry.solution))
         continue;
-      const float distance = gemmDistance(queryGemm, gemmShape(*fields),
-                                          weightM, weightN, weightK);
+      const double distance = gemmDistance(queryGemm, gemmShape(*fields),
+                                           weightM, weightN, weightK);
       // Ties keep the earlier row, matching the MatMulNBits probe.
       if (best != nullptr && distance >= bestDistance)
         continue;

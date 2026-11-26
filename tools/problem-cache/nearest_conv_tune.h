@@ -63,8 +63,10 @@ struct ProblemCacheLut {
 struct NearestConvTuneHit {
   std::string solution;
   std::string matchedProblem;
-  // Weighted log2 distance. Zero when every distance axis matches.
-  float distance = 0;
+  // Weighted log2 distance. Zero when every distance axis matches. A double,
+  // like the weights it is computed with, so a large or small table weight
+  // cannot overflow or underflow it.
+  double distance = 0;
   bool exact = false;
 };
 
@@ -149,8 +151,8 @@ std::optional<NearestConvTuneHit>
 findNearestConvTune(std::string_view problemKey,
                     const std::vector<ProblemCacheConvEntry> &entries,
                     const std::vector<std::string> &rejectedSolutions = {},
-                    float weightM = 1.0f, float weightN = 1.0f,
-                    float weightK = 1.0f);
+                    double weightM = 1.0, double weightN = 1.0,
+                    double weightK = 1.0);
 
 } // namespace hip
 } // namespace mlir
