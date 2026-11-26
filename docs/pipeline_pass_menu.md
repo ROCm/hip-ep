@@ -157,6 +157,7 @@ the selected perfConfig string are printed only with `--verbose`.
 | `outline-onnx-to-hipdnn` | module | Outline subgraphs targeted at hipDNN graph compilation. |
 | `convert-onnx-to-hip` | module | Pattern-match ONNX ops by name → HIP dialect; lower both constant sweeps to policy-neutral `hip.constant`; legalize GatherBlockQuantized (INT4 packing, unsigned, quantize_axis). Pre-lowering folds run first on ONNX IR, among them the `onnx.Attention` mask fold (sliding window and key-padding bias, `AttentionWindowFold.cpp`) and the sigmoid + correction-bias QMoE routing fold (`QMoEConversion.cpp`). |
 | `hip-fold-batchnorm` | func.func | Fold an inference `hip.batch_norm` with constant parameters into the filter and bias of the `hip.conv` producing it, directly or through a `hip.add` of two convs (the shift goes into one bias). Every intermediate result must have the batch norm as its only consumer. Reads inline and file-backed constants only; a batch norm over memory-address-backed weights is left in place. |
+| `hip-fold-slice-into-matmul` | func.func | Fold a static last-dim `tensor.extract_slice` of a `hip.matmul` / `hip.gemm` result into the constant weight (and gemm bias) by pre-slicing them at compile time; the slice must be the matmul's only consumer. Reads inline and file-backed constants only. |
 | `hip-externalize-constants` | module | Validate explicit serialization order, append unordered carriers deterministically, plan/serialize, then replace `hip.constant` using the existing inline/full/streaming/hybrid metadata contract. Direct threshold default: 0. |
 | `hip-fold-constant-extracts` | func.func | Resolve constant-index `tensor.extract` of vectors assembled with `tensor.insert_slice` (ONNX shape vectors) to the `from_elements` operand or integer constant element they read. |
 | `hip-infer-shapes` | module | Refine `?` dims on HIP DPS result types via `ReifyRankedShapedTypeOpInterface`. |
@@ -276,6 +277,7 @@ ONNX → HIP  (buildOnnxToHipPipeline)
   convert-onnx-to-hip
   func.func(hip-fold-batchnorm)      (shared with the rocMLIR head, so it runs
                                       before any conv rewrite or kernel outlining)
+  func.func(hip-fold-slice-into-matmul)
   «slot: AfterConvertOnnxToHip»  (supported hip.constant producer boundary)
   func.func(hip-decompose-conv-transpose)  (rank-3 -> rank-4 hip.conv before
                                            the MIOpen lowering; rocmlir-pipeline
