@@ -71,8 +71,8 @@
 // runtime. The two agree wherever the branch is taken, since it is taken only
 // on a non-zero fraction.
 // CHECK-LABEL: func.func @round_f32
-// CHECK-DAG: %[[HALF:.*]] = "tosa.const"() <{values = dense<5.000000e-01> : tensor<4xf32>}>
-// CHECK-DAG: %[[TWO:.*]] = "tosa.const"() <{values = dense<2.000000e+00> : tensor<4xf32>}>
+// CHECK-DAG: %[[HALF:.*]] = tosa.const values(dense<5.000000e-01> : tensor<4xf32>)
+// CHECK-DAG: %[[TWO:.*]] = tosa.const values(dense<2.000000e+00> : tensor<4xf32>)
 // CHECK: %[[F:.*]] = tosa.floor %arg1
 // CHECK: %[[D:.*]] = tosa.sub %arg1, %[[F]]
 // CHECK: %[[ABOVE:.*]] = tosa.greater %[[D]], %[[HALF]]
@@ -149,18 +149,18 @@ func.func @round_f16(%ctx: !hip.context, %x: tensor<2x8xf16>,
 // Every remainder by -1 is zero under both fmod rules and dividing by 1 gives
 // exactly that, so the substitution costs nothing but the overflow.
 // CHECK-LABEL: func.func @mod_i32
-// CHECK-DAG: %[[MONE:.*]] = "tosa.const"() <{values = dense<-1> : tensor<4xi32>}>
-// CHECK-DAG: %[[ONE:.*]] = "tosa.const"() <{values = dense<1> : tensor<4xi32>}>
+// CHECK-DAG: %[[MONE:.*]] = tosa.const values(dense<-1> : tensor<4xi32>)
+// CHECK-DAG: %[[ONE:.*]] = tosa.const values(dense<1> : tensor<4xi32>)
 // CHECK: %[[ISMONE:.*]] = tosa.equal %arg2, %[[MONE]]
 // CHECK: %[[DIV:.*]] = tosa.select %[[ISMONE]], %[[ONE]], %arg2
 // CHECK: %[[Q:.*]] = tosa.intdiv %arg1, %[[DIV]]
 // CHECK: %[[P:.*]] = tosa.mul %[[Q]], %[[DIV]]
 // CHECK: %[[R:.*]] = tosa.sub %arg1, %[[P]]
-// CHECK: %[[ZERO:.*]] = "tosa.const"() <{values = dense<0> : tensor<4xi32>}>
+// CHECK: %[[ZERO:.*]] = tosa.const values(dense<0> : tensor<4xi32>)
 // CHECK: %[[BNEG:.*]] = tosa.greater %[[ZERO]], %arg2
 // CHECK: %[[RNEG:.*]] = tosa.greater %[[ZERO]], %[[R]]
 // CHECK: %[[DIFF:.*]] = tosa.bitwise_xor %[[RNEG]], %[[BNEG]]
-// CHECK: %[[TRUE:.*]] = "tosa.const"() <{values = dense<true> : tensor<4xi1>}>
+// CHECK: %[[TRUE:.*]] = tosa.const values(dense<true> : tensor<4xi1>)
 // CHECK: %[[ISZERO:.*]] = tosa.equal %[[R]], %[[ZERO]]
 // CHECK: %[[NONZERO:.*]] = tosa.bitwise_xor %[[ISZERO]], %[[TRUE]]
 // CHECK: %[[ADJ:.*]] = tosa.bitwise_and %[[DIFF]], %[[NONZERO]]
@@ -231,7 +231,7 @@ func.func @mod_i64(%ctx: !hip.context, %a: tensor<4xi64>, %b: tensor<4xi64>,
 // A rank-0 divisor is reshaped to the result's rank first, the same way the
 // binary siblings do it, and every op in the expansion then broadcasts it.
 // CHECK-LABEL: func.func @mod_rank_extending
-// CHECK: %[[SHAPE:.*]] = tosa.const_shape {values = dense<1> : tensor<2xindex>}
+// CHECK: %[[SHAPE:.*]] = tosa.const_shape values(dense<1> : tensor<2xindex>)
 // CHECK: %[[B:.*]] = tosa.reshape %arg2, %[[SHAPE]] : (tensor<i32>, !tosa.shape<2>) -> tensor<1x1xi32>
 // CHECK: %[[DIV:.*]] = tosa.select %{{.*}}, %{{.*}}, %[[B]] : (tensor<4x8xi1>, tensor<4x8xi32>, tensor<1x1xi32>) -> tensor<4x8xi32>
 // CHECK: tosa.intdiv %arg1, %[[DIV]] : (tensor<4x8xi32>, tensor<4x8xi32>) -> tensor<4x8xi32>

@@ -83,7 +83,7 @@ func.func @range_f32_const(%ctx: !hip.context) -> tensor<3xf32>
 // CHECK-LABEL: func.func @range_dynamic_bounds
 // CHECK: %[[START:.*]] = tosa.reshape %arg1
 // CHECK: %[[DELTA:.*]] = tosa.reshape %arg3
-// CHECK: %[[IOTA:.*]] = "tosa.const"() <{values = dense<[0, 1, 2, 3]> : tensor<4xi32>}>
+// CHECK: %[[IOTA:.*]] = tosa.const values(dense<[0, 1, 2, 3]> : tensor<4xi32>)
 // CHECK: %[[SCALED:.*]] = tosa.mul %[[IOTA]], %[[DELTA]]
 // CHECK: tosa.add %[[SCALED]], %[[START]]
 // CHECK-NOT: hip.range
@@ -119,7 +119,7 @@ func.func @range_outlined_kernel() -> tensor<3xi64> attributes {rock.kernel} {
 //===----------------------------------------------------------------------===//
 
 // CHECK-LABEL: func.func @castlike_f32_to_f16
-// CHECK: tosa.cast %arg1 : (tensor<3x4xf32>) -> tensor<3x4xf16>
+// CHECK: tosa.cast %arg1 input_unsigned(false) : (tensor<3x4xf32>) -> tensor<3x4xf16>
 // CHECK-NOT: hip.cast
 func.func @castlike_f32_to_f16(%ctx: !hip.context, %x: tensor<3x4xf32>,
                                %init: tensor<3x4xf16>) -> tensor<3x4xf16>
