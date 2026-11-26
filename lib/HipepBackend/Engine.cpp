@@ -1093,6 +1093,13 @@ bool Engine::run(const hipep_backend_code &handle, void *const *data,
       error = "cannot copy output " + std::to_string(o);
       return false;
     }
+  // A device-to-device hipMemcpy may return before it is done, and the
+  // caller's next work may be on a stream that does not wait for the null
+  // stream: the run is done when the null stream is.
+  if (hipStreamSynchronize(nullptr) != hipSuccess) {
+    error = "the run's copies did not finish";
+    return false;
+  }
   return true;
 }
 
