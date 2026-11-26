@@ -160,3 +160,27 @@ func.func @main_graph(%ctx: !hip.context, %q: tensor<1x2x64x32xf16>,
       outs(%e3 : tensor<1x2x64x32xf16>) : tensor<1x2x64x32xf16>
   return %y, %p : tensor<1x2x64x32xf16>, tensor<1x2x64x64xf16>
 }
+
+// -----
+
+// The second matmul transposes the probabilities, so it would reduce over the
+// rows the softmax did not normalize.
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: hip.rocmlir
+// CHECK: hip.miopen.softmax
+// CHECK: hip.rocmlir
+func.func @main_graph(%ctx: !hip.context, %q: tensor<1x2x64x32xf16>,
+                      %k: tensor<1x2x32x64xf16>, %v: tensor<1x2x64x32xf16>)
+    -> tensor<1x2x64x32xf16> {
+  %e0 = tensor.empty() : tensor<1x2x64x64xf16>
+  %s = hip.matmul(%ctx) ins(%q, %k : tensor<1x2x64x32xf16>, tensor<1x2x32x64xf16>)
+      outs(%e0 : tensor<1x2x64x64xf16>) : tensor<1x2x64x64xf16>
+  %e2 = tensor.empty() : tensor<1x2x64x64xf16>
+  %p = hip.miopen.softmax(%ctx) ins(%s : tensor<1x2x64x64xf16>)
+      outs(%e2 : tensor<1x2x64x64xf16>) -> tensor<1x2x64x64xf16>
+  %e3 = tensor.empty() : tensor<1x2x64x32xf16>
+  %y = hip.matmul(%ctx) ins(%p, %v : tensor<1x2x64x64xf16>, tensor<1x2x64x32xf16>)
+      outs(%e3 : tensor<1x2x64x32xf16>) {transA = 1 : i64} : tensor<1x2x64x32xf16>
+  return %y : tensor<1x2x64x32xf16>
+}

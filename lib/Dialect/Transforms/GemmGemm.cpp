@@ -41,6 +41,12 @@ static OpOperand &getGemmAOperand(Operation *anchor) {
   return cast<GemmOp>(anchor).getInputAMutable();
 }
 
+static bool isGemmATransposed(Operation *anchor) {
+  if (auto matmul = dyn_cast<MatmulOp>(anchor))
+    return matmul.getTransA() != 0;
+  return cast<GemmOp>(anchor).getTransA() != 0;
+}
+
 // (m, n, k) of `A[m, k] @ B[k, n]`, after the gemm's own transposes.
 static std::optional<std::array<int64_t, 3>> getGemmDims(Operation *anchor) {
   Value a = getGemmAOperand(anchor).get();
@@ -388,7 +394,10 @@ static bool fuseAttentionTriple(RocMlirOp second, int &counter,
         !isAttentionSupported(secondAnchor, accelTypes, scoreBytes,
                               f32MinScoreBytes))
       continue;
-    if (!feedsGemmA(secondKernel.getArgument(index), secondAnchor))
+    // Transposing the probabilities would make the second gemm reduce over
+    // the rows the softmax did not normalize.
+    if (!feedsGemmA(secondKernel.getArgument(index), secondAnchor) ||
+        isGemmATransposed(secondAnchor))
       continue;
     std::optional<std::array<int64_t, 3>> firstDims = getGemmDims(firstAnchor);
     std::optional<std::array<int64_t, 3>> secondDims =

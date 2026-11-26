@@ -36,6 +36,8 @@
 namespace mlir {
 namespace hip {
 
+struct FuseRocMlirAnchorPassOptions;
+
 // One compiled kernel: the ELF blob plus the launch geometry rocMLIR picked.
 // A kernel argument that rocMLIR needs filled before every launch
 // (`rock.prefill`), such as the output of a split-K kernel, which the kernel
@@ -94,6 +96,12 @@ std::string resolveRocMlirArch();
 // The L2 cache size of device 0 in bytes, as the HIP runtime reports it, or 0
 // when there is no runtime or device to ask.
 int64_t resolveRocMlirL2CacheBytes();
+
+// The attention options of the rocMLIR fusion, shared by CompilerDriver and
+// hip-rocmlir-compiler so both form the same kernels on the same device:
+// HIPDNN_EP_ROCMLIR_NO_ATTENTION=1 keeps attention as two gemm kernels and a
+// softmax, and non-accelerated f32 attention merges only above the L2 size.
+void setRocMlirAttentionOptions(FuseRocMlirAnchorPassOptions &options);
 
 // The gemm element types, printed as in IR (f16, bf16, ...), that `arch`
 // runs on matrix cores, for the rocMLIR fusion's gemm-gemm-accel-types option.

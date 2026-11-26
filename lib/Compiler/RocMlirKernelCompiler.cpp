@@ -395,6 +395,11 @@ int64_t resolveRocMlirL2CacheBytes() {
   return 0;
 }
 
+void setRocMlirAttentionOptions(FuseRocMlirAnchorPassOptions &options) {
+  options.attention = !hip_env_is_on("HIPDNN_EP_ROCMLIR_NO_ATTENTION");
+  options.attentionF32MinScoreBytes = resolveRocMlirL2CacheBytes();
+}
+
 std::vector<std::string> getRocMlirGemmAccelTypes(MLIRContext &context,
                                                   StringRef arch) {
   Builder b(&context);
