@@ -154,8 +154,8 @@ std::string rocMlirArtifactTarget() {
         !target.empty() && numCU > 0)
       target += "+cu=" + std::to_string(numCU);
     if (autotune && space != mlir::hip::AutotuneSpace::Quick &&
-        !mlir::hip::rocMlirSplitKTuningEnabled())
-      target += "+no-splitk";
+        mlir::hip::rocMlirSplitKTuningEnabled())
+      target += "+splitk";
     // The same holds for the kernel plan: without standalone elementwise
     // kernels the leftover modules run as HIP ops, a different artifact.
     if (!target.empty() &&

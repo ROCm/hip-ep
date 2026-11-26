@@ -399,8 +399,7 @@ int64_t resolveRocMlirNumCU() {
 }
 
 bool rocMlirSplitKTuningEnabled() {
-  return hip_get_env("HIPDNN_EP_ROCMLIR_SPLITK").empty() ||
-         hip_env_is_on("HIPDNN_EP_ROCMLIR_SPLITK");
+  return hip_env_is_on("HIPDNN_EP_ROCMLIR_SPLITK");
 }
 
 std::vector<std::string> getRocMlirGemmAccelTypes(MLIRContext &context,

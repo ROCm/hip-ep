@@ -99,7 +99,7 @@ std::string resolveRocMlirArch();
 int64_t resolveRocMlirNumCU();
 
 // Whether full and exhaustive tuning may add split-K variants of every tile
-// (rock.enable_splitk_for_tuning). On unless HIPDNN_EP_ROCMLIR_SPLITK is off.
+// (rock.enable_splitk_for_tuning). Off unless HIPDNN_EP_ROCMLIR_SPLITK is on.
 bool rocMlirSplitKTuningEnabled();
 
 // The gemm element types, printed as in IR (f16, bf16, ...), that `arch`

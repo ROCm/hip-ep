@@ -95,9 +95,9 @@ Every rocMLIR kernel carries `rock.num_cu`, the device's `multiProcessorCount`
 tile grouping and which split-K variants the tuning space holds, so a known
 count adds a `+cu=<n>` suffix (`gfx1151+autotune=quick+cu=20`). Full and
 exhaustive tuning add split-K variants of every tile
-(`rock.enable_splitk_for_tuning`) unless `HIPDNN_EP_ROCMLIR_SPLITK` is off,
-which adds `+no-splitk` to those spaces; quick tuning always searches the quick
-list as is, including its split-K entries. A split-K candidate is timed with
+(`rock.enable_splitk_for_tuning`) only with `HIPDNN_EP_ROCMLIR_SPLITK=1`, which
+adds `+splitk` to those spaces; quick tuning always searches the quick list as
+is, including its split-K entries. A split-K candidate is timed with
 the zero fill of its output, as at inference.
 `HIPDNN_EP_ROCMLIR_NO_STANDALONE_ELEMENTWISE` adds a `+no-standalone-ew` suffix
 after that, because it changes which ops run as rocMLIR kernels
