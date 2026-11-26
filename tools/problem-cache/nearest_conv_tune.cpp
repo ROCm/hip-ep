@@ -975,8 +975,25 @@ bool loadProblemCacheLutJson(std::string_view text, ProblemCacheLut &lut,
   return true;
 }
 
+namespace {
+
+// Serializes rewrites within one process. The file is read, merged and
+// renamed over, so two compiles that overlap would otherwise each start from
+// the same old table and the second rename would drop the first one's
+// winners. Every read of an external table takes it too: on Windows an open
+// std::ifstream does not share delete access, so a read that overlaps the
+// rename would make the replacement fail and lose that compile's winners.
+// Separate processes are not covered.
+std::mutex &rewriteMutex() {
+  static std::mutex mutex;
+  return mutex;
+}
+
+} // namespace
+
 bool loadProblemCacheLutJsonFile(const std::string &path, ProblemCacheLut &lut,
                                  std::string &error) {
+  std::lock_guard<std::mutex> lock(rewriteMutex());
   std::ifstream in(path, std::ios::binary);
   if (!in) {
     lut = {};
@@ -1295,8 +1312,9 @@ bool looksLikeFlatBuffer(std::string_view bytes) {
 std::string flatBufferRewriteError(const std::string &path) {
   return path +
          " is an RCAL FlatBuffer (.fb). --enable-problem-cache-rw reads and "
-         "writes the LUT JSON; decode the .fb with flatc --json --raw-binary "
-         "problem_cache.fbs -- <file>, or start from a new file";
+         "writes the LUT JSON; decode the .fb with flatc --json --strict-json "
+         "--defaults-json --raw-binary problem_cache.fbs -- <file>, or start "
+         "from a new file";
 }
 
 // Reads \p target, the resolved path of \p path, for a rewrite. \p present is
@@ -1355,21 +1373,13 @@ void removeStaleTemporaries(const std::filesystem::path &target) {
   }
 }
 
-// Serializes rewrites within one process. The file is read, merged and
-// renamed over, so two compiles that overlap would otherwise each start from
-// the same old table and the second rename would drop the first one's
-// winners. Separate processes are not covered.
-std::mutex &rewriteMutex() {
-  static std::mutex mutex;
-  return mutex;
-}
-
 } // namespace
 
 bool checkProblemCacheJsonFile(const std::string &path,
                                std::string_view gpuArch, ProblemCacheLut &lut,
                                std::string &error) {
   lut = {};
+  std::lock_guard<std::mutex> lock(rewriteMutex());
   std::filesystem::path target;
   if (!resolveWriteTarget(path, target, error))
     return false;

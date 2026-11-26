@@ -1366,6 +1366,11 @@ int main() {
       expect(!mlir::hip::loadProblemCacheLutJsonFile(fbPath, fromFb, error) &&
                  error.find("FlatBuffer") != std::string::npos,
              "the JSON loader names a FlatBuffer as one");
+      expect(!mlir::hip::updateProblemCacheJsonFile(fbPath, "gfx1151",
+                                                    {{exact, tile32}}, error) &&
+                 error.find("--strict-json") != std::string::npos &&
+                 error.find("--defaults-json") != std::string::npos,
+             "the decode command in the refusal is strict and keeps defaults");
       expect(!mlir::hip::checkProblemCacheJsonFile(fbPath, "gfx1151", fromFb,
                                                    error) &&
                  error.find("FlatBuffer") != std::string::npos,
