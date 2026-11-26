@@ -502,6 +502,87 @@ func.func @batch_norm_then_divide(%ctx: !hip.context, %x: !full, %mean: !vec,
   return %y : !full
 }
 
+// A per-channel multiply and add after the bias cannot extend the chain, so
+// they stay, and the batch normalization before them still fuses.
+
+// CHECK-LABEL: func.func @batch_norm_then_channel_ops
+// CHECK-SAME:  (%[[CTX:.*]]: !hip.context, %[[X:.*]]: tensor<1x4x2x2xf32>, %[[MEAN:.*]]: tensor<4xf32>, %[[VAR:.*]]: tensor<4xf32>, %[[SCALE:.*]]: tensor<4xf32>, %[[BIAS:.*]]: tensor<4xf32>, %[[GAMMA:.*]]: tensor<4xf32>, %[[BETA:.*]]: tensor<4xf32>)
+// CHECK:         %[[GAMMA_V:.*]] = tensor.expand_shape %[[GAMMA]]
+// CHECK:         %[[BETA_V:.*]] = tensor.expand_shape %[[BETA]]
+// CHECK:         %[[BN:.*]] = hip.batch_norm(%[[CTX]]) ins(%[[X]], %[[SCALE]], %[[BIAS]], %[[MEAN]], %[[VAR]] :
+// CHECK:         %[[M:.*]] = hip.mul(%[[CTX]]) ins(%[[BN]], %[[GAMMA_V]] :
+// CHECK:         %[[Y:.*]] = hip.add(%[[CTX]]) ins(%[[M]], %[[BETA_V]] :
+// CHECK:         return %[[Y]]
+func.func @batch_norm_then_channel_ops(%ctx: !hip.context, %x: !full,
+                                       %mean: !vec, %var: !vec, %scale: !vec,
+                                       %bias: !vec, %gamma: !vec, %beta: !vec)
+    -> !full {
+  %eps = hip.constant {value = dense<1.0e-5> : tensor<f32>} : tensor<f32>
+  %e0 = tensor.empty() : !vec
+  %vpe = hip.add(%ctx) ins(%var, %eps : !vec, tensor<f32>) outs(%e0 : !vec) -> !vec
+  %e1 = tensor.empty() : !vec
+  %sd = hip.sqrt(%ctx) ins(%vpe : !vec) outs(%e1 : !vec) : !vec
+  %e2 = tensor.empty() : !vec
+  %inv = hip.reciprocal(%ctx) ins(%sd : !vec) outs(%e2 : !vec) : !vec
+
+  %mean_v = tensor.expand_shape %mean [[0, 1, 2]] output_shape [4, 1, 1] : !vec into !view
+  %inv_v = tensor.expand_shape %inv [[0, 1, 2]] output_shape [4, 1, 1] : !vec into !view
+  %scale_v = tensor.expand_shape %scale [[0, 1, 2]] output_shape [4, 1, 1] : !vec into !view
+  %bias_v = tensor.expand_shape %bias [[0, 1, 2]] output_shape [4, 1, 1] : !vec into !view
+  %gamma_v = tensor.expand_shape %gamma [[0, 1, 2]] output_shape [4, 1, 1] : !vec into !view
+  %beta_v = tensor.expand_shape %beta [[0, 1, 2]] output_shape [4, 1, 1] : !vec into !view
+
+  %e3 = tensor.empty() : !full
+  %c = hip.sub(%ctx) ins(%x, %mean_v : !full, !view) outs(%e3 : !full) : !full
+  %e4 = tensor.empty() : !full
+  %n = hip.mul(%ctx) ins(%c, %inv_v : !full, !view) outs(%e4 : !full) -> !full
+  %e5 = tensor.empty() : !full
+  %s = hip.mul(%ctx) ins(%n, %scale_v : !full, !view) outs(%e5 : !full) -> !full
+  %e6 = tensor.empty() : !full
+  %b = hip.add(%ctx) ins(%s, %bias_v : !full, !view) outs(%e6 : !full) -> !full
+  %e7 = tensor.empty() : !full
+  %m = hip.mul(%ctx) ins(%b, %gamma_v : !full, !view) outs(%e7 : !full) -> !full
+  %e8 = tensor.empty() : !full
+  %y = hip.add(%ctx) ins(%m, %beta_v : !full, !view) outs(%e8 : !full) -> !full
+  return %y : !full
+}
+
+// The normalized input is also returned, so the scale cannot join the chain.
+// The normalization before it still fuses.
+
+// CHECK-LABEL: func.func @batch_norm_normalization_has_other_use
+// CHECK-SAME:  (%[[CTX:.*]]: !hip.context, %[[X:.*]]: tensor<1x4x2x2xf32>, %[[MEAN:.*]]: tensor<4xf32>, %[[VAR:.*]]: tensor<4xf32>, %[[SCALE:.*]]: tensor<4xf32>)
+// CHECK:         %[[SCALE_V:.*]] = tensor.expand_shape %[[SCALE]]
+// CHECK:         %[[ONES:.*]] = hip.constant {{.*}}dense<1.000000e+00> : tensor<4xf32>
+// CHECK:         %[[ZEROS:.*]] = hip.constant {{.*}}dense<0.000000e+00> : tensor<4xf32>
+// CHECK:         %[[BN:.*]] = hip.batch_norm(%[[CTX]]) ins(%[[X]], %[[ONES]], %[[ZEROS]], %[[MEAN]], %[[VAR]] :
+// CHECK:         %[[Y:.*]] = hip.mul(%[[CTX]]) ins(%[[BN]], %[[SCALE_V]] :
+// CHECK:         return %[[Y]], %[[BN]]
+func.func @batch_norm_normalization_has_other_use(%ctx: !hip.context, %x: !full,
+                                                  %mean: !vec, %var: !vec,
+                                                  %scale: !vec)
+    -> (!full, !full) {
+  %eps = hip.constant {value = dense<1.0e-5> : tensor<f32>} : tensor<f32>
+  %e0 = tensor.empty() : !vec
+  %vpe = hip.add(%ctx) ins(%var, %eps : !vec, tensor<f32>) outs(%e0 : !vec) -> !vec
+  %e1 = tensor.empty() : !vec
+  %sd = hip.sqrt(%ctx) ins(%vpe : !vec) outs(%e1 : !vec) : !vec
+  %e2 = tensor.empty() : !vec
+  %inv = hip.reciprocal(%ctx) ins(%sd : !vec) outs(%e2 : !vec) : !vec
+
+  %mean_v = tensor.expand_shape %mean [[0, 1, 2]] output_shape [4, 1, 1] : !vec into !view
+  %inv_v = tensor.expand_shape %inv [[0, 1, 2]] output_shape [4, 1, 1] : !vec into !view
+  %scale_v = tensor.expand_shape %scale [[0, 1, 2]] output_shape [4, 1, 1] : !vec into !view
+
+  %e3 = tensor.empty() : !full
+  %c = hip.sub(%ctx) ins(%x, %mean_v : !full, !view) outs(%e3 : !full) : !full
+  %e4 = tensor.empty() : !full
+  %n = hip.mul(%ctx) ins(%c, %inv_v : !full, !view) outs(%e4 : !full) -> !full
+  %e5 = tensor.empty() : !full
+  %y = hip.mul(%ctx) ins(%n, %scale_v : !full, !view) outs(%e5 : !full) -> !full
+  return %y, %n : !full, !full
+}
+
 // Cases that must not fuse.
 
 // A view on another dimension than the channel dimension, although it has C
@@ -530,38 +611,6 @@ func.func @no_fusion_view_not_on_channel(%ctx: !hip.context, %x: tensor<1x4x4x4x
   %e4 = tensor.empty() : tensor<1x4x4x4xf32>
   %y = hip.mul(%ctx) ins(%c, %inv_v : tensor<1x4x4x4xf32>, tensor<1x1x4xf32>) outs(%e4 : tensor<1x4x4x4xf32>) -> tensor<1x4x4x4xf32>
   return %y : tensor<1x4x4x4xf32>
-}
-
-// The normalized input is also returned, so the chain must stay to produce it.
-
-// CHECK-LABEL: func.func @no_fusion_intermediate_has_other_use
-// CHECK-NOT:     hip.batch_norm
-// CHECK:         hip.sub
-// CHECK-NOT:     hip.batch_norm
-// CHECK:         return
-func.func @no_fusion_intermediate_has_other_use(%ctx: !hip.context, %x: !full,
-                                                %mean: !vec, %var: !vec,
-                                                %scale: !vec)
-    -> (!full, !full) {
-  %eps = hip.constant {value = dense<1.0e-5> : tensor<f32>} : tensor<f32>
-  %e0 = tensor.empty() : !vec
-  %vpe = hip.add(%ctx) ins(%var, %eps : !vec, tensor<f32>) outs(%e0 : !vec) -> !vec
-  %e1 = tensor.empty() : !vec
-  %sd = hip.sqrt(%ctx) ins(%vpe : !vec) outs(%e1 : !vec) : !vec
-  %e2 = tensor.empty() : !vec
-  %inv = hip.reciprocal(%ctx) ins(%sd : !vec) outs(%e2 : !vec) : !vec
-
-  %mean_v = tensor.expand_shape %mean [[0, 1, 2]] output_shape [4, 1, 1] : !vec into !view
-  %inv_v = tensor.expand_shape %inv [[0, 1, 2]] output_shape [4, 1, 1] : !vec into !view
-  %scale_v = tensor.expand_shape %scale [[0, 1, 2]] output_shape [4, 1, 1] : !vec into !view
-
-  %e3 = tensor.empty() : !full
-  %c = hip.sub(%ctx) ins(%x, %mean_v : !full, !view) outs(%e3 : !full) : !full
-  %e4 = tensor.empty() : !full
-  %n = hip.mul(%ctx) ins(%c, %inv_v : !full, !view) outs(%e4 : !full) -> !full
-  %e5 = tensor.empty() : !full
-  %y = hip.mul(%ctx) ins(%n, %scale_v : !full, !view) outs(%e5 : !full) -> !full
-  return %y, %n : !full, !full
 }
 
 // The mean is already broadcast-shaped, so it is not a [C] vector.

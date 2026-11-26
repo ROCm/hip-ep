@@ -37,8 +37,8 @@
 // learned parameters. hip.batch_norm always takes both, so a missing one is
 // replaced by a constant vector of ones or zeros. The pattern is rooted at the
 // last op of the chain, which is the add of the bias, else the multiply of the
-// scale, else the normalization; a root that feeds a further per-channel
-// multiply or add leaves the match to that op.
+// scale, else the normalization; a root whose consumer ends a longer chain
+// leaves the match to that op.
 //
 // Safety: the full-size intermediates must have a single value use (a
 // tensor.dim query is not a value use; it is retargeted to x) and the type of
@@ -121,23 +121,8 @@ splitChannelOperand(BinaryOp op, mlir::RankedTensorType data) {
   return std::nullopt;
 }
 
-/// `op`'s result feeds a multiply or add that applies one more per-channel
-/// view to it, so `op` is not the last op of a batch normalization chain.
-bool feedsChannelOp(mlir::Operation *op, mlir::RankedTensorType data) {
-  mlir::Value result = op->getResult(0);
-  for (mlir::Operation *user : result.getUsers()) {
-    std::optional<std::pair<mlir::Value, mlir::Value>> split;
-    if (auto add = mlir::dyn_cast<mlir::hip::AddOp>(user))
-      split = splitChannelOperand(add, data);
-    else if (auto mul = mlir::dyn_cast<mlir::hip::MulOp>(user))
-      split = splitChannelOperand(mul, data);
-    if (split && split->first == result)
-      return true;
-  }
-  return false;
-}
-
 struct Chain {
+  mlir::RankedTensorType data;
   mlir::Value input;
   // Each parameter as the [C] vector its view started from. The scale and the
   // bias are null when the chain does not apply them.
@@ -146,6 +131,7 @@ struct Chain {
   // Consumers first, so each op is erased after everything that reads it.
   // The root is not in it: it is replaced.
   llvm::SmallVector<mlir::Operation *> ops;
+  llvm::SmallVector<mlir::Operation *> initDefs;
 };
 
 /// `op` computes on a [C] vector.
@@ -345,8 +331,8 @@ collectInitDefs(llvm::ArrayRef<mlir::Operation *> ops) {
 /// change: a failed match must leave the IR unchanged.
 template <typename RootOp>
 void buildBatchNorm(mlir::PatternRewriter &rewriter, RootOp root,
-                    mlir::RankedTensorType data, const Chain &chain,
-                    llvm::ArrayRef<mlir::Operation *> initDefs) {
+                    const Chain &chain) {
+  mlir::RankedTensorType data = chain.data;
   auto vectorType =
       mlir::RankedTensorType::get({data.getDimSize(1)}, data.getElementType());
   auto constantVector = [&](double value) -> mlir::Value {
@@ -377,7 +363,7 @@ void buildBatchNorm(mlir::PatternRewriter &rewriter, RootOp root,
   for (mlir::Operation *op : chain.ops)
     rewriter.eraseOp(op);
   llvm::SmallPtrSet<mlir::Operation *, 8> seen;
-  for (mlir::Operation *def : initDefs)
+  for (mlir::Operation *def : chain.initDefs)
     if (seen.insert(def).second && mlir::isOpTriviallyDead(def))
       rewriter.eraseOp(def);
 }
@@ -390,6 +376,19 @@ struct BatchNormFusion : public mlir::OpRewritePattern<RootOp> {
 
   mlir::LogicalResult
   matchAndRewrite(RootOp root, mlir::PatternRewriter &rewriter) const override {
+    mlir::FailureOr<Chain> chain = matchChain(root, rewriter);
+    if (mlir::failed(chain))
+      return mlir::failure();
+    if (consumerEndsLongerChain(root, rewriter))
+      return rewriter.notifyMatchFailure(root, "not the end of the chain");
+    buildBatchNorm(rewriter, root, *chain);
+    return mlir::success();
+  }
+
+  /// Changes no IR, so it can also tell whether a consumer of a root ends a
+  /// longer chain.
+  static mlir::FailureOr<Chain> matchChain(RootOp root,
+                                           mlir::PatternRewriter &rewriter) {
     if (root->getNumResults() != 1)
       return rewriter.notifyMatchFailure(root, "not a tensor op");
     auto data =
@@ -399,11 +398,10 @@ struct BatchNormFusion : public mlir::OpRewritePattern<RootOp> {
         !mlir::isa<mlir::FloatType>(data.getElementType()))
       return rewriter.notifyMatchFailure(
           root, "batch norm needs a static channel dimension 1");
-    if (feedsChannelOp(root, data))
-      return rewriter.notifyMatchFailure(root, "not the end of the chain");
 
     constexpr bool endsInBias = std::is_same_v<RootOp, mlir::hip::AddOp>;
     Chain chain;
+    chain.data = data;
     mlir::Value current = root->getResult(0);
     if constexpr (endsInBias) {
       std::optional<mlir::Value> shifted = matchBias(root, data, chain);
@@ -437,9 +435,25 @@ struct BatchNormFusion : public mlir::OpRewritePattern<RootOp> {
     auto initDefs = collectInitDefs(chain.ops);
     if (!initDefs)
       return rewriter.notifyMatchFailure(root, "batch norm op is not DPS");
+    chain.initDefs = std::move(*initDefs);
+    return chain;
+  }
 
-    buildBatchNorm(rewriter, root, data, chain, *initDefs);
-    return mlir::success();
+  /// A consumer whose chain contains `root` fuses it; fusing `root` first
+  /// would split that chain.
+  static bool consumerEndsLongerChain(RootOp root,
+                                      mlir::PatternRewriter &rewriter) {
+    return llvm::any_of(root->getUsers(), [&](mlir::Operation *user) {
+      mlir::FailureOr<Chain> longer = mlir::failure();
+      if (auto add = mlir::dyn_cast<mlir::hip::AddOp>(user))
+        longer = BatchNormFusion<mlir::hip::AddOp>::matchChain(add, rewriter);
+      else if (auto mul = mlir::dyn_cast<mlir::hip::MulOp>(user))
+        longer = BatchNormFusion<mlir::hip::MulOp>::matchChain(mul, rewriter);
+      else if (auto div = mlir::dyn_cast<mlir::hip::DivOp>(user))
+        longer = BatchNormFusion<mlir::hip::DivOp>::matchChain(div, rewriter);
+      return mlir::succeeded(longer) &&
+             llvm::is_contained(longer->ops, root.getOperation());
+    });
   }
 };
 
