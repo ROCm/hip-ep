@@ -340,6 +340,83 @@ TEST_F(MlirE2ETest, ExceptionInGetCapabilityFailsSession) {
 #endif
 }
 
+/**
+ * @test InvalidGpuBackendFailsSession
+ * @brief A misspelt gpu_backend must fail loudly, not silently pick a backend.
+ */
+TEST_F(MlirE2ETest, InvalidGpuBackendFailsSession) {
+  const OrtEpDevice *morphizen_device = nullptr;
+  for (const auto &device : env_->GetEpDevices()) {
+    if (std::string(device.EpName()) == "MorphiZenExecutionProvider") {
+      morphizen_device = static_cast<const OrtEpDevice *>(device);
+      break;
+    }
+  }
+  if (morphizen_device == nullptr) {
+    GTEST_SKIP() << "MorphiZen EP device not found";
+  }
+
+  Ort::SessionOptions session_options;
+  const char *keys[] = {"config_file", "gpu_backend"};
+  const char *values[] = {config_path_.c_str(), "MIGraphX"};
+  Ort::ThrowOnError(Ort::GetApi().SessionOptionsAppendExecutionProvider_V2(
+      session_options, *env_, &morphizen_device, 1, keys, values, 2));
+
+  try {
+#ifdef _WIN32
+    Ort::Session(*env_, StringToWString(model_path_).c_str(), session_options);
+#else
+    Ort::Session(*env_, model_path_.c_str(), session_options);
+#endif
+    FAIL() << "session creation succeeded with gpu_backend=MIGraphX";
+  } catch (const Ort::Exception &e) {
+    EXPECT_NE(std::string(e.what()).find("gpu_backend"), std::string::npos)
+        << e.what();
+  }
+}
+
+/**
+ * @test MigraphxWithoutPluginClaimsNothing
+ * @brief gpu_backend=migraphx never falls back to the HIP compiler.
+ *
+ * Without the hipep_migraphx plugin the EP claims no nodes, so with CPU
+ * fallback disabled session creation fails instead of quietly running the
+ * graph on HIP or CPU.
+ */
+TEST_F(MlirE2ETest, MigraphxWithoutPluginClaimsNothing) {
+  const fs::path lib_dir = fs::path(ep_lib_path_).parent_path();
+  if (fs::exists(lib_dir / "hipep_migraphx.so") ||
+      fs::exists(lib_dir / "hipep_migraphx.dll")) {
+    GTEST_SKIP() << "MIGraphX backend plugin is present";
+  }
+  const OrtEpDevice *morphizen_device = nullptr;
+  for (const auto &device : env_->GetEpDevices()) {
+    if (std::string(device.EpName()) == "MorphiZenExecutionProvider") {
+      morphizen_device = static_cast<const OrtEpDevice *>(device);
+      break;
+    }
+  }
+  if (morphizen_device == nullptr) {
+    GTEST_SKIP() << "MorphiZen EP device not found";
+  }
+
+  Ort::SessionOptions session_options;
+  session_options.AddConfigEntry("session.disable_cpu_ep_fallback", "1");
+  const char *keys[] = {"config_file", "gpu_backend"};
+  const char *values[] = {config_path_.c_str(), "migraphx"};
+  Ort::ThrowOnError(Ort::GetApi().SessionOptionsAppendExecutionProvider_V2(
+      session_options, *env_, &morphizen_device, 1, keys, values, 2));
+
+#ifdef _WIN32
+  EXPECT_THROW(Ort::Session(*env_, StringToWString(model_path_).c_str(),
+                            session_options),
+               Ort::Exception);
+#else
+  EXPECT_THROW(Ort::Session(*env_, model_path_.c_str(), session_options),
+               Ort::Exception);
+#endif
+}
+
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
 

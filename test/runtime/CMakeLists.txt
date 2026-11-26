@@ -46,6 +46,18 @@ target_include_directories(test-transient-arena PRIVATE
 add_test(NAME TransientArenaUnitTest COMMAND test-transient-arena)
 set_target_properties(test-transient-arena PROPERTIES FOLDER "runtime-tests")
 
+# Whole-graph HIP/MIGraphX selection rules; pure logic with no ORT or HIP.
+add_executable(test-backend-routing
+    test_backend_routing.cpp
+    ${CMAKE_SOURCE_DIR}/morphizen/ort-bridge/src/backend-routing.cpp
+)
+target_compile_features(test-backend-routing PRIVATE cxx_std_17)
+target_include_directories(test-backend-routing PRIVATE
+    ${CMAKE_SOURCE_DIR}/morphizen/ort-bridge/src
+)
+add_test(NAME BackendRoutingUnitTest COMMAND test-backend-routing)
+set_target_properties(test-backend-routing PROPERTIES FOLDER "runtime-tests")
+
 # GQA offline autotune tests are GPU-free: they link the real embedded table
 # (lut/gfx1151.fb) and drive the same resolver that ships in
 # custom_kernels_<arch>, through the exported extern "C" shims. The resolver's

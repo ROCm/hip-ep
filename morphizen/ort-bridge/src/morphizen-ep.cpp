@@ -17,7 +17,9 @@
 #include <cctype>
 #include <filesystem>
 #include <google/protobuf/util/json_util.h>
+#include <optional>
 #include <set>
+#include <stdexcept>
 
 // Determine default backend based on compile-time configuration
 #if MORPHIZEN_ENABLE_ONNX_BACKEND
@@ -111,6 +113,17 @@ MorphiZenEP::MorphiZenEP(ApiPtrs apis, const std::string &name,
   throw_if_error(GetSessionConfigEntryOrDefault(
       session_options, "ep.context_enable", "0", ep_context_enable));
   enable_ep_context_ = ep_context_enable == "1";
+
+  if (auto it = provider_options_.find(kGpuBackendOption);
+      it != provider_options_.end()) {
+    auto backend = parse_gpu_backend(it->second);
+    if (!backend) {
+      throw std::invalid_argument("invalid provider option gpu_backend='" +
+                                  it->second +
+                                  "'; expected hip, migraphx or auto");
+    }
+    gpu_backend_ = *backend;
+  }
 
   OrtEp::ort_version_supported = NegotiatedOrtApiVersion();
   OrtEp::GetName = GetNameImpl;
@@ -391,6 +404,11 @@ MorphiZenEP::GetCapability(OrtGraphWrapper &graph_viewer,
                  "the body via LoopOutline.";
     return nullptr;
   }
+  if (gpu_backend_ == GpuBackend::MIGraphX) {
+    return ClaimForMigraphx(graph_viewer, graph_support_info,
+                            "gpu_backend=migraphx");
+  }
+  mgx_program_.reset();
   // setup API environment
   // Use compile-time default backend, but allow override via environment
   // variable
@@ -438,8 +456,13 @@ MorphiZenEP::GetCapability(OrtGraphWrapper &graph_viewer,
           },
           &logger_));
 
-  if (!execution_providers_) {
+  if (!execution_providers_ || (*execution_providers_)->empty()) {
     MY_LOG(1) << "Failed to compile ONNX model to MorphiZen EP.";
+    if (gpu_backend_ == GpuBackend::Auto) {
+      return ClaimForMigraphx(graph_viewer, graph_support_info,
+                              "HIP did not compile the graph");
+    }
+    log_routing("none", "HIP did not compile the graph");
     return nullptr;
   }
   // iterator over the execution providers and set the graph support info
@@ -461,6 +484,185 @@ MorphiZenEP::GetCapability(OrtGraphWrapper &graph_viewer,
       return status1;
     }
   }
+  log_routing("hip", "HIP compiled the graph");
+  return nullptr;
+}
+
+void MorphiZenEP::log_routing(const char *backend,
+                              const std::string &reason) const {
+  const std::string msg =
+      std::string("hip-ep backend=") + backend +
+      " policy_version=" + std::to_string(kRoutingPolicyVersion) +
+      " requested=" + to_string(gpu_backend_) + " reason=" + reason;
+  MY_LOG(1) << msg;
+  auto *status = ort_api.Logger_LogMessage(
+      &logger_, OrtLoggingLevel::ORT_LOGGING_LEVEL_INFO, msg.c_str(), ORT_FILE,
+      __LINE__, __FUNCTION__);
+  if (status != nullptr)
+    ort_api.ReleaseStatus(status);
+}
+
+OrtStatus *
+MorphiZenEP::ClaimForMigraphx(OrtGraphWrapper &graph_viewer,
+                              OrtEpGraphSupportInfo &graph_support_info,
+                              const std::string &why) {
+  execution_providers_.reset();
+  Ort::ConstGraph graph{&graph_viewer.get()};
+
+  GraphSummary summary;
+  const std::filesystem::path model_path{graph.GetModelPath()};
+  summary.has_model_path = !model_path.empty();
+  for (const auto &node : graph.GetNodes())
+    summary.op_types.push_back(node.GetOperatorType());
+  // Static shape of each tensor; nullopt when not a tensor or a dim is unknown.
+  auto static_shape =
+      [](const Ort::ConstValueInfo &vi) -> std::optional<std::vector<int64_t>> {
+    auto type_info = vi.TypeInfo();
+    if (type_info.GetONNXType() != ONNX_TYPE_TENSOR)
+      return std::nullopt;
+    auto shape = type_info.GetTensorTypeAndShapeInfo().GetShape();
+    if (std::any_of(shape.begin(), shape.end(),
+                    [](int64_t d) { return d < 0; }))
+      return std::nullopt;
+    return shape;
+  };
+  std::vector<std::string> input_names;
+  std::vector<std::vector<int64_t>> input_dims;
+  for (const auto &vi : graph.GetInputs()) {
+    if (vi.IsConstantInitializer())
+      continue;
+    input_names.push_back(vi.GetName());
+    if (auto shape = static_shape(vi))
+      input_dims.push_back(*shape);
+    else
+      summary.static_inputs = false;
+  }
+  summary.input_names = input_names;
+  std::vector<std::string> output_names;
+  for (const auto &vi : graph.GetOutputs()) {
+    output_names.push_back(vi.GetName());
+    if (!static_shape(vi))
+      summary.static_outputs = false;
+  }
+
+  const auto eligibility = migraphx_eligibility(summary);
+  if (!eligibility.eligible) {
+    log_routing("none", "MIGraphX ineligible: " + eligibility.reason);
+    return nullptr;
+  }
+
+  const std::string path = model_path.u8string();
+  // ORT may call GetCapability more than once per session; compile once.
+  if (!mgx_program_ || mgx_program_->model_path() != path ||
+      mgx_program_->input_names() != input_names ||
+      mgx_program_->input_dims() != input_dims) {
+    std::string error;
+    mgx_program_ =
+        MigraphxProgram::compile(path, input_names, input_dims, error);
+    if (!mgx_program_) {
+      log_routing("none", "MIGraphX unavailable: " + error);
+      return nullptr;
+    }
+  }
+  if (mgx_program_->output_dims().size() != output_names.size()) {
+    log_routing("none", "MIGraphX program has " +
+                            std::to_string(mgx_program_->output_dims().size()) +
+                            " outputs, graph has " +
+                            std::to_string(output_names.size()));
+    mgx_program_.reset();
+    return nullptr;
+  }
+  mgx_output_names_ = output_names;
+
+  OrtNodeFusionOptions node_fusion_options = {};
+  node_fusion_options.ort_version_supported = NegotiatedOrtApiVersion();
+  // MIGraphX reads the weights from the model file itself.
+  node_fusion_options.drop_constant_initializers = true;
+  auto nodes = graph_viewer.nodes();
+  auto *status = ep_api.EpGraphSupportInfo_AddNodesToFuse(
+      &graph_support_info, nodes.data(), nodes.size(), &node_fusion_options);
+  if (status != nullptr) {
+    mgx_program_.reset();
+    return status;
+  }
+  log_routing("migraphx", why);
+  return nullptr;
+}
+
+OrtStatus *
+MorphiZenEP::CompileMigraphx(const OrtNode *fused_node,
+                             OrtNodeComputeInfo *&node_compute_info) {
+  auto info = std::make_unique<MorphiZenEP_ComputeInfo>();
+  info->ort_version_supported = NegotiatedOrtApiVersion();
+  info->mgx_program = mgx_program_;
+
+  Ort::ConstNode node{fused_node};
+  const auto &program_inputs = mgx_program_->input_names();
+  for (const auto &vi : node.GetInputs()) {
+    const auto it =
+        std::find(program_inputs.begin(), program_inputs.end(), vi.GetName());
+    if (it == program_inputs.end()) {
+      return ort_api.CreateStatus(ORT_EP_FAIL,
+                                  ("MIGraphX: fused-node input '" +
+                                   vi.GetName() + "' is not a graph input")
+                                      .c_str());
+    }
+    info->mgx_inputs.push_back(
+        static_cast<size_t>(it - program_inputs.begin()));
+  }
+  for (const auto &vi : node.GetOutputs()) {
+    const auto it = std::find(mgx_output_names_.begin(),
+                              mgx_output_names_.end(), vi.GetName());
+    if (it == mgx_output_names_.end()) {
+      return ort_api.CreateStatus(ORT_EP_FAIL,
+                                  ("MIGraphX: fused-node output '" +
+                                   vi.GetName() + "' is not a graph output")
+                                      .c_str());
+    }
+    info->mgx_outputs.push_back(
+        static_cast<size_t>(it - mgx_output_names_.begin()));
+  }
+
+  // The compiled program is shared and stateless across runs.
+  info->CreateState = [](OrtNodeComputeInfo *, OrtNodeComputeContext *,
+                         void **compute_state) -> OrtStatus * {
+    *compute_state = nullptr;
+    return nullptr;
+  };
+  info->ReleaseState = [](OrtNodeComputeInfo *, void *) {};
+  info->Compute = [](OrtNodeComputeInfo *this_ptr, void * /*compute_state*/,
+                     OrtKernelContext *kernel_context) -> OrtStatus * {
+    auto self = static_cast<MorphiZenEP_ComputeInfo *>(this_ptr);
+    try {
+      auto &program = *self->mgx_program;
+      Ort::KernelContext ctx{kernel_context};
+      std::vector<void *> inputs(program.input_names().size(), nullptr);
+      for (size_t k = 0; k < self->mgx_inputs.size(); ++k) {
+        const size_t p = self->mgx_inputs[k];
+        auto value = ctx.GetInput(k);
+        if (value.GetTensorTypeAndShapeInfo().GetShape() !=
+            program.input_dims()[p]) {
+          throw std::runtime_error(
+              "input '" + program.input_names()[p] +
+              "' shape differs from the compiled static shape");
+        }
+        inputs[p] = const_cast<void *>(value.GetTensorRawData());
+      }
+      std::vector<void *> outputs(program.output_dims().size(), nullptr);
+      for (size_t k = 0; k < self->mgx_outputs.size(); ++k) {
+        const size_t j = self->mgx_outputs[k];
+        const auto &dims = program.output_dims()[j];
+        auto value = ctx.GetOutput(k, dims.data(), dims.size());
+        outputs[j] = value.GetTensorMutableRawData();
+      }
+      program.run(inputs, outputs);
+      return nullptr;
+    } catch (...) {
+      return status_from_current_exception(Ort::GetApi(),
+                                           "MorphiZenEP::Compute (MIGraphX)");
+    }
+  };
+  node_compute_info = info.release();
   return nullptr;
 }
 
@@ -563,6 +765,20 @@ OrtStatus *MorphiZenEP::Compile(const OrtGraph **graphs,
                                 const OrtNode **fused_nodes, size_t count,
                                 OrtNodeComputeInfo **node_compute_infos,
                                 OrtNode **ep_context_nodes) {
+  if (mgx_program_) {
+    if (count != 1) {
+      return ort_api.CreateStatus(
+          ORT_EP_FAIL, "MIGraphX path expects one whole-graph fused node");
+    }
+    if (enable_ep_context_) {
+      return ort_api.CreateStatus(
+          ORT_NOT_IMPLEMENTED,
+          "ep.context_enable=1 is not supported when hip-ep routes the graph "
+          "to the MIGraphX backend; use gpu_backend=hip");
+    }
+    (void)graphs;
+    return CompileMigraphx(fused_nodes[0], node_compute_infos[0]);
+  }
   CHECK(execution_providers_ != nullptr)
       << "Execution providers are not initialized.";
   CHECK_EQ((*execution_providers_)->size(), count)
