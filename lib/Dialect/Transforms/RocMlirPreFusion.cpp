@@ -54,9 +54,46 @@ std::optional<int64_t> singleConstantIndex(Value indices, int64_t axisSize) {
   return index;
 }
 
+// Whether the anchor pass makes `module` a kernel of its own. This follows
+// outlinesAlone in FuseRocMlirAnchor.cpp with standalone-elementwise on, its
+// default: the module saves a launch, so it needs two ops besides inits,
+// reshapes and slices, each lowering inside a rocMLIR kernel and safe under
+// unsigned types, and no result of several may only transpose a kernel
+// argument.
+bool outlinesAlone(RocMlirElementwiseOp module) {
+  Block &body = module.getBody().front();
+  int launches = 0;
+  for (Operation &op : body.without_terminator()) {
+    if (!isSignlessSafeUnderUnsigned(&op))
+      return false;
+    if (isa<tensor::EmptyOp>(op) || isTosaLowerableReshape(&op) ||
+        getFusableViewKind(&op) == ViewKind::Slice)
+      continue;
+    if (!isTosaLowerableInKernel(&op) && !isTosaLowerableQdq(&op))
+      return false;
+    ++launches;
+  }
+  if (launches < 2)
+    return false;
+  auto movesArgument = [](Value result) {
+    auto transpose = result.getDefiningOp<TransposeOp>();
+    if (!transpose)
+      return false;
+    Value source = transpose.getInput();
+    while (Operation *def = source.getDefiningOp()) {
+      if (!isTosaLowerableReshape(def))
+        return false;
+      source = def->getOperand(0);
+    }
+    return true;
+  };
+  auto yield = cast<YieldOp>(body.getTerminator());
+  return yield.getValues().size() == 1 ||
+         llvm::none_of(yield.getValues(), movesArgument);
+}
+
 // Whether the anchor fusion will likely take `module` into a kernel: as the
-// prologue or epilogue of an anchor it touches, or as a kernel of its own,
-// which the fusion makes only from a module of two or more compute ops.
+// prologue or epilogue of an anchor it touches, or as a kernel of its own.
 bool likelyInKernel(RocMlirElementwiseOp module) {
   for (Value input : module.getInputs())
     if (Operation *def = input.getDefiningOp(); def && isAnchorOp(def))
@@ -65,11 +102,7 @@ bool likelyInKernel(RocMlirElementwiseOp module) {
     for (Operation *user : result.getUsers())
       if (isAnchorOp(user))
         return true;
-  int64_t computeOps = 0;
-  for (Operation &op : module.getBody().front().without_terminator())
-    if (!isa<tensor::EmptyOp>(op) && !getFusableViewKind(&op))
-      ++computeOps;
-  return computeOps >= 2;
+  return outlinesAlone(module);
 }
 
 // A module takes each input once, however many of its ops read it. Inlined

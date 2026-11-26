@@ -163,8 +163,11 @@ reader will likely run in a rocMLIR kernel:
 - an anchor;
 - a module whose input comes from an anchor or whose result an anchor reads,
   so that it is likely its prologue or epilogue;
-- a module of two or more compute ops, which the anchor pass makes into a
-  kernel of its own when no plan takes it;
+- a module that the anchor pass makes into a kernel of its own when no plan
+  takes it. The pass applies the anchor pass's `outlinesAlone` test, with
+  `standalone-elementwise` on: two or more ops besides inits, reshapes and
+  slices, each lowering inside a rocMLIR kernel and safe under unsigned types,
+  and no result of several that only transposes a kernel argument;
 - a fusable view whose result in turn has such a reader.
 
 A module takes each input once, however many of its ops read it, so for a

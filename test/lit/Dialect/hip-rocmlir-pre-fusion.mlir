@@ -76,7 +76,7 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<3x16x32xf16>,
 
 // -----
 
-// A module of two compute ops becomes a kernel of its own and takes the
+// A module of an add and a neg becomes a kernel of its own and takes the
 // slice; a one-element 1-D index keeps the unit dim, so only a slice is made.
 
 // CHECK-LABEL: func.func @main_graph
@@ -103,6 +103,38 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<2x64x32xf32>,
   %n = hip.neg(%ctx) ins(%a : tensor<1x64x32xf32>)
       outs(%ne : tensor<1x64x32xf32>) : tensor<1x64x32xf32>
   return %n : tensor<1x64x32xf32>
+}
+
+// -----
+
+// A transpose counts as a launch of its own, as in the anchor pass, so a
+// module of one add and a transpose that keeps the innermost dimension is a
+// kernel of its own and takes the slice.
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: tensor.extract_slice
+// CHECK-NOT: hip.gather
+// CHECK: hip.rocmlir_elementwise
+
+// FUSE-LABEL: func.func @mlir_extract_slice_{{[a-z_]*}}transpose{{[a-z_]*}}_0
+// FUSE: tensor.extract_slice
+// FUSE-LABEL: func.func @main_graph
+// FUSE-NOT: hip.gather
+// FUSE: hip.rocmlir({{.*}}) @mlir_extract_slice_
+
+func.func @main_graph(%ctx: !hip.context, %x: tensor<3x8x16x32xf32>,
+                      %b: tensor<8x16x32xf32>) -> tensor<16x8x32xf32> {
+  %i = hip.constant {value = dense<2> : tensor<i64>} : tensor<i64>
+  %e = tensor.empty() : tensor<8x16x32xf32>
+  %g = hip.gather(%ctx) ins(%x, %i : tensor<3x8x16x32xf32>, tensor<i64>)
+      outs(%e : tensor<8x16x32xf32>) {axis = 0 : i64} : tensor<8x16x32xf32>
+  %ae = tensor.empty() : tensor<8x16x32xf32>
+  %a = hip.add(%ctx) ins(%g, %b : tensor<8x16x32xf32>, tensor<8x16x32xf32>)
+      outs(%ae : tensor<8x16x32xf32>) -> tensor<8x16x32xf32>
+  %te = tensor.empty() : tensor<16x8x32xf32>
+  %t = hip.transpose(%ctx) ins(%a : tensor<8x16x32xf32>)
+      outs(%te : tensor<16x8x32xf32>) {perm = [1, 0, 2]} : tensor<16x8x32xf32>
+  return %t : tensor<16x8x32xf32>
 }
 
 // -----
