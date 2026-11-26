@@ -187,9 +187,9 @@ The kernel question is asked once, in `hip-legalize-quant-types`, and a typed op
 without a kernel is a compile error there (no fallback to DQ -> op -> Q). Known
 cases that hit it today:
 
-- **PSI:** its 48 attention matmuls are A16W16 (`u16 x u16 -> u16`); the
-  quantized matmul kernel takes 8-bit B only. PSI does not compile until an
-  A16W16 quantized matmul kernel exists.
+- An A16W16 matmul (`u16 x u16 -> u16`), e.g. attention between two 16-bit
+  activations: the quantized matmul kernel takes 8-bit B only, so it does not
+  compile until an A16W16 quantized matmul kernel exists.
 - A mixed-width add that is not fused away (e.g. u16 + i8 -> u16).
 - A matmul with a 16-bit weight.
 
