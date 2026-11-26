@@ -138,6 +138,9 @@ int wrap_skip_layer_norm(RuntimeState *state, void *input, void *skip,
       },
       state);
 
+  // A zero-size buffer may be null, so an empty input returns first.
+  if (input_num_elements == 0)
+    return 0;
   if (!state || !input || !skip || !gamma || !output) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_skip_layer_norm: null required arg\n");
     return -1;
@@ -162,8 +165,6 @@ int wrap_skip_layer_norm(RuntimeState *state, void *input, void *skip,
     return -1;
   }
 
-  if (input_num_elements == 0)
-    return 0;
   if (skip_num_elements <= 0 || skip_num_elements % gamma_num_elements != 0 ||
       input_num_elements % skip_num_elements != 0) {
     fprintf(stderr,
