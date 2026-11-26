@@ -168,7 +168,7 @@ func.func @reciprocal(%ctx: !hip.context, %x: tensor<2x8xf16>,
 
 // hip.cast is same-shape; float->float and int->float are tosa.cast.
 // CHECK-LABEL: func.func @cast_f32_to_f16
-// CHECK: tosa.cast %arg1 : (tensor<2x8xf32>) -> tensor<2x8xf16>
+// CHECK: tosa.cast %arg1 input_unsigned(false) : (tensor<2x8xf32>) -> tensor<2x8xf16>
 // CHECK-NOT: hip.cast
 func.func @cast_f32_to_f16(%ctx: !hip.context, %x: tensor<2x8xf32>,
                             %init: tensor<2x8xf16>) -> tensor<2x8xf16>
@@ -180,7 +180,7 @@ func.func @cast_f32_to_f16(%ctx: !hip.context, %x: tensor<2x8xf32>,
 }
 
 // CHECK-LABEL: func.func @cast_i8_to_f32
-// CHECK: tosa.cast %arg1 : (tensor<4xi8>) -> tensor<4xf32>
+// CHECK: tosa.cast %arg1 input_unsigned(false) : (tensor<4xi8>) -> tensor<4xf32>
 // CHECK-NOT: hip.cast
 func.func @cast_i8_to_f32(%ctx: !hip.context, %x: tensor<4xi8>,
                            %init: tensor<4xf32>) -> tensor<4xf32>
@@ -194,7 +194,7 @@ func.func @cast_i8_to_f32(%ctx: !hip.context, %x: tensor<4xi8>,
 // ONNX Cast truncates float->int, while tosa.cast rounds to nearest even:
 // emit rocMLIR's truncating fp_to_int_cast.
 // CHECK-LABEL: func.func @cast_f32_to_i8
-// CHECK: tosa.custom %arg1 {{.*}}operator_name = "fp_to_int_cast"
+// CHECK: tosa.custom %arg1 {{.*}}operator_name("fp_to_int_cast")
 // CHECK-NOT: hip.cast
 func.func @cast_f32_to_i8(%ctx: !hip.context, %x: tensor<2x8xf32>,
                            %init: tensor<2x8xi8>) -> tensor<2x8xi8>
@@ -206,7 +206,7 @@ func.func @cast_f32_to_i8(%ctx: !hip.context, %x: tensor<2x8xf32>,
 }
 
 // CHECK-LABEL: func.func @cast_ui8_to_f32
-// CHECK: tosa.custom %arg1 {{.*}}operator_name = "unsigned_cast"
+// CHECK: tosa.custom %arg1 {{.*}}operator_name("unsigned_cast")
 // CHECK-NOT: hip.cast
 func.func @cast_ui8_to_f32(%ctx: !hip.context, %x: tensor<4xui8>,
                             %init: tensor<4xf32>) -> tensor<4xf32>
@@ -222,7 +222,7 @@ func.func @cast_ui8_to_f32(%ctx: !hip.context, %x: tensor<4xui8>,
 // CHECK-LABEL: func.func @cast_ui8_unit_to_f32_scalar
 // CHECK: %[[R:.*]] = tosa.reshape %arg1
 // CHECK-SAME: -> tensor<i8>
-// CHECK: tosa.custom %[[R]] {{.*}}operator_name = "unsigned_cast"
+// CHECK: tosa.custom %[[R]] {{.*}}operator_name("unsigned_cast")
 // CHECK-SAME: -> tensor<f32>
 // CHECK-NOT: hip.cast
 func.func @cast_ui8_unit_to_f32_scalar(%ctx: !hip.context, %x: tensor<1xui8>,
