@@ -132,9 +132,9 @@ jobs:
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/sccache-dir
-          key: sccache-linux-${{ env.SCCACHE_KEY_DATE }}
+          key: sccache-standard-linux-${{ env.SCCACHE_KEY_DATE }}
           restore-keys: |
-            sccache-linux-
+            sccache-standard-linux-
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
@@ -173,10 +173,24 @@ jobs:
           # evict the multi-hour LLVM cache, and an LLVM bump must.
           key: linux-llvm-dist-${{ steps.llvm.outputs.commit }}
 
+      - name: Restore LLVM sccache directory
+        id: llvm-sccache
+        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/sccache-llvm
+          key: sccache-llvm-linux-standard-${{ env.SCCACHE_KEY_DATE }}
+          restore-keys: sccache-llvm-linux-standard-
+
       - name: Build LLVM/MLIR/LLD from source
         if: steps.cache-llvm.outputs.cache-hit != 'true'
+        env:
+          SCCACHE_DIR: ${{ runner.workspace }}/sccache-llvm
+          # A separate server owns the LLVM cache directory and its statistics.
+          SCCACHE_SERVER_PORT: "4227"
         run: |
           set -euo pipefail
+          trap 'sccache --show-stats' EXIT
           # Shallow fetch of the pinned commit. The cmake project lives at llvm/.
           SRC="${{ runner.workspace }}/llvm-project"
           git init "$SRC"
@@ -223,6 +237,14 @@ jobs:
         with:
           path: ${{ runner.workspace }}/ort-install
           key: linux-ort-${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}-whl
+
+      - name: Save LLVM sccache directory
+        if: github.ref_name == 'main' && steps.llvm-sccache.outcome == 'success' && steps.llvm-sccache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/sccache-llvm
+          key: ${{ steps.llvm-sccache.outputs.cache-primary-key }}
 
       - name: Checkout ONNX Runtime v${{ env.ONNXRUNTIME_VERSION }}
         if: steps.cache-ort.outputs.cache-hit != 'true'
@@ -320,6 +342,8 @@ jobs:
       - name: Build onnx-hipdnn-ep
         run: |
           set -euo pipefail
+          sccache --zero-stats
+          trap 'sccache --show-stats' EXIT
           python3 build.py \
             --config Release \
             --hip_arch "${{ env.HIP_ARCHITECTURES }}" \
@@ -639,4 +663,4 @@ jobs:
         uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/sccache-dir
-          key: sccache-linux-${{ env.SCCACHE_KEY_DATE }}
+          key: sccache-standard-linux-${{ env.SCCACHE_KEY_DATE }}
