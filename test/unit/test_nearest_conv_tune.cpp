@@ -31,6 +31,7 @@
 #include <vector>
 
 #ifndef _WIN32
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -720,6 +721,23 @@ int main() {
                error) &&
                again == merged,
            "merging the same winners again changes nothing");
+  }
+  {
+    // A document with no schema_version reads as version 1, and the rewrite
+    // writes that version out. problem_cache_to_fb.py takes a missing one as 0
+    // and refuses the file, so it must not survive the rewrite. The other
+    // optional header fields stay as they were.
+    llvm::json::Object doc = dumpDoc();
+    doc.erase("schema_version");
+    std::string merged;
+    expect(mlir::hip::mergeProblemCacheJson(jsonText(std::move(doc)), "gfx1151",
+                                            {{gemmAt(24), tile32}}, merged,
+                                            error),
+           "a table with no schema_version can be rewritten");
+    llvm::json::Value out = parseDoc(merged);
+    const llvm::json::Object *root = out.getAsObject();
+    expect(root && root->getInteger("schema_version") == 1,
+           "the rewrite materializes schema_version");
   }
   {
     // Existing data is kept: a point the loader would skip, other top-level
@@ -1558,6 +1576,43 @@ int main() {
       expect(kept == lockedText, "the read-only file keeps its bytes");
       fs::permissions(locked, fs::perms::owner_write, fs::perm_options::add);
     }
+
+#ifndef _WIN32
+    // The table can carry model metadata, so the rewrite never exposes it. A
+    // new file is owner-only whatever the umask is, and a replaced file keeps
+    // the mode it had, wider or narrower. The temporary is created owner-only
+    // too, which a new file shows: nothing changes its mode afterwards.
+    {
+      namespace fs = std::filesystem;
+      const mode_t oldMask = ::umask(022);
+      const auto modeOf = [](const std::string &path) {
+        struct stat st {};
+        return ::stat(path.c_str(), &st) == 0 ? (st.st_mode & 0777)
+                                              : static_cast<mode_t>(-1);
+      };
+      const std::string fresh = (dir / "private_new.json").string();
+      expect(mlir::hip::updateProblemCacheJsonFile(fresh, "gfx1151",
+                                                   {{exact, tile32}}, error) &&
+                 modeOf(fresh) == 0600,
+             "a new table is owner-only, whatever the umask");
+      for (const mode_t mode :
+           {static_cast<mode_t>(0600), static_cast<mode_t>(0640),
+            static_cast<mode_t>(0664)}) {
+        const std::string kept = (dir / "kept_mode.json").string();
+        {
+          std::ofstream out(kept, std::ios::binary);
+          out << jsonText(dumpDoc());
+        }
+        ::chmod(kept.c_str(), mode);
+        expect(mlir::hip::updateProblemCacheJsonFile(
+                   kept, "gfx1151", {{gemmAt(24), tile32}}, error) &&
+                   modeOf(kept) == mode,
+               "a replaced table keeps its mode");
+        fs::remove(kept);
+      }
+      ::umask(oldMask);
+    }
+#endif
 
     // Temporaries are named `<file>.tmp<pid>-<n>`; an old one is removed like
     // the digits-only names, and the rewrite leaves none of its own.

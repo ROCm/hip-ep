@@ -130,9 +130,11 @@ that is not a LUT, is for another `gpu_arch`, has a malformed `configs`,
 `points` or `fallbacks` section, is read-only, or is a `.fb` is refused before
 the compile starts, with the file untouched; a write that fails after the
 compile is a warning, and the output is still written. The file is replaced
-atomically and flushed to disk before the rename. Compiles in one process take
-turns, but two processes writing it at once can lose one set of winners. The
-provider does the same as the flag through
+atomically and flushed to disk before the rename. It is written owner-only, so
+no one else can read it halfway; a new file stays owner-only and a replaced one
+gets its old mode back. `schema_version` is always written out. Compiles in one
+process take turns, but two processes writing it at once can lose one set of
+winners. The provider does the same as the flag through
 `HIPDNN_EP_ROCMLIR_PROBLEM_CACHE_RW=<file.json>`, except that a file it cannot
 use or update is reported and the compile still succeeds. A repeated problem in the same
 compile reuses the in-session winner, then a miss searches the selected space.

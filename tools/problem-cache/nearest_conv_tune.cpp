@@ -37,6 +37,7 @@
 #include <sys/stat.h>
 #else
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -1200,6 +1201,10 @@ bool mergeProblemCacheJson(std::string_view existing, std::string_view gpuArch,
       return false;
     }
     root = *parsedRoot;
+    // The version the header check accepted, written out. A document without
+    // the field reads as version 1, but problem_cache_to_fb.py takes a missing
+    // one as 0 and refuses it, so the rewrite must not carry the absence over.
+    root["schema_version"] = static_cast<int64_t>(1);
 
     // Every point is kept, whatever kind of perfConfig it names: the loader
     // skips points whose perfConfig is not gemm:/attn:, but a rewrite must not
@@ -1454,7 +1459,13 @@ std::string errnoMessage() { return std::generic_category().message(errno); }
 // it to the disk, so that a crash after the rename cannot leave an empty or
 // partial table in its place. \p exists is set when the name was taken. On any
 // other failure the caller removes the file.
+//
+// The file is created readable by its owner only, whatever the umask is, so
+// the table (which carries model metadata) is never readable by others while
+// it is written, or if the process dies before the rename. \p finalPerms, the
+// mode of the file being replaced, is applied once the contents are written.
 bool writeNewFile(const std::filesystem::path &path, std::string_view text,
+                  std::optional<std::filesystem::perms> finalPerms,
                   bool &exists, std::string &error) {
   exists = false;
 #ifdef _WIN32
@@ -1474,7 +1485,7 @@ bool writeNewFile(const std::filesystem::path &path, std::string_view text,
   const auto closeFile = [fd] { return _close(fd) == 0; };
 #else
   const int fd =
-      ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0666);
+      ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
   if (fd < 0) {
     exists = errno == EEXIST;
     error = errnoMessage();
@@ -1501,6 +1512,12 @@ bool writeNewFile(const std::filesystem::path &path, std::string_view text,
     data += written;
     left -= static_cast<size_t>(written);
   }
+#ifndef _WIN32
+  // Best effort: a failure here is not worth losing the winners over, and the
+  // file is then only more private than the one it replaces.
+  if (finalPerms)
+    (void)::fchmod(fd, static_cast<mode_t>(*finalPerms) & 0777);
+#endif
   if (!sync()) {
     error = errnoMessage();
     closeFile();
@@ -1510,6 +1527,12 @@ bool writeNewFile(const std::filesystem::path &path, std::string_view text,
     error = errnoMessage();
     return false;
   }
+#ifdef _WIN32
+  if (finalPerms) {
+    std::error_code ec;
+    std::filesystem::permissions(path, *finalPerms, ec);
+  }
+#endif
   return true;
 }
 
@@ -1622,6 +1645,12 @@ bool updateProblemCacheJsonFile(const std::string &path,
   // Write beside the target and rename over it, so the old file survives a
   // failed or interrupted write. The name carries the process id and is
   // created exclusively, so two processes never write the same temporary.
+  std::optional<fs::perms> oldPerms;
+  if (present) {
+    const fs::file_status old = fs::status(target, ec);
+    if (!ec)
+      oldPerms = old.permissions();
+  }
   static std::atomic<unsigned> counter{0};
   constexpr int kMaxNameAttempts = 100;
   fs::path temporary;
@@ -1631,7 +1660,7 @@ bool updateProblemCacheJsonFile(const std::string &path,
                  std::to_string(counter.fetch_add(1));
     bool exists = false;
     std::string reason;
-    if (writeNewFile(temporary, merged, exists, reason))
+    if (writeNewFile(temporary, merged, oldPerms, exists, reason))
       break;
     if (exists && attempt + 1 < kMaxNameAttempts)
       continue;
@@ -1640,14 +1669,6 @@ bool updateProblemCacheJsonFile(const std::string &path,
     error =
         "failed writing problem cache: " + temporary.string() + ": " + reason;
     return false;
-  }
-  // The rename swaps in a new file, so give it the mode the old one had rather
-  // than the default one. Best effort: a failure here is not worth losing the
-  // winners over.
-  if (present) {
-    const fs::file_status old = fs::status(target, ec);
-    if (!ec)
-      fs::permissions(temporary, old.permissions(), ec);
   }
   fs::rename(temporary, target, ec);
   if (ec) {
