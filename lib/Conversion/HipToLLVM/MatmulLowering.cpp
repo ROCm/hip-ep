@@ -33,14 +33,12 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
     };
 
     // The runtime takes one data_type (HIPDNN_EP_DATATYPE_*) for A, B and the
-    // output, so they must share it. Pass the type, not its byte size: f16
-    // and bf16 are both 2 bytes. Checked before any IR is created.
+    // output; MatmulOp::verify guarantees they share it. Pass the type, not
+    // its byte size: f16 and bf16 are both 2 bytes. Checked before any IR is
+    // created.
     auto AType = cast<MemRefType>(op.getA().getType());
     auto BType = cast<MemRefType>(op.getB().getType());
     Type elemType = AType.getElementType();
-    if (elemType != BType.getElementType() ||
-        elemType != cast<MemRefType>(op.getOutput().getType()).getElementType())
-      return rewriter.notifyMatchFailure(op, "mixed element types");
     int64_t dataType = getHipdnnDataType(elemType);
     if (dataType < 0)
       return rewriter.notifyMatchFailure(op, "unsupported element type");

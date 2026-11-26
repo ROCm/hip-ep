@@ -136,3 +136,44 @@ func.func @matmul_tensor_mode_static(%ctx: !hip.context,
     outs(%c : tensor<2x8xf16>) : tensor<2x8xf16>
   return %r : tensor<2x8xf16>
 }
+
+// -----
+
+func.func @matmul_mixed_b(%ctx: !hip.context, %a: memref<2x2xbf16, 1>,
+                          %b: memref<2x2xf16, 1>, %c: memref<2x2xbf16, 1>) {
+  // expected-error @below {{'hip.matmul' op does not support mixed element types}}
+  hip.matmul(%ctx) ins(%a, %b : memref<2x2xbf16, 1>, memref<2x2xf16, 1>)
+    outs(%c : memref<2x2xbf16, 1>)
+  return
+}
+
+// -----
+
+func.func @matmul_mixed_output(%ctx: !hip.context, %a: memref<2x2xf32, 1>,
+                               %b: memref<2x2xf32, 1>, %c: memref<2x2xf16, 1>) {
+  // expected-error @below {{'hip.matmul' op does not support mixed element types}}
+  hip.matmul(%ctx) ins(%a, %b : memref<2x2xf32, 1>, memref<2x2xf32, 1>)
+    outs(%c : memref<2x2xf16, 1>)
+  return
+}
+
+// -----
+
+func.func @matmul_mixed_int_float(%ctx: !hip.context, %a: memref<2x2xi32, 1>,
+                                  %b: memref<2x2xf32, 1>, %c: memref<2x2xi32, 1>) {
+  // expected-error @below {{'hip.matmul' op does not support mixed element types}}
+  hip.matmul(%ctx) ins(%a, %b : memref<2x2xi32, 1>, memref<2x2xf32, 1>)
+    outs(%c : memref<2x2xi32, 1>)
+  return
+}
+
+// -----
+
+func.func @matmul_mixed_tensor(%ctx: !hip.context, %a: tensor<2x4xf16>,
+                               %b: tensor<4x8xf32>, %c: tensor<2x8xf16>)
+    -> tensor<2x8xf16> {
+  // expected-error @below {{'hip.matmul' op does not support mixed element types}}
+  %r = hip.matmul(%ctx) ins(%a, %b : tensor<2x4xf16>, tensor<4x8xf32>)
+    outs(%c : tensor<2x8xf16>) : tensor<2x8xf16>
+  return %r : tensor<2x8xf16>
+}
