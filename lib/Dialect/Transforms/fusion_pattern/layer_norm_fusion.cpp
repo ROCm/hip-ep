@@ -423,6 +423,9 @@ mlir::LogicalResult fuseLayerNorm(Operation *root, Value rawD, Value rawA,
   Value gamma, beta;
   Operation *last = produced;
   Value normCompute = root->getResult(0);
+  // Views of gamma / beta: the pack right-aligns [H] to [1, ..., 1, H]. They
+  // are not x-shaped, and isPerChannel checks the vector they view.
+  llvm::SmallVector<Operation *> affineViews;
   auto nextAffine = [&](Value current) -> Operation * {
     Operation *user = onlyUser(current);
     if (auto collapse =
@@ -437,7 +440,7 @@ mlir::LogicalResult fuseLayerNorm(Operation *root, Value rawD, Value rawA,
     if (auto mul = mlir::dyn_cast<mlir::hip::MulOp>(user)) {
       Value gRaw = affineOther(mul, n, normCompute);
       if (gRaw && sameContext(mul, ctx)) {
-        Value g = definingCompute(gRaw, chain, seen);
+        Value g = definingCompute(gRaw, affineViews, seen);
         auto [mulProduced, mulN] = producedOf(mul);
         if (isPerChannel(g, dim) && mulN.getType() == xType) {
           gamma = g;
@@ -453,7 +456,7 @@ mlir::LogicalResult fuseLayerNorm(Operation *root, Value rawD, Value rawA,
       if (auto add = mlir::dyn_cast<mlir::hip::AddOp>(user)) {
         Value bRaw = affineOther(add, n, n);
         if (bRaw && sameContext(add, ctx)) {
-          Value b = definingCompute(bRaw, chain, seen);
+          Value b = definingCompute(bRaw, affineViews, seen);
           auto [addProduced, addN] = producedOf(add);
           if (isPerChannel(b, dim) && addN.getType() == xType) {
             beta = b;
@@ -471,6 +474,7 @@ mlir::LogicalResult fuseLayerNorm(Operation *root, Value rawD, Value rawA,
     return rewriter.notifyMatchFailure(root, "norm result type");
   if (!reshapesArePacks(chain, xType))
     return rewriter.notifyMatchFailure(root, "reshape regroups rows");
+  chain.append(affineViews.begin(), affineViews.end());
 
   rewriter.setInsertionPoint(last);
   if (!gamma) {
