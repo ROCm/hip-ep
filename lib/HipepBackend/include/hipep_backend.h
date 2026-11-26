@@ -5,8 +5,9 @@
 
 /*===- hipep_backend.h - Running ggml graphs' splits by compiled code -----===
  *
- * libhipep_backend.so: what a ggml backend (llama.cpp's ggml-hipep) calls to
- * have the splits the scheduler hands it compiled and run on an AMD GPU. The
+ * libhipep_backend.so: what a ggml backend (llama.cpp's ggml-hip, built with
+ * GGML_HIP_HIPEP) calls to have the splits the scheduler hands it compiled
+ * and run on an AMD GPU. The
  * caller describes a split in plain C - its tensors' metadata, never their
  * data - and gets code for it; it runs the code on the tensors' memory.
  * Nothing here is ggml's: the library depends on no ggml or llama.cpp, and the
@@ -14,8 +15,8 @@
  *
  * A backend checks hipep_backend_abi_version() against
  * HIPEP_BACKEND_ABI_VERSION and opens a context per device
- * (hipep_backend_open). Its supports_op asks hipep_backend_supports about one
- * node; its graph_compute describes the split, takes hipep_backend_find's code
+ * (hipep_backend_open). It asks hipep_backend_supports about each node of a
+ * split; its graph_compute describes the split, takes hipep_backend_find's code
  * or has it made (hipep_backend_compile), runs it (hipep_backend_run), and
  * otherwise runs the split another way. hipep_backend_close at the end.
  *

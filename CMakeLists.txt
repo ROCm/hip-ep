@@ -133,7 +133,7 @@ option(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS
 # conversion to HIP and the ggml-to-hip pipeline, the split frontend and
 # libhipep_backend.
 option(HIPDNN_EP_BUILD_GGML
-  "Build the ggml-to-hip pipeline, its kernels and libhipep_backend for llama.cpp's ggml-hipep backend"
+  "Build the ggml-to-hip pipeline, its kernels and libhipep_backend for llama.cpp's ggml-hip (GGML_HIP_HIPEP)"
   OFF)
 
 # Build rocMLIR/Triton (rocmlirTriton) in-tree as a subdirectory, reusing the
@@ -306,7 +306,7 @@ endif()
 # register its plugin. Must run before finalize (below).
 hipdnn_ep_add_external_plugins()
 
-# The split frontend and libhipep_backend, the library llama.cpp's ggml-hipep
+# The split frontend and libhipep_backend, the library llama.cpp's ggml-hip
 # backend compiles and runs its splits with; after the compiler and the EP's
 # JIT (backend-mlir-compiler) they build on.
 if(HIPDNN_EP_BUILD_GGML)

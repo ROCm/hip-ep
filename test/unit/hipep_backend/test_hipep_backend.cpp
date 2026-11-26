@@ -6,7 +6,7 @@
 //===- test_hipep_backend.cpp - libhipep_backend without a device --------===//
 //
 // A split as a ggml backend describes it (hipep_backend.h), built as ggml
-// builds its graphs and described as ggml-hipep describes it: what the
+// builds its graphs and described as ggml-hip describes it: what the
 // library rebuilds of it
 // (Graph.h), which extents the split's operations make one size and which the
 // model fixes, what a dynamic signature keeps, whether compiled shapes fit a
@@ -203,7 +203,8 @@ struct Context {
 };
 
 //===----------------------------------------------------------------------===//
-// A split description, built as ggml-hipep builds it (split-desc.cpp)
+// A split description, built as ggml-hip builds it
+// (ggml-cuda/hipep/split-desc.cpp)
 //===----------------------------------------------------------------------===//
 
 struct SplitDescBuilder {
@@ -324,7 +325,7 @@ struct AttentionLayer : Context {
   std::vector<const Tensor *> nodes;
   AttentionLayer(int64_t tokens, int64_t slots) {
     Tensor *positions = named(tensor(kI32, {tokens}), "inp_pos");
-    Tensor *x = named(tensor(kF32, {64, tokens}), "HIPEP0#node_1#0");
+    Tensor *x = named(tensor(kF32, {64, tokens}), "ROCm0#node_1#0");
     Tensor *w = named(tensor(kF32, {64, 64}), "blk.0.attn_q.weight");
     Tensor *q = reshape3d(mulMat(w, x), 16, 4, tokens);
     q = rope(q, positions, 16, 0, 4096, 10000.0f);
@@ -375,11 +376,11 @@ void testAttentionLayerSymbols() {
         "the mask's rows are the queries");
   check(symbolAt(spec, layer.leafIndex("self_k_idxs"), 0) == tokens,
         "a row per token is written");
-  check(symbolAt(spec, layer.leafIndex("HIPEP0#node_1#0"), 1) == tokens,
+  check(symbolAt(spec, layer.leafIndex("ROCm0#node_1#0"), 1) == tokens,
         "the copy's rows are the positions RoPE turns");
   check(symbolAt(spec, layer.cacheWindowIndex(), 2) == slots,
         "the window is as wide as the mask");
-  check(symbolAt(spec, layer.leafIndex("HIPEP0#node_1#0"), 0) == nullptr &&
+  check(symbolAt(spec, layer.leafIndex("ROCm0#node_1#0"), 0) == nullptr &&
             symbolAt(spec, layer.cacheWindowIndex(), 0) == nullptr,
         "a product's shared extent and a head are the weight's");
   for (int d = 0; d < 4; ++d) {
@@ -401,7 +402,7 @@ void testEqualExtentsAreSeparateSymbols() {
         "256 tokens and 256 slots are two symbols");
   check(symbolAt(spec, layer.cacheWindowIndex(), 2) == slots,
         "the window is the slots");
-  check(symbolAt(spec, layer.leafIndex("HIPEP0#node_1#0"), 1) == tokens,
+  check(symbolAt(spec, layer.leafIndex("ROCm0#node_1#0"), 1) == tokens,
         "the copy's rows are the tokens");
 }
 
@@ -420,7 +421,7 @@ void testSingleTokenIsStatic() {
 /// nothing outside the split says what it counts.
 void testSchedulerCopyInput() {
   Context c;
-  Tensor *copy = c.named(c.tensor(kF32, {64, 7}), "HIPEP0#inp_embd_rows#0");
+  Tensor *copy = c.named(c.tensor(kF32, {64, 7}), "ROCm0#inp_embd_rows#0");
   Tensor *w = c.named(c.tensor(kF32, {64, 32}), "blk.0.ffn.weight");
   const SplitDescBuilder split({c.mulMat(w, copy)}, {"blk.0.ffn.weight"});
   const capture::SymbolSpec spec = deriveSymbols(split);
@@ -434,8 +435,8 @@ void testSchedulerCopyInput() {
 /// its heads' (a number), the rotation that the positions are its rows.
 void testReshapeFixesWidth() {
   Context c;
-  Tensor *x = c.named(c.tensor(kF32, {64, 7}), "HIPEP0#node_1#0");
-  Tensor *positions = c.named(c.tensor(kI32, {7}), "HIPEP0#inp_pos#0");
+  Tensor *x = c.named(c.tensor(kF32, {64, 7}), "ROCm0#node_1#0");
+  Tensor *positions = c.named(c.tensor(kI32, {7}), "ROCm0#inp_pos#0");
   Tensor *reshaped = c.reshape3d(x, 16, 4, 7);
   Tensor *rotated = c.rope(reshaped, positions, 16, 0, 4096, 10000.0f);
   const SplitDescBuilder split(Context::forward({rotated}), {});
@@ -453,7 +454,7 @@ void testReshapeFixesWidth() {
 void testMergedViewFixesHeads() {
   Context c;
   Tensor *keys = c.named(c.tensor(kF32, {16, 4, 7}), "Kcur-0");
-  Tensor *rows = c.named(c.tensor(kI64, {7}), "HIPEP0#attn_inp_k_idxs#0");
+  Tensor *rows = c.named(c.tensor(kI64, {7}), "ROCm0#attn_inp_k_idxs#0");
   Tensor *cache = c.named(c.tensor(kF16, {64, 256}), "cache_k_l0");
   Tensor *flat = c.view2d(keys, 64, 7, keys->nb[2], 0);
   const SplitDescBuilder split(Context::forward({c.setRows(cache, flat, rows)}),
