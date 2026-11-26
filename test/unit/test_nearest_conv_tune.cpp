@@ -1697,23 +1697,87 @@ int main() {
     {
       namespace fs = std::filesystem;
       const std::string pipe = (dir / "pipe.json").string();
-      expect(::mkfifo(pipe.c_str(), 0600) == 0, "a pipe can be made");
       mlir::hip::ProblemCacheLut piped;
-      expect(!mlir::hip::checkProblemCacheJsonFile(pipe, "gfx1151", piped,
-                                                   error) &&
-                 error.find("regular file") != std::string::npos,
-             "a pipe fails the check without blocking");
-      expect(!mlir::hip::loadProblemCacheLutJsonFile(pipe, piped, error) &&
-                 error.find("regular file") != std::string::npos,
-             "a pipe is not read");
-      expect(!mlir::hip::updateProblemCacheJsonFile(pipe, "gfx1151",
-                                                    {{exact, tile32}}, error) &&
-                 fs::is_fifo(pipe),
-             "a pipe is not replaced");
-      expect(!mlir::hip::checkProblemCacheJsonFile("/dev/null", "gfx1151",
-                                                   piped, error) &&
-                 error.find("regular file") != std::string::npos,
-             "a device is refused");
+      // A file system without pipes skips this part.
+      if (::mkfifo(pipe.c_str(), 0600) == 0) {
+        expect(!mlir::hip::checkProblemCacheJsonFile(pipe, "gfx1151", piped,
+                                                     error) &&
+                   error.find("regular file") != std::string::npos,
+               "a pipe fails the check without blocking");
+        expect(!mlir::hip::loadProblemCacheLutJsonFile(pipe, piped, error) &&
+                   error.find("regular file") != std::string::npos,
+               "a pipe is not read");
+        expect(!mlir::hip::updateProblemCacheJsonFile(
+                   pipe, "gfx1151", {{exact, tile32}}, error) &&
+                   fs::is_fifo(pipe),
+               "a pipe is not replaced");
+      }
+      if (fs::exists("/dev/null"))
+        expect(!mlir::hip::checkProblemCacheJsonFile("/dev/null", "gfx1151",
+                                                     piped, error) &&
+                   error.find("regular file") != std::string::npos,
+               "a device is refused");
+    }
+
+    // The rewrite writes a temporary beside the cache and renames it, which
+    // needs write access to the directory, not to the file. A directory that
+    // does not allow that is refused before the compile, for a table that
+    // exists, for one that does not, and for a directory that would have to be
+    // created inside it. Root can write anywhere, so there is nothing to
+    // refuse there.
+    {
+      namespace fs = std::filesystem;
+#ifdef _WIN32
+      const bool asRoot = true;
+#else
+      const bool asRoot = ::geteuid() == 0;
+#endif
+      if (!asRoot) {
+        const fs::path locked = dir / "locked_dir";
+        fs::create_directories(locked);
+        const std::string inside = (locked / "cache.json").string();
+        {
+          std::ofstream out(inside, std::ios::binary);
+          out << jsonText(dumpDoc());
+        }
+        fs::permissions(locked, fs::perms::owner_read | fs::perms::owner_exec);
+        mlir::hip::ProblemCacheLut lockedLut;
+        expect(!mlir::hip::checkProblemCacheJsonFile(inside, "gfx1151",
+                                                     lockedLut, error) &&
+                   error.find("not writable") != std::string::npos,
+               "a table in a read-only directory fails the check");
+        expect(
+            !mlir::hip::checkProblemCacheJsonFile(
+                (locked / "new.json").string(), "gfx1151", lockedLut, error) &&
+                error.find("not writable") != std::string::npos,
+            "a new table in a read-only directory fails the check");
+        expect(!mlir::hip::checkProblemCacheJsonFile(
+                   (locked / "deeper" / "new.json").string(), "gfx1151",
+                   lockedLut, error) &&
+                   error.find("would be created") != std::string::npos,
+               "a directory that cannot be created fails the check");
+        expect(!mlir::hip::updateProblemCacheJsonFile(
+                   inside, "gfx1151", {{"fresh", tile32}}, error) &&
+                   error.find("not writable") != std::string::npos,
+               "the rewrite refuses it too, with the table untouched");
+        fs::permissions(locked, fs::perms::owner_all);
+        expect(mlir::hip::checkProblemCacheJsonFile(
+                   (locked / "deeper" / "new.json").string(), "gfx1151",
+                   lockedLut, error),
+               "a directory that can be created passes the check");
+      }
+      // In a sticky directory the rename needs the file or the directory, as
+      // the kernel enforces; root may always.
+      using mlir::hip::mayReplaceInDirectory;
+      expect(mayReplaceInDirectory(1000, 0, true, 1000),
+             "your own file in a sticky directory can be replaced");
+      expect(mayReplaceInDirectory(2000, 1000, true, 1000),
+             "any file in your own sticky directory can be replaced");
+      expect(!mayReplaceInDirectory(2000, 0, true, 1000),
+             "another user's file in a sticky directory cannot");
+      expect(mayReplaceInDirectory(2000, 0, false, 1000),
+             "another user's file outside a sticky directory can");
+      expect(mayReplaceInDirectory(2000, 3000, true, 0), "root always can");
     }
 
     // A replaced table keeps its group as well as its mode. The rename would
@@ -1721,9 +1785,9 @@ int main() {
     // away from the people a shared cache is for.
     {
       namespace fs = std::filesystem;
-      std::vector<gid_t> groups(64);
-      const int count =
-          ::getgroups(static_cast<int>(groups.size()), groups.data());
+      const int total = ::getgroups(0, nullptr);
+      std::vector<gid_t> groups(total > 0 ? static_cast<size_t>(total) : 0);
+      const int count = total > 0 ? ::getgroups(total, groups.data()) : 0;
       gid_t other = static_cast<gid_t>(-1);
       for (int i = 0; i < count; ++i)
         if (groups[i] != ::getegid())

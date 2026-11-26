@@ -1365,6 +1365,12 @@ bool mergeProblemCacheJson(std::string_view existing, std::string_view gpuArch,
   return true;
 }
 
+bool mayReplaceInDirectory(uint32_t fileOwner, uint32_t directoryOwner,
+                           bool directoryIsSticky, uint32_t callerUid) {
+  return callerUid == 0 || !directoryIsSticky || fileOwner == callerUid ||
+         directoryOwner == callerUid;
+}
+
 bool mayFollowDanglingLink(uint32_t linkOwner, uint32_t directoryOwner,
                            bool directoryIsStickyAndWritable,
                            uint32_t callerUid) {
@@ -1536,6 +1542,55 @@ void removeStaleTemporaries(const std::filesystem::path &target) {
   }
 }
 
+// Whether a rewrite can put its temporary file beside \p target and rename it
+// over \p target: that needs write access to the directory, not just to the
+// file. A directory that does not exist yet is created by the rewrite, so the
+// nearest one that does exist is the one that has to allow it. In a sticky
+// directory (/tmp) the rename also needs the file to be yours, or the
+// directory, which the kernel enforces. Without this the compile would run in
+// full and only then fail to write its winners.
+bool canWriteBeside(const std::string &path,
+                    const std::filesystem::path &target, bool present,
+                    std::string &error) {
+#ifdef _WIN32
+  (void)path;
+  (void)target;
+  (void)present;
+  (void)error;
+  return true;
+#else
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  const fs::path parent =
+      target.has_parent_path() ? target.parent_path() : fs::path(".");
+  fs::path dir = parent;
+  while (!fs::exists(dir, ec) && dir.has_parent_path() &&
+         dir.parent_path() != dir)
+    dir = dir.parent_path();
+  const bool created = dir != parent;
+  if (::access(dir.c_str(), W_OK | X_OK) != 0) {
+    error = "cannot write problem cache " + path + ": " + dir.string() +
+            (created ? ", where its directory would be created, is not "
+                       "writable"
+                     : " is not writable");
+    return false;
+  }
+  if (present) {
+    struct stat dirStat {};
+    struct stat fileStat {};
+    if (::stat(dir.c_str(), &dirStat) == 0 &&
+        ::stat(target.c_str(), &fileStat) == 0 &&
+        !mayReplaceInDirectory(fileStat.st_uid, dirStat.st_uid,
+                               (dirStat.st_mode & S_ISVTX) != 0, ::geteuid())) {
+      error = "cannot replace problem cache " + path + ": " + dir.string() +
+              " is sticky and the file belongs to another user";
+      return false;
+    }
+  }
+  return true;
+#endif
+}
+
 // Whether this process may write \p target itself. The rewrite renames a new
 // file over it, which needs write access to the directory only, so a file that
 // was made read-only would otherwise be replaced anyway.
@@ -1674,6 +1729,8 @@ bool checkProblemCacheJsonFile(const std::string &path,
   bool present = false;
   if (!readRewriteTarget(path, target, existing, present, error))
     return false;
+  if (!canWriteBeside(path, target, present, error))
+    return false;
   if (!present)
     return true;
   if (!isWritable(target)) {
@@ -1738,6 +1795,8 @@ bool updateProblemCacheJsonFile(const std::string &path,
       });
   if (present && !anyWinner)
     return true;
+  if (!canWriteBeside(path, target, present, error))
+    return false;
 
   if (target.has_parent_path())
     fs::create_directories(target.parent_path(), ec);

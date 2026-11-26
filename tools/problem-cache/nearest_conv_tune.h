@@ -102,6 +102,12 @@ bool loadProblemCacheLutJson(std::string_view text, ProblemCacheLut &lut,
 bool loadProblemCacheLutJsonFile(const std::string &path, ProblemCacheLut &lut,
                                  std::string &error);
 
+// Whether the kernel lets the caller rename a new file over \p fileOwner's
+// file in a directory owned by \p directoryOwner. In a sticky directory (/tmp)
+// that takes owning the file or the directory; root may always.
+bool mayReplaceInDirectory(uint32_t fileOwner, uint32_t directoryOwner,
+                           bool directoryIsSticky, uint32_t callerUid);
+
 // Whether a rewrite may follow a dangling symbolic link that it finds on the
 // way to the cache file. It applies the rule the kernel uses for
 // protected_symlinks, which does not cover a link followed by hand: in a
@@ -135,16 +141,23 @@ struct ProblemCacheWinner {
 // perfConfig, even one that no point uses. `fallbacks` is written only if
 // \p existing had it, and its other fields are kept. Top-level fields besides
 // `configs`, `points` and `fallbacks` (weights, `model_key`, ...) are carried
-// over.
+// over. `schema_version` is the exception: it is always written out, as the
+// version that was checked, so that a document which left it out (read as
+// version 1) can still be compiled to a `.fb`. A dimension worked out from a
+// problem string that does not fit the table's uint32 is stored as 0, the
+// schema's "not recognized".
 //
 // Fails, leaving \p out empty, without producing a document when \p existing is
 // not a supported LUT (invalid JSON, wrong `schema_version` or `kernel_abi`, a
-// bad weight), names a different non-empty `gpu_arch` than \p gpuArch, or has a
-// structure that cannot be rewritten without losing data: `configs` or
-// `points` missing or not an array, a config without a string `perf_config`, a
-// point that is not an object or lacks a string `problem` or an in-range
-// integer `config` (or has a non-integer `m`, `n` or `k`), or `fallbacks`
-// that is not an array of objects with an in-range integer `config`.
+// bad weight, a `gpu_arch` or `model_key` that is not a string, a
+// `rocm_version` that is not an int32), names a different non-empty `gpu_arch`
+// than \p gpuArch, or has a structure that cannot be rewritten without losing
+// data or compiled to the table format: `configs` or `points` missing or not an
+// array, more than 65536 configs (also when the rewrite would need that
+// many), a config without a string `perf_config`, a point that is not an object
+// or lacks a string `problem` or an in-range integer `config` (or has an `m`,
+// `n` or `k` that is not an integer from 0 to 2^32-1), or `fallbacks` that is
+// not an array of objects with an in-range integer `config`.
 bool mergeProblemCacheJson(std::string_view existing, std::string_view gpuArch,
                            const std::vector<ProblemCacheWinner> &winners,
                            std::string &out, std::string &error);
@@ -152,8 +165,12 @@ bool mergeProblemCacheJson(std::string_view existing, std::string_view gpuArch,
 // Checks, before a compile, that updateProblemCacheJsonFile can rewrite \p path
 // for \p gpuArch, and loads it into \p lut for lookup. A missing or blank file
 // is an empty table. Fails, with \p lut empty, for a file that the rewrite
-// would refuse (see mergeProblemCacheJson), for an RCAL FlatBuffer, and for a
-// file that cannot be read.
+// would refuse (see mergeProblemCacheJson), for an RCAL FlatBuffer, for a path
+// that is not a regular file (a pipe would block, a device would be replaced),
+// for a file that is read-only, for a directory the rewrite could not put its
+// temporary file in (or create, when it does not exist yet; in a sticky
+// directory also when the file is another user's), and for a file that cannot
+// be read. Without these a compile would run in full and then fail to write.
 bool checkProblemCacheJsonFile(const std::string &path,
                                std::string_view gpuArch, ProblemCacheLut &lut,
                                std::string &error);
@@ -163,15 +180,23 @@ bool checkProblemCacheJsonFile(const std::string &path,
 // With no winners an existing file is left as it is. An RCAL FlatBuffer is
 // refused.
 // The new contents go to a sibling temporary file that is renamed over \p path,
-// so a failed or interrupted write leaves the old file intact. The file is read
-// again at write time, not taken from an earlier load, so entries another
+// so a failed or interrupted write leaves the old file intact. The temporary
+// is created exclusively and readable by its owner only, whatever the umask is,
+// written and flushed to disk before the rename. The old file's mode and group
+// are then put on it, so a shared cache keeps its group access. The owner is
+// the caller's, which cannot be kept without root, and ACLs, extended
+// attributes and hard links of the old file are not carried over. The file is
+// read again at write time, not taken from an earlier load, so entries another
 // compile added in between are kept. Missing parent directories are created. A
 // symlinked \p path is rewritten at its target, which is created if the link
-// is dangling, and the link stays. A symlink loop is refused. Rewrites in one
-// process are serialized, so overlapping compiles there do not lose each
-// other's winners; separate processes can, and the last one to finish wins.
-// Temporary files older than an hour, left by a rewrite that was killed, are
-// removed.
+// is dangling, and the link stays; a dangling link is followed only under the
+// kernel's rule for sticky, world-writable directories (see
+// mayFollowDanglingLink). A symlink loop is refused, and so is anything but a
+// regular file, a read-only file, and a directory that does not allow the
+// rename (see checkProblemCacheJsonFile). Rewrites in one process are
+// serialized, so overlapping compiles there do not lose each other's winners;
+// separate processes can, and the last one to finish wins. Temporary files
+// older than an hour, left by a rewrite that was killed, are removed.
 bool updateProblemCacheJsonFile(const std::string &path,
                                 std::string_view gpuArch,
                                 const std::vector<ProblemCacheWinner> &winners,

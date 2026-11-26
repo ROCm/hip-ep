@@ -129,18 +129,19 @@ winners the file is not rewritten. A missing or empty file is created. A file
 that is not a LUT, is for another `gpu_arch`, has a malformed `configs`,
 `points` or `fallbacks` section, has a value the table format cannot hold
 (`rocm_version` beyond 32 bits, `m`, `n` or `k` outside 0 to 2^32-1, more than
-65536 configs), is read-only, is not a regular file, or is a `.fb` is refused
-before the compile starts, with the file untouched; a write that fails after
-the compile is a warning, and the output is still written. The file is replaced
-atomically and flushed to disk before the rename. It is written owner-only, so
-no one else can read it halfway; a new file stays owner-only and a replaced one
-gets its old mode and group back. A dangling symbolic link is followed only by
-the rule the kernel uses in a shared directory like `/tmp`: its owner must be
-you or the directory's owner. The rename replaces the file, so ACLs, extended
-attributes and hard links of the old one are not carried over. `schema_version`
-is always written out. Compiles in one process take turns, but two processes
-writing it at once can lose one set of winners. The provider does the same as
-the flag through
+65536 configs), is read-only, is not a regular file, sits in a directory the
+rewrite cannot write to (or create), or is a `.fb` is refused before the
+compile starts, with the file untouched; a write that fails after the compile
+is a warning, and the output is still written. The file is replaced atomically
+and flushed to disk before the rename. It is written owner-only, so no one else
+can read it halfway; a new file stays owner-only and a replaced one gets its
+old mode and group back, but not its owner, which becomes the user who ran the
+compile. A dangling symbolic link is followed only by the rule the kernel uses
+in a shared directory like `/tmp`: its owner must be you or the directory's
+owner. The rename replaces the file, so ACLs, extended attributes and hard
+links of the old one are not carried over. `schema_version` is always written
+out. Compiles in one process take turns, but two processes writing it at once
+can lose one set of winners. The provider does the same as the flag through
 `HIPDNN_EP_ROCMLIR_PROBLEM_CACHE_RW=<file.json>`, except that a file it cannot
 use or update is reported and the compile still succeeds. A repeated problem in the same
 compile reuses the in-session winner, then a miss searches the selected space.
