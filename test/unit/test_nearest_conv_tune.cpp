@@ -15,6 +15,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
@@ -445,6 +446,22 @@ int main() {
     rejects(std::move(doc), "a JSON weight that rounds to zero is rejected");
   }
   {
+    // Outside the finite range of a float: converting it is undefined, and an
+    // infinite weight breaks the distance.
+    llvm::json::Object doc = dumpDoc();
+    doc["weight_k"] = 1e40;
+    rejects(std::move(doc), "a JSON weight above the float range is rejected");
+  }
+  {
+    llvm::json::Object doc = dumpDoc();
+    doc["weight_m"] = 3e38;
+    mlir::hip::ProblemCacheLut large;
+    expect(mlir::hip::loadProblemCacheLutJson(jsonText(std::move(doc)), large,
+                                              error) &&
+               std::isfinite(large.weightM) && large.weightM > 0.0f,
+           "a large JSON weight that still fits a float is accepted");
+  }
+  {
     llvm::json::Object doc = dumpDoc();
     doc["weight_m"] = 1e-30;
     mlir::hip::ProblemCacheLut small;
@@ -834,20 +851,117 @@ int main() {
            "a table with no fallbacks key is rewritten without adding one");
   }
   {
-    // A problem that appears twice keeps its first row, which is the one a
-    // lookup returns, so the rewrite does not change the answer.
-    llvm::json::Object doc = dumpDoc();
-    llvm::json::Array points;
-    points.push_back(llvm::json::Object{{"problem", exact}, {"config", 0}});
-    points.push_back(llvm::json::Object{{"problem", exact}, {"config", 2}});
-    doc["points"] = std::move(points);
+    // A problem can have several rows. A lookup returns the first one it can
+    // use, so a later row is the alternative when the first is filtered out
+    // (a perfConfig the loader skips) or rejected (it failed to compile). A
+    // rewrite keeps every row of a problem the winners do not touch, in file
+    // order, so it never turns a usable lookup into a miss.
+    const std::string skipped = "{\"algo\":\"block\"}";
+    const auto build =
+        [&](const std::vector<std::pair<std::string, std::string>> &rows) {
+          llvm::json::Object doc = dumpDoc();
+          llvm::json::Array configs;
+          std::map<std::string, int64_t> index;
+          llvm::json::Array points;
+          for (const auto &[problem, perf] : rows) {
+            auto found = index.find(perf);
+            if (found == index.end()) {
+              found =
+                  index.emplace(perf, static_cast<int64_t>(index.size())).first;
+              configs.push_back(llvm::json::Object{{"perf_config", perf}});
+            }
+            points.push_back(llvm::json::Object{{"problem", problem},
+                                                {"config", found->second}});
+          }
+          doc["configs"] = std::move(configs);
+          doc["points"] = std::move(points);
+          return jsonText(std::move(doc));
+        };
+    // Every row in file order, repeats included.
+    const auto rowsOf = [&](const std::string &text) {
+      std::vector<std::pair<std::string, std::string>> rows;
+      llvm::json::Value doc = parseDoc(text);
+      const llvm::json::Object *root = doc.getAsObject();
+      if (!root || !root->getArray("points") || !root->getArray("configs"))
+        return rows;
+      const llvm::json::Array &cfgs = *root->getArray("configs");
+      for (const llvm::json::Value &p : *root->getArray("points")) {
+        const llvm::json::Object *o = p.getAsObject();
+        auto problem = o->getString("problem");
+        auto index = o->getInteger("config");
+        if (problem && index && *index >= 0 &&
+            static_cast<size_t>(*index) < cfgs.size())
+          rows.emplace_back(problem->str(), cfgs[static_cast<size_t>(*index)]
+                                                .getAsObject()
+                                                ->getString("perf_config")
+                                                .value_or("")
+                                                .str());
+      }
+      return rows;
+    };
+    using Rows = std::vector<std::pair<std::string, std::string>>;
+    const auto lookup = [&](const std::string &text,
+                            const std::vector<std::string> &rejected) {
+      mlir::hip::ProblemCacheLut lut;
+      std::string loadError;
+      std::string solution;
+      if (mlir::hip::loadProblemCacheLutJson(text, lut, loadError))
+        if (auto hit =
+                mlir::hip::findNearestConvTune(exact, lut.entries, rejected))
+          solution = hit->solution;
+      return solution;
+    };
+
+    // The first row is one the loader skips, so the lookup uses the second.
+    const std::string filteredFirst =
+        build({{exact, skipped}, {exact, tile32}});
     std::string merged;
-    expect(mlir::hip::mergeProblemCacheJson(jsonText(std::move(doc)), "gfx1151",
-                                            {}, merged, error),
+    expect(mlir::hip::mergeProblemCacheJson(filteredFirst, "gfx1151", {},
+                                            merged, error),
            "a table with a repeated problem is rewritten");
-    const auto rows = pointMap(merged);
-    expect(rows.size() == 1 && rows.at(exact) == tile32,
-           "a repeated problem keeps its first row");
+    expect(rowsOf(merged) == Rows({{exact, skipped}, {exact, tile32}}),
+           "a repeated problem keeps both rows, in file order");
+    expect(lookup(filteredFirst, {}) == tile32 && lookup(merged, {}) == tile32,
+           "a filtered first row still falls through to the second after a "
+           "rewrite");
+
+    // The first row compiles badly, so the caller rejects it and takes the
+    // next. Both rows have to survive for that to work after a rewrite.
+    const std::string rejectedFirst =
+        build({{exact, tile32}, {exact, tileBig}});
+    expect(mlir::hip::mergeProblemCacheJson(rejectedFirst, "gfx1151", {},
+                                            merged, error) &&
+               rowsOf(merged) == Rows({{exact, tile32}, {exact, tileBig}}),
+           "a repeated problem with two usable rows keeps both");
+    expect(lookup(merged, {}) == tile32 &&
+               lookup(merged, {tile32}) == tileBig &&
+               lookup(rejectedFirst, {tile32}) == tileBig,
+           "a rejected first row still yields the second after a rewrite");
+    std::string again;
+    expect(
+        mlir::hip::mergeProblemCacheJson(merged, "gfx1151", {}, again, error) &&
+            again == merged,
+        "rewriting a table with a repeated problem again changes nothing");
+
+    // Winners for other problems leave the repeated problem alone.
+    expect(mlir::hip::mergeProblemCacheJson(
+               rejectedFirst, "gfx1151", {{gemmAt(8), tile16}}, merged, error),
+           "a winner for another problem is merged");
+    Rows keptForExact;
+    Rows keptForOther;
+    for (const auto &row : rowsOf(merged))
+      (row.first == exact ? keptForExact : keptForOther).push_back(row);
+    expect(keptForExact == Rows({{exact, tile32}, {exact, tileBig}}) &&
+               keptForOther == Rows({{gemmAt(8), tile16}}) &&
+               lookup(merged, {tile32}) == tileBig,
+           "a winner for another problem keeps the alternatives");
+
+    // A winner is a fresh measurement of its own problem, so it replaces all
+    // of that problem's rows rather than piling up beside them.
+    expect(mlir::hip::mergeProblemCacheJson(rejectedFirst, "gfx1151",
+                                            {{exact, tile16}}, merged, error) &&
+               rowsOf(merged) == Rows({{exact, tile16}}),
+           "a winner replaces every row of its problem");
   }
   {
     // The file overload across compiles: create, accumulate, replace, and keep

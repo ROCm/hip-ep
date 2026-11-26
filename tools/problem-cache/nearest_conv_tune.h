@@ -106,9 +106,11 @@ struct ProblemCacheWinner {
 // document in \p out. Blank \p existing starts a new document for \p gpuArch.
 //
 // Every point already in \p existing is kept, whatever kind of perfConfig it
-// names, so a rewrite never drops data the loader would skip. A winner replaces
-// the point of the same problem string, and a new problem is added. If a
-// problem appears twice, its first row is kept, as a lookup returns that one.
+// names, so a rewrite never drops data the loader would skip. A problem the
+// winners do not touch keeps all its rows, in file order, even when it repeats:
+// a lookup returns the first row it can use, so a later row is the alternative
+// when the first is filtered out or rejected. A winner is a fresh measurement,
+// so it replaces every row of its problem string, and a new problem is added.
 //
 // `configs` is rebuilt without duplicates, so its indices change. It holds
 // every perfConfig a point or a fallback uses. The `config` of each point and

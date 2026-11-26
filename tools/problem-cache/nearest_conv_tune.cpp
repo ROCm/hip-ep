@@ -20,6 +20,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <utility>
 
@@ -869,9 +870,14 @@ bool readLutHeaderJson(const llvm::json::Object &root, ProblemCacheLut &lut,
     std::optional<double> value = root.getNumber(name);
     if (!value)
       return false;
-    // The weight is stored as a float, so test it after the narrowing: 1e-50
+    // The weight is stored as a float, so it has to be a finite positive
+    // float. 1e40 is outside the range, and converting it is undefined; 1e-50
     // is positive as a double but rounds to zero, which the FlatBuffer loader
-    // rejects.
+    // rejects. Either would also corrupt the distance (a dropped axis, or an
+    // infinite one), so check the range first and the narrowed value after.
+    if (!std::isfinite(*value) ||
+        *value > static_cast<double>(std::numeric_limits<float>::max()))
+      return false;
     const float narrowed = static_cast<float>(*value);
     if (!(narrowed > 0.0f))
       return false;
@@ -994,8 +1000,11 @@ bool mergeProblemCacheJson(std::string_view existing, std::string_view gpuArch,
                            const std::vector<ProblemCacheWinner> &winners,
                            std::string &out, std::string &error) {
   out.clear();
-  // Sorted by problem, which is also the output order.
-  std::map<std::string, StoredPoint> table;
+  // Sorted by problem, which is also the output order. A problem can have
+  // several rows, in file order: a lookup returns the first one it can use, so
+  // a later row is an alternative for when the first is filtered out or turns
+  // out not to compile.
+  std::map<std::string, std::vector<StoredPoint>> table;
   std::vector<StoredFallback> fallbacks;
   bool hadFallbacks = false;
   llvm::json::Object root;
@@ -1097,9 +1106,7 @@ bool mergeProblemCacheJson(std::string_view existing, std::string_view gpuArch,
       } else {
         implicitGemmDims(problem->str(), stored.m, stored.n, stored.k);
       }
-      // A lookup returns the first row for a problem, so a repeated problem
-      // keeps its first row.
-      table.emplace(problem->str(), std::move(stored));
+      table[problem->str()].push_back(std::move(stored));
     }
 
     // `fallbacks` is optional, but one that is present is index-linked to
@@ -1123,15 +1130,17 @@ bool mergeProblemCacheJson(std::string_view existing, std::string_view gpuArch,
     }
   }
 
-  // The winners replace a point of the same problem and add the rest. A later
-  // winner for the same problem wins over an earlier one.
+  // A winner is a fresh measurement of its problem, so it replaces every row
+  // the file had for it, and a new problem is added. A later winner for the
+  // same problem wins over an earlier one. Problems with no winner keep all
+  // their rows.
   for (const ProblemCacheWinner &winner : winners) {
     if (winner.problem.empty() || winner.perfConfig.empty())
       continue;
     StoredPoint stored;
     stored.perfConfig = winner.perfConfig;
     implicitGemmDims(winner.problem, stored.m, stored.n, stored.k);
-    table[winner.problem] = std::move(stored);
+    table[winner.problem] = {std::move(stored)};
   }
 
   // The configs that remain are the ones a point or a fallback uses, each once.
@@ -1150,15 +1159,14 @@ bool mergeProblemCacheJson(std::string_view existing, std::string_view gpuArch,
     return found->second;
   };
   llvm::json::Array outPoints;
-  for (const auto &row : table) {
-    const StoredPoint &stored = row.second;
-    outPoints.push_back(
-        llvm::json::Object{{"problem", row.first},
-                           {"config", indexOf(stored.perfConfig)},
-                           {"m", stored.m},
-                           {"n", stored.n},
-                           {"k", stored.k}});
-  }
+  for (const auto &row : table)
+    for (const StoredPoint &stored : row.second)
+      outPoints.push_back(
+          llvm::json::Object{{"problem", row.first},
+                             {"config", indexOf(stored.perfConfig)},
+                             {"m", stored.m},
+                             {"n", stored.n},
+                             {"k", stored.k}});
   llvm::json::Array outFallbacks;
   for (StoredFallback &fallback : fallbacks) {
     fallback.record["config"] = indexOf(fallback.perfConfig);
