@@ -1,0 +1,31 @@
+diff --git a/cmake/triton.cmake b/cmake/triton.cmake
+index 763a178..894be93 100644
+--- a/cmake/triton.cmake
++++ b/cmake/triton.cmake
+@@ -45,7 +45,7 @@ endif()
+ 
+ FetchContent_Declare(
+   triton
+-  URL "${ROCMLIR_TRITON_GIT_REPOSITORY}/archive/refs/heads/${ROCMLIR_TRITON_GIT_BRANCH}.tar.gz"
++  URL "${ROCMLIR_TRITON_GIT_REPOSITORY}/archive/${ROCMLIR_TRITON_GIT_BRANCH}.tar.gz"
+   # GIT_REPOSITORY "${ROCMLIR_TRITON_GIT_REPOSITORY}"
+   # GIT_TAG "${ROCMLIR_TRITON_GIT_BRANCH}"
+   # GIT_SHALLOW TRUE
+@@ -55,7 +55,7 @@ FetchContent_Declare(
+ 
+ FetchContent_Declare(
+   amd-codegen-llvm
+-  URL "${ROCMLIR_AMD_CODEGEN_LLVM_GIT_REPOSITORY}/archive/refs/heads/${ROCMLIR_AMD_CODEGEN_LLVM_GIT_BRANCH}.tar.gz"
++  URL "${ROCMLIR_AMD_CODEGEN_LLVM_GIT_REPOSITORY}/archive/${ROCMLIR_AMD_CODEGEN_LLVM_GIT_BRANCH}.tar.gz"
+   # GIT_REPOSITORY "${ROCMLIR_AMD_CODEGEN_LLVM_GIT_REPOSITORY}"
+   # GIT_TAG "${ROCMLIR_AMD_CODEGEN_LLVM_GIT_BRANCH}"
+   # GIT_SHALLOW TRUE
+@@ -80,7 +80,7 @@ else()
+   message(STATUS "Fetching LLVM/MLIR: ${ROCMLIR_LLVM_GIT_REPOSITORY}@${ROCMLIR_LLVM_GIT_BRANCH}")
+   FetchContent_Declare(
+     llvm-project
+-    URL "${ROCMLIR_LLVM_GIT_REPOSITORY}/archive/refs/heads/${ROCMLIR_LLVM_GIT_BRANCH}.tar.gz"
++    URL "${ROCMLIR_LLVM_GIT_REPOSITORY}/archive/${ROCMLIR_LLVM_GIT_BRANCH}.tar.gz"
+     # GIT_REPOSITORY "${ROCMLIR_LLVM_GIT_REPOSITORY}"
+     # GIT_TAG "${ROCMLIR_LLVM_GIT_BRANCH}"
+     # GIT_SHALLOW TRUE

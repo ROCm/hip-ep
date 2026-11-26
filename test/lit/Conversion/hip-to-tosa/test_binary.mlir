@@ -88,7 +88,7 @@ func.func @max(%ctx: !hip.context, %x: tensor<2x8xf16>, %y: tensor<2x8xf16>,
 // tosa.mul takes a third shift operand, which hip.mul has no equivalent for:
 // it is a plain multiply, so the shift is a zero tensor<1xi8>.
 // CHECK-LABEL: func.func @mul
-// CHECK: %[[SHIFT:.*]] = "tosa.const"{{.*}}dense<0> : tensor<1xi8>
+// CHECK: %[[SHIFT:.*]] = tosa.const{{.*}}dense<0> : tensor<1xi8>
 // CHECK: tosa.mul %arg1, %arg2, %[[SHIFT]] : (tensor<2x8xf16>, tensor<2x8xf16>, tensor<1xi8>) -> tensor<2x8xf16>
 // CHECK-NOT: hip.mul
 func.func @mul(%ctx: !hip.context, %x: tensor<2x8xf16>, %y: tensor<2x8xf16>,

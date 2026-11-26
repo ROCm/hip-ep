@@ -24,7 +24,7 @@
 // ============================================================================
 
 // CHECK-LABEL: func.func @tile_basic
-// CHECK: %[[M:.*]] = tosa.const_shape {values = dense<[2, 3]> : tensor<2xindex>}
+// CHECK: %[[M:.*]] = tosa.const_shape values(dense<[2, 3]> : tensor<2xindex>)
 // CHECK: tosa.tile %arg1, %[[M]]
 // CHECK-NOT: hip.tile
 func.func @tile_basic(%ctx: !hip.context, %x: tensor<2x3xf32>,
@@ -38,7 +38,7 @@ func.func @tile_basic(%ctx: !hip.context, %x: tensor<2x3xf32>,
 
 // A repeat of 1 leaves the dimension alone, which is still a valid tile.
 // CHECK-LABEL: func.func @tile_identity_axis
-// CHECK: %[[M:.*]] = tosa.const_shape {values = dense<[1, 4]> : tensor<2xindex>}
+// CHECK: %[[M:.*]] = tosa.const_shape values(dense<[1, 4]> : tensor<2xindex>)
 // CHECK: tosa.tile %arg1, %[[M]]
 func.func @tile_identity_axis(%ctx: !hip.context, %x: tensor<2x3xf32>,
                               %init: tensor<2x12xf32>) -> tensor<2x12xf32>
@@ -53,8 +53,8 @@ func.func @tile_identity_axis(%ctx: !hip.context, %x: tensor<2x3xf32>,
 // 3 before and 4 after, so 1x2 becomes 4x9. TOSA spells the same thing as the
 // interleaved [1, 2, 3, 4].
 // CHECK-LABEL: func.func @pad_constant
-// CHECK: %[[PC:.*]] = "tosa.const"() <{values = dense<0.000000e+00> : tensor<1xf32>}>
-// CHECK: %[[P:.*]] = tosa.const_shape {values = dense<[1, 2, 3, 4]> : tensor<4xindex>}
+// CHECK: %[[PC:.*]] = tosa.const values(dense<0.000000e+00> : tensor<1xf32>)
+// CHECK: %[[P:.*]] = tosa.const_shape values(dense<[1, 2, 3, 4]> : tensor<4xindex>)
 // CHECK: tosa.pad %arg1, %[[P]], %[[PC]]
 // CHECK-NOT: hip.pad
 func.func @pad_constant(%ctx: !hip.context, %x: tensor<1x2xf32>,
@@ -82,7 +82,7 @@ func.func @pad_default_mode(%ctx: !hip.context, %x: tensor<1x2xf32>,
 // `axes` restricts the pads to the listed dimensions; the rest stay at zero,
 // so a single-axis pad still produces a full-rank TOSA padding.
 // CHECK-LABEL: func.func @pad_axes_subset
-// CHECK: %[[P:.*]] = tosa.const_shape {values = dense<[0, 0, 2, 3]> : tensor<4xindex>}
+// CHECK: %[[P:.*]] = tosa.const_shape values(dense<[0, 0, 2, 3]> : tensor<4xindex>)
 // CHECK: tosa.pad %arg1, %[[P]]
 func.func @pad_axes_subset(%ctx: !hip.context, %x: tensor<2x3xf32>,
                            %init: tensor<2x8xf32>) -> tensor<2x8xf32>
@@ -98,7 +98,7 @@ func.func @pad_axes_subset(%ctx: !hip.context, %x: tensor<2x3xf32>,
 
 // A negative axis counts from the end, matching ONNX.
 // CHECK-LABEL: func.func @pad_negative_axis
-// CHECK: %[[P:.*]] = tosa.const_shape {values = dense<[0, 0, 2, 3]> : tensor<4xindex>}
+// CHECK: %[[P:.*]] = tosa.const_shape values(dense<[0, 0, 2, 3]> : tensor<4xindex>)
 // CHECK: tosa.pad %arg1, %[[P]]
 func.func @pad_negative_axis(%ctx: !hip.context, %x: tensor<2x3xf32>,
                              %init: tensor<2x8xf32>) -> tensor<2x8xf32>
@@ -117,7 +117,7 @@ func.func @pad_negative_axis(%ctx: !hip.context, %x: tensor<2x3xf32>,
 // operand is present and non-empty, so a zero-length `axes` reaches the same
 // branch an omitted one does and `pads` carries the full 2 * rank entries.
 // CHECK-LABEL: func.func @pad_empty_axes
-// CHECK: %[[P:.*]] = tosa.const_shape {values = dense<[1, 1, 2, 3]> : tensor<4xindex>}
+// CHECK: %[[P:.*]] = tosa.const_shape values(dense<[1, 1, 2, 3]> : tensor<4xindex>)
 // CHECK: tosa.pad %arg1, %[[P]]
 // CHECK-NOT: hip.pad
 func.func @pad_empty_axes(%ctx: !hip.context, %x: tensor<2x3xf32>,
@@ -134,7 +134,7 @@ func.func @pad_empty_axes(%ctx: !hip.context, %x: tensor<2x3xf32>,
 
 // The fill value becomes tosa.pad's one-element pad_const operand.
 // CHECK-LABEL: func.func @pad_with_cval
-// CHECK: %[[PC:.*]] = "tosa.const"() <{values = dense<2.500000e+00> : tensor<1xf32>}>
+// CHECK: %[[PC:.*]] = tosa.const values(dense<2.500000e+00> : tensor<1xf32>)
 // CHECK: tosa.pad %arg1, %{{.*}}, %[[PC]]
 func.func @pad_with_cval(%ctx: !hip.context, %x: tensor<1x2xf32>,
                          %init: tensor<4x9xf32>) -> tensor<4x9xf32>
@@ -150,7 +150,7 @@ func.func @pad_with_cval(%ctx: !hip.context, %x: tensor<1x2xf32>,
 
 // Integer tensors pad the same way, with an integer pad_const.
 // CHECK-LABEL: func.func @pad_integer
-// CHECK: %[[PC:.*]] = "tosa.const"() <{values = dense<0> : tensor<1xi32>}>
+// CHECK: %[[PC:.*]] = tosa.const values(dense<0> : tensor<1xi32>)
 // CHECK: tosa.pad %arg1, %{{.*}}, %[[PC]]
 func.func @pad_integer(%ctx: !hip.context, %x: tensor<4xi32>,
                        %init: tensor<7xi32>) -> tensor<7xi32>
@@ -166,7 +166,7 @@ func.func @pad_integer(%ctx: !hip.context, %x: tensor<4xi32>,
 // collapses to the one-element pad_const the same way a rank-0 fill does.
 // The float and integer fills accept the same shapes.
 // CHECK-LABEL: func.func @pad_splat_cval
-// CHECK: %[[PCF:.*]] = "tosa.const"() <{values = dense<2.500000e+00> : tensor<1xf32>}>
+// CHECK: %[[PCF:.*]] = tosa.const values(dense<2.500000e+00> : tensor<1xf32>)
 // CHECK: tosa.pad %arg1, %{{.*}}, %[[PCF]]
 func.func @pad_splat_cval(%ctx: !hip.context, %x: tensor<1x2xf32>,
                           %init: tensor<4x9xf32>) -> tensor<4x9xf32>
@@ -181,7 +181,7 @@ func.func @pad_splat_cval(%ctx: !hip.context, %x: tensor<1x2xf32>,
 }
 
 // CHECK-LABEL: func.func @pad_int_splat_cval
-// CHECK: %[[PCI:.*]] = "tosa.const"() <{values = dense<5> : tensor<1xi32>}>
+// CHECK: %[[PCI:.*]] = tosa.const values(dense<5> : tensor<1xi32>)
 // CHECK: tosa.pad %arg1, %{{.*}}, %[[PCI]]
 func.func @pad_int_splat_cval(%ctx: !hip.context, %x: tensor<4xi32>,
                               %init: tensor<7xi32>) -> tensor<7xi32>

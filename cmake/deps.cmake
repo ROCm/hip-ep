@@ -36,9 +36,9 @@ endif()
 #     tablegen DEPENDS and propagate rock/Triton INTERFACE include dirs so
 #     out-of-tree consumers (hip-rocmlir-compiler) build without a downstream
 #     tablegen collector or include-dir export.
-#   - rocmlirTriton-amd-codegen-llvm-commit.patch: fetch the triton_amd_codegen
-#     LLVM archive by any ref, so deps.txt amd_codegen_llvm can pin a commit
-#     instead of following the branch tip.
+#   - rocmlirTriton-pin-commits.patch: fetch the LLVM, Triton and
+#     triton_amd_codegen LLVM archives by any ref, so deps.txt can pin commits
+#     instead of following the branch tips.
 #
 # We do NOT use FetchContent's PATCH_COMMAND: its populate sub-build re-runs the
 # patch step on every reconfigure (not just on first clone), and `git apply` is
@@ -56,7 +56,7 @@ endif()
 set(_rocmlirtriton_patches
     "${CMAKE_CURRENT_LIST_DIR}/rocmlirTriton-use-external-LLVM.patch"
     "${CMAKE_CURRENT_LIST_DIR}/rocmlirTriton-fix-header-dependencies.patch"
-    "${CMAKE_CURRENT_LIST_DIR}/rocmlirTriton-amd-codegen-llvm-commit.patch")
+    "${CMAKE_CURRENT_LIST_DIR}/rocmlirTriton-pin-commits.patch")
 set(_rocmlirtriton_patches_abs "")
 foreach(_p IN LISTS _rocmlirtriton_patches)
   get_filename_component(_p "${_p}" ABSOLUTE)
@@ -479,8 +479,11 @@ if(ENABLE_ROCMLIRTRITON)
 
   set(ROCM_PATH "${THEROCK_DIST}")
 
-  # rocmlirTriton builds a second, AMDGPU-only LLVM for triton_amd_codegen and
-  # defaults it to a branch tip. FORCE so an existing cache picks up a bump.
+  # rocmlirTriton fetches Triton and a second, AMDGPU-only LLVM for
+  # triton_amd_codegen, and defaults both to branch tips. FORCE so an existing
+  # cache picks up a bump.
+  set(ROCMLIR_TRITON_GIT_REPOSITORY "${DEP_URL_triton}" CACHE STRING "" FORCE)
+  set(ROCMLIR_TRITON_GIT_BRANCH "${DEP_HASH_triton}" CACHE STRING "" FORCE)
   set(ROCMLIR_AMD_CODEGEN_LLVM_GIT_REPOSITORY "${DEP_URL_amd_codegen_llvm}"
       CACHE STRING "" FORCE)
   set(ROCMLIR_AMD_CODEGEN_LLVM_GIT_BRANCH "${DEP_HASH_amd_codegen_llvm}"
