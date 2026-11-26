@@ -184,17 +184,7 @@ int wrap_skip_layer_norm(RuntimeState *state, void *input, void *skip,
       bias ? "yes" : "null", input_skip_bias_sum ? "yes" : "null");
 
   void *stream = hipdnn_ep_state_get_stream(state);
-  int64_t block_bytes = skip_num_elements * element_size_bytes;
-  for (int64_t row = 0; row < outer; row += skip_rows) {
-    int64_t offset = (row / skip_rows) * block_bytes;
-    int rc = hip_skip_layer_norm(
-        stream, static_cast<char *>(input) + offset, skip, gamma, beta, bias,
-        static_cast<char *>(output) + offset,
-        input_skip_bias_sum ? static_cast<char *>(input_skip_bias_sum) + offset
-                            : nullptr,
-        skip_rows, gamma_num_elements, epsilon, hip_dtype);
-    if (rc != 0)
-      return rc;
-  }
-  return 0;
+  return hip_skip_layer_norm(stream, input, skip, gamma, beta, bias, output,
+                             input_skip_bias_sum, outer, skip_rows,
+                             gamma_num_elements, epsilon, hip_dtype);
 }

@@ -608,9 +608,9 @@ class TestLayerNormalization:
     def test_layer_norm_large_magnitude_fp32(self, model_runner):
         """Rows whose plain sum of squares is finite but near the fp32 limit.
 
-        Squaring x - x[0] overflows for x = [1e19, -1e19] (the second shifted
-        value is -2e19), which would zero both outputs instead of giving about
-        +-1 times scale.
+        Deviations from a sample instead of the mean overflow when squared
+        for x = [1e19, -1e19] (x - x[0] is -2e19), which would zero both
+        outputs instead of giving about +-1 times scale.
         """
         input_shape = [2, 2]
         model = _make_layer_norm_model(input_shape, np.float32, with_bias=True)
@@ -669,10 +669,14 @@ class TestLayerNormalization:
         )
         compare_outputs(actual, expected, atol=2e-4, rtol=2e-4)
 
-    def test_layer_norm_first_element_outlier(self, model_runner):
-        input_shape = [1, 256]
+    # One large sample dominates the row. With the rest at 1, an fp32 first
+    # pass rounds the mean (1e8 + 1 is 1e8); the second pass recovers it.
+    # 4096 runs the row kernel, 65536 the block kernel.
+    @pytest.mark.parametrize("hidden,rest", [(256, 0.0), (4096, 1.0), (65536, 1.0)])
+    def test_layer_norm_first_element_outlier(self, model_runner, hidden, rest):
+        input_shape = [1, hidden]
         model = _make_layer_norm_model(input_shape, np.float32, with_bias=True)
-        x = np.zeros(input_shape, dtype=np.float32)
+        x = np.full(input_shape, rest, dtype=np.float32)
         x[0, 0] = 1e8
         actual, expected = model_runner.run_sample(
             model,
@@ -1030,6 +1034,76 @@ class TestSkipLayerNormSizes:
         actual, expected = model_runner.run_sample(model, [x, s])
         atol = 1e-5 if dtype == np.float32 else 4e-3
         compare_outputs(actual, expected, atol=atol, rtol=1e-3)
+
+    @pytest.mark.parametrize("dtype", [np.float16, np.float32])
+    def test_skip_layer_norm_rank2_skip_bias(self, model_runner, dtype):
+        """A [S, H] skip with a bias against [B, S, H]: one fused launch reads
+        skip row r mod S for input row r."""
+        shape, hidden = [4, 6, 768], 768
+        rng = np.random.default_rng(1504)
+        model = _make_skip_layer_norm_shapes_model(
+            shape, shape[1:], dtype, rng.uniform(-0.5, 0.5, [hidden]).astype(dtype)
+        )
+        x = rng.uniform(-2, 2, shape).astype(dtype)
+        s = rng.uniform(-2, 2, shape[1:]).astype(dtype)
+        actual, expected = model_runner.run_sample(model, [x, s])
+        atol = 1e-5 if dtype == np.float32 else 4e-3
+        compare_outputs(actual, expected, atol=atol, rtol=1e-3)
+
+    @pytest.mark.parametrize("dynamic_hidden", [False, True])
+    def test_skip_layer_norm_f16_sum_rounds_once(self, model_runner, dynamic_hidden):
+        """input + skip overflows f16 (60000 + 60032) while the whole sum,
+        after the -60000 bias, does not. ORT adds in fp32 and rounds once; so
+        do the fused kernel and, for a dynamic hidden size, the fallback."""
+        hidden = 8
+        bias = np.full([hidden], -60000, np.float16)
+        model = _make_skip_layer_norm_shapes_model(
+            [1, 2, "hidden" if dynamic_hidden else hidden],
+            [1, 2, "hidden" if dynamic_hidden else hidden],
+            np.float16,
+            bias,
+        )
+        x = np.full([1, 2, hidden], 60000, np.float16)
+        s = np.tile(np.linspace(60000, 60032, hidden), (1, 2, 1)).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [x, s])
+        assert np.isfinite(actual[0]).all() and np.isfinite(actual[1]).all()
+        compare_outputs(actual, expected, atol=4e-3, rtol=1e-3)
+
+
+def _make_skip_layer_norm_shapes_model(input_shape, skip_shape, dtype, bias):
+    """5-input SkipLayerNormalization with output[0] and output[3]; string dims
+    are symbolic. gamma / beta are random, bias as given."""
+    hidden = len(bias)
+    tp = _TENSOR_PROTO[dtype]
+    rng = np.random.default_rng(1505)
+    node = helper.make_node(
+        "SkipLayerNormalization",
+        ["X", "S", "gamma", "beta", "bias"],
+        ["Y", "", "", "Y3"],
+        domain="com.microsoft",
+        epsilon=1e-5,
+    )
+    return make_model_from_nodes(
+        [node],
+        [
+            helper.make_tensor_value_info("X", tp, input_shape),
+            helper.make_tensor_value_info("S", tp, skip_shape),
+        ],
+        [
+            helper.make_tensor_value_info("Y", tp, input_shape),
+            helper.make_tensor_value_info("Y3", tp, input_shape),
+        ],
+        initializers=[
+            numpy_helper.from_array(
+                rng.uniform(0.5, 1.5, [hidden]).astype(dtype), name="gamma"
+            ),
+            numpy_helper.from_array(
+                rng.uniform(-0.5, 0.5, [hidden]).astype(dtype), name="beta"
+            ),
+            numpy_helper.from_array(bias, name="bias"),
+        ],
+        extra_opsets=[helper.make_opsetid("com.microsoft", 1)],
+    )
 
 
 def _make_instance_norm_model(input_shape: list[int], dtype=np.float32):

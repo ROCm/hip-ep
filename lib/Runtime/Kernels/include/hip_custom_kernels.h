@@ -2312,7 +2312,8 @@ HIP_KERNEL_API int hip_layer_norm(
  *   y   = (sum - mean) * rsqrt(var + epsilon) * gamma [+ beta]
  *
  * `beta`, `bias` and `input_skip_bias_sum` may be null. All tensors share
- * `hip_dtype` (FLOAT16 or FLOAT32).
+ * `hip_dtype` (FLOAT16 or FLOAT32). `skip` holds `skip_rows` rows; input
+ * row r adds skip row r % skip_rows.
  */
 HIP_KERNEL_API int hip_skip_layer_norm(
     void* stream,
@@ -2324,6 +2325,7 @@ HIP_KERNEL_API int hip_skip_layer_norm(
     void* output,
     void* input_skip_bias_sum,        // optional
     int64_t outer,
+    int64_t skip_rows,
     int64_t norm_size,
     float epsilon,
     int hip_dtype);
