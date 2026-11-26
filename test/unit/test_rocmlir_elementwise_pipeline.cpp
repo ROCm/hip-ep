@@ -190,13 +190,21 @@ int main() {
   mlir::OwningOpRef<mlir::ModuleOp> embedded = graph->clone();
 
   mlir::OwningOpRef<mlir::ModuleOp> tosaKernels =
-      mlir::hip::takeRocMlirKernelsAsTosaModule(*graph, "gfx1151");
+      mlir::hip::takeRocMlirKernelsAsTosaModule(*graph, "gfx1151",
+                                                /*numCU=*/20);
   check(static_cast<bool>(tosaKernels), "HIP-to-TOSA converts both kernels");
   if (!tosaKernels)
     return 1;
   auto tosaAnchor = tosaKernels->lookupSymbol<mlir::func::FuncOp>(anchorName);
   auto tosaPointwise =
       tosaKernels->lookupSymbol<mlir::func::FuncOp>(pointwiseName);
+  auto numCU = tosaAnchor
+                   ? tosaAnchor->getAttrOfType<mlir::IntegerAttr>("rock.num_cu")
+                   : mlir::IntegerAttr();
+  check(numCU && numCU.getInt() == 20, "kernel carries rock.num_cu");
+  check(tosaAnchor && tosaAnchor->hasAttr("rock.enable_splitk_for_tuning") ==
+                          mlir::hip::rocMlirSplitKTuningEnabled(),
+        "rock.enable_splitk_for_tuning follows HIPDNN_EP_ROCMLIR_SPLITK");
   check(tosaAnchor && !tosaAnchor->hasAttr("rock.elementwise"),
         "conv kernel has no marker after HIP-to-TOSA");
   check(tosaPointwise && tosaPointwise->hasAttr("rock.elementwise"),

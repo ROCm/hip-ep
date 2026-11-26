@@ -143,8 +143,19 @@ std::string rocMlirArtifactTarget() {
     // built with another space must not be reused: the cache is keyed on the
     // graph alone.
     mlir::hip::AutotuneSpace space;
-    if (!target.empty() && mlir::hip::rocMlirAutotuneFromEnv(space))
+    const bool autotune =
+        !target.empty() && mlir::hip::rocMlirAutotuneFromEnv(space);
+    if (autotune)
       target += std::string("+autotune=") + mlir::hip::autotuneSpaceName(space);
+    // rock.num_cu changes tile grouping and which split-K variants exist, and
+    // split-K variants enter only the full and exhaustive spaces, so an
+    // artifact tuned for another CU count or split-K setting is not reused.
+    if (int64_t numCU = mlir::hip::resolveRocMlirNumCU();
+        !target.empty() && numCU > 0)
+      target += "+cu=" + std::to_string(numCU);
+    if (autotune && space != mlir::hip::AutotuneSpace::Quick &&
+        !mlir::hip::rocMlirSplitKTuningEnabled())
+      target += "+no-splitk";
     // The same holds for the kernel plan: without standalone elementwise
     // kernels the leftover modules run as HIP ops, a different artifact.
     if (!target.empty() &&
@@ -504,6 +515,7 @@ bool CompilerDriver::runMLIRPasses(
 
     mlir::hip::RocMlirEmbedOptions embedOpts;
     embedOpts.arch = mlir::hip::resolveRocMlirArch();
+    embedOpts.numCU = mlir::hip::resolveRocMlirNumCU();
     if (hip_env_is_on("HIPDNN_EP_ROCMLIR_VERBOSE")) {
       embedOpts.log = &llvm::errs();
       embedOpts.logPrefix = "[CompilerDriver/rocmlir]";
