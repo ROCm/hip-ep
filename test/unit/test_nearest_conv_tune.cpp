@@ -32,6 +32,7 @@
 
 #ifndef _WIN32
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 #endif
 
@@ -516,6 +517,39 @@ int main() {
     doc["gpu_arch"] = 5;
     rejects(std::move(doc), "a non-string gpu_arch is rejected");
   }
+  // The `.fbs` types: a table with other values could not be shipped through
+  // problem_cache_to_fb.py, so the loader and the rewrite refuse it.
+  {
+    llvm::json::Object doc = dumpDoc();
+    doc["rocm_version"] = "6.4";
+    rejects(std::move(doc), "a non-integer rocm_version is rejected");
+  }
+  {
+    llvm::json::Object doc = dumpDoc();
+    doc["rocm_version"] = static_cast<int64_t>(1) << 40;
+    rejects(std::move(doc), "a rocm_version above int32 is rejected");
+  }
+  {
+    llvm::json::Object doc = dumpDoc();
+    doc["model_key"] = 7;
+    rejects(std::move(doc), "a non-string model_key is rejected");
+  }
+  for (const int64_t bad :
+       {static_cast<int64_t>(-1), static_cast<int64_t>(4294967296LL)}) {
+    llvm::json::Object doc = dumpDoc();
+    (*doc.getArray("points"))[0].getAsObject()->operator[]("m") = bad;
+    rejects(std::move(doc), "a point dimension outside uint32 is rejected");
+  }
+  {
+    llvm::json::Object doc = dumpDoc();
+    doc.getArray("configs")->clear();
+    for (int i = 0; i < 65537; ++i)
+      doc.getArray("configs")->push_back(llvm::json::Object{
+          {"perf_config", "gemm:mPerBlock=" + std::to_string(i + 1)}});
+    doc.getArray("points")->clear();
+    doc.getArray("fallbacks")->clear();
+    rejects(std::move(doc), "more configs than a uint16 index is rejected");
+  }
   {
     llvm::json::Object doc = dumpDoc();
     doc["schema_version"] = 2;
@@ -738,6 +772,49 @@ int main() {
     const llvm::json::Object *root = out.getAsObject();
     expect(root && root->getInteger("schema_version") == 1,
            "the rewrite materializes schema_version");
+  }
+  {
+    // A dimension that does not fit the table's uint32 is stored as 0, which
+    // the schema uses for "not recognized", not as a value the converter would
+    // refuse. The rewrite still succeeds.
+    std::string merged;
+    const std::string huge =
+        "gfx1151\t2\t1\t-t f32 -m 5000000000 -n 1000 -k 1280";
+    expect(mlir::hip::mergeProblemCacheJson("", "gfx1151", {{huge, tile32}},
+                                            merged, error),
+           "a winner with a huge dimension is stored");
+    llvm::json::Value out = parseDoc(merged);
+    const llvm::json::Array *pts =
+        out.getAsObject() ? out.getAsObject()->getArray("points") : nullptr;
+    const llvm::json::Object *first =
+        pts && !pts->empty() ? (*pts)[0].getAsObject() : nullptr;
+    expect(first && first->getInteger("m") == 0 &&
+               first->getInteger("n") == 1000 && first->getInteger("k") == 1280,
+           "a dimension above uint32 is stored as 0");
+  }
+  {
+    // A rewrite that would need more than 65536 distinct configs is refused
+    // rather than written with indices that wrap.
+    llvm::json::Object doc = dumpDoc();
+    doc.getArray("configs")->clear();
+    doc.getArray("points")->clear();
+    doc.getArray("fallbacks")->clear();
+    for (int i = 0; i < 65536; ++i) {
+      doc.getArray("configs")->push_back(llvm::json::Object{
+          {"perf_config", "gemm:mPerBlock=" + std::to_string(i + 1)}});
+      doc.getArray("points")->push_back(
+          llvm::json::Object{{"problem", "p" + std::to_string(i)},
+                             {"config", i},
+                             {"m", 1},
+                             {"n", 1},
+                             {"k", 1}});
+    }
+    std::string merged;
+    expect(!mlir::hip::mergeProblemCacheJson(jsonText(std::move(doc)),
+                                             "gfx1151", {{"new", tile32}},
+                                             merged, error) &&
+               error.find("65536") != std::string::npos,
+           "a rewrite past 65536 configs is refused");
   }
   {
     // Existing data is kept: a point the loader would skip, other top-level
@@ -1611,6 +1688,80 @@ int main() {
         fs::remove(kept);
       }
       ::umask(oldMask);
+    }
+#endif
+
+#ifndef _WIN32
+    // Only a regular file is a cache. A pipe would block the read for good and
+    // a device would read as an empty table that the rename then replaces.
+    {
+      namespace fs = std::filesystem;
+      const std::string pipe = (dir / "pipe.json").string();
+      expect(::mkfifo(pipe.c_str(), 0600) == 0, "a pipe can be made");
+      mlir::hip::ProblemCacheLut piped;
+      expect(!mlir::hip::checkProblemCacheJsonFile(pipe, "gfx1151", piped,
+                                                   error) &&
+                 error.find("regular file") != std::string::npos,
+             "a pipe fails the check without blocking");
+      expect(!mlir::hip::loadProblemCacheLutJsonFile(pipe, piped, error) &&
+                 error.find("regular file") != std::string::npos,
+             "a pipe is not read");
+      expect(!mlir::hip::updateProblemCacheJsonFile(pipe, "gfx1151",
+                                                    {{exact, tile32}}, error) &&
+                 fs::is_fifo(pipe),
+             "a pipe is not replaced");
+      expect(!mlir::hip::checkProblemCacheJsonFile("/dev/null", "gfx1151",
+                                                   piped, error) &&
+                 error.find("regular file") != std::string::npos,
+             "a device is refused");
+    }
+
+    // A replaced table keeps its group as well as its mode. The rename would
+    // otherwise hand it to the caller's primary group and take group access
+    // away from the people a shared cache is for.
+    {
+      namespace fs = std::filesystem;
+      std::vector<gid_t> groups(64);
+      const int count =
+          ::getgroups(static_cast<int>(groups.size()), groups.data());
+      gid_t other = static_cast<gid_t>(-1);
+      for (int i = 0; i < count; ++i)
+        if (groups[i] != ::getegid())
+          other = groups[i];
+      const std::string shared = (dir / "shared_group.json").string();
+      {
+        std::ofstream out(shared, std::ios::binary);
+        out << jsonText(dumpDoc());
+      }
+      if (other != static_cast<gid_t>(-1) &&
+          ::chown(shared.c_str(), static_cast<uid_t>(-1), other) == 0) {
+        ::chmod(shared.c_str(), 0664);
+        expect(mlir::hip::updateProblemCacheJsonFile(
+                   shared, "gfx1151", {{gemmAt(24), tile32}}, error),
+               "a table in another group is rewritten");
+        struct stat st {};
+        expect(::stat(shared.c_str(), &st) == 0 && st.st_gid == other &&
+                   (st.st_mode & 0777) == 0664,
+               "a replaced table keeps its group");
+      }
+      fs::remove(shared);
+    }
+
+    // The kernel does not follow another user's symbolic link in a sticky,
+    // world-writable directory; the rewrite follows a dangling one by hand,
+    // so it applies the same rule.
+    {
+      using mlir::hip::mayFollowDanglingLink;
+      expect(mayFollowDanglingLink(1000, 0, false, 1000),
+             "your own link is followed");
+      expect(mayFollowDanglingLink(2000, 0, false, 1000),
+             "another user's link outside a sticky directory is followed");
+      expect(!mayFollowDanglingLink(2000, 0, true, 1000),
+             "another user's link in a sticky directory is refused");
+      expect(mayFollowDanglingLink(1000, 0, true, 1000),
+             "your own link in a sticky directory is followed");
+      expect(mayFollowDanglingLink(2000, 2000, true, 1000),
+             "a link owned by the directory's owner is followed");
     }
 #endif
 

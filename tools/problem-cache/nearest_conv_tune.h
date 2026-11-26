@@ -102,6 +102,15 @@ bool loadProblemCacheLutJson(std::string_view text, ProblemCacheLut &lut,
 bool loadProblemCacheLutJsonFile(const std::string &path, ProblemCacheLut &lut,
                                  std::string &error);
 
+// Whether a rewrite may follow a dangling symbolic link that it finds on the
+// way to the cache file. It applies the rule the kernel uses for
+// protected_symlinks, which does not cover a link followed by hand: in a
+// sticky, world-writable directory (/tmp) a link is followed only when its
+// owner is the caller or the directory's owner. Elsewhere any link is.
+bool mayFollowDanglingLink(uint32_t linkOwner, uint32_t directoryOwner,
+                           bool directoryIsStickyAndWritable,
+                           uint32_t callerUid);
+
 // A problem string and the perfConfig the search picked for it.
 struct ProblemCacheWinner {
   std::string problem;

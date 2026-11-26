@@ -932,6 +932,20 @@ bool readLutHeaderJson(const llvm::json::Object &root, ProblemCacheLut &lut,
     error = "rocmlir LUT has a non-positive or non-finite distance weight";
     return false;
   }
+  // The `.fbs` types: rocm_version is an int32 and model_key a string. A
+  // document that holds anything else could not be compiled to a `.fb`.
+  if (root.get("rocm_version") != nullptr) {
+    std::optional<int64_t> version = root.getInteger("rocm_version");
+    if (!version || *version < std::numeric_limits<int32_t>::min() ||
+        *version > std::numeric_limits<int32_t>::max()) {
+      error = "rocmlir LUT rocm_version is not a 32-bit integer";
+      return false;
+    }
+  }
+  if (root.get("model_key") != nullptr && !root.getString("model_key")) {
+    error = "rocmlir LUT model_key is not a string";
+    return false;
+  }
   if (root.get("gpu_arch") != nullptr) {
     // A gpu_arch that is not a string would otherwise read as absent, and an
     // absent arch matches every GPU.
@@ -946,6 +960,17 @@ bool readLutHeaderJson(const llvm::json::Object &root, ProblemCacheLut &lut,
   lut.weightN = weightN;
   lut.weightK = weightK;
   return true;
+}
+
+// Limits of the `.fbs` types the document is compiled to.
+constexpr size_t kMaxConfigs = 65536;
+constexpr int64_t kMaxDimension = std::numeric_limits<uint32_t>::max();
+
+// A dimension worked out from a problem string. One that does not fit the
+// table's uint32 is stored as 0, which the `.fbs` already uses for "not
+// recognized", rather than written out as a value the converter rejects.
+int64_t storableDimension(int64_t value) {
+  return value >= 0 && value <= kMaxDimension ? value : 0;
 }
 
 // The rows of a LUT document. The objects point into the parsed document,
@@ -984,6 +1009,11 @@ bool readLutRows(const llvm::json::Object &root, LutRows &rows,
   if (points == nullptr)
     return malformed("`points` is missing or not an array");
 
+  // `config` is a uint16 in the `.fbs`, so a table can name 65536 configs.
+  if (configs->size() > kMaxConfigs)
+    return malformed("`configs` has " + std::to_string(configs->size()) +
+                     " entries; at most " + std::to_string(kMaxConfigs) +
+                     " fit the table format");
   rows.perfConfigs.reserve(configs->size());
   for (size_t i = 0; i < configs->size(); ++i) {
     const llvm::json::Object *object = (*configs)[i].getAsObject();
@@ -1021,10 +1051,15 @@ bool readLutRows(const llvm::json::Object &root, LutRows &rows,
     record.problem = problem->str();
     if (!configIndexOf(*record.object, where, record.config))
       return false;
+    // m, n and k are uint32 in the `.fbs`.
     for (const char *dim : {"m", "n", "k"}) {
       const llvm::json::Value *value = record.object->get(dim);
-      if (value != nullptr && !value->getAsInteger())
-        return malformed(where + " has a non-integer `m`, `n` or `k`");
+      if (value == nullptr)
+        continue;
+      std::optional<int64_t> number = value->getAsInteger();
+      if (!number || *number < 0 || *number > kMaxDimension)
+        return malformed(where + " has an `m`, `n` or `k` that is not an "
+                                 "integer from 0 to 4294967295");
     }
     rows.points.push_back(std::move(record));
   }
@@ -1100,6 +1135,17 @@ std::mutex &rewriteMutex() {
 bool loadProblemCacheLutJsonFile(const std::string &path, ProblemCacheLut &lut,
                                  std::string &error) {
   std::lock_guard<std::mutex> lock(rewriteMutex());
+  {
+    std::error_code ec;
+    const std::filesystem::file_status status =
+        std::filesystem::status(path, ec);
+    if (!ec && std::filesystem::exists(status) &&
+        !std::filesystem::is_regular_file(status)) {
+      lut = {};
+      error = "problem cache " + path + " is not a regular file";
+      return false;
+    }
+  }
   std::ifstream in(path, std::ios::binary);
   if (!in) {
     lut = {};
@@ -1218,6 +1264,9 @@ bool mergeProblemCacheJson(std::string_view existing, std::string_view gpuArch,
       // Each one that is absent is worked out from the problem string, so a
       // point with only some of them keeps the ones it has.
       implicitGemmDims(point.problem, stored.m, stored.n, stored.k);
+      stored.m = storableDimension(stored.m);
+      stored.n = storableDimension(stored.n);
+      stored.k = storableDimension(stored.k);
       const char *names[3] = {"m", "n", "k"};
       int64_t *outDims[3] = {&stored.m, &stored.n, &stored.k};
       for (int i = 0; i < 3; ++i)
@@ -1250,6 +1299,9 @@ bool mergeProblemCacheJson(std::string_view existing, std::string_view gpuArch,
     stored.problem = winner.problem;
     stored.perfConfig = winner.perfConfig;
     implicitGemmDims(winner.problem, stored.m, stored.n, stored.k);
+    stored.m = storableDimension(stored.m);
+    stored.n = storableDimension(stored.n);
+    stored.k = storableDimension(stored.k);
     fresh[winner.problem] = std::move(stored);
   }
   std::vector<StoredPoint> merged;
@@ -1297,6 +1349,12 @@ bool mergeProblemCacheJson(std::string_view existing, std::string_view gpuArch,
     fallback.record["config"] = indexOf(fallback.perfConfig);
     outFallbacks.push_back(std::move(fallback.record));
   }
+  if (outConfigs.size() > kMaxConfigs) {
+    error = "problem cache would hold " + std::to_string(outConfigs.size()) +
+            " distinct configs; at most " + std::to_string(kMaxConfigs) +
+            " fit the table format";
+    return false;
+  }
   root["configs"] = std::move(outConfigs);
   root["points"] = std::move(outPoints);
   if (hadFallbacks)
@@ -1307,7 +1365,16 @@ bool mergeProblemCacheJson(std::string_view existing, std::string_view gpuArch,
   return true;
 }
 
+bool mayFollowDanglingLink(uint32_t linkOwner, uint32_t directoryOwner,
+                           bool directoryIsStickyAndWritable,
+                           uint32_t callerUid) {
+  return !directoryIsStickyAndWritable || linkOwner == callerUid ||
+         linkOwner == directoryOwner;
+}
+
 namespace {
+
+std::string errnoMessage() { return std::generic_category().message(errno); }
 
 // Finds the file to rewrite for \p path: where a symlink points, not the link
 // itself. weakly_canonical resolves every link that leads to something that
@@ -1338,7 +1405,31 @@ bool resolveWriteTarget(const std::string &path, std::filesystem::path &target,
       target = std::move(resolved);
       return true;
     }
-    // Only a dangling link is still a link here.
+    // Only a dangling link is still a link here. The kernel does not follow
+    // a link that someone else left in a sticky, world-writable directory like
+    // /tmp when it opens the path; following it here by hand would give that
+    // protection up, so the same rule is applied first.
+#ifndef _WIN32
+    {
+      struct stat linkStat {};
+      struct stat dirStat {};
+      const fs::path parent = resolved.parent_path();
+      if (::lstat(resolved.c_str(), &linkStat) != 0 ||
+          ::stat(parent.empty() ? "." : parent.c_str(), &dirStat) != 0) {
+        error = "cannot inspect symbolic link " + resolved.string() + ": " +
+                errnoMessage();
+        return false;
+      }
+      const bool sticky =
+          (dirStat.st_mode & S_ISVTX) != 0 && (dirStat.st_mode & S_IWOTH) != 0;
+      if (!mayFollowDanglingLink(linkStat.st_uid, dirStat.st_uid, sticky,
+                                 ::geteuid())) {
+        error = "refusing to follow symbolic link " + resolved.string() +
+                " in a shared directory: it belongs to another user";
+        return false;
+      }
+    }
+#endif
     fs::path link = fs::read_symlink(resolved, ec);
     if (ec) {
       error = "cannot read symbolic link " + resolved.string() + ": " +
@@ -1388,6 +1479,12 @@ bool readRewriteTarget(const std::string &path,
   }
   if (!present)
     return true;
+  // A pipe would block the read for good, and a device would be read as an
+  // empty table and then renamed over. Only a regular file is a cache.
+  if (!fs::is_regular_file(target, ec)) {
+    error = "problem cache " + path + " is not a regular file";
+    return false;
+  }
   std::ifstream in(target, std::ios::binary);
   if (!in) {
     error = "cannot read problem cache: " + path;
@@ -1453,8 +1550,6 @@ bool isWritable(const std::filesystem::path &target) {
 #endif
 }
 
-std::string errnoMessage() { return std::generic_category().message(errno); }
-
 // Creates \p path, which must not exist yet, writes \p text to it and flushes
 // it to the disk, so that a crash after the rename cannot leave an empty or
 // partial table in its place. \p exists is set when the name was taken. On any
@@ -1462,11 +1557,14 @@ std::string errnoMessage() { return std::generic_category().message(errno); }
 //
 // The file is created readable by its owner only, whatever the umask is, so
 // the table (which carries model metadata) is never readable by others while
-// it is written, or if the process dies before the rename. \p finalPerms, the
-// mode of the file being replaced, is applied once the contents are written.
+// it is written, or if the process dies before the rename. \p finalPerms and
+// \p groupId, the mode and the group of the file being replaced, are applied
+// once the contents are written, so that a shared cache keeps its group
+// access.
 bool writeNewFile(const std::filesystem::path &path, std::string_view text,
                   std::optional<std::filesystem::perms> finalPerms,
-                  bool &exists, std::string &error) {
+                  std::optional<uint32_t> groupId, bool &exists,
+                  std::string &error) {
   exists = false;
 #ifdef _WIN32
   int fd = -1;
@@ -1514,7 +1612,10 @@ bool writeNewFile(const std::filesystem::path &path, std::string_view text,
   }
 #ifndef _WIN32
   // Best effort: a failure here is not worth losing the winners over, and the
-  // file is then only more private than the one it replaces.
+  // file is then only more private than the one it replaces. The group goes
+  // first, because changing it can clear the set-group-ID bit of the mode.
+  if (groupId)
+    (void)::fchown(fd, static_cast<uid_t>(-1), static_cast<gid_t>(*groupId));
   if (finalPerms)
     (void)::fchmod(fd, static_cast<mode_t>(*finalPerms) & 0777);
 #endif
@@ -1645,6 +1746,14 @@ bool updateProblemCacheJsonFile(const std::string &path,
   // Write beside the target and rename over it, so the old file survives a
   // failed or interrupted write. The name carries the process id and is
   // created exclusively, so two processes never write the same temporary.
+  std::optional<uint32_t> oldGroup;
+#ifndef _WIN32
+  {
+    struct stat st {};
+    if (present && ::stat(target.c_str(), &st) == 0)
+      oldGroup = static_cast<uint32_t>(st.st_gid);
+  }
+#endif
   std::optional<fs::perms> oldPerms;
   if (present) {
     const fs::file_status old = fs::status(target, ec);
@@ -1660,7 +1769,7 @@ bool updateProblemCacheJsonFile(const std::string &path,
                  std::to_string(counter.fetch_add(1));
     bool exists = false;
     std::string reason;
-    if (writeNewFile(temporary, merged, oldPerms, exists, reason))
+    if (writeNewFile(temporary, merged, oldPerms, oldGroup, exists, reason))
       break;
     if (exists && attempt + 1 < kMaxNameAttempts)
       continue;
