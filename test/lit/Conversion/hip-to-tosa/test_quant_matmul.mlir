@@ -7,7 +7,7 @@
 
 // CHECK-LABEL: func.func @quant_matmul_i8
 // CHECK-SAME: (%[[A:.*]]: tensor<4x64xi8>, %[[B:.*]]: tensor<64x16xi8>)
-// CHECK-DAG: %[[ZP:.*]] = "tosa.const"() <{values = dense<0> : tensor<1xi8>}>
+// CHECK-DAG: %[[ZP:.*]] = tosa.const values(dense<0> : tensor<1xi8>)
 // CHECK-DAG: %[[A3:.*]] = tosa.reshape %[[A]], %{{.*}} : (tensor<4x64xi8>, !tosa.shape<3>) -> tensor<1x4x64xi8>
 // CHECK-DAG: %[[B3:.*]] = tosa.reshape %[[B]], %{{.*}} : (tensor<64x16xi8>, !tosa.shape<3>) -> tensor<1x64x16xi8>
 // CHECK: %[[M:.*]] = tosa.matmul %[[A3]], %[[B3]], %[[ZP]], %[[ZP]] : {{.*}} -> tensor<1x4x16xi32>
@@ -27,10 +27,10 @@ func.func @quant_matmul_i8(%a: tensor<4x64xi8>, %b: tensor<64x16xi8>)
 
 // CHECK-LABEL: func.func @quant_matmul_ui8
 // CHECK-NOT: ui8
-// CHECK: tosa.custom %{{.*}} {{.*}}operator_name = "unsigned_cast"
-// CHECK: %[[C128:.*]] = "tosa.const"() <{values = dense<128> : tensor<1x1xi32>}>
+// CHECK: tosa.custom %{{.*}} {{.*}}operator_name("unsigned_cast")
+// CHECK: %[[C128:.*]] = tosa.const values(dense<128> : tensor<1x1xi32>)
 // CHECK: %[[S:.*]] = tosa.sub %{{.*}}, %[[C128]] : (tensor<4x64xi32>, tensor<1x1xi32>) -> tensor<4x64xi32>
-// CHECK: %[[A8:.*]] = tosa.cast %[[S]] : (tensor<4x64xi32>) -> tensor<4x64xi8>
+// CHECK: %[[A8:.*]] = tosa.cast %[[S]] input_unsigned(false) : (tensor<4x64xi32>) -> tensor<4x64xi8>
 // CHECK: tosa.reshape %[[A8]]
 // CHECK: tosa.matmul {{.*}} -> tensor<1x4x16xi32>
 func.func @quant_matmul_ui8(%a: tensor<4x64xui8>, %b: tensor<64x16xi8>)

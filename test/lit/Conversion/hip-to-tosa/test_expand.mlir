@@ -39,8 +39,8 @@
 // rocMLIR's own mixr-to-tosa-ops.mlir pins for migraphx.multibroadcast, down to
 // the f16 element type and the splat ones constant.
 // CHECK-LABEL: func.func @expand_leading_dim
-// CHECK-DAG: %[[ONES:.*]] = "tosa.const"() <{values = dense<1.000000e+00> : tensor<64x768x2304xf16>}>
-// CHECK-DAG: %[[SHIFT:.*]] = "tosa.const"() <{values = dense<0> : tensor<1xi8>}>
+// CHECK-DAG: %[[ONES:.*]] = tosa.const values(dense<1.000000e+00> : tensor<64x768x2304xf16>)
+// CHECK-DAG: %[[SHIFT:.*]] = tosa.const values(dense<0> : tensor<1xi8>)
 // CHECK: tosa.mul %arg1, %[[ONES]], %[[SHIFT]] : (tensor<1x768x2304xf16>, tensor<64x768x2304xf16>, tensor<1xi8>) -> tensor<64x768x2304xf16>
 // CHECK-NOT: hip.expand
 func.func @expand_leading_dim(%ctx: !hip.context, %x: tensor<1x768x2304xf16>,
@@ -59,8 +59,8 @@ func.func @expand_leading_dim(%ctx: !hip.context, %x: tensor<1x768x2304xf16>,
 // multiply. Both remaining dimensions broadcast: 3 passes through, 1 stretches
 // to 6.
 // CHECK-LABEL: func.func @expand_rank_extending
-// CHECK-DAG: %[[ONES:.*]] = "tosa.const"() <{values = dense<1.000000e+00> : tensor<2x3x6xf32>}>
-// CHECK-DAG: %[[SHAPE:.*]] = tosa.const_shape {values = dense<[1, 3, 1]> : tensor<3xindex>}
+// CHECK-DAG: %[[ONES:.*]] = tosa.const values(dense<1.000000e+00> : tensor<2x3x6xf32>)
+// CHECK-DAG: %[[SHAPE:.*]] = tosa.const_shape values(dense<[1, 3, 1]> : tensor<3xindex>)
 // CHECK: %[[RESHAPED:.*]] = tosa.reshape %arg1, %[[SHAPE]] : (tensor<3x1xf32>, !tosa.shape<3>) -> tensor<1x3x1xf32>
 // CHECK: tosa.mul %[[RESHAPED]], %[[ONES]], %{{.*}} : (tensor<1x3x1xf32>, tensor<2x3x6xf32>, tensor<1xi8>) -> tensor<2x3x6xf32>
 // CHECK-NOT: hip.expand
@@ -77,8 +77,8 @@ func.func @expand_rank_extending(%ctx: !hip.context, %x: tensor<3x1xf32>,
 // A rank-0 source is the widest rank extension there is; every dimension of the
 // result comes from the broadcast.
 // CHECK-LABEL: func.func @expand_scalar_source
-// CHECK-DAG: %[[ONES:.*]] = "tosa.const"() <{values = dense<1.000000e+00> : tensor<4x8xf32>}>
-// CHECK-DAG: %[[SHAPE:.*]] = tosa.const_shape {values = dense<1> : tensor<2xindex>}
+// CHECK-DAG: %[[ONES:.*]] = tosa.const values(dense<1.000000e+00> : tensor<4x8xf32>)
+// CHECK-DAG: %[[SHAPE:.*]] = tosa.const_shape values(dense<1> : tensor<2xindex>)
 // CHECK: %[[RESHAPED:.*]] = tosa.reshape %arg1, %[[SHAPE]] : (tensor<f32>, !tosa.shape<2>) -> tensor<1x1xf32>
 // CHECK: tosa.mul %[[RESHAPED]], %[[ONES]], %{{.*}} -> tensor<4x8xf32>
 // CHECK-NOT: hip.expand
@@ -96,8 +96,8 @@ func.func @expand_scalar_source(%ctx: !hip.context, %x: tensor<f32>,
 // shift operand has to be zero: tosa.mul right-shifts the product of integer
 // inputs, so any other shift would scale the result rather than copy it.
 // CHECK-LABEL: func.func @expand_integer
-// CHECK-DAG: %[[ONES:.*]] = "tosa.const"() <{values = dense<1> : tensor<3x5xi32>}>
-// CHECK-DAG: %[[SHIFT:.*]] = "tosa.const"() <{values = dense<0> : tensor<1xi8>}>
+// CHECK-DAG: %[[ONES:.*]] = tosa.const values(dense<1> : tensor<3x5xi32>)
+// CHECK-DAG: %[[SHIFT:.*]] = tosa.const values(dense<0> : tensor<1xi8>)
 // CHECK: tosa.mul %arg1, %[[ONES]], %[[SHIFT]] : (tensor<1x5xi32>, tensor<3x5xi32>, tensor<1xi8>) -> tensor<3x5xi32>
 // CHECK-NOT: hip.expand
 func.func @expand_integer(%ctx: !hip.context, %x: tensor<1x5xi32>,
@@ -121,7 +121,7 @@ func.func @expand_integer(%ctx: !hip.context, %x: tensor<1x5xi32>,
 // CHECK-LABEL: func.func @rocMlir0
 // CHECK: ub.poison : !hip.context
 // CHECK: tensor.empty() : tensor<8x64x64xf32>
-// CHECK: %[[ONES:.*]] = "tosa.const"() <{values = dense<1.000000e+00> : tensor<8x64x64xf32>}>
+// CHECK: %[[ONES:.*]] = tosa.const values(dense<1.000000e+00> : tensor<8x64x64xf32>)
 // CHECK: %[[BCAST:.*]] = tosa.mul %arg0, %[[ONES]], %{{.*}} -> tensor<8x64x64xf32>
 // CHECK: %[[A:.*]] = tosa.reshape %[[BCAST]], %{{.*}} -> tensor<1x512x64xf32>
 // CHECK: tosa.matmul %[[A]], %{{.*}}

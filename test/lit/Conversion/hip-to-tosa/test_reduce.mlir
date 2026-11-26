@@ -22,7 +22,7 @@
 // RUN:   --verify-diagnostics %s | FileCheck %s
 
 // CHECK-LABEL: func.func @reduce_sum
-// CHECK: tosa.reduce_sum %arg1 {axis = 1 : i32}
+// CHECK: tosa.reduce_sum %arg1 axis(1)
 // CHECK-NOT: hip.reduce_sum
 func.func @reduce_sum(%ctx: !hip.context, %data: tensor<2x8xf16>,
                       %init: tensor<2x1xf16>) -> tensor<2x1xf16>
@@ -35,7 +35,7 @@ func.func @reduce_sum(%ctx: !hip.context, %data: tensor<2x8xf16>,
 }
 
 // CHECK-LABEL: func.func @reduce_sum_keepdims0
-// CHECK: tosa.reduce_sum %arg1 {axis = 1 : i32}
+// CHECK: tosa.reduce_sum %arg1 axis(1)
 // CHECK: tosa.reshape
 // CHECK-NOT: hip.reduce_sum
 func.func @reduce_sum_keepdims0(%ctx: !hip.context, %data: tensor<2x8xf16>,
@@ -50,7 +50,7 @@ func.func @reduce_sum_keepdims0(%ctx: !hip.context, %data: tensor<2x8xf16>,
 }
 
 // CHECK-LABEL: func.func @reduce_sum_neg_axis
-// CHECK: tosa.reduce_sum %arg1 {axis = 1 : i32}
+// CHECK: tosa.reduce_sum %arg1 axis(1)
 // CHECK-NOT: hip.reduce_sum
 func.func @reduce_sum_neg_axis(%ctx: !hip.context, %data: tensor<2x8xf16>,
                                %init: tensor<2x1xf16>) -> tensor<2x1xf16>
@@ -63,7 +63,7 @@ func.func @reduce_sum_neg_axis(%ctx: !hip.context, %data: tensor<2x8xf16>,
 }
 
 // CHECK-LABEL: func.func @reduce_sum_i32
-// CHECK: tosa.reduce_sum %arg1 {axis = 0 : i32}
+// CHECK: tosa.reduce_sum %arg1 axis(0)
 // CHECK-NOT: hip.reduce_sum
 func.func @reduce_sum_i32(%ctx: !hip.context, %data: tensor<4x8xi32>,
                           %init: tensor<1x8xi32>) -> tensor<1x8xi32>
@@ -93,7 +93,7 @@ func.func @reduce_sum_noop(%ctx: !hip.context, %data: tensor<2x8xf16>,
 // The nan_mode attribute on tosa.reduce_max defaults to PROPAGATE, which is
 // what ONNX ReduceMax does, so it is omitted from the pretty form.
 // CHECK-LABEL: func.func @reduce_max
-// CHECK: tosa.reduce_max %arg1 {axis = 1 : i32}
+// CHECK: tosa.reduce_max %arg1 axis(1)
 // CHECK-NOT: hip.reduce_max
 func.func @reduce_max(%ctx: !hip.context, %data: tensor<2x8xf16>,
                       %init: tensor<2x1xf16>) -> tensor<2x1xf16>
@@ -106,7 +106,7 @@ func.func @reduce_max(%ctx: !hip.context, %data: tensor<2x8xf16>,
 }
 
 // CHECK-LABEL: func.func @reduce_min
-// CHECK: tosa.reduce_min %arg1 {axis = 1 : i32}
+// CHECK: tosa.reduce_min %arg1 axis(1)
 // CHECK-NOT: hip.reduce_min
 func.func @reduce_min(%ctx: !hip.context, %data: tensor<2x8xf16>,
                       %init: tensor<2x1xf16>) -> tensor<2x1xf16>
@@ -119,7 +119,7 @@ func.func @reduce_min(%ctx: !hip.context, %data: tensor<2x8xf16>,
 }
 
 // CHECK-LABEL: func.func @reduce_prod
-// CHECK: tosa.reduce_product %arg1 {axis = 1 : i32}
+// CHECK: tosa.reduce_product %arg1 axis(1)
 // CHECK-NOT: hip.reduce_prod
 func.func @reduce_prod(%ctx: !hip.context, %data: tensor<2x8xf16>,
                        %init: tensor<2x1xf16>) -> tensor<2x1xf16>
@@ -134,7 +134,7 @@ func.func @reduce_prod(%ctx: !hip.context, %data: tensor<2x8xf16>,
 // Unlike max and min, these three go through the same template, so keepdims=0
 // is checked once here rather than for each of them.
 // CHECK-LABEL: func.func @reduce_max_keepdims0
-// CHECK: tosa.reduce_max %arg1 {axis = 1 : i32}
+// CHECK: tosa.reduce_max %arg1 axis(1)
 // CHECK: tosa.reshape
 // CHECK-NOT: hip.reduce_max
 func.func @reduce_max_keepdims0(%ctx: !hip.context, %data: tensor<2x8xf16>,
@@ -151,7 +151,7 @@ func.func @reduce_max_keepdims0(%ctx: !hip.context, %data: tensor<2x8xf16>,
 // Integers reduce through the same op; only max/min/prod accept them, since
 // the mean and l2 expansions are float-only.
 // CHECK-LABEL: func.func @reduce_prod_i32
-// CHECK: tosa.reduce_product %arg1 {axis = 0 : i32}
+// CHECK: tosa.reduce_product %arg1 axis(0)
 func.func @reduce_prod_i32(%ctx: !hip.context, %data: tensor<4x8xi32>,
                            %init: tensor<1x8xi32>) -> tensor<1x8xi32>
     attributes {rock.kernel} {
@@ -170,13 +170,13 @@ func.func @reduce_prod_i32(%ctx: !hip.context, %data: tensor<4x8xi32>,
 // maximum of 65504, and squaring in place would return +inf for the norm of a
 // single 300. reduce_l2_f16_kernel widens the same way.
 // CHECK-LABEL: func.func @reduce_l2
-// CHECK: %[[W:.*]] = tosa.cast %arg1 : (tensor<2x8xf16>) -> tensor<2x8xf32>
+// CHECK: %[[W:.*]] = tosa.cast %arg1 input_unsigned(false) : (tensor<2x8xf16>) -> tensor<2x8xf32>
 // CHECK: %[[SQ:.*]] = tosa.mul %[[W]], %[[W]]
-// CHECK: %[[SUM:.*]] = tosa.reduce_sum %[[SQ]] {axis = 1 : i32}
+// CHECK: %[[SUM:.*]] = tosa.reduce_sum %[[SQ]] axis(1)
 // CHECK-SAME: -> tensor<2x1xf32>
 // CHECK: %[[RS:.*]] = tosa.rsqrt %[[SUM]]
 // CHECK: %[[N:.*]] = tosa.reciprocal %[[RS]]
-// CHECK: tosa.cast %[[N]] : (tensor<2x1xf32>) -> tensor<2x1xf16>
+// CHECK: tosa.cast %[[N]] input_unsigned(false) : (tensor<2x1xf32>) -> tensor<2x1xf16>
 // CHECK-NOT: hip.reduce_l2
 func.func @reduce_l2(%ctx: !hip.context, %data: tensor<2x8xf16>,
                      %init: tensor<2x1xf16>) -> tensor<2x1xf16>
@@ -193,7 +193,7 @@ func.func @reduce_l2(%ctx: !hip.context, %data: tensor<2x8xf16>,
 // CHECK-LABEL: func.func @reduce_l2_f32
 // CHECK-NOT: tosa.cast
 // CHECK: %[[SQ:.*]] = tosa.mul %arg1, %arg1
-// CHECK: tosa.reduce_sum %[[SQ]] {axis = 1 : i32}
+// CHECK: tosa.reduce_sum %[[SQ]] axis(1)
 // CHECK-NOT: tosa.cast
 func.func @reduce_l2_f32(%ctx: !hip.context, %data: tensor<2x8xf32>,
                          %init: tensor<2x1xf32>) -> tensor<2x1xf32>
@@ -208,7 +208,7 @@ func.func @reduce_l2_f32(%ctx: !hip.context, %data: tensor<2x8xf32>,
 // The reshape for keepdims=0 comes after the whole expansion, including the
 // narrowing cast, not after the reduce_sum in the middle of it.
 // CHECK-LABEL: func.func @reduce_l2_keepdims0
-// CHECK: tosa.reduce_sum {{.*}}{axis = 1 : i32}
+// CHECK: tosa.reduce_sum {{.*}}axis(1)
 // CHECK: tosa.rsqrt
 // CHECK: tosa.reciprocal
 // CHECK: %[[C:.*]] = tosa.cast {{.*}} -> tensor<2x1xf16>
@@ -246,7 +246,7 @@ func.func @reduce_l2_noop(%ctx: !hip.context, %data: tensor<2x8xf16>,
 // CHECK: tosa.reciprocal
 // CHECK: tosa.reshape
 // CHECK: tosa.mul
-// CHECK: tosa.reduce_sum {{.*}}{axis = 1 : i32}
+// CHECK: tosa.reduce_sum {{.*}}axis(1)
 // CHECK-NOT: hip.reduce_mean
 func.func @reduce_mean(%ctx: !hip.context, %data: tensor<2x8xf16>,
                        %init: tensor<2x1xf16>) -> tensor<2x1xf16>
@@ -259,7 +259,7 @@ func.func @reduce_mean(%ctx: !hip.context, %data: tensor<2x8xf16>,
 }
 
 // CHECK-LABEL: func.func @reduce_mean_outlined_kernel
-// CHECK: tosa.reduce_sum {{.*}}{axis = 1 : i32}
+// CHECK: tosa.reduce_sum {{.*}}axis(1)
 // CHECK-NOT: hip.reduce_mean
 func.func @reduce_mean_outlined_kernel(%data: tensor<2x8xf16>,
                                        %init: tensor<2x1xf16>)
