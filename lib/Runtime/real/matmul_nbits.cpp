@@ -810,11 +810,13 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
   // and returns -1 if no fused config is eligible, in which case we fall
   // through unpadded.
   //
-  // Decode (M=1) and bias shapes never enter: the M>=16 and !bias gates stop
-  // them. wave64 (CDNA) has already taken the hipBLASLt path above.
+  // Decode (M=1) never enters: the M>=16 gate stops it. The padded kernel has
+  // no bias epilogue, so a bias is added by a second launch over the output,
+  // the same broadcast add an unfused bias would have run. wave64 (CDNA) has
+  // already taken the hipBLASLt path above.
   if (!hipdnn_device_is_wave64() && bits == 4 && batch_count == 1 &&
       (K % 32 == 0) && M >= 16 && elem_size == 2 && block_size > 0 &&
-      (K % block_size == 0) && !bias && shouldPadRow(K)) {
+      (K % block_size == 0) && shouldPadRow(K)) {
     const void *zeros_fp16 = nullptr;
     bool zeros_ok = true;
     if (zero_points) {
@@ -832,8 +834,23 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
           static_cast<int>(K), static_cast<int>(block_size), A,
           /*lda=*/static_cast<int>(K), B, scales, zeros_fp16, output,
           /*ldc=*/static_cast<int>(N));
-      if (rc == 0)
+      if (rc == 0) {
+        if (bias) {
+          const int64_t out_shape4[4] = {1, 1, M, N};
+          const int64_t bias_shape4[4] = {1, 1, 1, N};
+          int brc = hip_elementwise_binary_bcast(
+              stream, output, bias, output, out_shape4, bias_shape4, out_shape4,
+              /*op=add*/ 0, HIP_DTYPE_FLOAT16);
+          if (brc != 0) {
+            fprintf(stderr,
+                    "matmul_nbits: padded-row bias add failed (rc=%d, M=%lld, "
+                    "N=%lld)\n",
+                    brc, static_cast<long long>(M), static_cast<long long>(N));
+            result = -1;
+          }
+        }
         goto cleanup;
+      }
       RUNTIME_DEBUG_LOG("[REAL] matmul_nbits padrow wmma rc=%d, falling back\n",
                         rc);
     }
