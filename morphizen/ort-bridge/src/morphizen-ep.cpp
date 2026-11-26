@@ -298,10 +298,14 @@ OrtStatus *ORT_API_CALL MorphiZenEP::GetCapabilityImpl(
     MY_LOG(1) << " no available IR converter.";
     return nullptr;
   }
-  // Use the OrtGraphWrapper class instead of manual API calls
-  auto graph_wrapper = morphizen::OrtGraphWrapper(*self, *graph);
-  self->GetCapability(graph_wrapper, *graph_support_info);
-  return nullptr;
+  try {
+    // Use the OrtGraphWrapper class instead of manual API calls
+    auto graph_wrapper = morphizen::OrtGraphWrapper(*self, *graph);
+    return self->GetCapability(graph_wrapper, *graph_support_info);
+  } catch (...) {
+    return status_from_current_exception(Ort::GetApi(),
+                                         "MorphiZenEP::GetCapability");
+  }
 }
 
 OrtStatus *ORT_API_CALL MorphiZenEP::CompileImpl(
@@ -309,8 +313,12 @@ OrtStatus *ORT_API_CALL MorphiZenEP::CompileImpl(
     size_t count, OrtNodeComputeInfo **node_compute_infos,
     OrtNode **ep_context_nodes) noexcept {
   MorphiZenEP *self = static_cast<MorphiZenEP *>(this_ptr);
-  return self->Compile(graphs, fused_nodes, count, node_compute_infos,
-                       ep_context_nodes);
+  try {
+    return self->Compile(graphs, fused_nodes, count, node_compute_infos,
+                         ep_context_nodes);
+  } catch (...) {
+    return status_from_current_exception(Ort::GetApi(), "MorphiZenEP::Compile");
+  }
 }
 void ORT_API_CALL MorphiZenEP::ReleaseNodeComputeInfosImpl(
     OrtEp *this_ptr, OrtNodeComputeInfo **node_compute_infos,
@@ -628,9 +636,15 @@ OrtStatus *MorphiZenEP::CompileSubgraph(const morphizen::ExecutionProvider &ep,
            void **compute_state) -> OrtStatus * {
       (void)compute_context;
       auto self = static_cast<MorphiZenEP_ComputeInfo *>(this_ptr);
-      auto *p = self->morphizen_ep->compile().release();
-      *compute_state = p;
-      return nullptr;
+      // Artifact load and runtime init run here; a failure must fail session
+      // creation, not terminate the process from inside this C callback.
+      try {
+        *compute_state = self->morphizen_ep->compile().release();
+        return nullptr;
+      } catch (...) {
+        return status_from_current_exception(Ort::GetApi(),
+                                             "MorphiZenEP::CreateState");
+      }
     };
     morphizen_node_compute_info->ReleaseState =
         [](OrtNodeComputeInfo *this_ptr, void *compute_state) -> void {

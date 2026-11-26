@@ -222,7 +222,8 @@ mlir_metadata::Metadata parse_metadata_from_metadef(
       google::protobuf::util::JsonStringToMessage(metadata_json, &metadata);
 
   if (!status.ok()) {
-    LOG(FATAL) << "Failed to parse MLIR metadata: " << status.ToString();
+    throw std::runtime_error("Failed to parse MLIR metadata: " +
+                             status.ToString());
   }
 
   MY_LOG(1) << "Parsed metadata - Artifact filename: "
@@ -238,8 +239,8 @@ std::vector<uint8_t> load_artifact_from_epcontext(
 
   auto artifact_stream = context->open_file_for_read(artifact_filename);
   if (!artifact_stream) {
-    LOG(FATAL) << "Failed to open artifact from EPContext: "
-               << artifact_filename;
+    throw std::runtime_error("Failed to open artifact from EPContext: " +
+                             artifact_filename);
   }
 
   std::vector<uint8_t> artifact_bytes;
@@ -263,7 +264,7 @@ std::vector<uint8_t> load_artifact_from_epcontext(
   }
 
   if (artifact_bytes.empty()) {
-    LOG(FATAL) << "Failed to read artifact bytes from EPContext";
+    throw std::runtime_error("Failed to read artifact bytes from EPContext");
   }
 
   MY_LOG(1) << "Loaded artifact: " << total_read << " bytes";
@@ -277,10 +278,10 @@ std::vector<uint8_t> load_artifact_from_epcontext(
 customop::ArtifactKind determine_artifact_kind(const std::string &format_str) {
   customop::ArtifactKind kind;
   if (!customop::artifactKindFromFormat(format_str, kind)) {
-    LOG(FATAL) << "EPContext metadata has empty/unknown artifact_format='"
-               << format_str << "'; expected '"
-               << customop::kArtifactFormatLlvmIr << "' or '"
-               << customop::kArtifactFormatNative << "'.";
+    throw std::runtime_error(
+        "EPContext metadata has empty/unknown artifact_format='" + format_str +
+        "'; expected '" + customop::kArtifactFormatLlvmIr + "' or '" +
+        customop::kArtifactFormatNative + "'.");
   }
 
 #if !HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS
@@ -308,11 +309,11 @@ void check_rocmlir_arch(const std::string &recorded) {
   auto describe = [](const std::string &arch) {
     return arch.empty() ? std::string("rocMLIR off") : "rocMLIR for " + arch;
   };
-  LOG(FATAL) << "Cached MLIR artifact was compiled with " << describe(recorded)
-             << ", but this session requests " << describe(current)
-             << " (HIPDNN_EP_ROCMLIR / HIPDNN_EP_ROCMLIR_AUTOTUNE / ROCK_ARCH "
-                "/ active GPU). Delete the model cache or EPContext model "
-                "and recompile.";
+  throw std::runtime_error(
+      "Cached MLIR artifact was compiled with " + describe(recorded) +
+      ", but this session requests " + describe(current) +
+      " (HIPDNN_EP_ROCMLIR / HIPDNN_EP_ROCMLIR_AUTOTUNE / ROCK_ARCH / active "
+      "GPU). Delete the model cache or EPContext model and recompile.");
 }
 } // anonymous namespace
 
@@ -818,11 +819,12 @@ void MlirCustomOp::compute_with_output_allocator(
   // silently pass a CPU-vs-CPU comparison).
   for (size_t i = 0; i < octx.allocated.size(); ++i) {
     if (!octx.allocated[i]) {
-      LOG(FATAL) << "output allocator: output '"
-                 << metadata_.outputs()[static_cast<int>(i)].name() << "' (idx "
-                 << i
-                 << ") was never allocated by the model.dll. Passthrough / "
-                    "aliased outputs are not supported yet.";
+      throw std::runtime_error(
+          "output allocator: output '" +
+          metadata_.outputs()[static_cast<int>(i)].name() + "' (idx " +
+          std::to_string(i) +
+          ") was never allocated by the model.dll. Passthrough / aliased "
+          "outputs are not supported yet.");
     }
   }
 

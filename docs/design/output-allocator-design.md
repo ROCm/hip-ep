@@ -279,7 +279,7 @@ MlirCustomOp::Compute(context)
    │     ├─ hipdnn_ep_state_read_and_clear_error_flag(state)
    │     └─ hipdnn_ep_tensor_free_input(state, ...) x N
    ├─ inference_state_->set_output_allocator(nullptr)   clear before octx leaves scope
-   ├─ output-completeness guard: every allocated[i] true else LOG(FATAL)
+   ├─ output-completeness guard: every allocated[i] true else throw (→ OrtStatus)
    └─ #ifndef BUILD_MOCK_RUNTIME: pending_d2h -> blocking hipMemcpy(host <- GPU scratch)
 ```
 
@@ -306,6 +306,6 @@ Note the `main_graph` / `main_graph_internal` split (from `convert-hip-to-llvm`)
 
 4. **KV cache share-buffer needs no special case in the callback.** `output_allocate_cb` passes the DLL's in-graph `shape` to `GetOutput` verbatim — every output is acquired the same way. The shape is already right because `hip.alloc_output`'s dynamic dims come from its producer's operands: a `present.*` output is sized from `memref.dim %past_key` (the past input buffer's actual extent), which under OGA `past_present_share_buffer` already **is** the `max_length` capacity buffer. So `GetOutput` returns the pre-bound shared `OrtValue` and the `past == present` pointer identity is preserved. Pinned by `test/lit/e2e/test_gqa_output_allocator_present_dim.mlir`. (`build_metadata_json` emits each output shape verbatim — static extent or `-1`.)
 
-5. **Output-completeness guard.** Every declared output must be created in-graph, so each one should trigger exactly one `hip.alloc_output` → callback. Right after the inference call returns, the EP checks that every output index in the metadata was served; if one was skipped it `LOG(FATAL)`s and names it. This catches the two graph shapes we don't support yet — an output that just passes a graph input straight through, and two outputs that share (alias) one buffer — and turns them into a clear error instead of handing ORT an unfilled buffer. None of the target models have either shape.
+5. **Output-completeness guard.** Every declared output must be created in-graph, so each one should trigger exactly one `hip.alloc_output` → callback. Right after the inference call returns, the EP checks that every output index in the metadata was served; if one was skipped it throws an error naming it, which the EP Compute callback returns to ORT as a failed `OrtStatus` (the session run fails; the process keeps running). This catches the two graph shapes we don't support yet — an output that just passes a graph input straight through, and two outputs that share (alias) one buffer — and turns them into a clear error instead of handing ORT an unfilled buffer. None of the target models have either shape.
 
 6. **Per-Compute allocator install/clear.** The `OutputAllocatorCtx` lives on `MlirCustomOp::compute_with_output_allocator`'s stack; the allocator is installed (with `self = &ctx`) before `InferenceState::compute` and cleared (`set_output_allocator(nullptr)`) immediately after, so `self` can never dangle into a later `Compute()`.

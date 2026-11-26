@@ -21,6 +21,8 @@ struct OrtStatusException : public std::exception {
 
   const char *what() const noexcept override;
 
+  OrtErrorCode code() const noexcept;
+
   // Prevent copying to avoid double-free of status
   OrtStatusException(const OrtStatusException &) = delete;
   OrtStatusException &operator=(const OrtStatusException &) = delete;
@@ -30,5 +32,12 @@ private:
   OrtStatus *status_;
   const char *error_msg_ = nullptr;
 };
+
+// Converts the exception currently being handled into an OrtStatus. Call only
+// from inside a catch block. ORT invokes the EP through noexcept C callbacks,
+// so an exception that escapes one terminates the whole process instead of
+// failing the session.
+OrtStatus *status_from_current_exception(const OrtApi &api,
+                                         const char *where) noexcept;
 
 } // namespace morphizen
