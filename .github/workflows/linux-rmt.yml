@@ -39,7 +39,10 @@ env:
   # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
   # pull/<n>.diff and applied on top of v<OGA_VERSION>. Part of the OGA cache
   # key. Remove a PR once it lands in the pinned OGA release.
-  OGA_PR_PATCHES: "2875"
+  # NOTE: Temporarily use a onnxruntime-genai fork until issues with original repo availability are resolved.
+  #       The fork has PR 2875 applied in v0.19.0 branch.
+  # OGA_PR_PATCHES: "2875"
+  OGA_PR_PATCHES: ""
   # The GPU arch the artifact targets. CI runners have no GPU, so it is passed
   # explicitly (build.py auto-detects from /sys on a real GPU host).
   HIP_ARCHITECTURES: gfx11-generic
@@ -431,7 +434,9 @@ jobs:
         if: steps.cache-oga.outputs.cache-hit != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: microsoft/onnxruntime-genai
+          # NOTE: Temporarily use a onnxruntime-genai fork until issues with original repo availability are resolved.
+          #repository: microsoft/onnxruntime-genai
+          repository: pschlan-amd/onnxruntime-genai
           ref: v${{ env.OGA_VERSION }}
           submodules: recursive
           path: onnxruntime-genai
