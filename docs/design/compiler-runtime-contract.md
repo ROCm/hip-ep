@@ -80,12 +80,11 @@ which is empty when `HIPDNN_EP_ROCMLIR` was off, the arch with an
 There is no `+lut=` fingerprint. A provided `HIPDNN_EP_ROCMLIR_AUTOTUNE`
 skips the shipped `tools/problem-cache/lut/*.fb`; when it is unset, the shipped
 table is consulted before the search. `hip-rocmlir-compiler` still honors
-`--enable-problem-cache-rw` / `HIP_ROCMLIR_PROBLEM_CACHE` ahead of the search.
+`--enable-problem-cache-rw` ahead of the search.
 The flag names a LUT JSON file (the document it writes) and merges the
 compile's search winners back into it; a file it would refuse to rewrite stops
-the compile before it starts. `HIP_ROCMLIR_PROBLEM_CACHE` only reads, and takes
-the LUT JSON or a `.fb`. The provider does not read
-`HIP_ROCMLIR_PROBLEM_CACHE`; its counterpart of the flag is
+the compile before it starts; an external `.fb` is never accepted. The
+provider's counterpart of the flag is
 `HIPDNN_EP_ROCMLIR_PROBLEM_CACHE_RW=<file.json>`, which reads and updates the
 file the same way, except that a file it cannot use or update is reported and
 the compile still succeeds. The variable is ignored, with a message, when autotune is off.

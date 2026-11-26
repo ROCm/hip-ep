@@ -201,13 +201,11 @@ static void printUsage(llvm::raw_ostream &os, const char *prog) {
      << "                       are not written as winners. A missing or\n"
      << "                       empty file is created. A file that is not a\n"
      << "                       LUT, is malformed, is for another GPU, or is\n"
-     << "                       a .fb stops the compile before it starts,\n"
-     << "                       with the file untouched. A failed write is a\n"
-     << "                       warning. The file is replaced atomically;\n"
-     << "                       with several processes at once the last\n"
-     << "                       writer wins. Needs autotune.\n"
-     << "                       HIP_ROCMLIR_PROBLEM_CACHE names a file to\n"
-     << "                       read only, JSON or .fb.\n"
+     << "                       a FlatBuffer (.fb) stops the compile before\n"
+     << "                       it starts, with the file untouched. A failed\n"
+     << "                       write is a warning. The file is replaced\n"
+     << "                       atomically; with several processes at once\n"
+     << "                       the last writer wins. Needs autotune.\n"
      << "                       problem_cache_to_fb.py compiles the JSON to a\n"
      << "                       .fb to ship it as a LUT.\n"
      << "  --verbose            Print per-config compile/benchmark lines "
@@ -324,12 +322,6 @@ int main(int argc, char **argv) {
       printUsage(llvm::errs(), argv[0]);
       return 1;
     }
-  }
-  if (autotune.problemCachePath.empty()) {
-    // The environment variable names a table to read. Only
-    // --enable-problem-cache-rw also writes it back.
-    if (const char *env = std::getenv("HIP_ROCMLIR_PROBLEM_CACHE"))
-      autotune.problemCachePath = env;
   }
   if (mlir::hip::rocMlirSkipBenchmarking())
     autotuneEnabled = false;

@@ -1350,9 +1350,9 @@ int main() {
              "a refused directory is left in place");
     }
 
-    // An RCAL FlatBuffer (the shipped format) can still be read as a table
-    // that is only looked up, but it cannot be rewritten: a rewrite would turn
-    // it into JSON, or refuse it as invalid JSON with no hint why.
+    // An external file is never an RCAL FlatBuffer (the shipped format): it is
+    // refused, and named as one, instead of failing as invalid JSON with no
+    // hint why, and it is left as it was.
     {
       const std::string fbPath = (dir / "table.fb").string();
       std::string fbBytes(
@@ -1363,20 +1363,13 @@ int main() {
         out << fbBytes;
       }
       mlir::hip::ProblemCacheLut fromFb;
-      expect(mlir::hip::loadProblemCacheLutFile(fbPath, fromFb, error) &&
-                 fromFb.entries.size() == 2 && fromFb.gpuArch == "gfx1151",
-             "a read-only table may be an RCAL FlatBuffer");
-      mlir::hip::ProblemCacheLut fromJsonFile;
-      expect(mlir::hip::loadProblemCacheLutFile(file, fromJsonFile, error) &&
-                 fromJsonFile.entries.size() == 3,
-             "a read-only table may be the LUT JSON");
       expect(!mlir::hip::loadProblemCacheLutJsonFile(fbPath, fromFb, error) &&
                  error.find("FlatBuffer") != std::string::npos,
              "the JSON loader names a FlatBuffer as one");
       expect(!mlir::hip::checkProblemCacheJsonFile(fbPath, "gfx1151", fromFb,
                                                    error) &&
                  error.find("FlatBuffer") != std::string::npos,
-             "a FlatBuffer cannot be the file the compile rewrites");
+             "a FlatBuffer cannot be the external problem cache");
       expect(!mlir::hip::updateProblemCacheJsonFile(fbPath, "gfx1151",
                                                     {{exact, tile32}}, error) &&
                  error.find("FlatBuffer") != std::string::npos,

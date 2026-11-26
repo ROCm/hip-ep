@@ -98,12 +98,6 @@ bool loadProblemCacheLutJson(std::string_view text, ProblemCacheLut &lut,
 bool loadProblemCacheLutJsonFile(const std::string &path, ProblemCacheLut &lut,
                                  std::string &error);
 
-// Reads a table that is only looked up, not rewritten
-// (HIP_ROCMLIR_PROBLEM_CACHE): an RCAL FlatBuffer, recognised by its file
-// identifier, or else the LUT JSON. Both formats load into the same table.
-bool loadProblemCacheLutFile(const std::string &path, ProblemCacheLut &lut,
-                             std::string &error);
-
 // A problem string and the perfConfig the search picked for it.
 struct ProblemCacheWinner {
   std::string problem;

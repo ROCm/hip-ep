@@ -117,9 +117,9 @@ again. The compiled binary is not reused, because each outlined kernel has its
 own symbol. `--autotune[=quick|full|exhaustive]`
 overrides the search space. A given tuning type skips the shipped
 problem-cache LUT; with none given, the shipped LUT is consulted before the
-search. `--enable-problem-cache-rw <file.json>` / `HIP_ROCMLIR_PROBLEM_CACHE`
-still takes priority over the search and replaces the shipped table. The flag
-names a LUT JSON file, such as one it wrote. It also writes back: after a
+search. `--enable-problem-cache-rw <file.json>` still takes priority over the
+search and replaces the shipped table. The flag names a LUT JSON file, such as
+one it wrote. It also writes back: after a
 successful compile the winners the search picked are merged into that file, so
 a later compile reads them. Only winners of a search are written. A tile taken
 from the file, even a nearest neighbour's, is not a measurement and is not
@@ -131,9 +131,8 @@ has a malformed `configs`, `points` or `fallbacks` section, or is a `.fb` is
 refused before the compile starts, with the file untouched; a write that fails
 after the compile is a warning, and the output is still written. The file is
 replaced atomically. Compiles in one process take turns, but two processes
-writing it at once can lose one set of winners. `HIP_ROCMLIR_PROBLEM_CACHE` only
-reads, and accepts the LUT JSON or a `.fb` (the format it took before the JSON
-file). The provider does the same as the flag through
+writing it at once can lose one set of winners. The provider does the same as
+the flag through
 `HIPDNN_EP_ROCMLIR_PROBLEM_CACHE_RW=<file.json>`, except that a file it cannot
 use or update is reported and the compile still succeeds. A repeated problem in the same
 compile reuses the in-session winner, then a miss searches the selected space.

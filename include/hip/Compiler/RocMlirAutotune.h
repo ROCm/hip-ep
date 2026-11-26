@@ -105,18 +105,18 @@ struct AutotuneOptions {
   // useful when tuning by hand, far too much for a normal compile.
   bool verbose = false;
   // External rocMLIR LUT JSON, the document updateProblemCacheFile writes.
-  // hip-rocmlir-compiler sets this from --enable-problem-cache-rw or
-  // HIP_ROCMLIR_PROBLEM_CACHE. A file that is only read (the environment
-  // variable) may also be an RCAL FlatBuffer, the shipped tables' format; the
-  // file that is rewritten has to be JSON. When set, this file takes priority
-  // over the search and the shipped table is not consulted. When empty, the
-  // shipped LUT is consulted unless tuningTypeProvided.
+  // hip-rocmlir-compiler sets this from --enable-problem-cache-rw, and the
+  // provider from HIPDNN_EP_ROCMLIR_PROBLEM_CACHE_RW. It is always JSON: an
+  // RCAL FlatBuffer, the format of the shipped tables, is refused. When set,
+  // this file takes priority over the search and the shipped table is not
+  // consulted. When empty, the shipped LUT is consulted unless
+  // tuningTypeProvided.
   std::string problemCachePath;
   // Write this compile's benchmarked winners back into `problemCachePath`
-  // itself. Set by --enable-problem-cache-rw; HIP_ROCMLIR_PROBLEM_CACHE leaves
-  // it false, so that path is only read. The autotuner does not write the file
-  // itself; hip-rocmlir-compiler calls updateProblemCacheFile once the embed
-  // has succeeded. A missing or empty file is a new table, not an error.
+  // itself. Set by --enable-problem-cache-rw and the provider variable; with
+  // it false the path is only read. The autotuner does not write the file
+  // itself; the caller calls updateProblemCacheFile once the embed has
+  // succeeded. A missing or empty file is a new table, not an error.
   bool problemCacheRewrite = false;
 };
 

@@ -1340,9 +1340,8 @@ const ProblemCacheLut &RocMlirAutotuner::Impl::loadedProblemCache() {
     return problemCache;
   }
   problemCacheLoaded = true;
-  // A table that is only read can be the LUT JSON or, as before the JSON
-  // format, an RCAL FlatBuffer.
-  if (!loadProblemCacheLutFile(options.problemCachePath, problemCache, error)) {
+  if (!loadProblemCacheLutJsonFile(options.problemCachePath, problemCache,
+                                   error)) {
     llvm::errs() << "warning: " << error << "\n";
     problemCache = {};
   } else if (log()) {

@@ -1366,29 +1366,6 @@ std::mutex &rewriteMutex() {
 
 } // namespace
 
-bool loadProblemCacheLutFile(const std::string &path, ProblemCacheLut &lut,
-                             std::string &error) {
-  lut = {};
-  std::ifstream in(path, std::ios::binary);
-  if (!in) {
-    error = "problem cache not found: " + path;
-    return false;
-  }
-  std::string bytes;
-  if (!readStreamText(in, bytes)) {
-    error = "failed reading problem cache: " + path;
-    return false;
-  }
-  const bool ok =
-      looksLikeFlatBuffer(bytes)
-          ? loadProblemCacheLut(reinterpret_cast<const uint8_t *>(bytes.data()),
-                                bytes.size(), lut, error)
-          : loadProblemCacheLutJson(bytes, lut, error);
-  if (!ok)
-    error = path + ": " + error;
-  return ok;
-}
-
 bool checkProblemCacheJsonFile(const std::string &path,
                                std::string_view gpuArch, ProblemCacheLut &lut,
                                std::string &error) {
