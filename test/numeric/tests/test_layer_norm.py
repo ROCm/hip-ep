@@ -618,6 +618,25 @@ class TestLayerNormalization:
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1e-5, rtol=1e-5)
 
+    @pytest.mark.parametrize("hidden", [4, 5])
+    def test_layer_norm_large_constant_rows_fp32(self, model_runner, hidden):
+        """Rows of large finite values whose plain sum overflows fp32.
+
+        Four or five 1e38s sum past the fp32 maximum; an infinite mean turns
+        the row into NaNs. A constant row normalizes to the bias. hidden=4
+        runs the register row kernel, hidden=5 the block kernel (not a whole
+        number of 16-byte chunks), where 1/5 is inexact and a mean an ulp off
+        1e38 would square to infinity.
+        """
+        input_shape = [3, hidden]
+        model = _make_layer_norm_model(input_shape, np.float32, with_bias=True)
+        x = np.full(input_shape, 1e38, dtype=np.float32)
+        x[1] = -1e38
+        x[2] = 3e38
+        actual, _ = model_runner.run_sample(model, [x])
+        assert np.isfinite(actual[0]).all()
+        compare_outputs(actual, _layer_norm_reference(model, x), atol=1e-4, rtol=1e-4)
+
     @pytest.mark.parametrize("num_patches", [256, 1024])
     def test_layer_norm_qwen35b_vision_shape(self, model_runner, num_patches):
         """LN exactly as it appears 55x in Qwen3.5-35B vision.onnx:

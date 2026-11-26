@@ -761,8 +761,10 @@ static bool canUseSkipLayerNorm(mlir::Value input, mlir::Value skip,
     if (!mlir::ShapedType::isDynamic(rows) &&
         !mlir::ShapedType::isDynamic(skipRows) && rows != skipRows)
       return false;
+    // An empty skip ([0, H] against [B, 0, H]) is left to the composed path.
     if (inputType.hasStaticShape() && skipType.hasStaticShape() &&
-        inputType.getNumElements() % skipType.getNumElements() != 0)
+        (skipType.getNumElements() == 0 ||
+         inputType.getNumElements() % skipType.getNumElements() != 0))
       return false;
   }
   auto isHiddenVector = [&](mlir::Value v) {

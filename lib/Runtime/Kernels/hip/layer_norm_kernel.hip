@@ -21,16 +21,21 @@
  *          norm_size = scale_num_elements).
  *
  * Numerics (both kernels): corrected two-pass statistics in FP32.
- *   m0:    sum(t) / norm_size
+ *   m0:    t[0] + sum((t - t[0]) / norm_size)
  *   d:     t - m0
- *   c:     sum(d) / norm_size            (the rounding error left in m0)
+ *   c:     sum(d / norm_size)            (the rounding error left in m0)
  *   var:   sum(d^2) / norm_size - c^2
  *   y:     (d - c) * inv_std * scale + bias;  mean = m0 + c
  * Centering the second pass avoids the E[t^2] - E[t]^2 cancellation when
  * |mean| >> stddev (e.g. t = [8192, 8193]) and cannot overflow for rows
  * whose plain sum of squares is finite (e.g. t = [1e19, -1e19]). The
  * correction c recovers the mean when the first pass rounds, as when one
- * large sample dominates the row (e.g. [1e8, 1, 1, ...]).
+ * large sample dominates the row (e.g. [1e8, 1, 1, ...]). Scaling each term
+ * before it is summed keeps the partial sums of the means within the row's
+ * largest magnitude, so a row of large finite values (e.g. [1e38] * 4) does
+ * not overflow to an infinite mean. Measuring m0 from t[0] makes it exact for
+ * a constant row whatever norm_size is, so its deviations stay 0 instead of
+ * an ulp of t whose square overflows (e.g. [1e38] * 5).
  *
  * Kernels:
  *   Row kernel (default): a group of G threads (one wave for hidden sizes up
@@ -138,26 +143,28 @@ __global__ void hip_layer_norm_block_kernel(
   T *y_row = output + base;
   T *sum_row = sum_out ? sum_out + base : nullptr;
   const float n = static_cast<float>(norm_size);
+  const float inv_n = 1.0f / n;
 
   __shared__ float s_reduce[kLayerNormBlockSize];
 
+  const float t0 = ln_elem(x_row, s_row, skip_bias, round_sum, 0);
   float local_sum = 0.0f;
   for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
     float t = ln_elem(x_row, s_row, skip_bias, round_sum, i);
     if (sum_row)
       ln_store(sum_row + i, t);
-    local_sum += t;
+    local_sum += (t - t0) * inv_n;
   }
-  const float m0 = ln_block_sum(local_sum, s_reduce) / n;
+  const float m0 = t0 + ln_block_sum(local_sum, s_reduce);
 
   float local_d = 0.0f;
   float local_dsq = 0.0f;
   for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
     float d = ln_elem(x_row, s_row, skip_bias, round_sum, i) - m0;
-    local_d += d;
+    local_d += d * inv_n;
     local_dsq += d * d;
   }
-  const float c = ln_block_sum(local_d, s_reduce) / n;
+  const float c = ln_block_sum(local_d, s_reduce);
   const float inv_std =
       rsqrtf(ln_var(ln_block_sum(local_dsq, s_reduce) / n, c) + epsilon);
   if (threadIdx.x == 0) {
@@ -269,6 +276,8 @@ __global__ __launch_bounds__(RowBlock<G>::BS) void hip_layer_norm_row_kernel(
   const T *s =
       skip ? skip + ((active ? row : 0) % skip_rows) * norm_size : nullptr;
   const float n = static_cast<float>(norm_size);
+  const float inv_n = 1.0f / n;
+  const float t0 = ln_elem(x, s, skip_bias, round_sum, 0);
 
   float v[C][N];
   float sum = 0.0f;
@@ -299,10 +308,10 @@ __global__ __launch_bounds__(RowBlock<G>::BS) void hip_layer_norm_row_kernel(
       }
 #pragma unroll
       for (int k = 0; k < N; ++k)
-        sum += v[c][k];
+        sum += (v[c][k] - t0) * inv_n;
     }
   }
-  const float m0 = ln_group_sum<G>(sum, s_wave) / n;
+  const float m0 = t0 + ln_group_sum<G>(sum, s_wave);
 
   float dsum = 0.0f;
   float dsq = 0.0f;
@@ -313,12 +322,12 @@ __global__ __launch_bounds__(RowBlock<G>::BS) void hip_layer_norm_row_kernel(
 #pragma unroll
       for (int k = 0; k < N; ++k) {
         v[c][k] -= m0;
-        dsum += v[c][k];
+        dsum += v[c][k] * inv_n;
         dsq += v[c][k] * v[c][k];
       }
     }
   }
-  const float corr = ln_group_sum<G>(dsum, s_wave) / n;
+  const float corr = ln_group_sum<G>(dsum, s_wave);
   const float mean_dsq = ln_group_sum<G>(dsq, s_wave) / n;
   if (!active)
     return;

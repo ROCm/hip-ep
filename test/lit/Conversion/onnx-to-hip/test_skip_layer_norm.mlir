@@ -151,6 +151,21 @@ module {
         -> tensor<1x16x1280xf16>
     return %0 : tensor<1x16x1280xf16>
   }
+
+  // ===== Test 8: empty sequence, empty skip -> composed path =====
+
+  func.func @empty_sequence(%input: tensor<2x0x768xf32>,
+                            %skip: tensor<0x768xf32>,
+                            %gamma: tensor<768xf32>)
+      -> tensor<2x0x768xf32> {
+    %0 = "onnx.Custom"(%input, %skip, %gamma) {
+      function_name = "SkipLayerNormalization",
+      domain_name = "com.microsoft",
+      epsilon = 9.99999974E-6 : f32
+    } : (tensor<2x0x768xf32>, tensor<0x768xf32>, tensor<768xf32>)
+        -> tensor<2x0x768xf32>
+    return %0 : tensor<2x0x768xf32>
+  }
 }
 
 // CHECK-LABEL: func.func @main_graph
@@ -202,3 +217,9 @@ module {
 // CHECK-LABEL: func.func @default_epsilon
 // CHECK: hip.skip_layer_norm
 // CHECK-SAME: {epsilon = 9.99999996E-13 : f32}
+
+// CHECK-LABEL: func.func @empty_sequence
+// CHECK-NOT: hip.skip_layer_norm
+// CHECK: hip.add
+// CHECK: hip.layer_norm
+// CHECK: return
