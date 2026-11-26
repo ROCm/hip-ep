@@ -21,6 +21,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <set>
 #include <string>
@@ -296,6 +297,34 @@ int main() {
              loaded.gpuArch == "gfx1151",
          "loader keeps conv and gemm rows and drops a non-gemm config");
 
+  {
+    // An infinite or NaN weight in the buffer makes the distance NaN for a row
+    // that shares the axis, so the loader refuses it like a non-positive one.
+    const auto withWeights = [&](float m, float n, float k) {
+      flatbuffers::FlatBufferBuilder fb;
+      auto arch = fb.CreateString("gfx1151");
+      auto abi = fb.CreateString("rocmlir-conv-v1");
+      auto model = fb.CreateString("");
+      std::vector<flatbuffers::Offset<fbs::RocmlirTuneConfig>> noConfigs;
+      std::vector<flatbuffers::Offset<fbs::RocmlirTunePoint>> noPoints;
+      std::vector<flatbuffers::Offset<fbs::RocmlirTuneFallback>> noFallbacks;
+      auto root = fbs::CreateRocmlirAutotuneLut(
+          fb, 1, arch, 0, abi, model, m, n, k, fb.CreateVector(noConfigs),
+          fb.CreateVector(noPoints), fb.CreateVector(noFallbacks));
+      fbs::FinishRocmlirAutotuneLutBuffer(fb, root);
+      mlir::hip::ProblemCacheLut lut;
+      std::string weightError;
+      return mlir::hip::loadProblemCacheLut(fb.GetBufferPointer(), fb.GetSize(),
+                                            lut, weightError);
+    };
+    const float inf = std::numeric_limits<float>::infinity();
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    expect(withWeights(1.0f, 1.0f, 1.0f), "finite weights load");
+    expect(!withWeights(inf, 1.0f, 1.0f), "an infinite weight is rejected");
+    expect(!withWeights(1.0f, nan, 1.0f), "a NaN weight is rejected");
+    expect(!withWeights(1.0f, 1.0f, 0.0f), "a zero weight is rejected");
+  }
+
   const uint8_t garbage[] = {1, 2, 3, 4};
   expect(
       !mlir::hip::loadProblemCacheLut(garbage, sizeof(garbage), loaded, error),
@@ -451,6 +480,22 @@ int main() {
     llvm::json::Object doc = dumpDoc();
     doc["weight_k"] = 1e40;
     rejects(std::move(doc), "a JSON weight above the float range is rejected");
+  }
+  {
+    // 1e50 is finite as a double and narrows to infinity as a float.
+    llvm::json::Object doc = dumpDoc();
+    doc["weight_m"] = 1e50;
+    rejects(std::move(doc), "a JSON weight that overflows a float is rejected");
+  }
+  {
+    // The largest float is still a finite weight, and one more step is not.
+    llvm::json::Object doc = dumpDoc();
+    doc["weight_n"] = static_cast<double>(std::numeric_limits<float>::max());
+    mlir::hip::ProblemCacheLut widest;
+    expect(mlir::hip::loadProblemCacheLutJson(jsonText(std::move(doc)), widest,
+                                              error) &&
+               std::isfinite(widest.weightN),
+           "the largest float is accepted as a JSON weight");
   }
   {
     llvm::json::Object doc = dumpDoc();
@@ -1124,6 +1169,34 @@ int main() {
             ++temps;
         expect(temps == 0, "symlinked writes leave no temporary file");
       }
+    }
+
+    // A directory opens as a stream on Linux and then fails to read. That is
+    // an error return, not an exception, for the load and for the rewrite.
+    {
+      const std::filesystem::path asDir = dir / "a_directory.json";
+      std::filesystem::create_directories(asDir);
+      mlir::hip::ProblemCacheLut unread;
+      bool threw = false;
+      bool loaded = true;
+      bool updated = true;
+      std::string loadError;
+      std::string updateError;
+      try {
+        loaded = mlir::hip::loadProblemCacheLutJsonFile(asDir.string(), unread,
+                                                        loadError);
+        updated = mlir::hip::updateProblemCacheJsonFile(
+            asDir.string(), "gfx1151", {{exact, tile32}}, updateError);
+      } catch (...) {
+        threw = true;
+      }
+      expect(!threw, "a directory path does not throw");
+      expect(!loaded && !loadError.empty(),
+             "loading a directory reports an error");
+      expect(!updated && updateError.find(asDir.string()) != std::string::npos,
+             "rewriting a directory reports an error");
+      expect(std::filesystem::is_directory(asDir),
+             "a refused directory is left in place");
     }
 
     // An empty file, as `touch` makes it, is a fresh table.

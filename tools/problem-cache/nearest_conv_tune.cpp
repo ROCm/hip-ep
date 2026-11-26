@@ -787,9 +787,15 @@ bool loadProblemCacheLut(const uint8_t *data, size_t size, ProblemCacheLut &lut,
     error = "unsupported rocmlir LUT kernel_abi";
     return false;
   }
-  if (!(table->weight_m() > 0.0f) || !(table->weight_n() > 0.0f) ||
-      !(table->weight_k() > 0.0f)) {
-    error = "rocmlir LUT has a non-positive distance weight";
+  // A weight has to be a finite positive float: an infinite one makes the
+  // distance NaN (infinity * 0) for a row that shares the axis, and then the
+  // comparison that picks the nearest row accepts every row in turn.
+  const auto usable = [](float weight) {
+    return std::isfinite(weight) && weight > 0.0f;
+  };
+  if (!usable(table->weight_m()) || !usable(table->weight_n()) ||
+      !usable(table->weight_k())) {
+    error = "rocmlir LUT has a non-positive or non-finite distance weight";
     return false;
   }
   if (table->gpu_arch() != nullptr)
@@ -839,6 +845,17 @@ bool parseLutObject(std::string_view text, llvm::json::Value &document,
   return true;
 }
 
+// Reads the rest of \p in into \p text with stream-level calls only. On Linux
+// a directory opens as an ifstream but cannot be read; istream::read turns that
+// into badbit, whereas an istreambuf_iterator over the same stream throws
+// std::ios_base::failure. Returns false if the read failed.
+bool readStreamText(std::ifstream &in, std::string &text) {
+  char buffer[1 << 14];
+  while (in.read(buffer, sizeof(buffer)) || in.gcount() > 0)
+    text.append(buffer, static_cast<size_t>(in.gcount()));
+  return !in.bad();
+}
+
 // Same checks as the FlatBuffer overload, on the fields every LUT carries. An
 // absent schema_version or weight takes the problem_cache.fbs default; a
 // present one of the wrong type is an error rather than a silent default.
@@ -871,15 +888,16 @@ bool readLutHeaderJson(const llvm::json::Object &root, ProblemCacheLut &lut,
     if (!value)
       return false;
     // The weight is stored as a float, so it has to be a finite positive
-    // float. 1e40 is outside the range, and converting it is undefined; 1e-50
-    // is positive as a double but rounds to zero, which the FlatBuffer loader
-    // rejects. Either would also corrupt the distance (a dropped axis, or an
-    // infinite one), so check the range first and the narrowed value after.
+    // float. 1e50 is finite as a double but outside the float range, and
+    // converting it is undefined (in practice infinity). 1e-50 is positive as a
+    // double but rounds to zero, which the FlatBuffer loader rejects. Either
+    // would corrupt the distance (an infinite or a dropped axis), so check the
+    // range before converting and the converted value after.
     if (!std::isfinite(*value) ||
         *value > static_cast<double>(std::numeric_limits<float>::max()))
       return false;
     const float narrowed = static_cast<float>(*value);
-    if (!(narrowed > 0.0f))
+    if (!std::isfinite(narrowed) || !(narrowed > 0.0f))
       return false;
     out = narrowed;
     return true;
@@ -887,7 +905,7 @@ bool readLutHeaderJson(const llvm::json::Object &root, ProblemCacheLut &lut,
   float weightM = 1.0f, weightN = 1.0f, weightK = 1.0f;
   if (!readWeight("weight_m", weightM) || !readWeight("weight_n", weightN) ||
       !readWeight("weight_k", weightK)) {
-    error = "rocmlir LUT has a non-positive distance weight";
+    error = "rocmlir LUT has a non-positive or non-finite distance weight";
     return false;
   }
   if (std::optional<llvm::StringRef> arch = root.getString("gpu_arch"))
@@ -957,9 +975,8 @@ bool loadProblemCacheLutJsonFile(const std::string &path, ProblemCacheLut &lut,
     error = "problem cache not found: " + path;
     return false;
   }
-  std::string text((std::istreambuf_iterator<char>(in)),
-                   std::istreambuf_iterator<char>());
-  if (in.bad()) {
+  std::string text;
+  if (!readStreamText(in, text)) {
     lut = {};
     error = "failed reading problem cache: " + path;
     return false;
@@ -1239,16 +1256,21 @@ bool updateProblemCacheJsonFile(const std::string &path,
   if (!resolveWriteTarget(path, target, error))
     return false;
 
+  // A stat that fails for a reason other than "no such file" is an error: the
+  // file may be there, and writing a new table over it would lose it.
   std::string existing;
-  if (fs::exists(target, ec) && !ec) {
+  const bool present = fs::exists(target, ec);
+  if (ec) {
+    error = "cannot inspect problem cache " + path + ": " + ec.message();
+    return false;
+  }
+  if (present) {
     std::ifstream in(target, std::ios::binary);
     if (!in) {
       error = "cannot read problem cache: " + path;
       return false;
     }
-    existing.assign(std::istreambuf_iterator<char>(in),
-                    std::istreambuf_iterator<char>());
-    if (in.bad()) {
+    if (!readStreamText(in, existing)) {
       error = "failed reading problem cache: " + path;
       return false;
     }
@@ -1279,6 +1301,14 @@ bool updateProblemCacheJsonFile(const std::string &path,
       error = "failed writing problem cache: " + temporary.string();
       return false;
     }
+  }
+  // The rename swaps in a new file, so give it the mode the old one had rather
+  // than the default one. Best effort: a failure here is not worth losing the
+  // winners over.
+  if (present) {
+    const fs::file_status old = fs::status(target, ec);
+    if (!ec)
+      fs::permissions(temporary, old.permissions(), ec);
   }
   fs::rename(temporary, target, ec);
   if (ec) {
