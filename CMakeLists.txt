@@ -128,6 +128,13 @@ option(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS
   "Build the opt-in native .dll/.so artifact path (lld). When OFF, artifact_format=NATIVE throws."
   OFF)
 
+# MIGraphX library backend (docs/design/migraphx-backend.md). Builds the
+# runtime-loaded hipep_migraphx plugin; the EP itself never links MIGraphX, so
+# with this OFF hipgpu behaves exactly as before.
+option(HIPDNN_EP_ENABLE_MIGRAPHX
+  "Build the hipep_migraphx backend plugin (requires find_package(migraphx))"
+  OFF)
+
 # Build rocMLIR/Triton (rocmlirTriton) in-tree as a subdirectory, reusing the
 # same LLVM/MLIR this project already resolves (see cmake/deps.cmake). When ON,
 # the in-tree LLVM is built as a superset (adds the AMDGPU target and matching
@@ -241,6 +248,10 @@ add_subdirectory(lib)
 # Must come AFTER lib/Runtime (RuntimeBitcode dep) and BEFORE tools/
 # (tools/hip-test links morphizen-custom-op-mlir).
 add_subdirectory(backend-mlir-compiler)
+
+if(HIPDNN_EP_ENABLE_MIGRAPHX)
+  add_subdirectory(lib/Backend/MIGraphX)
+endif()
 
 # Test-only pass registrations used by hip-mlir-opt LIT coverage.
 # Define the library before configuring tools so the target is linked by name.

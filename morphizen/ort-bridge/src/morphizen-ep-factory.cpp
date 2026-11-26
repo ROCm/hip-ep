@@ -347,20 +347,25 @@ OrtStatus *ORT_API_CALL MorphiZenEpFactory::CreateEpImpl(
   // accepted, including a parent EP (e.g. the AMD GPU umbrella) that creates
   // the EP without forwarding the selection.
 
-  // Create the execution provider
-  factory->throw_if_error(factory->ort_api.Logger_LogMessage(
-      logger, OrtLoggingLevel::ORT_LOGGING_LEVEL_INFO, "Creating MorphiZen EP",
-      ORT_FILE, __LINE__, __FUNCTION__));
+  try {
+    // Create the execution provider
+    factory->throw_if_error(factory->ort_api.Logger_LogMessage(
+        logger, OrtLoggingLevel::ORT_LOGGING_LEVEL_INFO,
+        "Creating MorphiZen EP", ORT_FILE, __LINE__, __FUNCTION__));
 
-  // use properties from the device and ep_metadata if needed
-  // const OrtHardwareDevice* device = devices[0];
-  // const OrtKeyValuePairs* ep_metadata = ep_metadata[0];
+    // use properties from the device and ep_metadata if needed
+    // const OrtHardwareDevice* device = devices[0];
+    // const OrtKeyValuePairs* ep_metadata = ep_metadata[0];
 
-  auto morphizen_ep = std::make_unique<MorphiZenEP>(
-      *factory, factory->ep_name_, ep_metadata, *session_options, *logger);
+    auto morphizen_ep = std::make_unique<MorphiZenEP>(
+        *factory, factory->ep_name_, ep_metadata, *session_options, *logger);
 
-  *ep = morphizen_ep.release();
-  return nullptr;
+    *ep = morphizen_ep.release();
+    return nullptr;
+  } catch (...) {
+    return status_from_current_exception(factory->ort_api,
+                                         "MorphiZenEpFactory::CreateEp");
+  }
 }
 void ORT_API_CALL MorphiZenEpFactory::ReleaseEpImpl(OrtEpFactory * /*this_ptr*/,
                                                     OrtEp *ep) noexcept {

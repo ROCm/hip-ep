@@ -25,8 +25,8 @@ target_compile_features(test-e2e-mlir PRIVATE cxx_std_17)
 # Model path (using Git LFS committed model)
 set(TWO_LAYER_CONV_MODEL_PATH "${CMAKE_CURRENT_SOURCE_DIR}/models/two_layer_conv.onnx")
 
-# Config file path (absolute path to etc/morphizen_config_mlir.json)
-set(MORPHIZEN_CONFIG_MLIR_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../../etc/morphizen_config_mlir.json")
+# Config file path (absolute path to etc/morphizen_config.json)
+set(MORPHIZEN_CONFIG_MLIR_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../../etc/morphizen_config.json")
 
 # Get the MorphiZen EP target (set by parent morphizen build system)
 if(NOT DEFINED morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET)
@@ -72,3 +72,34 @@ endif()
 add_test(NAME MlirE2ETest COMMAND test-e2e-mlir)
 
 set_target_properties(test-e2e-mlir PROPERTIES FOLDER "mlir-tests")
+
+# GPU-free E2E tests of backend selection and the MIGraphX path, against a
+# mock MIGraphX plugin (models: gen_migraphx_routing_models.py). The mock gets
+# the real plugin's file name but its own directory, which the test passes in
+# HIPDNN_EP_MIGRAPHX_PLUGIN_DIR.
+add_library(mock-migraphx-plugin SHARED mock_migraphx_plugin.cpp)
+target_compile_features(mock-migraphx-plugin PRIVATE cxx_std_17)
+target_include_directories(mock-migraphx-plugin PRIVATE
+  ${CMAKE_SOURCE_DIR}/morphizen/ort-bridge/src)
+set_target_properties(mock-migraphx-plugin PROPERTIES
+  OUTPUT_NAME hipep_migraphx
+  PREFIX ""
+  LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/mock_migraphx
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/mock_migraphx
+  FOLDER "mlir-tests")
+
+add_executable(test-e2e-migraphx-mock test_e2e_migraphx_mock.cpp)
+target_compile_features(test-e2e-migraphx-mock PRIVATE cxx_std_17)
+target_compile_definitions(test-e2e-migraphx-mock PRIVATE
+  MORPHIZEN_EP_LIB_PATH="$<TARGET_FILE:${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET}>"
+  MORPHIZEN_CONFIG_MLIR_PATH="${MORPHIZEN_CONFIG_MLIR_PATH}"
+  TEST_MODEL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/models"
+  MOCK_MGX_PLUGIN_DIR="$<TARGET_FILE_DIR:mock-migraphx-plugin>"
+)
+target_link_libraries(test-e2e-migraphx-mock PRIVATE
+  onnxruntime::onnxruntime
+  GTest::gtest
+)
+add_dependencies(test-e2e-migraphx-mock mock-migraphx-plugin)
+add_test(NAME MigraphxMockE2ETest COMMAND test-e2e-migraphx-mock)
+set_target_properties(test-e2e-migraphx-mock PROPERTIES FOLDER "mlir-tests")

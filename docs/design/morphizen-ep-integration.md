@@ -135,6 +135,10 @@ The two contracts specific to this project are described below.
 
 ## Contract 1: morphizen-ep.dll → hip-compiler
 
+The `gpu_backend` provider option can route the whole graph to the MIGraphX
+library instead of this compiler; see
+[migraphx-backend.md](migraphx-backend.md).
+
 During `GetCapability`, the level-1 pass first converts the `OrtGraph` object
 to MLIR IR bytes:
 

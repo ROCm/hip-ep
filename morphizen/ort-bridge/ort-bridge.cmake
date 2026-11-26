@@ -21,6 +21,11 @@ set(_ORT_BRIDGE_SOURCES
   src/ir-converter-imp.hpp
   src/ir-converter-imp.cpp
   src/roctx-range.hpp
+  src/backend-routing.hpp
+  src/backend-routing.cpp
+  src/migraphx-plugin-abi.hpp
+  src/migraphx-backend.hpp
+  src/migraphx-backend.cpp
 )
 
 if(morphizen_ENABLE_HIP_GPU_ALLOCATOR)

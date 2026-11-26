@@ -4,6 +4,8 @@
  */
 #include "./ort-status-exception.hpp"
 
+#include <string>
+
 namespace morphizen {
 
 OrtStatusException::OrtStatusException(const OrtApi &api, OrtStatus *status)
@@ -45,6 +47,27 @@ OrtStatusException::~OrtStatusException() {
 
 const char *OrtStatusException::what() const noexcept {
   return error_msg_ ? error_msg_ : "Unknown ORT error";
+}
+
+OrtErrorCode OrtStatusException::code() const noexcept {
+  return status_ ? ort_api_.GetErrorCode(status_) : ORT_FAIL;
+}
+
+OrtStatus *status_from_current_exception(const OrtApi &api,
+                                         const char *where) noexcept {
+  try {
+    throw;
+  } catch (const OrtStatusException &e) {
+    // Keep the original code (e.g. ORT_INVALID_ARGUMENT) from the failed call.
+    return api.CreateStatus(e.code(),
+                            (std::string(where) + ": " + e.what()).c_str());
+  } catch (const std::exception &e) {
+    return api.CreateStatus(ORT_FAIL,
+                            (std::string(where) + ": " + e.what()).c_str());
+  } catch (...) {
+    return api.CreateStatus(
+        ORT_FAIL, (std::string(where) + ": unknown exception").c_str());
+  }
 }
 
 } // namespace morphizen

@@ -4,11 +4,15 @@
  */
 #pragma once
 #include "./api-ptrs.hpp"
+#include "./backend-routing.hpp"
 #include "./ir-converter.hpp"
+#include "./migraphx-backend.hpp"
 #include "morphizen/custom_op.h" // in onnxruntime/core/providers/morphizen/include
 #include "morphizen/morphizen-ort-api-ext.hpp"
 #include <map>
+#include <memory>
 #include <string>
+#include <vector>
 
 namespace onnxruntime {
 struct OrtGraphWrapper;
@@ -96,6 +100,13 @@ private:
                                  /*out*/ std::string &config_val);
   void update_input_output_argument_indice(morphizen::ExecutionProvider &ep,
                                            const OrtNode *fused_node);
+  // Whole-graph MIGraphX path (docs/design/migraphx-backend.md).
+  OrtStatus *ClaimForMigraphx(OrtGraphWrapper &graph_wrapper,
+                              OrtEpGraphSupportInfo &graph_support_info,
+                              const std::string &why);
+  OrtStatus *CompileMigraphx(const OrtNode *fused_node,
+                             OrtNodeComputeInfo *&node_compute_info);
+  void log_routing(const char *backend, const std::string &reason) const;
 
 private:
   std::string name_;
@@ -112,6 +123,11 @@ private:
   std::unordered_map<std::string, std::string> provider_options_;
   std::map<std::string, std::string> session_configs_;
   bool enable_ep_context_;
+  GpuBackend gpu_backend_ = GpuBackend::Auto;
+  // Set when the graph was routed to MIGraphX; execution_providers_ is then
+  // null. Graph output names in graph order, matching the program outputs.
+  std::shared_ptr<MigraphxProgram> mgx_program_;
+  std::vector<std::string> mgx_output_names_;
 };
 struct MorphiZenEP_ComputeInfo : public OrtNodeComputeInfo {
   morphizen::ExecutionProvider *morphizen_ep =
@@ -119,5 +135,10 @@ struct MorphiZenEP_ComputeInfo : public OrtNodeComputeInfo {
   // "hip_ep.graph.<model> sub=<subgraph>" ROCTx range around each Compute;
   // empty when ROCTx is off.
   std::string roctx_label;
+  // MIGraphX path only: the shared program and, per fused-node input/output
+  // position, the program input index / graph output index.
+  std::shared_ptr<MigraphxProgram> mgx_program;
+  std::vector<size_t> mgx_inputs;
+  std::vector<size_t> mgx_outputs;
 };
 } // namespace morphizen
