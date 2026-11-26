@@ -438,6 +438,22 @@ int main() {
     rejects(std::move(doc), "a non-numeric JSON weight is rejected");
   }
   {
+    // Positive as a double, zero as the float it is stored in. The FlatBuffer
+    // loader rejects a zero weight, so this one must be rejected too.
+    llvm::json::Object doc = dumpDoc();
+    doc["weight_n"] = 1e-50;
+    rejects(std::move(doc), "a JSON weight that rounds to zero is rejected");
+  }
+  {
+    llvm::json::Object doc = dumpDoc();
+    doc["weight_m"] = 1e-30;
+    mlir::hip::ProblemCacheLut small;
+    expect(mlir::hip::loadProblemCacheLutJson(jsonText(std::move(doc)), small,
+                                              error) &&
+               small.weightM > 0.0f,
+           "a small JSON weight that still fits a float is accepted");
+  }
+  {
     mlir::hip::ProblemCacheLut bad;
     expect(!mlir::hip::loadProblemCacheLutJson("", bad, error),
            "empty JSON text is rejected");
@@ -932,6 +948,69 @@ int main() {
       if (entry.path().filename().string().rfind("partial.json.", 0) == 0)
         ++partialTemps;
     expect(partialTemps == 0, "a refused table leaves no temporary file");
+
+    // A symlink is followed to its target, which is created if it does not
+    // exist yet. The link itself is never replaced by the file.
+    {
+      namespace fs = std::filesystem;
+      const fs::path linkPath = dir / "dangling.json";
+      std::error_code linkEc;
+      fs::create_symlink("dangling_target.json", linkPath, linkEc);
+      if (linkEc) {
+        std::fprintf(stderr, "skipping symlink checks: %s\n",
+                     linkEc.message().c_str());
+      } else {
+        expect(mlir::hip::updateProblemCacheJsonFile(
+                   linkPath.string(), "gfx1151", {{exact, tile32}}, error),
+               "a dangling symlink is written through");
+        expect(fs::is_symlink(fs::symlink_status(linkPath)) &&
+                   fs::is_regular_file(dir / "dangling_target.json"),
+               "the link stays and its target is created");
+        expect(mlir::hip::updateProblemCacheJsonFile(
+                   linkPath.string(), "gfx1151", {{gemmAt(8), tile16}}, error),
+               "a link whose target now exists is written through");
+        mlir::hip::ProblemCacheLut viaLink;
+        expect(
+            fs::is_symlink(fs::symlink_status(linkPath)) &&
+                mlir::hip::loadProblemCacheLutJsonFile(
+                    (dir / "dangling_target.json").string(), viaLink, error) &&
+                viaLink.entries.size() == 2,
+            "later compiles keep updating the target, not the link");
+
+        // A chain of dangling links, ending in a directory that is not there.
+        fs::create_symlink("chain_mid.json", dir / "chain.json", linkEc);
+        fs::create_symlink("chain_end/final.json", dir / "chain_mid.json",
+                           linkEc);
+        expect(!linkEc && mlir::hip::updateProblemCacheJsonFile(
+                              (dir / "chain.json").string(), "gfx1151",
+                              {{exact, tile32}}, error),
+               "a chain of dangling symlinks is written through");
+        expect(fs::is_symlink(fs::symlink_status(dir / "chain.json")) &&
+                   fs::is_symlink(fs::symlink_status(dir / "chain_mid.json")) &&
+                   fs::is_regular_file(dir / "chain_end" / "final.json"),
+               "every link in the chain stays and the last target is created");
+
+        // A loop cannot be resolved, so it is refused and left alone.
+        fs::create_symlink("loop_b.json", dir / "loop_a.json", linkEc);
+        fs::create_symlink("loop_a.json", dir / "loop_b.json", linkEc);
+        const std::string loopPath = (dir / "loop_a.json").string();
+        expect(!linkEc &&
+                   !mlir::hip::updateProblemCacheJsonFile(
+                       loopPath, "gfx1151", {{exact, tile32}}, error) &&
+                   error.find(loopPath) != std::string::npos,
+               "a symlink loop is refused");
+        expect(fs::is_symlink(fs::symlink_status(dir / "loop_a.json")) &&
+                   fs::is_symlink(fs::symlink_status(dir / "loop_b.json")),
+               "a refused symlink loop is left in place");
+
+        size_t temps = 0;
+        for (const auto &entry : fs::recursive_directory_iterator(dir))
+          if (entry.path().filename().string().find(".tmp") !=
+              std::string::npos)
+            ++temps;
+        expect(temps == 0, "symlinked writes leave no temporary file");
+      }
+    }
 
     // An empty file, as `touch` makes it, is a fresh table.
     const std::string blank = (dir / "blank.json").string();

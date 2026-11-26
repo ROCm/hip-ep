@@ -867,9 +867,15 @@ bool readLutHeaderJson(const llvm::json::Object &root, ProblemCacheLut &lut,
     if (root.get(name) == nullptr)
       return true;
     std::optional<double> value = root.getNumber(name);
-    if (!value || !(*value > 0.0))
+    if (!value)
       return false;
-    out = static_cast<float>(*value);
+    // The weight is stored as a float, so test it after the narrowing: 1e-50
+    // is positive as a double but rounds to zero, which the FlatBuffer loader
+    // rejects.
+    const float narrowed = static_cast<float>(*value);
+    if (!(narrowed > 0.0f))
+      return false;
+    out = narrowed;
     return true;
   };
   float weightM = 1.0f, weightN = 1.0f, weightK = 1.0f;
@@ -1168,16 +1174,62 @@ bool mergeProblemCacheJson(std::string_view existing, std::string_view gpuArch,
   return true;
 }
 
+namespace {
+
+// Finds the file to rewrite for \p path: where a symlink points, not the link
+// itself. weakly_canonical resolves every link that leads to something that
+// exists, but leaves a dangling one in place, and renaming over that would
+// replace the link. A dangling link is followed by hand, so the file is
+// created at its target and the link stays. A loop, or a link that cannot be
+// read, is refused rather than overwritten.
+bool resolveWriteTarget(const std::string &path, std::filesystem::path &target,
+                        std::string &error) {
+  namespace fs = std::filesystem;
+  constexpr int kMaxLinkHops = 40;
+  std::error_code ec;
+  fs::path current = path;
+  for (int hop = 0; hop < kMaxLinkHops; ++hop) {
+    fs::path resolved = fs::weakly_canonical(current, ec);
+    if (ec) {
+      // Not resolvable (for example a link loop). A plain path is written
+      // as it is, but a link is never replaced.
+      std::error_code statusEc;
+      if (fs::is_symlink(fs::symlink_status(current, statusEc)) || statusEc) {
+        error = "cannot resolve problem cache " + path + ": " + ec.message();
+        return false;
+      }
+      target = current;
+      return true;
+    }
+    if (!fs::is_symlink(fs::symlink_status(resolved, ec)) || ec) {
+      target = std::move(resolved);
+      return true;
+    }
+    // Only a dangling link is still a link here.
+    fs::path link = fs::read_symlink(resolved, ec);
+    if (ec) {
+      error = "cannot read symbolic link " + resolved.string() + ": " +
+              ec.message();
+      return false;
+    }
+    current = link.is_absolute() ? link : resolved.parent_path() / link;
+  }
+  error = "cannot resolve problem cache " + path +
+          ": too many levels of symbolic links";
+  return false;
+}
+
+} // namespace
+
 bool updateProblemCacheJsonFile(const std::string &path,
                                 std::string_view gpuArch,
                                 const std::vector<ProblemCacheWinner> &winners,
                                 std::string &error) {
   namespace fs = std::filesystem;
   std::error_code ec;
-  // Rewrite the file a symlink points at, not the link.
-  fs::path target = fs::weakly_canonical(fs::path(path), ec);
-  if (ec)
-    target = path;
+  fs::path target;
+  if (!resolveWriteTarget(path, target, error))
+    return false;
 
   std::string existing;
   if (fs::exists(target, ec) && !ec) {

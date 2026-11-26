@@ -136,7 +136,8 @@ bool mergeProblemCacheJson(std::string_view existing, std::string_view gpuArch,
 // so a failed or interrupted write leaves the old file intact. The file is read
 // again at write time, not taken from an earlier load, so entries another
 // compile added in between are kept. Missing parent directories are created. A
-// symlinked \p path is rewritten at its target.
+// symlinked \p path is rewritten at its target, which is created if the link
+// is dangling, and the link stays. A symlink loop is refused.
 bool updateProblemCacheJsonFile(const std::string &path,
                                 std::string_view gpuArch,
                                 const std::vector<ProblemCacheWinner> &winners,
