@@ -18,6 +18,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -52,10 +53,14 @@ jobs:
   build_required:
     uses: ./.github/workflows/build-required.yml
 
-  # LLVM and ONNX Runtime finish in this job so their caches are saved before
-  # the six-hour runner limit. The hip-ep link is the next job and gets its
-  # own budget. A single job built both, then died while linking and never
-  # stored the LLVM prefix.
+  llvm:
+    needs: build_required
+    if: needs.build_required.outputs.run == 'true'
+    uses: ./.github/workflows/linux-llvm-package.yml
+    with:
+      variant: x86-amdgpu
+
+  # Prepare ORT in parallel with the LLVM distribution.
   deps-linux-rmt:
     needs: build_required
     if: needs.build_required.outputs.run == 'true'
@@ -64,8 +69,6 @@ jobs:
     # Jekyll diff on a pull request or merge group. Pushes always build.
     runs-on: ubuntu-latest
     continue-on-error: true
-    outputs:
-      llvm_commit: ${{ steps.llvm.outputs.commit }}
     steps:
       # MorphiZen is vendored in-tree as a git subtree under morphizen,
       # so no deploy key or submodule initialization is needed.
@@ -153,71 +156,6 @@ jobs:
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
-
-      # -----------------------------------------------------------------------
-      # LLVM/MLIR/LLD/Clang from source -> llvm-install (cached). Caching is a CI
-      # concern, so the prefix build lives here (not in build.py). Source is
-      # deps.txt llvm_project (a pinned commit, which is also the cache key).
-      # Recipe matches cmake/deps.cmake's RMT from-source fallback:
-      # clang;mlir;lld, X86 and AMDGPU, RTTI on, zlib/zstd off, INSTALL_UTILS on.
-      # -----------------------------------------------------------------------
-      - name: Resolve LLVM commit
-        id: llvm
-        run: |
-          set -euo pipefail
-          LINE=$(grep -E '^llvm_project;' cmake/deps.txt)
-          LLVM_URL=$(echo "$LINE" | cut -d';' -f2)
-          LLVM_REF=$(echo "$LINE" | cut -d';' -f3)
-          LLVM_COMMIT="$LLVM_REF"
-          if ! [[ "$LLVM_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "ERROR: deps.txt llvm_project must pin a full commit, got '$LLVM_REF'" >&2
-            exit 1
-          fi
-          echo "url=$LLVM_URL" >> "$GITHUB_OUTPUT"
-          echo "ref=$LLVM_REF" >> "$GITHUB_OUTPUT"
-          echo "commit=$LLVM_COMMIT" >> "$GITHUB_OUTPUT"
-
-      - name: Cache LLVM install prefix
-        id: cache-llvm
-        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
-        with:
-          path: ${{ runner.workspace }}/llvm-install
-          # Keyed on the pinned commit, with an AMDGPU prefix so this
-          # does not collide with the X86 Linux Build cache.
-          key: linux-llvm-amdgpu-${{ steps.llvm.outputs.commit }}
-
-      - name: Build LLVM/MLIR/LLD from source
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
-        run: |
-          set -euo pipefail
-          # Shallow fetch of the pinned commit. The cmake project lives at llvm/.
-          SRC="${{ runner.workspace }}/llvm-project"
-          git init "$SRC"
-          git -C "$SRC" remote add origin "${{ steps.llvm.outputs.url }}"
-          git -C "$SRC" fetch --depth 1 origin "${{ steps.llvm.outputs.commit }}"
-          git -C "$SRC" checkout FETCH_HEAD
-          rm -rf "$SRC/.git"
-          cmake -G Ninja -S "$SRC/llvm" -B "${{ runner.workspace }}/build-llvm" \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DLLVM_ENABLE_PROJECTS="clang;mlir;lld" \
-            -DLLVM_TARGETS_TO_BUILD="X86;AMDGPU" \
-            -DCMAKE_INSTALL_PREFIX="${{ runner.workspace }}/llvm-install" \
-            -DLLVM_ENABLE_RTTI=ON \
-            -DLLVM_ENABLE_ZLIB=OFF \
-            -DLLVM_ENABLE_ZSTD=OFF \
-            -DLLVM_INCLUDE_TESTS=OFF \
-            -DLLVM_INCLUDE_EXAMPLES=OFF \
-            -DLLVM_INCLUDE_BENCHMARKS=OFF \
-            -DLLVM_BUILD_TOOLS=ON \
-            -DLLVM_INSTALL_UTILS=ON \
-            -DLLVM_PARALLEL_LINK_JOBS=4 \
-            -DCMAKE_CXX_VISIBILITY_PRESET=hidden \
-            -DCMAKE_C_VISIBILITY_PRESET=hidden \
-            -DCMAKE_VISIBILITY_INLINES_HIDDEN=ON \
-            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
-          cmake --build "${{ runner.workspace }}/build-llvm" --target install
-          rm -rf "$SRC" "${{ runner.workspace }}/build-llvm"
 
       # -----------------------------------------------------------------------
       # ONNX Runtime built from source into ort-install (cached): checkout ->
@@ -320,7 +258,7 @@ jobs:
           echo "Cached ORT wheel: $(basename "$ORT_WHEEL")"
 
   build-linux-rmt:
-    needs: deps-linux-rmt
+    needs: [deps-linux-rmt, llvm]
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
@@ -374,12 +312,21 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
 
-      - name: Restore LLVM install prefix
-        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+      - name: Download LLVM distribution
+        uses: actions/download-artifact@v4
         with:
-          path: ${{ runner.workspace }}/llvm-install
-          key: linux-llvm-amdgpu-${{ needs.deps-linux-rmt.outputs.llvm_commit }}
-          fail-on-cache-miss: true
+          artifact-ids: ${{ needs.llvm.outputs.artifact_id }}
+          github-token: ${{ github.token }}
+          run-id: ${{ needs.llvm.outputs.run_id }}
+          path: ${{ runner.temp }}/llvm-package
+          merge-multiple: true
+
+      - name: Install LLVM distribution
+        run: |
+          prefix="$(dirname "$GITHUB_WORKSPACE")/llvm-install"
+          mkdir -p "$prefix"
+          tar --zstd -xf "$RUNNER_TEMP/llvm-package/llvm.tar.zst" -C "$prefix"
+          rm "$RUNNER_TEMP/llvm-package/llvm.tar.zst"
 
       - name: Restore ONNX Runtime install prefix
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1

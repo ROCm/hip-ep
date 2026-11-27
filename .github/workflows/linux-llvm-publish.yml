@@ -1,0 +1,49 @@
+##
+## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+name: Linux LLVM publisher
+run-name: Linux LLVM for run ${{ github.event.workflow_run.id }} attempt ${{ github.event.workflow_run.run_attempt }}
+on:
+  workflow_run:
+    workflows: [Linux Build, Linux RMT Build]
+    types: [in_progress]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  request:
+    if: >-
+      github.event.workflow_run.path == '.github/workflows/linux-build.yml' ||
+      github.event.workflow_run.path == '.github/workflows/linux-rmt.yml'
+    runs-on: ubuntu-latest
+    outputs:
+      name: ${{ steps.request.outputs.name }}
+      sha: ${{ steps.request.outputs.sha }}
+      variant: ${{ steps.request.outputs.variant }}
+    steps:
+      # workflow_run checks out the default branch. Never check out the requester.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/llvm
+      - id: request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REQUEST_RUN: ${{ github.event.workflow_run.id }}
+        run: python3 .github/llvm/packages.py request "$REQUEST_RUN"
+
+  publish:
+    needs: request
+    if: needs.request.outputs.name != ''
+    concurrency:
+      group: publish-${{ needs.request.outputs.name }}
+      cancel-in-progress: false
+    uses: ./.github/workflows/linux-llvm-build.yml
+    with:
+      name: ${{ needs.request.outputs.name }}
+      sha: ${{ needs.request.outputs.sha }}
+      variant: ${{ needs.request.outputs.variant }}

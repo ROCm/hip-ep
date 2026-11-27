@@ -236,6 +236,29 @@ lives in the ONNX Runtime prefix and the ROCm libs in TheRock, so run with
 Skip to the [Open a container shell](#open-a-container-shell-and-set-root)
 section once `install/bin/` is populated.
 
+## LLVM packages used by Linux CI
+
+The Linux build uses an X86 distribution. RMT downloads a separate X86+AMDGPU
+distribution containing the MLIR translation tools, `llc`, and `opt`. Both are
+Release builds for Ubuntu 24.04 x64. The package name includes the target set,
+pinned LLVM commit from `cmake/deps.txt`, and Git blob ID of
+`.github/llvm/build.sh`. Change that recipe when changing the package contents
+or toolchain configuration.
+
+On a miss, the build's **await** job names the package it needs. The default-branch
+**Linux LLVM publisher** reads that request and serializes publication by package
+name across PRs. It checks again for an existing artifact inside the concurrency
+group. Consumers download the same immutable Actions artifact by ID, including
+after a later hip-ep failure. Expired artifacts are rebuilt on demand. Cold
+consumers occupy a runner while waiting for publication.
+
+The publisher checks out the default branch and fetches source directly from
+ROCm/llvm-project. It accepts the reviewed pin, published upstream branch tips,
+and commits reachable from upstream amd-staging or rmt-core branches. PRs that
+change the recipe build a run-local preview until the recipe lands. This also
+allows a PR introducing the publisher to test packaging before its workflow is
+available on the default branch.
+
 ## Use the prebuilt package (testers, no compile)
 
 A ready-to-run package is published for each green build. It contains every
