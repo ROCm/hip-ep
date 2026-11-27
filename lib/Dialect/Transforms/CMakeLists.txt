@@ -30,6 +30,7 @@ add_library(HipDialectTransforms STATIC
   fusion_pattern/gelu_fusion.cpp
   fusion_pattern/swiglu_fusion.cpp
   fusion_pattern/scaled_masked_softmax_fusion.cpp
+  fusion_pattern/transpose_removal/transpose_removal.cpp
   AddHipContextArg.cpp
   AssignOpStateSlots.cpp
   BufferUtils.cpp
