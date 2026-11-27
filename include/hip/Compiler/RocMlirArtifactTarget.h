@@ -18,8 +18,9 @@ namespace hip::compiler {
 /// ENABLE_ROCMLIRTRITON).
 ///
 /// The string is the GPU arch, plus `+autotune=<space>` when benchmarking is
-/// on. There is no `+lut=` suffix, whether or not the shipped problem-cache
-/// LUT was consulted. The model cache / EPContext identity is derived
+/// on, and `+attention` (`+attention-f32=<bytes>` with an f32 cutoff) when
+/// attention merges. There is no `+lut=` suffix, whether or not the shipped
+/// problem-cache LUT was consulted. The model cache / EPContext identity is derived
 /// from the graph alone, so an artifact that carries an arch-specific HSACO
 /// could otherwise be reused on a different GPU, or after HIPDNN_EP_ROCMLIR
 /// or the autotune space changes. The level-1 pass records this value and the

@@ -195,8 +195,9 @@ struct RocMlirFusionPipelineOptions
       llvm::cl::init(true)};
   Option<int64_t> attentionF32MinScoreBytes{
       *this, "attention-f32-min-score-bytes",
-      llvm::cl::desc("Smallest f32 score matrix, in bytes, that attention "
-                     "merges; 0 keeps f32 attention unmerged"),
+      llvm::cl::desc("Without f32 matrix acceleration, f32 attention "
+                     "merges only above this many score bytes; 0 keeps it "
+                     "unmerged. Accelerated f32 merges at any size"),
       llvm::cl::init(0)};
   Option<std::string> report{
       *this, "report",

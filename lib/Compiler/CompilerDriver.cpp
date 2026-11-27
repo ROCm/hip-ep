@@ -153,9 +153,16 @@ std::string rocMlirArtifactTarget() {
     if (!target.empty() &&
         hip_env_is_on("HIPDNN_EP_ROCMLIR_NO_STANDALONE_ELEMENTWISE"))
       target += "+no-standalone-ew";
-    // Whether attention was fused is baked into the kernels the same way.
-    if (!target.empty() && hip_env_is_on("HIPDNN_EP_ROCMLIR_NO_ATTENTION"))
-      target += "+no-attention";
+    // Whether attention was fused, and above which f32 score size, is baked
+    // into the kernels the same way. Artifacts from before the attention
+    // merge carry neither suffix, like a NO_ATTENTION session.
+    if (!target.empty() && !hip_env_is_on("HIPDNN_EP_ROCMLIR_NO_ATTENTION")) {
+      target += "+attention";
+      if (int64_t f32MinBytes =
+              mlir::hip::resolveRocMlirAttentionF32MinScoreBytes(
+                  mlir::hip::resolveRocMlirArch()))
+        target += "-f32=" + std::to_string(f32MinBytes);
+    }
     return target;
   }
 #endif

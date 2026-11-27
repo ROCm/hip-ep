@@ -58,6 +58,8 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringMap.h"
+
+#include <optional>
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/IR/LLVMContext.h"
@@ -150,6 +152,7 @@ int main(int argc, char **argv) {
   std::string dumpHipPath;
   std::string dumpTosaPath;
   bool dumpHighLevel = false;
+  std::optional<int64_t> attentionF32MinScoreBytes;
   bool autotuneFlagSeen = false;
   // On unless HIP_ROCMLIR_SKIP_BENCHMARKING says otherwise: benchmarking is
   // the reason this tool exists, unlike the EP, which opts in.
@@ -207,6 +210,14 @@ int main(int argc, char **argv) {
         llvm::errs() << "error: --autotune-runs must be greater than zero\n";
         return 1;
       }
+    } else if (arg == "--attention-f32-min-score-bytes" && i + 1 < argc) {
+      int64_t bytes = 0;
+      if (llvm::StringRef(argv[++i]).getAsInteger(10, bytes) || bytes < 0) {
+        llvm::errs()
+            << "error: invalid --attention-f32-min-score-bytes value\n";
+        return 1;
+      }
+      attentionF32MinScoreBytes = bytes;
     } else if (argv[i][0] != '-') {
       inputFilename = argv[i];
     }
@@ -305,6 +316,17 @@ int main(int argc, char **argv) {
         << "                       write the rock MLIR (text) to <output> "
            "instead of\n"
         << "                       the compiled bitcode.\n"
+        << "  --attention-f32-min-score-bytes <n>\n"
+        << "                       f32 attention without matrix acceleration\n"
+        << "                       merges only above n bytes of scores; 0 "
+           "turns\n"
+        << "                       that off. Default: "
+           "HIPDNN_EP_ROCMLIR_ATTENTION_\n"
+        << "                       F32_MIN_SCORE_BYTES, else the L2 size of "
+           "device 0\n"
+        << "                       when it is the target arch, else 0. Pass "
+           "the\n"
+        << "                       EP's value when compiling for another GPU.\n"
         << "  Set ROCK_ARCH to override the target GPU arch (default: "
         << mlir::hip::resolveRocMlirArch() << ").\n"
         << "  Set HIP_ROCMLIR_SKIP_BENCHMARKING=1 to skip autotune and affix "
@@ -404,6 +426,10 @@ int main(int argc, char **argv) {
   // which autotuning finds.
   fuseOpts.int4Weights = autotuneEnabled && HIP_ROCMLIR_AUTOTUNE;
   mlir::hip::setRocMlirAttentionOptions(fuseOpts);
+  if (attentionF32MinScoreBytes)
+    fuseOpts.attentionF32MinScoreBytes = *attentionF32MinScoreBytes;
+  llvm::errs() << "[hip-rocmlir-compiler] attention-f32-min-score-bytes="
+               << fuseOpts.attentionF32MinScoreBytes << "\n";
   mlir::hip::addRocMlirFusionPasses(pm, fuseOpts);
 
   if (mlir::failed(pm.run(*module))) {

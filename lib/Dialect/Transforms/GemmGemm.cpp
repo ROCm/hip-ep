@@ -41,6 +41,12 @@ static OpOperand &getGemmAOperand(Operation *anchor) {
   return cast<GemmOp>(anchor).getInputAMutable();
 }
 
+static Value getGemmB(Operation *anchor) {
+  if (auto matmul = dyn_cast<MatmulOp>(anchor))
+    return matmul.getB();
+  return cast<GemmOp>(anchor).getInputB();
+}
+
 static bool isGemmATransposed(Operation *anchor) {
   if (auto matmul = dyn_cast<MatmulOp>(anchor))
     return matmul.getTransA() != 0;
@@ -78,8 +84,7 @@ static std::optional<std::array<int64_t, 3>> getGemmDims(Operation *anchor) {
 // accelerates. `accelTypes` holds them as printed (f16, bf16, ...).
 static bool isGemmGemmSupported(Operation *anchor,
                                 ArrayRef<std::string> accelTypes) {
-  Value b = isa<MatmulOp>(anchor) ? cast<MatmulOp>(anchor).getB()
-                                  : cast<GemmOp>(anchor).getInputB();
+  Value b = getGemmB(anchor);
   auto isAccelerated = [&](Value operand) {
     std::string name;
     llvm::raw_string_ostream os(name);
@@ -106,18 +111,21 @@ static bool passesGemmGemmHeuristic(std::array<int64_t, 3> first, int64_t g) {
   return m >= 98304 && n >= 512 && k <= 13 && g <= 256;
 }
 
-// What may lie between the two gemms: pointwise ops, and a reshape that only
-// regroups the rows (batch and m) and keeps n. A transpose there makes the
-// second gemm's reduction dimension disagree with the first gemm's n.
-static bool isGemmGemmLink(Operation *op) {
-  if (isFusablePointwise(op))
-    return true;
+// A reshape that only regroups the rows (batch and m) and keeps n.
+static bool isRowReshape(Operation *op) {
   if (getFusableViewKind(op) != ViewKind::Reshape)
     return false;
   auto in = dyn_cast<RankedTensorType>(op->getOperand(0).getType());
   auto out = dyn_cast<RankedTensorType>(op->getResult(0).getType());
   return in && out && in.getRank() > 0 && out.getRank() > 0 &&
          in.getShape().back() == out.getShape().back();
+}
+
+// What may lie between the two gemms: pointwise ops and row reshapes. A
+// transpose there makes the second gemm's reduction dimension disagree with
+// the first gemm's n.
+static bool isGemmGemmLink(Operation *op) {
+  return isFusablePointwise(op) || isRowReshape(op);
 }
 
 // Whether only links lie between the anchor and the value the kernel
@@ -156,6 +164,55 @@ static bool feedsGemmA(BlockArgument arg, Operation *anchor) {
   return false;
 }
 
+// The chain from `arg` to the anchor's A operand when it is single-use and
+// holds only row reshapes and at most one cast, which is all rocMLIR's
+// attention matcher skips between the softmax and the second gemm. Yields
+// that cast, or null without one.
+static FailureOr<CastOp> getProbabilitiesCast(BlockArgument arg,
+                                              Operation *anchor) {
+  CastOp found;
+  Value value = arg;
+  while (value.hasOneUse()) {
+    OpOperand &use = *value.use_begin();
+    Operation *user = use.getOwner();
+    if (user == anchor) {
+      if (use.getOperandNumber() !=
+          getGemmAOperand(anchor).getOperandNumber())
+        return failure();
+      return found;
+    }
+    if (auto cast = dyn_cast<CastOp>(user)) {
+      if (found)
+        return failure();
+      found = cast;
+    } else if (!isRowReshape(user)) {
+      return failure();
+    }
+    if (user->getNumResults() != 1)
+      return failure();
+    value = user->getResult(0);
+  }
+  return failure();
+}
+
+// Whether the kernel casts its anchor's result to `elementType` on the way
+// to the returned value.
+static bool castsResultTo(func::FuncOp kernel, Operation *anchor,
+                          Type elementType) {
+  DenseSet<Value> derived(anchor->result_begin(), anchor->result_end());
+  for (Operation &op : llvm::make_range(std::next(anchor->getIterator()),
+                                        kernel.getBody().front().end())) {
+    if (llvm::none_of(op.getOperands(),
+                      [&](Value v) { return derived.contains(v); }))
+      continue;
+    if (isa<CastOp>(op) &&
+        getElementTypeOrSelf(op.getResult(0).getType()) == elementType)
+      return true;
+    derived.insert(op.result_begin(), op.result_end());
+  }
+  return false;
+}
+
 // Whether another input of `second` is computed from `first`'s result, so a
 // merged kernel would read its own output. `between` holds the host ops that
 // sit between the two kernels and are absorbed with them.
@@ -170,18 +227,21 @@ static bool closesCycle(RocMlirOp first, RocMlirOp second, unsigned index,
   });
 }
 
+static func::FuncOp lookupKernel(SymbolTable &symbols, RocMlirOp op) {
+  return symbols.lookup<func::FuncOp>(op.getKernelAttr().getRootReference());
+}
+
 // Replace `first`, the host ops `between` and `second` with one kernel: the
 // first kernel's body, then `link` applied to its result, then the second
 // kernel's body reading the linked value in place of its argument `index`.
 // `link` builds inside the new kernel and receives the kernel's context.
 static void mergeKernels(RocMlirOp first, RocMlirOp second, unsigned index,
                          ArrayRef<Operation *> between, int &counter,
+                         SymbolTable &symbols,
                          function_ref<Value(OpBuilder &, Value, Value)> link) {
   auto module = second->getParentOfType<ModuleOp>();
-  auto firstKernel = SymbolTable::lookupNearestSymbolFrom<func::FuncOp>(
-      first, first.getKernelAttr());
-  auto secondKernel = SymbolTable::lookupNearestSymbolFrom<func::FuncOp>(
-      second, second.getKernelAttr());
+  func::FuncOp firstKernel = lookupKernel(symbols, first);
+  func::FuncOp secondKernel = lookupKernel(symbols, second);
 
   OpBuilder builder(second);
   SmallVector<Value> operands(first.getInputs());
@@ -212,6 +272,7 @@ static void mergeKernels(RocMlirOp first, RocMlirOp second, unsigned index,
         builder.getFunctionType(argTypes,
                                 secondKernel.getFunctionType().getResults()));
     merged->setAttrs(secondKernel->getDiscardableAttrDictionary());
+    symbols.insert(merged);
     Block *body = merged.addEntryBlock();
     builder.setInsertionPointToStart(body);
 
@@ -268,7 +329,7 @@ static void mergeKernels(RocMlirOp first, RocMlirOp second, unsigned index,
     kernels.push_back(secondKernel);
   for (func::FuncOp kernel : kernels)
     if (SymbolTable::symbolKnownUseEmpty(kernel, module))
-      kernel->erase();
+      symbols.erase(kernel);
 }
 
 // Gemm-pointwise-gemm: merge two outlined kernels when the first kernel's
@@ -281,9 +342,9 @@ static void mergeKernels(RocMlirOp first, RocMlirOp second, unsigned index,
 // After:
 //   %y = hip.rocmlir @mlir_matmul_sigmoid_matmul_2 ins(%x, %w0, %w1) outs(%e1)
 static bool fuseGemmGemmPair(RocMlirOp second, int &counter,
+                             SymbolTable &symbols,
                              ArrayRef<std::string> accelTypes) {
-  auto secondKernel = SymbolTable::lookupNearestSymbolFrom<func::FuncOp>(
-      second, second.getKernelAttr());
+  func::FuncOp secondKernel = lookupKernel(symbols, second);
   if (!secondKernel)
     return false;
   Operation *secondAnchor = getSoleGemmAnchor(secondKernel);
@@ -295,8 +356,7 @@ static bool fuseGemmGemmPair(RocMlirOp second, int &counter,
     if (!first || first->getNumResults() != 1 || !input.hasOneUse() ||
         first->getBlock() != second->getBlock())
       continue;
-    auto firstKernel = SymbolTable::lookupNearestSymbolFrom<func::FuncOp>(
-        first, first.getKernelAttr());
+    func::FuncOp firstKernel = lookupKernel(symbols, first);
     if (!firstKernel)
       continue;
     Operation *firstAnchor = getSoleGemmAnchor(firstKernel);
@@ -314,22 +374,22 @@ static bool fuseGemmGemmPair(RocMlirOp second, int &counter,
     if (closesCycle(first, second, index, {}))
       continue;
     mergeKernels(
-        first, second, index, {}, counter,
+        first, second, index, {}, counter, symbols,
         [](OpBuilder &, Value intermediate, Value) { return intermediate; });
     return true;
   }
   return false;
 }
 
-// rocMLIR's attention kernel keeps a head dimension of each gemm in LDS, up to
-// this size.
+// The head dims the attention merge takes. rocMLIR tiles larger ones, but no
+// test compiles or measures them.
 static constexpr int64_t kMaxAttentionHeadDim = 256;
 
 // Both gemms read a floating-point type. With matrix acceleration fusing
 // always pays. Without it (f32) the fused kernel is slower per flop, so it
 // pays only when the score matrix is larger than `f32MinScoreBytes`, the
-// target's cache, and would otherwise go to memory between the unfused
-// kernels. A `f32MinScoreBytes` of 0 never fuses f32.
+// target's L2 cache, and would otherwise go to memory between the unfused
+// kernels. A `f32MinScoreBytes` of 0 keeps f32 without acceleration apart.
 static bool isAttentionSupported(Operation *anchor,
                                  ArrayRef<std::string> accelTypes,
                                  int64_t scoreBytes, int64_t f32MinScoreBytes) {
@@ -345,8 +405,11 @@ static bool isAttentionSupported(Operation *anchor,
 // Attention: merge a gemm kernel, the last-axis softmax that reads its only
 // result, and the gemm kernel that reads the softmax as its A operand, so
 // rocMLIR lowers the three to one rock.attention and the score matrix stays
-// on chip. Scale, bias and cast epilogues of the first gemm and cast
-// prologues of the second ride along as their kernels' pointwise ops.
+// on chip. Scale, bias and cast epilogues of the first gemm ride along as its
+// pointwise ops. Between the softmax and the second gemm only row reshapes and
+// one cast may sit, and that cast must undo a cast to the softmax type in the
+// first kernel: rocMLIR fails to compile a merged kernel its attention
+// matcher rejects, with no fallback.
 //
 // Before:
 //   %s = hip.rocmlir @mlir_matmul_mul_0 ins(%q, %k) outs(%e0)
@@ -356,10 +419,17 @@ static bool isAttentionSupported(Operation *anchor,
 //   %y = hip.rocmlir @mlir_matmul_mul_miopen.softmax_matmul_2
 //       ins(%q, %k, %v) outs(%e2)
 static bool fuseAttentionTriple(RocMlirOp second, int &counter,
+                                SymbolTable &symbols,
                                 ArrayRef<std::string> accelTypes,
                                 int64_t f32MinScoreBytes) {
-  auto secondKernel = SymbolTable::lookupNearestSymbolFrom<func::FuncOp>(
-      second, second.getKernelAttr());
+  auto isSoftmaxInput = [&](Value input) {
+    auto softmax = input.getDefiningOp<MiopenSoftmaxOp>();
+    return softmax && softmax->getNumResults() == 1 && input.hasOneUse() &&
+           softmax->getBlock() == second->getBlock();
+  };
+  if (llvm::none_of(second.getInputs(), isSoftmaxInput))
+    return false;
+  func::FuncOp secondKernel = lookupKernel(symbols, second);
   if (!secondKernel)
     return false;
   Operation *secondAnchor = getSoleGemmAnchor(secondKernel);
@@ -367,10 +437,9 @@ static bool fuseAttentionTriple(RocMlirOp second, int &counter,
     return false;
 
   for (auto [index, input] : llvm::enumerate(second.getInputs())) {
-    auto softmax = input.getDefiningOp<MiopenSoftmaxOp>();
-    if (!softmax || softmax->getNumResults() != 1 || !input.hasOneUse() ||
-        softmax->getBlock() != second->getBlock())
+    if (!isSoftmaxInput(input))
       continue;
+    auto softmax = input.getDefiningOp<MiopenSoftmaxOp>();
     Value scores = softmax.getInput();
     auto first = scores.getDefiningOp<RocMlirOp>();
     if (!first || first->getNumResults() != 1 || !scores.hasOneUse() ||
@@ -380,8 +449,7 @@ static bool fuseAttentionTriple(RocMlirOp second, int &counter,
     if (!scoresType || !scoresType.hasStaticShape() ||
         scoresType != input.getType())
       continue;
-    auto firstKernel = SymbolTable::lookupNearestSymbolFrom<func::FuncOp>(
-        first, first.getKernelAttr());
+    func::FuncOp firstKernel = lookupKernel(symbols, first);
     if (!firstKernel)
       continue;
     int64_t scoreBytes =
@@ -394,21 +462,33 @@ static bool fuseAttentionTriple(RocMlirOp second, int &counter,
         !isAttentionSupported(secondAnchor, accelTypes, scoreBytes,
                               f32MinScoreBytes))
       continue;
+    // rock.attention reads Q, K and V as one element type.
+    Type qType = getElementTypeOrSelf(getGemmAOperand(firstAnchor).get());
+    if (getElementTypeOrSelf(getGemmB(firstAnchor)) != qType ||
+        getElementTypeOrSelf(getGemmB(secondAnchor)) != qType)
+      continue;
     // Transposing the probabilities would make the second gemm reduce over
     // the rows the softmax did not normalize.
-    if (!feedsGemmA(secondKernel.getArgument(index), secondAnchor) ||
-        isGemmATransposed(secondAnchor))
+    FailureOr<CastOp> probsCast =
+        getProbabilitiesCast(secondKernel.getArgument(index), secondAnchor);
+    if (failed(probsCast) || isGemmATransposed(secondAnchor))
+      continue;
+    if (*probsCast &&
+        !castsResultTo(firstKernel, firstAnchor, scoresType.getElementType()))
       continue;
     std::optional<std::array<int64_t, 3>> firstDims = getGemmDims(firstAnchor);
     std::optional<std::array<int64_t, 3>> secondDims =
         getGemmDims(secondAnchor);
     // (m, n, k) of Q @ K^T and (m, g, n) of P @ V: k and g are head dims.
-    if (!firstDims || !secondDims || (*firstDims)[2] > kMaxAttentionHeadDim ||
-        (*secondDims)[1] > kMaxAttentionHeadDim)
+    if (!firstDims || !secondDims)
+      continue;
+    int64_t qkHeadDim = (*firstDims)[2], vHeadDim = (*secondDims)[1];
+    if (qkHeadDim <= 0 || qkHeadDim > kMaxAttentionHeadDim || vHeadDim <= 0 ||
+        vHeadDim > kMaxAttentionHeadDim)
       continue;
     if (closesCycle(first, second, index, {softmax}))
       continue;
-    mergeKernels(first, second, index, {softmax}, counter,
+    mergeKernels(first, second, index, {softmax}, counter, symbols,
                  [&](OpBuilder &builder, Value intermediate, Value ctx) {
                    Value init = tensor::EmptyOp::create(
                        builder, softmax.getLoc(), scoresType.getShape(),
@@ -424,31 +504,23 @@ static bool fuseAttentionTriple(RocMlirOp second, int &counter,
   return false;
 }
 
+// One pass in program order: a merged kernel holds two gemms, so it is never
+// the first or second kernel of another merge, and every op a merge erases
+// precedes the dispatch being visited.
 void fuseAttentionKernels(func::FuncOp funcOp, int &counter,
                           ArrayRef<std::string> accelTypes,
                           int64_t f32MinScoreBytes) {
-  bool changed = true;
-  while (changed) {
-    changed = false;
-    for (auto op : llvm::make_early_inc_range(funcOp.getOps<RocMlirOp>()))
-      if (fuseAttentionTriple(op, counter, accelTypes, f32MinScoreBytes)) {
-        changed = true;
-        break;
-      }
-  }
+  SymbolTable symbols(funcOp->getParentOfType<ModuleOp>());
+  for (auto op : llvm::make_early_inc_range(funcOp.getOps<RocMlirOp>()))
+    fuseAttentionTriple(op, counter, symbols, accelTypes, f32MinScoreBytes);
 }
 
 void fuseGemmGemmKernels(func::FuncOp funcOp, int &counter,
                          ArrayRef<std::string> accelTypes) {
-  bool changed = true;
-  while (changed) {
-    changed = false;
-    for (auto op : llvm::make_early_inc_range(funcOp.getOps<RocMlirOp>()))
-      if (fuseGemmGemmPair(op, counter, accelTypes)) {
-        changed = true;
-        break;
-      }
-  }
+  SymbolTable symbols(funcOp->getParentOfType<ModuleOp>());
+  for (auto op : llvm::make_early_inc_range(funcOp.getOps<RocMlirOp>()))
+    fuseGemmGemmPair(op, counter, symbols, accelTypes);
 }
 
 } // namespace mlir::hip
+

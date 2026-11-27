@@ -349,6 +349,23 @@ bool hasRocMlirComputation(ModuleOp kernelModule) {
   return found.wasInterrupted();
 }
 
+// The arch of device 0 without target features, or "" when there is no HIP
+// runtime or device to ask.
+static std::string queryDeviceArch() {
+#if defined(HIPDNN_EP_LINK_HIP_HOST) && defined(HIPDNN_HIP_RUNTIME_LIB)
+  static HipGetDevicePropsFn getProps = loadHipGetDeviceProperties();
+  hipDeviceProp_t prop{};
+  if (getProps && getProps(&prop, 0) == hipSuccess) {
+    // Empty gcnArchName has been seen on some Windows TheRock builds.
+    std::string deviceArch = prop.gcnArchName;
+    if (auto colon = deviceArch.find(':'); colon != std::string::npos)
+      deviceArch.resize(colon); // "gfx1100:xnack-" -> "gfx1100"
+    return deviceArch;
+  }
+#endif
+  return "";
+}
+
 std::string resolveRocMlirArch() {
   // hip_get_env, not std::getenv: this runs inside the static-CRT EP DLL when
   // called from CompilerDriver, and std::getenv there cannot see env vars set
@@ -357,24 +374,13 @@ std::string resolveRocMlirArch() {
   if (!arch.empty())
     return arch;
 
-#if defined(HIPDNN_EP_LINK_HIP_HOST) && defined(HIPDNN_HIP_RUNTIME_LIB)
   // Ask the GPU we are about to run on. Guessing here is not a harmless
   // default: a code object built for the wrong chip loads with "no kernel
   // image is available for execution on the device" at the first dispatch.
   // Mirrors LlvmIrJit::detectCustomKernelArch. A machine with no HIP runtime
   // (or no device) just falls through to the build's target below.
-  static HipGetDevicePropsFn getProps = loadHipGetDeviceProperties();
-  hipDeviceProp_t prop{};
-  if (getProps && getProps(&prop, 0) == hipSuccess) {
-    std::string deviceArch = prop.gcnArchName;
-    // Empty gcnArchName has been seen on some Windows TheRock builds.
-    if (!deviceArch.empty()) {
-      if (auto colon = deviceArch.find(':'); colon != std::string::npos)
-        deviceArch.resize(colon); // "gfx1100:xnack-" -> "gfx1100"
-      return deviceArch;
-    }
-  }
-#endif
+  if (std::string deviceArch = queryDeviceArch(); !deviceArch.empty())
+    return deviceArch;
 
   // Whatever this build was configured for (HIP_ARCHITECTURES), which at
   // least matches the kernels shipped beside it.
@@ -395,9 +401,27 @@ int64_t resolveRocMlirL2CacheBytes() {
   return 0;
 }
 
+int64_t resolveRocMlirAttentionF32MinScoreBytes(StringRef arch) {
+  std::string env =
+      hip_get_env("HIPDNN_EP_ROCMLIR_ATTENTION_F32_MIN_SCORE_BYTES");
+  if (!env.empty()) {
+    int64_t bytes = 0;
+    if (!StringRef(env).getAsInteger(10, bytes) && bytes >= 0)
+      return bytes;
+    llvm::errs() << "warning: ignoring "
+                    "HIPDNN_EP_ROCMLIR_ATTENTION_F32_MIN_SCORE_BYTES='"
+                 << env << "' (expected a byte count)\n";
+  }
+  // Another chip's cache says nothing about the target's.
+  if (queryDeviceArch() != arch)
+    return 0;
+  return resolveRocMlirL2CacheBytes();
+}
+
 void setRocMlirAttentionOptions(FuseRocMlirAnchorPassOptions &options) {
   options.attention = !hip_env_is_on("HIPDNN_EP_ROCMLIR_NO_ATTENTION");
-  options.attentionF32MinScoreBytes = resolveRocMlirL2CacheBytes();
+  options.attentionF32MinScoreBytes =
+      resolveRocMlirAttentionF32MinScoreBytes(options.arch);
 }
 
 std::vector<std::string> getRocMlirGemmAccelTypes(MLIRContext &context,

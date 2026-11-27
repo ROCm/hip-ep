@@ -92,15 +92,20 @@ The perfConfig a kernel was tuned to is baked into its code object, so a tuned
 and an untuned artifact are not interchangeable even on the same GPU.
 `HIPDNN_EP_ROCMLIR_NO_STANDALONE_ELEMENTWISE` adds a `+no-standalone-ew` suffix
 after that, because it changes which ops run as rocMLIR kernels
-(`gfx1151+autotune=quick+no-standalone-ew`). A `+no-attention` suffix follows
-when `HIPDNN_EP_ROCMLIR_NO_ATTENTION` kept attention unfused; whether attention
-was fused is baked into the code objects the same way.
+(`gfx1151+autotune=quick+no-standalone-ew`). A `+attention` suffix follows
+when attention merges (the default), as `+attention-f32=<bytes>` when f32
+attention merges above that score size
+(`resolveRocMlirAttentionF32MinScoreBytes`). Whether and where attention was
+fused is baked into the code objects the same way.
+`HIPDNN_EP_ROCMLIR_NO_ATTENTION` drops the suffix, so artifacts built before
+the attention merge, which have unfused attention, match only such a session.
 
 The model cache / EPContext identity is derived from the graph alone, so the EP
 refuses to load an artifact whose recorded value differs from the current one;
 delete the cache and recompile after changing GPUs, or toggling
 `HIPDNN_EP_ROCMLIR`, `HIP_ROCMLIR_SKIP_BENCHMARKING`,
-`HIPDNN_EP_ROCMLIR_AUTOTUNE`, or `HIPDNN_EP_ROCMLIR_NO_ATTENTION`. Compilation
+`HIPDNN_EP_ROCMLIR_AUTOTUNE`, `HIPDNN_EP_ROCMLIR_NO_ATTENTION`, or
+`HIPDNN_EP_ROCMLIR_ATTENTION_F32_MIN_SCORE_BYTES`. Compilation
 fails outright if autotune is on but no HIP device could be reached, so the
 suffix never claims tuning that did not happen.
 

@@ -328,9 +328,10 @@ def FuseRocMlirAnchorPass
            "256.">,
     Option<"attentionF32MinScoreBytes", "attention-f32-min-score-bytes",
            "int64_t", /*default=*/"0",
-           "f32 attention merges only when its score matrix is larger than "
-           "this many bytes, normally the target's L2 cache size. 0 keeps "
-           "f32 attention unmerged.">
+           "f32 attention whose gemms lack matrix acceleration merges only "
+           "when its score matrix is strictly larger than this many bytes, "
+           "normally the target's L2 cache size. 0 keeps that f32 attention "
+           "unmerged; f32 in gemm-gemm-accel-types merges at any size.">
   ];
   let dependentDialects = [
     "mlir::arith::ArithDialect",
