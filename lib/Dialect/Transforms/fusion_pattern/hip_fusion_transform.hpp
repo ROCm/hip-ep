@@ -30,6 +30,7 @@
 
 #include "hip/Dialect/IR/HipDialect.h"
 
+#include "batch_norm_fusion.hpp"
 #include "gelu_fusion.hpp"
 #include "linear_attention_group_fold.hpp"
 #include "patch_embed_conv_to_gemm.hpp"
@@ -864,6 +865,10 @@ constexpr unsigned kPatchEmbedConvToGemmBenefit = 5;
 constexpr unsigned kSwigluFusionBenefit = 2;
 constexpr unsigned kGeluFusionBenefit = 2;
 
+/// Rooted at the last op of the chain: the bias add, else the last multiply or
+/// divide.
+constexpr unsigned kBatchNormFusionBenefit = 2;
+
 /// The only pattern rooted at `hip.linear_attention`.
 constexpr unsigned kLinearAttentionGroupFoldBenefit = 1;
 
@@ -886,6 +891,8 @@ inline mlir::LogicalResult run(mlir::ModuleOp module,
   populateSwigluFusionPattern(patterns,
                               mlir::PatternBenefit(kSwigluFusionBenefit));
   populateGeluFusionPattern(patterns, mlir::PatternBenefit(kGeluFusionBenefit));
+  populateBatchNormFusionPattern(patterns,
+                                 mlir::PatternBenefit(kBatchNormFusionBenefit));
   populateLinearAttentionGroupFoldPattern(
       patterns, mlir::PatternBenefit(kLinearAttentionGroupFoldBenefit));
   populateScaledMaskedSoftmaxFusionPattern(
