@@ -11,6 +11,7 @@
 #include <hip/hip_fp16.h>
 #include <cstdint>
 #include <cstdio>
+#include <type_traits>
 
 namespace {
 
@@ -304,6 +305,33 @@ static int launch_cast_bf16(hipStream_t stream, const void* input,
   return -1;
 }
 
+// Launches any integer -> integer cast (two's-complement truncation or
+// extension, as ONNX Cast and torch .to()). Returns -1 without launching when
+// either side is not an integer dtype.
+static int launch_cast_int(hipStream_t stream, const void* input, void* output,
+                           int64_t num_elements, int input_dtype,
+                           int output_dtype, int grid_size, int block_size) {
+  return dispatch_dtype(input_dtype, [&](auto src) {
+    using Src = typename decltype(src)::type;
+    if constexpr (!std::is_integral_v<Src>) {
+      return -1;
+    } else {
+      return dispatch_dtype(output_dtype, [&](auto dst) {
+        using Dst = typename decltype(dst)::type;
+        if constexpr (!std::is_integral_v<Dst>) {
+          return -1;
+        } else {
+          hipLaunchKernelGGL(HIP_KERNEL_NAME(cast_int_to_int_kernel<Src, Dst>),
+                             dim3(grid_size), dim3(block_size), 0, stream,
+                             static_cast<const Src*>(input),
+                             static_cast<Dst*>(output), num_elements);
+          return 0;
+        }
+      });
+    }
+  });
+}
+
 extern "C" int hip_cast(
     void* stream,
     const void* input,
@@ -466,6 +494,10 @@ extern "C" int hip_cast(
                               input_dtype, output_dtype, grid_size,
                               kBlockSize) == 0) {
     // bf16 <-> {f32, f16, f64, i64, i32, i16, i8, u8} launched.
+  } else if (launch_cast_int(hip_stream, input, output, num_elements,
+                             input_dtype, output_dtype, grid_size,
+                             kBlockSize) == 0) {
+    // {i64, i32, i16, i8, u8} <-> {i64, i32, i16, i8, u8} launched.
   } else {
     fprintf(stderr,
             "[custom_kernels] hip_cast: unsupported conversion "
