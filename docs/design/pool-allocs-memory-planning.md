@@ -328,6 +328,12 @@ their aliases are bounded and their backend readers support mapped inputs. This
 avoids extra device-pool storage when early placement separates them from
 host-written buffers. Copies and payload accesses stay in their original order.
 
+A host load that may follow an async copy or HIP op on the slot becomes a
+synchronized `hip.readback_scalar`. A slot allocated inside a loop with such
+writers is preceded by `hip.stream_wait`: each iteration reuses the same slot,
+so its host accesses would otherwise race with the previous iteration's
+pending work.
+
 All selected allocations in a function share one `hip.get_host_scratch` buffer. Their offsets are aligned to 64 bytes, independently of PoolAllocs' default 256-byte alignment.
 
 Functions without `!hip.context` as argument zero are skipped.
