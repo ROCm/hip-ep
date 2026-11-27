@@ -539,8 +539,13 @@ bool CompilerDriver::runMLIRPasses(
       mlir::hip::rocMlirAutotuneBenchmarkFromEnv(autotuneOpts.benchmark);
       autotuneOpts.log = embedOpts.log;
       autotuneOpts.logPrefix = "[CompilerDriver/rocmlir-autotune]";
-      // problemCachePath stays empty here. The shipped LUT is skipped only
-      // when HIPDNN_EP_ROCMLIR_AUTOTUNE is set explicitly.
+      // HIP_ROCMLIR_PROBLEM_CACHE names an external problem-cache table, as
+      // for hip-rocmlir-compiler: it takes priority over the search and
+      // replaces the shipped table, so the kernels it covers are the same in
+      // every session and skip benchmarking. Like autotune winners, it is not
+      // part of the artifact identity. The shipped LUT is skipped only when
+      // HIPDNN_EP_ROCMLIR_AUTOTUNE is set explicitly.
+      autotuneOpts.problemCachePath = hip_get_env("HIP_ROCMLIR_PROBLEM_CACHE");
       autotuneOpts.tuningTypeProvided =
           !hip_get_env("HIPDNN_EP_ROCMLIR_AUTOTUNE").empty();
       autotuner.emplace(embedOpts.arch, autotuneOpts);
