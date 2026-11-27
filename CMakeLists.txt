@@ -129,10 +129,10 @@ option(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS
   OFF)
 
 # llama.cpp's ggml graphs (docs/design/ggml-backend.md): the K-quant, Q8_1
-# and token-major GQA kernels and their runtime wrappers, which only that path
-# uses.
+# and token-major GQA kernels and their runtime wrappers, the ggml dialect, its
+# conversion to HIP and the ggml-to-hip pipeline.
 option(HIPDNN_EP_BUILD_GGML
-  "Build the kernels and runtime wrappers llama.cpp's ggml-hipep backend uses"
+  "Build the ggml-to-hip pipeline and the kernels llama.cpp's ggml-hipep backend uses"
   OFF)
 
 # Build rocMLIR/Triton (rocmlirTriton) in-tree as a subdirectory, reusing the
@@ -258,6 +258,9 @@ add_subdirectory(backend-mlir-compiler)
 # Define the library before configuring tools so the target is linked by name.
 if(BUILD_HIP_UNIT_TESTS)
   add_subdirectory(test/lib/Dialect/Hip)
+  if(HIPDNN_EP_BUILD_GGML)
+    add_subdirectory(test/lib/Dialect/Ggml)
+  endif()
 endif()
 
 # Executable targets

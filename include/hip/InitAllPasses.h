@@ -20,6 +20,11 @@
 #include "hip/Dialect/Onnx/IR/OnnxDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 #include "hip/Dialect/Transforms/Pipelines.h"
+#ifdef HIPDNN_EP_BUILD_GGML
+#include "hip/Conversion/GgmlToHip/Passes.h"
+#include "hip/Dialect/Ggml/IR/GgmlDialect.h"
+#include "hip/Dialect/Ggml/Transforms/Passes.h"
+#endif
 
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
 #include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
@@ -102,6 +107,10 @@ inline void
 registerAllDialects(mlir::DialectRegistry &registry,
                     OnnxDialectKind onnxDialect = OnnxDialectKind::Stub) {
   registry.insert<mlir::BuiltinDialect>();
+#ifdef HIPDNN_EP_BUILD_GGML
+  // ggml graphs (the ggml-to-hip pipeline).
+  registry.insert<mlir::ggml::GgmlDialect>();
+#endif
   registry.insert<mlir::affine::AffineDialect>();
   registry.insert<mlir::arith::ArithDialect>();
   registry.insert<mlir::cf::ControlFlowDialect>();
@@ -189,9 +198,9 @@ loadAllDialects(mlir::MLIRContext &context,
 /// takes a runtime handle, and a handful of MLIR utility passes are added only
 /// inside the pipeline builders. A textual override that needs the C-ABI entry
 /// point therefore composes the registered *pipeline* names
-/// (`onnx-to-hip-pipeline`, `hip-to-llvm-pipeline`, `hipdnn-pipeline`), which
-/// embed those passes. See docs/design/plugin-interface.md "Pipeline
-/// composition".
+/// (`onnx-to-hip-pipeline`, `ggml-to-hip-pipeline`, `hip-to-llvm-pipeline`,
+/// `hipdnn-pipeline`), which embed those passes. See
+/// docs/design/plugin-interface.md "Pipeline composition".
 inline void registerAllPasses() {
   // Register exactly once per process. PassPipelineRegistration (used by
   // registerHipPipelines for `onnx-to-hip-pipeline` etc.) writes into MLIR's
@@ -219,6 +228,11 @@ inline void registerAllPasses() {
     // are hand-written, not in the .td set, so they are registered separately
     // below.
     registerConversionPasses();
+#ifdef HIPDNN_EP_BUILD_GGML
+    // ggml-symbolize-shapes, convert-ggml-to-hip.
+    mlir::ggml::registerGgmlTransformsPasses();
+    mlir::hip::registerGgmlToHipPasses();
+#endif
     mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
       return mlir::hip::createOnnxLoopOutlinePass();
     });
