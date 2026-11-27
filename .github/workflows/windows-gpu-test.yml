@@ -1128,6 +1128,13 @@ jobs:
           if exist genai-accuracy-baseline rd /s /q genai-accuracy-baseline
           del /q genai-accuracy-summary.md genai-accuracy-report.md genai-accuracy-regressions.txt >nul 2>&1 || ver >nul
 
+      # The script and its venv need Python 3.14 (the package wheels are
+      # cp314); a self-hosted runner's PATH may have none.
+      - name: Setup Python 3.14
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.14"
+
       - name: Download GPU test package
         uses: actions/download-artifact@v4
         with:
@@ -1175,6 +1182,7 @@ jobs:
             --cache-root "${{ runner.workspace }}\genai-accuracy" `
             --models-root "${{ runner.workspace }}\genai-accuracy\models" `
             --staged-root "${{ runner.workspace }}"
+          if ($null -eq $LASTEXITCODE) { Write-Host "ERROR: python did not run"; exit 1 }
           exit $LASTEXITCODE
 
       - name: Run GenAI accuracy
@@ -1277,7 +1285,9 @@ jobs:
             $reportArgs += @("--baseline-dir", $baselineDir)
           }
           python @reportArgs
-          if ($LASTEXITCODE -ne 0) { Write-Host "ERROR: GenAI accuracy report failed"; exit 1 }
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath "genai-accuracy-report.md")) {
+            Write-Host "ERROR: GenAI accuracy report failed"; exit 1
+          }
           $regressions = @()
           if (Test-Path -LiteralPath "genai-accuracy-regressions.txt") {
             $regressions = @(Get-Content -LiteralPath "genai-accuracy-regressions.txt")
