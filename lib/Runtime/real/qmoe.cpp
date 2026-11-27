@@ -314,7 +314,14 @@ int hipdnn_ep_qmoe_run(RuntimeState *state, const void *input,
   size_t off_tile_lists = off_a_scale_mid + sz_a_scale_mid;
   size_t off_num_tiles = off_tile_lists + sz_tile_lists;
   size_t off_row_scale = off_num_tiles + sz_num_tiles;
-  size_t total_scratch = off_row_scale + sz_row_scale;
+  // Routed expert ids kept for the prefill reduce's order once the hook has
+  // rewritten d_expert_indices to slot rows.
+  const bool fused_decode =
+      num_tokens <= hipdnn_ep_qmoe_fused_max_tokens() && swiglu;
+  size_t sz_order_ids =
+      hook && !fused_decode ? align_up_64(routed_rows * sizeof(int32_t)) : 0;
+  size_t off_order_ids = off_row_scale + sz_row_scale;
+  size_t total_scratch = off_order_ids + sz_order_ids;
 
   if (hipdnn_ep_state_ensure_qmoe_scratch(state, total_scratch) != 0) {
     fprintf(stderr, "wrap_qmoe: ensure_qmoe_scratch(%zu) failed\n",
@@ -356,6 +363,7 @@ int hipdnn_ep_qmoe_run(RuntimeState *state, const void *input,
       reinterpret_cast<int32_t *>(scratch_base + off_num_tiles);
   // relu2 activations are stored unscaled, so only SwiGLU has row scales.
   void *d_row_scale = swiglu ? scratch_base + off_row_scale : nullptr;
+  void *d_order_ids = sz_order_ids ? scratch_base + off_order_ids : nullptr;
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: %s routing(tokens=%lld, experts=%lld, "
                     "k=%lld, normalize=%lld, router_weights=%s)\n",
@@ -380,7 +388,8 @@ int hipdnn_ep_qmoe_run(RuntimeState *state, const void *input,
 
   if (hook) {
     const void *pools[6] = {};
-    if (hook->prepare(hook->ctx, d_expert_indices, num_tokens, k, pools) != 0) {
+    if (hook->prepare(hook->ctx, d_expert_indices, d_order_ids, num_tokens, k,
+                      pools) != 0) {
       fprintf(stderr, "wrap_qmoe: expert offload prepare failed\n");
       return -1;
     }
@@ -602,7 +611,7 @@ int hipdnn_ep_qmoe_run(RuntimeState *state, const void *input,
                            hidden_size, inter_size));
       OP_ROCTX_MARK("hip_ep.op.qmoe.prefill.reduce");
       HIP_CHECK(hip_qmoe_reduce_sorted_pairs(
-          stream, d_fc2_buf, d_pair_to_sorted, d_expert_indices,
+          stream, d_fc2_buf, d_pair_to_sorted, d_expert_indices, d_order_ids,
           d_expert_weights, d_row_scale, fc2_reduce_bias, output, num_tokens,
           hidden_size, k, elem_size));
       return 0;
@@ -626,9 +635,9 @@ int hipdnn_ep_qmoe_run(RuntimeState *state, const void *input,
 
     OP_ROCTX_MARK("hip_ep.op.qmoe.prefill.reduce");
     HIP_CHECK(hip_qmoe_reduce_sorted_pairs(
-        stream, d_fc2_buf, d_pair_to_sorted, d_expert_indices, d_expert_weights,
-        d_row_scale, fc2_reduce_bias, output, num_tokens, hidden_size, k,
-        elem_size));
+        stream, d_fc2_buf, d_pair_to_sorted, d_expert_indices, d_order_ids,
+        d_expert_weights, d_row_scale, fc2_reduce_bias, output, num_tokens,
+        hidden_size, k, elem_size));
     return 0;
   }
 

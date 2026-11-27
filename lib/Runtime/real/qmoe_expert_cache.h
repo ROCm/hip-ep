@@ -14,11 +14,12 @@ struct RuntimeState;
 // on the state stream. It makes those experts resident, rewrites the indices
 // to slot rows in [0, num_slots), and returns the fc1 weights, scales, bias,
 // fc2 weights, scales, bias pool bases (null for an absent bias), each laid
-// out like the original operand with num_slots expert rows.
+// out like the original operand with num_slots expert rows. A non-null
+// `d_order_ids` receives the routed expert ids before the rewrite.
 struct QMoEExpertHook {
   int64_t num_slots;
-  int (*prepare)(void *ctx, void *d_expert_indices, int64_t num_tokens,
-                 int64_t k, const void *pools[6]);
+  int (*prepare)(void *ctx, void *d_expert_indices, void *d_order_ids,
+                 int64_t num_tokens, int64_t k, const void *pools[6]);
   void *ctx;
 };
 

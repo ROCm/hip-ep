@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -629,8 +630,8 @@ int loadMmap(RuntimeState *state, Cache *c, int64_t node, Pool &pool,
   phase.t_h2d += secondsSince(t);
   return 0;
 }
-int prepare(void *ctx_ptr, void *d_expert_indices, int64_t num_tokens,
-            int64_t k, const void *pools_out[6]) {
+int prepare(void *ctx_ptr, void *d_expert_indices, void *d_order_ids,
+            int64_t num_tokens, int64_t k, const void *pools_out[6]) {
   auto *ctx = static_cast<PrepareCtx *>(ctx_ptr);
   RuntimeState *state = ctx->state;
   Cache *c = ctx->cache;
@@ -661,7 +662,7 @@ int prepare(void *ctx_ptr, void *d_expert_indices, int64_t num_tokens,
     const int32_t e = c->host_idx[r];
     if (e < 0 || e >= E) {
       if (e >= E) {
-        c->host_idx[r] = static_cast<int32_t>(pool.slots);
+        c->host_idx[r] = INT32_MAX;
       }
       continue;
     }
@@ -700,7 +701,10 @@ int prepare(void *ctx_ptr, void *d_expert_indices, int64_t num_tokens,
     }
   }
 
-  if (hipMemcpyAsync(d_expert_indices, c->host_idx, idx_bytes,
+  if ((d_order_ids &&
+       hipMemcpyAsync(d_order_ids, d_expert_indices, idx_bytes,
+                      hipMemcpyDeviceToDevice, stream) != hipSuccess) ||
+      hipMemcpyAsync(d_expert_indices, c->host_idx, idx_bytes,
                      hipMemcpyHostToDevice, stream) != hipSuccess) {
     fprintf(stderr, "[QMoE offload] slot index upload failed\n");
     return -1;

@@ -2907,7 +2907,8 @@
 "_Z34qmoe_decode_fc2_reduce_dp4a_kernelILi128ELi2ELi32EEvPKaPKfPKiPK6__halfPKhS8_SA_S8_PS6_iiiii":[59,0,0,16,429,2,16]
 },
 "qmoe_ragged_mm_kernel":{
-"_ZN12_GLOBAL__N_131qmoe_reduce_sorted_pairs_kernelEPK6__halfPKiS4_S2_PS0_xxi":[17,0,0,16,292,0,0],
+"_ZN12_GLOBAL__N_131qmoe_reduce_sorted_pairs_kernelILi1EEEvPK6__halfPKiS5_S5_S3_PKfS3_PS1_xxi":[28,0,0,16,857,49,388],
+"_ZN12_GLOBAL__N_131qmoe_reduce_sorted_pairs_kernelILi8EEEvPK6__halfPKiS5_S5_S3_PKfS3_PS1_xxi":[151,0,0,6,1382,49,388],
 "_ZN12_GLOBAL__N_140qmoe_ragged_matmul_nbits_adaptive_kernelILNS_17RaggedQueuePolicyE0EEEvPKDF16_PKiS5_S5_PjPKhS3_S8_S3_PDF16_xxxxxii":[256,936,233,3,8331,38,584],
 "_ZN12_GLOBAL__N_140qmoe_ragged_matmul_nbits_adaptive_kernelILNS_17RaggedQueuePolicyE1EEEvPKDF16_PKiS5_S5_PjPKhS3_S8_S3_PDF16_xxxxxii":[256,936,233,3,8336,38,584],
 "_ZN12_GLOBAL__N_140qmoe_ragged_matmul_nbits_adaptive_kernelILNS_17RaggedQueuePolicyE2EEEvPKDF16_PKiS5_S5_PjPKhS3_S8_S3_PDF16_xxxxxii":[256,936,233,3,8336,38,584],

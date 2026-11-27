@@ -755,7 +755,8 @@ struct alignas(2 * kVec) HalfVec {
 };
 
 // One block per token. Contributions are accumulated in ascending expert-id
-// order (ties to the lower slot; INT32_MAX ids are skipped), with an fp16
+// order (order_ids when given, else expert_indices; ties to the lower slot;
+// INT32_MAX ids are skipped), with an fp16
 // round after every contribution, to match the host loop this replaced. The
 // order is resolved once per token into LDS; each thread then sums kVec
 // contiguous columns, issuing the row loads of each batch of up to
@@ -765,6 +766,7 @@ __global__ void __launch_bounds__(kReduceBlock) qmoe_reduce_sorted_pairs_kernel(
     const __half *__restrict__ sorted_expert_output,
     const int32_t *__restrict__ pair_to_sorted,
     const int32_t *__restrict__ expert_indices,
+    const int32_t *__restrict__ order_ids,
     const __half *__restrict__ expert_weights,
     const float *__restrict__ row_scale,
     const __half *__restrict__ fc2_bias,
@@ -781,12 +783,14 @@ __global__ void __launch_bounds__(kReduceBlock) qmoe_reduce_sorted_pairs_kernel(
   const int64_t token = blockIdx.x;
   const int tid = static_cast<int>(threadIdx.x);
   const int32_t *ids = expert_indices + token * k;
+  const int32_t *keys = order_ids ? order_ids + token * k : ids;
   if (tid < k) {
     const int32_t expert = ids[tid];
+    const int32_t key = keys[tid];
     int rank = 0;
     for (int slot = 0; slot < k; ++slot) {
-      const int32_t other = ids[slot];
-      rank += other < expert || (other == expert && slot < tid);
+      const int32_t other = keys[slot];
+      rank += other < key || (other == key && slot < tid);
     }
     if (expert != INT32_MAX) {
       const int32_t sorted_row = pair_to_sorted[token * k + tid];
@@ -995,7 +999,8 @@ extern "C" int hip_qmoe_ragged_matmul_nbits(
 extern "C" int hip_qmoe_reduce_sorted_pairs(
     void *stream, const void *sorted_expert_output,
     const void *pair_to_sorted, const void *expert_indices,
-    const void *expert_weights, const void *row_scale, const void *fc2_bias,
+    const void *order_ids, const void *expert_weights, const void *row_scale,
+    const void *fc2_bias,
     void *output, int64_t num_tokens, int64_t width, int64_t k,
     int64_t element_size_bytes) {
   if (!stream || !sorted_expert_output || !pair_to_sorted ||
@@ -1029,6 +1034,7 @@ extern "C" int hip_qmoe_reduce_sorted_pairs(
         hip_stream, static_cast<const __half *>(sorted_expert_output),
         static_cast<const int32_t *>(pair_to_sorted),
         static_cast<const int32_t *>(expert_indices),
+        static_cast<const int32_t *>(order_ids),
         static_cast<const __half *>(expert_weights),
         static_cast<const float *>(row_scale),
         static_cast<const __half *>(fc2_bias), static_cast<__half *>(output),
@@ -1039,6 +1045,7 @@ extern "C" int hip_qmoe_reduce_sorted_pairs(
         hip_stream, static_cast<const __half *>(sorted_expert_output),
         static_cast<const int32_t *>(pair_to_sorted),
         static_cast<const int32_t *>(expert_indices),
+        static_cast<const int32_t *>(order_ids),
         static_cast<const __half *>(expert_weights),
         static_cast<const float *>(row_scale),
         static_cast<const __half *>(fc2_bias), static_cast<__half *>(output),
