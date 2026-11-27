@@ -389,12 +389,25 @@ def _link_model(store_dir: Path, link: Path) -> None:
 
 
 def _find_source_dir(spec: dict, source_root: Path | None) -> Path | None:
-    if source_root is None or not source_root.is_dir():
+    # Log why the share was not usable: a silent miss turns into a skipped model
+    # and a green job, which hides an unmounted or misnamed share.
+    if source_root is None:
+        _log("[INFO] no model share configured (--source-root)")
+        return None
+    if not source_root.is_dir():
+        # A mapped drive letter is per logon session, so a share mapped by an
+        # interactive user is invisible to a runner running as a service.
+        _log(
+            f"[WARN] model share {source_root} is not accessible from this "
+            f"process (user {os.environ.get('USERNAME') or os.environ.get('USER')})"
+        )
         return None
     for name in spec.get("source_dirs", []):
         candidate = source_root / name
         if (candidate / "genai_config.json").is_file():
             return candidate
+        state = "has no genai_config.json" if candidate.is_dir() else "does not exist"
+        _log(f"[WARN] {candidate} {state}")
     return None
 
 
@@ -450,6 +463,8 @@ def _ensure_model(venv_python: Path, spec: dict, paths: dict, name: str) -> bool
                 f"share ({paths['source_root']}; tried {spec.get('source_dirs')}); "
                 "its test is skipped."
             )
+            if os.environ.get("GITHUB_ACTIONS") == "true":
+                print(f"::warning::GenAI accuracy: {name} not found, test skipped")
             return False
     _link_model(store, paths["model"])
     return True

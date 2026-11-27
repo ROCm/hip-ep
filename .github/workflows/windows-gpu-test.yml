@@ -547,6 +547,11 @@ jobs:
           # Sets up the framework, venv and wheels once, then makes each model
           # available: in C:\models, else copied from R:, else downloaded from
           # Hugging Face; a model with none of these is skipped.
+          # R: is a per-logon-session mapping: a drive mapped interactively is
+          # not visible to the runner service, and every share model is skipped.
+          if (-not (Test-Path -LiteralPath "R:\")) {
+            Write-Host "::warning::Model share R: is not accessible to $env:USERNAME; models not in C:\models will be skipped"
+          }
           python hip-ep-src\test\genai_accuracy\run_genai_accuracy.py prepare `
             --model $models `
             --package-dir gpu-test-package `

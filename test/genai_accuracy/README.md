@@ -99,7 +99,12 @@ in the store.
 
 ### Model share layout
 
-The share `R:/` is mounted from `xcosdaem579.xilinx.com:/proj/aiebuilds/vitisaijenkins/ROCm/models/key_llm`.
+The share is mapped as `R:/` on the runner.
+A drive mapped in an interactive session is not visible to the runner
+service. When `R:` is missing, the CI prepare step emits a warning, and
+`prepare` logs why each share lookup failed (share not accessible, directory
+missing, or no `genai_config.json`).
+
 It holds one directory per model, named after the modelzoo alias. Each must
 contain `genai_config.json`:
 
