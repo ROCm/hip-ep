@@ -708,7 +708,8 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
   // Opt-in W4A8 dp4a fast path for narrow GEMV. Eligibility:
   //   - HIPDNN_EP_MATMUL_DP4A=1
   //   - 1 <= M <= HIPDNN_EP_MATMUL_DP4A_MAX_M && batch_count==1
-  //   - bits==4, K%32==0, block_size>0, elem_size==2 (fp16 activation)
+  //   - bits==4 (or bits==8 at M==1, see below), K%32==0, block_size>0,
+  //     elem_size==2 (fp16 activation)
   //   - symmetric (no zero_points) OR asym with pre_zp_u8 already unpacked
   //   above
   // The kernel dynamically quantizes the activation rows into per-session
@@ -724,11 +725,19 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
   // reads the weight once but dequantizes it once per row, which leaves it
   // ALU-bound at ~2.5x the per-byte cost of the single-row kernel. Here the
   // nibble split is two mask instructions shared by every row in the tile.
+  //
+  // bits==8 at M==1 takes the W8A8 sibling (HIPDNN_EP_MATMUL_DP4A_U8=0 keeps
+  // the fp-activation GEMV); its zero points are already one byte per block.
   // All other shapes fall through to hip_matmul_nbits.
+  const bool dp4a_u8 = bits == 8 && M == 1 &&
+                       hipdnn_ep_matmul_dp4a_u8_enabled() &&
+                       (!zero_points || zp_elem_size == 1);
+  const bool dp4a_u4 =
+      bits == 4 && (!zero_points || (zp_elem_size == 1 && pre_zp_u8));
   if (hipdnn_ep_matmul_dp4a_enabled() && M >= 1 &&
-      M <= hipdnn_ep_matmul_dp4a_max_m() && batch_count == 1 && bits == 4 &&
+      M <= hipdnn_ep_matmul_dp4a_max_m() && batch_count == 1 &&
       block_size > 0 && (K % 32 == 0) && elem_size == 2 &&
-      (!zero_points || (zp_elem_size == 1 && pre_zp_u8))) {
+      (dp4a_u4 || dp4a_u8)) {
     const size_t k_blocks =
         static_cast<size_t>((K + block_size - 1) / block_size);
     // a_qb at offset 0 (M*K bytes, hipMalloc base is over-aligned); a_scale
@@ -743,9 +752,13 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
       if (base) {
         void *a_qb = base;
         void *a_scale = base + scale_off;
-        int rc =
-            hip_matmul_nbits_dp4a(stream, A, B, scales, pre_zp_u8, bias, output,
-                                  M, N, K, block_size, a_qb, a_scale);
+        int rc = dp4a_u8
+                     ? hip_matmul_nbits_dp4a_u8(stream, A, B, scales,
+                                                zero_points, bias, output, N, K,
+                                                block_size, a_qb, a_scale)
+                     : hip_matmul_nbits_dp4a(stream, A, B, scales, pre_zp_u8,
+                                             bias, output, M, N, K, block_size,
+                                             a_qb, a_scale);
         if (rc == 0) {
           result = 0;
           goto cleanup;
