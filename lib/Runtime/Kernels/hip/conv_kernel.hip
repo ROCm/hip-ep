@@ -1629,8 +1629,10 @@ static int launch(hipStream_t stream, const void *x, const void *w,
   }
 
   // Two passes over the ladder. The first asks a tile shape to cover the
-  // device; the second takes the tile that makes the most blocks among those
-  // whose rows are live and accepts whatever grid that gives.
+  // device. The second accepts whatever grid it gets: the 32x128 or 32x32 tile
+  // by block count, or for outputs narrower than any tile the 64x64 tile with
+  // dead rows (once the problem is large enough to beat it) and conv_direct
+  // below that.
   //
   // The second pass exists because coverage is the wrong thing to insist on
   // when the problem is small. A shape with few output channels over a small
@@ -1652,12 +1654,12 @@ static int launch(hipStream_t stream, const void *x, const void *w,
                 hipGetErrorString(err));
       return static_cast<int>(err);
     }
-    // Widest scalar tile that fits, then narrower ones. A wider tile does more
-    // FMAs per LDS read -- 8x8 does 64 per 16, where 4x4 does 16 per 8 -- and
-    // measured across simplebev's 31 shapes the widest one that fits is indeed
-    // the fastest: 277 ms on 128x128 against 335 on 64x64 and 612 on 32x128,
-    // and the ladder lands within noise of picking the best tile for every
-    // shape individually.
+    // Pass 0: widest scalar tile that covers the device, then narrower ones. A
+    // wider tile does more FMAs per LDS read -- 8x8 does 64 per 16, where 4x4
+    // does 16 per 8 -- and measured across simplebev's 31 shapes the widest one
+    // that fits is indeed the fastest: 277 ms on 128x128 against 335 on 64x64
+    // and 612 on 32x128, and the ladder lands within noise of picking the best
+    // tile for every shape individually.
     //
     // That ordering was wrong for as long as the register tile spilled. With
     // the contraction loop fully unrolled the 8x8 tile ran at 5 waves/SIMD out
@@ -1665,59 +1667,51 @@ static int launch(hipStream_t stream, const void *x, const void *w,
     // tile is better" and is really "the wide tile is broken". The unroll
     // comment in conv_tiled_kernel has the numbers. Reorder these rungs only
     // against a sweep taken with a kernel that does not spill.
-    if (pass == 1) {
-      // No tile covers the device, so the widest-first order above would leave
-      // most of it idle: a 256-channel 14x14 output is 4 blocks at 128x128 but
-      // 56 at 32x32. Take the 32x128 tile, or the 32x32 tile when it makes more
-      // than twice as many blocks, since its register tile does half the FMAs
-      // per LDS read. A 64x64 or 128x128 tile never makes more blocks than both
-      // of these (checked for M <= 4096 and Nout <= 2048), so they are not
-      // candidates here.
-      const int64_t blocks32x128 =
-          (pr.MPerGroup >= 24 && tileFits(pr, 32, 128, 1))
-              ? tileBlocks(pr, 32, 128)
-              : 0;
-      const int64_t blocks32x32 =
-          tileFits(pr, 32, 32, 1) ? tileBlocks(pr, 32, 32) : 0;
-      if (blocks32x32 > 0 && blocks32x32 > 2 * blocks32x128) {
-        launchTile<T, 32, 32, 2, 2>(stream, x, w, bias, y, pr);
+    if (pass == 0) {
+      if (tileFits(pr, 128, 128, units)) {
+        launchTile<T, 128, 128, 8, 8>(stream, x, w, bias, y, pr);
         break;
       }
-      if (blocks32x128 > 0) {
+      if (tileFits(pr, 64, 64, units)) {
+        launchTile<T, 64, 64, 4, 4>(stream, x, w, bias, y, pr);
+        break;
+      }
+      if (tileFits(pr, 32, 128, units)) {
         launchTile<T, 32, 128, 2, 8>(stream, x, w, bias, y, pr);
         break;
       }
+      continue;
     }
-    if (tileFits(pr, 128, 128, need)) {
-      launchTile<T, 128, 128, 8, 8>(stream, x, w, bias, y, pr);
+
+    // Pass 1: no tile covers the device, so the widest-first order above would
+    // leave most of it idle: a 256-channel 14x14 output is 4 blocks at 128x128
+    // but 56 at 32x32. Take the 32x128 tile, or the 32x32 tile when it makes
+    // more than twice as many blocks, since its register tile does half the
+    // FMAs per LDS read. A 64x64 or 128x128 tile never makes more blocks than
+    // 32x32, since each of its sides is at least as long, so they are not
+    // candidates here.
+    if (pr.MPerGroup >= 32) {
+      if (tileBlocks(pr, 32, 32) > 2 * tileBlocks(pr, 32, 128)) {
+        launchTile<T, 32, 32, 2, 2>(stream, x, w, bias, y, pr);
+      } else {
+        launchTile<T, 32, 128, 2, 8>(stream, x, w, bias, y, pr);
+      }
       break;
     }
-    if (tileFits(pr, 64, 64, need)) {
-      launchTile<T, 64, 64, 4, 4>(stream, x, w, bias, y, pr);
-      break;
-    }
-    if (pr.MPerGroup >= 24 && tileFits(pr, 32, 128, need)) {
-      launchTile<T, 32, 128, 2, 8>(stream, x, w, bias, y, pr);
-      break;
-    }
-    if (pass == 1 && smallMTileWorthwhile(pr)) {
+    if (smallMTileWorthwhile(pr)) {
       // Fewer output channels than the smallest tile has rows. The tile still
       // reuses each staged input slice across its block, which conv_direct does
       // not, and its dead rows are zero-filled on load and skipped on store.
       launchTile<T, 64, 64, 4, 4>(stream, x, w, bias, y, pr);
       break;
     }
-    if (pass == 1) {
-      logPick("direct", pr);
-      const int block = 256;
-      const int64_t grid = (totalOut + block - 1) / block;
-      hipLaunchKernelGGL(conv_direct_kernel<T>,
-                         dim3(static_cast<unsigned>(grid)), dim3(block), 0,
-                         stream, static_cast<const T *>(x),
-                         static_cast<const T *>(w),
-                         static_cast<const T *>(bias), static_cast<T *>(y), pr,
-                         totalOut);
-    }
+    logPick("direct", pr);
+    const int block = 256;
+    const int64_t grid = (totalOut + block - 1) / block;
+    hipLaunchKernelGGL(conv_direct_kernel<T>, dim3(static_cast<unsigned>(grid)),
+                       dim3(block), 0, stream, static_cast<const T *>(x),
+                       static_cast<const T *>(w), static_cast<const T *>(bias),
+                       static_cast<T *>(y), pr, totalOut);
   }
 
   hipError_t err = hipGetLastError();
