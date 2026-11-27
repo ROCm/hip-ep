@@ -1788,8 +1788,8 @@
 "_ZN12_GLOBAL__N_124mha_flash_prefill_kernelILi4ELi64ELi32ELi1EEEvPKDF16_S2_S2_PDF16_iiiiif":[112,24,5,9,3524,136,384],
 "_ZN12_GLOBAL__N_124mha_flash_prefill_kernelILi4ELi64ELi48ELi1EEEvPKDF16_S2_S2_PDF16_iiiiif":[126,0,0,8,4669,200,512],
 "_ZN12_GLOBAL__N_124mha_flash_prefill_kernelILi4ELi64ELi64ELi1EEEvPKDF16_S2_S2_PDF16_iiiiif":[141,0,0,7,5709,264,640],
-"_ZN12_GLOBAL__N_124mha_flash_prefill_kernelILi4ELi64ELi80ELi1EEEvPKDF16_S2_S2_PDF16_iiiiif":[152,0,0,6,6857,328,768],
-"_ZN12_GLOBAL__N_124mha_flash_prefill_kernelILi4ELi64ELi96ELi1EEEvPKDF16_S2_S2_PDF16_iiiiif":[160,16,3,6,8041,392,896]
+"_ZN12_GLOBAL__N_124mha_flash_prefill_kernelILi4ELi64ELi96ELi1EEEvPKDF16_S2_S2_PDF16_iiiiif":[160,16,3,6,8041,392,896],
+"_ZN12_GLOBAL__N_124mha_flash_prefill_kernelILi8ELi64ELi80ELi1EEEvPKDF16_S2_S2_PDF16_iiiiif":[152,0,0,6,6857,328,768]
 },
 "ngram_hash_mapping_kernel":{
 "_ZN12_GLOBAL__N_117ngram_hash_kernelIiEEvPKT_S3_S3_S3_S3_S3_PKiPS1_xxxxS1_b":[25,0,0,16,522,0,0],

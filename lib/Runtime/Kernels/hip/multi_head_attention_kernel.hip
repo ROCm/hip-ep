@@ -337,26 +337,39 @@ static inline size_t mha_prefill_smem_bytes(int nw, int bkv, int d_pad, int mt) 
   return v_lds + p_lds;
 }
 
-// Default launch config (correctness-first; autotune can be layered later).
-// rows/block = NW*MT*16 = 64; V+P LDS at d_pad=80,BKV=64 ~= 19 KB.
-constexpr int kMhaNW = 4;
+// Launch config: BKV=64, MT=1; rows/block = NW*16. NW is 4 except d_pad 80
+// (the Qwen vision encoders), where 8 waves measured 3-14% faster on gfx1151
+// at every length from 256 to 7296 (16 heads, same output bit for bit). d_pad
+// 64 loses 4-6% with 8 at sq 1024-2048; d_pad 128 gains with 16 but spills on
+// gfx11-generic.
 constexpr int kMhaBKV = 64;
 constexpr int kMhaMT = 1;
+
+template <int D_PAD, int NW>
+static inline int launch_mha_prefill_nw(hipStream_t stream, const _Float16 *Q,
+                                        const _Float16 *K, const _Float16 *V,
+                                        _Float16 *O, int B, int N, int sq,
+                                        int skv, int d, int max_seq,
+                                        float scale) {
+  const int rows = NW * kMhaMT * 16;
+  const int num_q_tiles = (sq + rows - 1) / rows;
+  dim3 grid(num_q_tiles * B, N);
+  const size_t smem = mha_prefill_smem_bytes(NW, kMhaBKV, D_PAD, kMhaMT);
+  (void)hipGetLastError();
+  mha_flash_prefill_kernel<NW, kMhaBKV, D_PAD, kMhaMT>
+      <<<grid, NW * 32, smem, stream>>>(Q, K, V, O, N, sq, skv, d, max_seq,
+                                        scale);
+  return (hipGetLastError() == hipSuccess) ? 0 : -1;
+}
 
 template <int D_PAD>
 static inline int launch_mha_prefill(hipStream_t stream, const _Float16 *Q,
                                      const _Float16 *K, const _Float16 *V,
                                      _Float16 *O, int B, int N, int sq, int skv,
                                      int d, int max_seq, float scale) {
-  const int rows = kMhaNW * kMhaMT * 16;
-  const int num_q_tiles = (sq + rows - 1) / rows;
-  dim3 grid(num_q_tiles * B, N);
-  const size_t smem = mha_prefill_smem_bytes(kMhaNW, kMhaBKV, D_PAD, kMhaMT);
-  (void)hipGetLastError();
-  mha_flash_prefill_kernel<kMhaNW, kMhaBKV, D_PAD, kMhaMT>
-      <<<grid, kMhaNW * 32, smem, stream>>>(Q, K, V, O, N, sq, skv, d, max_seq,
-                                            scale);
-  return (hipGetLastError() == hipSuccess) ? 0 : -1;
+  constexpr int nw = D_PAD == 80 ? 8 : 4;
+  return launch_mha_prefill_nw<D_PAD, nw>(stream, Q, K, V, O, B, N, sq, skv, d,
+                                          max_seq, scale);
 }
 
 }  // namespace
