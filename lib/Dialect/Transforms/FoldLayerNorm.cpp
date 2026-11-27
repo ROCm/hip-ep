@@ -2,7 +2,7 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-//===- layer_norm_fusion.cpp - primitive LayerNorm chains to one hip op ---===//
+//===- FoldLayerNorm.cpp - fold primitive LayerNorm chains ----------------===//
 //
 // clang-format off
 // Before:
@@ -23,30 +23,36 @@
 // no per-channel scale the norm gets a constant scale of ones.
 //
 // A rank>4 elementwise op is packed to rank 4 as collapse -> hip op ->
-// expand before this pass. One collapse/expand pair is skipped so the match
-// still sees the original tensors, provided its unpacked side has x's shape.
+// expand. One collapse/expand pair is skipped so the match still sees the
+// original tensors, provided its unpacked side has x's shape.
 //
 // A same-shape hip.add that produces the norm input becomes
 // hip.skip_layer_norm. Later users of that add, in the same block and after
 // the norm, read the sum the kernel writes. A broadcasting add, or one whose
 // dynamic extents are not proven equal, is left alone.
 //
+// The pass runs in the shared ONNX->HIP head, after hip-fold-batchnorm, so
+// every frontend that lowers to these HIP ops gets the fold, and on the
+// rocMLIR path it runs before the fusion outlines the chain's elementwise
+// ops into kernels or the residual add into the producing GEMM.
+//
 //===----------------------------------------------------------------------===//
 
-#include "layer_norm_fusion.hpp"
-
-#include "fusion_utils.hpp"
-#include "runtime_shape.hpp"
+#include "fusion_pattern/fusion_utils.hpp"
+#include "fusion_pattern/runtime_shape.hpp"
 
 #include "hip/Dialect/IR/HipDialect.h"
+#include "hip/Dialect/Transforms/Passes.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/STLExtras.h"
@@ -763,12 +769,27 @@ struct ResidualLayerNormFusion
 };
 
 } // namespace
-
-void populateLayerNormFusionPatterns(mlir::RewritePatternSet &patterns,
-                                     mlir::PatternBenefit benefit) {
-  patterns.add<LayerNormDivFusion, LayerNormMulFusion, ResidualLayerNormFusion>(
-      patterns.getContext(), benefit);
-}
-
 } // namespace fusion_transform
 } // namespace hip
+
+namespace mlir::hip {
+#define GEN_PASS_DEF_FOLDLAYERNORMPASS
+#include "hip/Dialect/Transforms/Passes.h.inc"
+
+namespace {
+
+struct FoldLayerNormPass
+    : public impl::FoldLayerNormPassBase<FoldLayerNormPass> {
+  void runOnOperation() override {
+    RewritePatternSet patterns(&getContext());
+    patterns.add<::hip::fusion_transform::LayerNormDivFusion,
+                 ::hip::fusion_transform::LayerNormMulFusion,
+                 ::hip::fusion_transform::ResidualLayerNormFusion>(
+        &getContext());
+    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
+      signalPassFailure();
+  }
+};
+
+} // namespace
+} // namespace mlir::hip

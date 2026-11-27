@@ -1975,7 +1975,7 @@ def Hip_SkipLayerNormOp :
   let description = [{
     Residual add fused with LayerNormalization over the last axis, in one
     kernel. com.microsoft.SkipLayerNormalization lowers here directly.
-    hip-fusion-transform folds a same-shape hip.add in front of
+    hip-fold-layer-norm folds a same-shape hip.add in front of
     hip.layer_norm into this op:
 
       input_skip_bias_sum = input + skip [+ bias]

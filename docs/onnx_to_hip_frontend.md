@@ -95,12 +95,13 @@ A LayerNorm over the last axis written as primitives
 (`ReduceMean`, `Sub`, `Pow(., 2)` or `Mul(d, d)`, `ReduceMean`, `Add(eps)`,
 then `Div` by `Sqrt` / `Pow(., 0.5)` or `Mul` by `Reciprocal(Sqrt)` /
 `Pow(., -0.5)` / `Div(1, Sqrt)`, with an optional per-channel scale and bias)
-in f16 or f32, at rank 4 or below, is folded into `LayerNormalization` before
-lowering (`LayerNormFusion.cpp`) when no op outside the chain reads its
-intermediates.
-Otherwise it lowers to those HIP ops, and `hip-fusion-transform` folds the
-chain into `hip.layer_norm`, redirecting shape queries on the intermediates to
-the input. Either way the norm accumulates in fp32. With no per-channel scale
+in f16 or f32 lowers to those HIP ops, and `hip-fold-layer-norm` folds the
+chain into one `hip.layer_norm`, redirecting shape queries on the intermediates
+to the input; a rank above 4 is matched through its collapse/expand pack. The
+pass works on HIP ops and runs in the shared ONNX->HIP head right after
+`hip-fold-batchnorm`, so any frontend that emits these ops gets it, and on the
+rocMLIR path it runs before the fusion outlines the chain into kernels. The
+norm accumulates in fp32. With no per-channel scale
 the norm takes a constant scale of ones. A last-axis `hip.layer_norm` whose input
 is a same-shape `hip.add` becomes `hip.skip_layer_norm`, which also writes
 the sum when later ops read it.

@@ -28,7 +28,6 @@ add_library(HipDialectTransforms STATIC
   fusion_pattern/linear_attention_group_fold.cpp
   fusion_pattern/patch_embed_conv_to_gemm.cpp
   fusion_pattern/gelu_fusion.cpp
-  fusion_pattern/layer_norm_fusion.cpp
   fusion_pattern/runtime_shape.cpp
   fusion_pattern/swiglu_fusion.cpp
   fusion_pattern/scaled_masked_softmax_fusion.cpp
@@ -40,6 +39,7 @@ add_library(HipDialectTransforms STATIC
   ExternalizeConstants.cpp
   FixLoopAccumulatorOffset.cpp
   FoldBatchNorm.cpp
+  FoldLayerNorm.cpp
   FoldConstantExtracts.cpp
   ForwardConcatSlots.cpp
   FuseRocMlirAnchor.cpp

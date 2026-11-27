@@ -31,7 +31,6 @@
 #include "hip/Dialect/IR/HipDialect.h"
 
 #include "gelu_fusion.hpp"
-#include "layer_norm_fusion.hpp"
 #include "linear_attention_group_fold.hpp"
 #include "patch_embed_conv_to_gemm.hpp"
 #include "scaled_masked_softmax_fusion.hpp"
@@ -865,12 +864,6 @@ constexpr unsigned kPatchEmbedConvToGemmBenefit = 5;
 constexpr unsigned kSwigluFusionBenefit = 2;
 constexpr unsigned kGeluFusionBenefit = 2;
 
-/// LayerNorm chain and residual-add fusions root at different ops
-/// (`hip.mul`/`hip.div` versus `hip.layer_norm`), so they are not ranked
-/// against each other. The mul root is disjoint from the GELU and SwiGLU
-/// mul roots.
-constexpr unsigned kLayerNormFusionBenefit = 2;
-
 /// The only pattern rooted at `hip.linear_attention`.
 constexpr unsigned kLinearAttentionGroupFoldBenefit = 1;
 
@@ -893,8 +886,6 @@ inline mlir::LogicalResult run(mlir::ModuleOp module,
   populateSwigluFusionPattern(patterns,
                               mlir::PatternBenefit(kSwigluFusionBenefit));
   populateGeluFusionPattern(patterns, mlir::PatternBenefit(kGeluFusionBenefit));
-  populateLayerNormFusionPatterns(
-      patterns, mlir::PatternBenefit(kLayerNormFusionBenefit));
   populateLinearAttentionGroupFoldPattern(
       patterns, mlir::PatternBenefit(kLinearAttentionGroupFoldBenefit));
   populateScaledMaskedSoftmaxFusionPattern(
