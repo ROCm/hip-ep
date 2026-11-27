@@ -15,13 +15,16 @@ softmax(Q Kᵀ * scale + bias) V, and the fusion report
 kernel or stayed a host op.
 
 The merge is gated, so the cases come in pairs that do and don't merge:
-- f16 always merges (head dims up to 256), also with an f32 softmax between
-  casts.
+- f16 merges on a target that accelerates it (head dims up to 256), also with
+  an f32 softmax between casts or a reshape that folds the heads into the
+  batch. A target without f16 acceleration keeps the softmax apart, and the
+  tests read gemm-gemm-accel-types from the pre-fusion dump to expect that.
 - f32 without matrix acceleration merges only when the score matrix is larger
   than HIPDNN_EP_ROCMLIR_ATTENTION_F32_MIN_SCORE_BYTES, pinned here to 2 MiB;
   an f32 the target accelerates merges at any size.
-- A head dim over 256, probabilities that are also a graph output, or
-  HIPDNN_EP_ROCMLIR_NO_ATTENTION=1 keep the softmax apart.
+- A head dim over 256, probabilities that are also a graph output, a reshape
+  that folds the heads into the rows, or HIPDNN_EP_ROCMLIR_NO_ATTENTION=1 keep
+  the softmax apart.
 - Two identical attention blocks merge into two dispatches, and a score gemm
   repeated without a softmax after it stays a plain gemm kernel.
 
@@ -94,12 +97,13 @@ class _RocMlirSession:
             json.loads(line) for line in report.read_text().splitlines() if line
         ]
         header = next(iter(sorted(dump.glob("*.mlir"))), None)
+        if header is None:
+            pytest.fail("the rocMLIR fusion wrote no pre-fusion dump")
         self.accel_types = []
-        if header is not None:
-            first = header.read_text(errors="replace").splitlines()[0]
-            for field in first.split():
-                if field.startswith("gemm-gemm-accel-types="):
-                    self.accel_types = [t for t in field.split("=", 1)[1].split(",") if t]
+        first = header.read_text(errors="replace").splitlines()[0]
+        for field in first.split():
+            if field.startswith("gemm-gemm-accel-types="):
+                self.accel_types = [t for t in field.split("=", 1)[1].split(",") if t]
         return outputs
 
     def softmax_counts(self) -> tuple[int, int]:
@@ -164,9 +168,7 @@ def _attention_nodes(
         logits = f"{prefix}b"
     if softmax_f32:
         nodes.append(
-            helper.make_node(
-                "Cast", [logits], [f"{prefix}l32"], to=TensorProto.FLOAT
-            )
+            helper.make_node("Cast", [logits], [f"{prefix}l32"], to=TensorProto.FLOAT)
         )
         logits = f"{prefix}l32"
     probs = f"{prefix}p"
@@ -282,36 +284,85 @@ def _expect_apart(rocmlir):
     rocmlir.expect(merged=0, host=1)
 
 
+def _expect_merged_f16(rocmlir):
+    """Merged where the target accelerates f16; apart where it does not."""
+    if "f16" in rocmlir.accel_types:
+        _expect_merged(rocmlir)
+    else:
+        _expect_apart(rocmlir)
+
+
+def _check_reshaped_probs(rocmlir, h, s, d, probs_shape, seed):
+    """``softmax(q kᵀ * scale)`` reshaped to ``probs_shape``, then ``@ v``."""
+    dtype = np.float16
+    tp = np_to_onnx_type(dtype)
+    v_shape = [probs_shape[0], s, d]
+    y_shape = [probs_shape[0], probs_shape[1], d]
+    inputs = [
+        helper.make_tensor_value_info("q", tp, [1, h, s, d]),
+        helper.make_tensor_value_info("k", tp, [1, h, d, s]),
+        helper.make_tensor_value_info("v", tp, v_shape),
+    ]
+    outputs = [helper.make_tensor_value_info("y", tp, y_shape)]
+    nodes = [
+        helper.make_node("MatMul", ["q", "k"], ["s"]),
+        helper.make_node("Mul", ["s", "scale"], ["m"]),
+        helper.make_node("Softmax", ["m"], ["p"], axis=-1),
+        helper.make_node("Reshape", ["p", "probs_shape"], ["r"]),
+        helper.make_node("MatMul", ["r", "v"], ["y"]),
+    ]
+    shape_init = helper.make_tensor(
+        "probs_shape", TensorProto.INT64, [len(probs_shape)], probs_shape
+    )
+    model = make_model_from_nodes(
+        nodes, inputs, outputs, initializers=[_scale_init(dtype, d), shape_init]
+    )
+
+    feeds, (q, k, v4, _) = _inputs(dtype, 1, h, s, d, seed=seed)
+    v = np.random.default_rng(seed + 1).standard_normal(v_shape).astype(dtype)
+    actual = rocmlir.run(model, feeds[:2] + [v])
+    _, p = _reference(q, k, v4, None)
+    y = p.reshape(probs_shape) @ v.astype(np.float64)
+    compare_outputs(actual, [y], **_TOL[dtype])
+
+
 class TestAttentionFusionF16:
-    """f16 has matrix acceleration, so these all merge into one kernel."""
+    """f16 merges into one kernel where the target accelerates it."""
 
     @pytest.mark.parametrize(
         "s,d", [(64, 32), (128, 64), (256, 64), (128, 128), (64, 256)]
     )
     def test_scaled(self, rocmlir, s, d):
         _check(rocmlir, np.float16, 1, 4, s, d)
-        _expect_merged(rocmlir)
+        _expect_merged_f16(rocmlir)
 
     @pytest.mark.parametrize("s", [64, 200])
     def test_mask_bias(self, rocmlir, s):
         """A broadcast additive mask between the scale and the softmax."""
         _check(rocmlir, np.float16, 2, 4, s, 64, bias=True)
-        _expect_merged(rocmlir)
+        _expect_merged_f16(rocmlir)
 
     def test_transposed_k(self, rocmlir):
         """K arrives BHSD and a Transpose feeds the score gemm."""
         _check(rocmlir, np.float16, 1, 4, 128, 64, k_layout="bhsd")
-        _expect_merged(rocmlir)
+        _expect_merged_f16(rocmlir)
 
     def test_batched_heads(self, rocmlir):
         _check(rocmlir, np.float16, 2, 12, 128, 64)
-        _expect_merged(rocmlir)
+        _expect_merged_f16(rocmlir)
 
     def test_softmax_in_f32(self, rocmlir):
         """f16 gemms around an f32 softmax: Cast to f32, Softmax, Cast to f16.
         The f32 softmax must keep at least the f16 accuracy."""
         _check(rocmlir, np.float16, 1, 4, 128, 64, bias=True, softmax_f32=True)
-        _expect_merged(rocmlir)
+        _expect_merged_f16(rocmlir)
+
+    def test_heads_folded_into_batch(self, rocmlir):
+        """A Reshape of the probabilities from BHSS to (BH)SS keeps the rows
+        the softmax normalized, so the merge takes it."""
+        h, s = 4, 128
+        _check_reshaped_probs(rocmlir, h, s, 64, [h, s, s], seed=5)
+        _expect_merged_f16(rocmlir)
 
 
 class TestAttentionFusionF32:
@@ -343,6 +394,13 @@ class TestAttentionFusionKeptApart:
 
     def test_probs_also_output(self, rocmlir):
         _check(rocmlir, np.float16, 1, 4, 64, 64, probs_out=True)
+        _expect_apart(rocmlir)
+
+    def test_heads_folded_into_rows(self, rocmlir):
+        """A Reshape of the probabilities from BHSS to B(HS)S gives the second
+        gemm other rows than the first, so the softmax stays apart."""
+        h, s = 4, 64
+        _check_reshaped_probs(rocmlir, h, s, 64, [1, h * s, s], seed=6)
         _expect_apart(rocmlir)
 
     def test_no_attention(self, rocmlir, monkeypatch):
@@ -380,9 +438,13 @@ class TestAttentionFusionRepeatedBlocks:
             expected.append(_reference(q, k, v, None)[0])
         actual = rocmlir.run(model, feeds)
         compare_outputs(actual, expected, **_TOL[dtype])
-        # Identical blocks may share one kernel, but neither softmax stays.
+        # Identical blocks may share one kernel, but neither softmax stays
+        # where the target accelerates f16.
         merged, host = rocmlir.softmax_counts()
-        assert merged >= 1 and host == 0, (merged, host)
+        if "f16" in rocmlir.accel_types:
+            assert merged >= 1 and host == 0, (merged, host)
+        else:
+            assert (merged, host) == (0, 2), (merged, host)
 
     def test_score_gemm_shared_with_plain_matmul(self, rocmlir):
         """A second Q Kᵀ * scale with no softmax after it, reading the same K,
@@ -415,4 +477,4 @@ class TestAttentionFusionRepeatedBlocks:
             q2.astype(np.float64) @ k.astype(np.float64).transpose(0, 1, 3, 2)
         ) / np.sqrt(d)
         compare_outputs(actual, [y, s2], **_TOL[dtype])
-        _expect_merged(rocmlir)
+        _expect_merged_f16(rocmlir)

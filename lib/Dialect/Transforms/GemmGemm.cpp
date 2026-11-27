@@ -164,10 +164,22 @@ static bool feedsGemmA(BlockArgument arg, Operation *anchor) {
   return false;
 }
 
+// A reshape that only regroups the batch dims and keeps the rows and columns,
+// so the second gemm's m and reduction dim stay the first gemm's m and n.
+static bool isBatchReshape(Operation *op) {
+  if (getFusableViewKind(op) != ViewKind::Reshape)
+    return false;
+  auto in = dyn_cast<RankedTensorType>(op->getOperand(0).getType());
+  auto out = dyn_cast<RankedTensorType>(op->getResult(0).getType());
+  return in && out && in.getRank() >= 2 && out.getRank() >= 2 &&
+         in.getShape().take_back(2) == out.getShape().take_back(2);
+}
+
 // The chain from `arg` to the anchor's A operand when it is single-use and
-// holds only row reshapes and at most one cast, which is all rocMLIR's
-// attention matcher skips between the softmax and the second gemm. Yields
-// that cast, or null without one.
+// holds only batch reshapes and at most one cast, which is all rocMLIR's
+// attention matcher skips between the softmax and the second gemm. A reshape
+// that regroups the rows would give the two gemms different m and batch
+// counts. Yields that cast, or null without one.
 static FailureOr<CastOp> getProbabilitiesCast(BlockArgument arg,
                                               Operation *anchor) {
   CastOp found;
@@ -176,8 +188,7 @@ static FailureOr<CastOp> getProbabilitiesCast(BlockArgument arg,
     OpOperand &use = *value.use_begin();
     Operation *user = use.getOwner();
     if (user == anchor) {
-      if (use.getOperandNumber() !=
-          getGemmAOperand(anchor).getOperandNumber())
+      if (use.getOperandNumber() != getGemmAOperand(anchor).getOperandNumber())
         return failure();
       return found;
     }
@@ -185,7 +196,7 @@ static FailureOr<CastOp> getProbabilitiesCast(BlockArgument arg,
       if (found)
         return failure();
       found = cast;
-    } else if (!isRowReshape(user)) {
+    } else if (!isBatchReshape(user)) {
       return failure();
     }
     if (user->getNumResults() != 1)
@@ -406,9 +417,9 @@ static bool isAttentionSupported(Operation *anchor,
 // result, and the gemm kernel that reads the softmax as its A operand, so
 // rocMLIR lowers the three to one rock.attention and the score matrix stays
 // on chip. Scale, bias and cast epilogues of the first gemm ride along as its
-// pointwise ops. Between the softmax and the second gemm only row reshapes and
-// one cast may sit, and that cast must undo a cast to the softmax type in the
-// first kernel: rocMLIR fails to compile a merged kernel its attention
+// pointwise ops. Between the softmax and the second gemm only batch reshapes
+// and one cast may sit, and that cast must undo a cast to the softmax type in
+// the first kernel: rocMLIR fails to compile a merged kernel its attention
 // matcher rejects, with no fallback.
 //
 // Before:
@@ -523,4 +534,3 @@ void fuseGemmGemmKernels(func::FuncOp funcOp, int &counter,
 }
 
 } // namespace mlir::hip
-

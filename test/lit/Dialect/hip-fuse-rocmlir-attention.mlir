@@ -6,7 +6,7 @@
 // which rocMLIR lowers to rock.attention. Both gemms must read a float type in
 // gemm-gemm-accel-types (or f32 with a score matrix larger than
 // attention-f32-min-score-bytes, here a 2 MiB cache), both head dims must be
-// at most 256, and only row reshapes and one paired cast may sit between the
+// at most 256, and only batch reshapes and one paired cast may sit between the
 // softmax and the second gemm. hip-fuse-rocmlir-attention-f32-cutoff.mlir
 // checks the cutoff itself.
 
@@ -533,4 +533,91 @@ func.func @main_graph(%ctx: !hip.context, %q: tensor<64x32xf16>,
       {alpha = 1.0 : f32, beta = 1.0 : f32, transA = 0 : i64, transB = 0 : i64}
       : tensor<64x32xf16>
   return %y : tensor<64x32xf16>
+}
+
+// -----
+
+// A reshape that folds the heads into the batch keeps the rows and columns of
+// the probabilities, so it may sit between the softmax and the second gemm.
+
+// CHECK-LABEL: func.func @mlir_matmul_miopen.softmax_{{[a-z_]*}}matmul_
+// CHECK-SAME: (%{{.*}}: tensor<1x2x64x32xf16>, %{{.*}}: tensor<1x2x32x64xf16>, %{{.*}}: tensor<2x64x32xf16>) -> tensor<2x64x32xf16>
+// CHECK: %[[P:.*]] = hip.miopen.softmax
+// CHECK: %[[R:.*]] = tensor.collapse_shape %[[P]]
+// CHECK-SAME: into tensor<2x64x64xf16>
+// CHECK: hip.matmul({{.*}}) ins(%[[R]],
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK-NOT: hip.miopen.softmax
+// CHECK: hip.rocmlir
+// CHECK-NOT: hip.rocmlir
+// CHECK-NOT: hip.miopen.softmax
+// CHECK: return
+func.func @main_graph(%ctx: !hip.context, %q: tensor<1x2x64x32xf16>,
+                      %k: tensor<1x2x32x64xf16>, %v: tensor<2x64x32xf16>)
+    -> tensor<2x64x32xf16> {
+  %e0 = tensor.empty() : tensor<1x2x64x64xf16>
+  %s = hip.matmul(%ctx) ins(%q, %k : tensor<1x2x64x32xf16>, tensor<1x2x32x64xf16>)
+      outs(%e0 : tensor<1x2x64x64xf16>) : tensor<1x2x64x64xf16>
+  %e2 = tensor.empty() : tensor<1x2x64x64xf16>
+  %p = hip.miopen.softmax(%ctx) ins(%s : tensor<1x2x64x64xf16>)
+      outs(%e2 : tensor<1x2x64x64xf16>) -> tensor<1x2x64x64xf16>
+  %r = tensor.collapse_shape %p [[0, 1], [2], [3]]
+      : tensor<1x2x64x64xf16> into tensor<2x64x64xf16>
+  %e3 = tensor.empty() : tensor<2x64x32xf16>
+  %y = hip.matmul(%ctx) ins(%r, %v : tensor<2x64x64xf16>, tensor<2x64x32xf16>)
+      outs(%e3 : tensor<2x64x32xf16>) : tensor<2x64x32xf16>
+  return %y : tensor<2x64x32xf16>
+}
+
+// -----
+
+// A reshape that folds the heads into the rows gives the second gemm another
+// m and batch count than the first, which rocMLIR's attention does not take.
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: hip.rocmlir
+// CHECK: hip.miopen.softmax
+// CHECK: hip.rocmlir
+func.func @main_graph(%ctx: !hip.context, %q: tensor<1x2x64x32xf16>,
+                      %k: tensor<1x2x32x64xf16>, %v: tensor<1x64x32xf16>)
+    -> tensor<1x128x32xf16> {
+  %e0 = tensor.empty() : tensor<1x2x64x64xf16>
+  %s = hip.matmul(%ctx) ins(%q, %k : tensor<1x2x64x32xf16>, tensor<1x2x32x64xf16>)
+      outs(%e0 : tensor<1x2x64x64xf16>) : tensor<1x2x64x64xf16>
+  %e2 = tensor.empty() : tensor<1x2x64x64xf16>
+  %p = hip.miopen.softmax(%ctx) ins(%s : tensor<1x2x64x64xf16>)
+      outs(%e2 : tensor<1x2x64x64xf16>) -> tensor<1x2x64x64xf16>
+  %r = tensor.collapse_shape %p [[0], [1, 2], [3]]
+      : tensor<1x2x64x64xf16> into tensor<1x128x64xf16>
+  %e3 = tensor.empty() : tensor<1x128x32xf16>
+  %y = hip.matmul(%ctx) ins(%r, %v : tensor<1x128x64xf16>, tensor<1x64x32xf16>)
+      outs(%e3 : tensor<1x128x32xf16>) : tensor<1x128x32xf16>
+  return %y : tensor<1x128x32xf16>
+}
+
+// -----
+
+// A reshape that changes the last dim makes the second gemm reduce over
+// something other than the keys the softmax normalized.
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: hip.rocmlir
+// CHECK: hip.miopen.softmax
+// CHECK: hip.rocmlir
+func.func @main_graph(%ctx: !hip.context, %q: tensor<1x2x64x32xf16>,
+                      %k: tensor<1x2x32x64xf16>, %v: tensor<1x4096x32xf16>)
+    -> tensor<1x2x32xf16> {
+  %e0 = tensor.empty() : tensor<1x2x64x64xf16>
+  %s = hip.matmul(%ctx) ins(%q, %k : tensor<1x2x64x32xf16>, tensor<1x2x32x64xf16>)
+      outs(%e0 : tensor<1x2x64x64xf16>) : tensor<1x2x64x64xf16>
+  %e2 = tensor.empty() : tensor<1x2x64x64xf16>
+  %p = hip.miopen.softmax(%ctx) ins(%s : tensor<1x2x64x64xf16>)
+      outs(%e2 : tensor<1x2x64x64xf16>) -> tensor<1x2x64x64xf16>
+  %r = tensor.collapse_shape %p [[0], [1], [2, 3]]
+      : tensor<1x2x64x64xf16> into tensor<1x2x4096xf16>
+  %e3 = tensor.empty() : tensor<1x2x32xf16>
+  %y = hip.matmul(%ctx) ins(%r, %v : tensor<1x2x4096xf16>, tensor<1x4096x32xf16>)
+      outs(%e3 : tensor<1x2x32xf16>) : tensor<1x2x32xf16>
+  return %y : tensor<1x2x32xf16>
 }

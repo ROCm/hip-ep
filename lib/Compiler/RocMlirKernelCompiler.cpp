@@ -412,8 +412,9 @@ int64_t resolveRocMlirAttentionF32MinScoreBytes(StringRef arch) {
                     "HIPDNN_EP_ROCMLIR_ATTENTION_F32_MIN_SCORE_BYTES='"
                  << env << "' (expected a byte count)\n";
   }
-  // Another chip's cache says nothing about the target's.
-  if (queryDeviceArch() != arch)
+  // Another chip's cache says nothing about the target's. Compare chips only:
+  // a ROCK_ARCH such as "gfx1100:xnack-" still targets device 0's gfx1100.
+  if (queryDeviceArch() != arch.split(':').first)
     return 0;
   return resolveRocMlirL2CacheBytes();
 }

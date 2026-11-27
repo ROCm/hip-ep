@@ -427,15 +427,18 @@ lowers to `rock.attention`. The gates are:
   three kernels.
 - The scores and the probabilities have no other reader, and the second gemm
   does not transpose the probabilities.
-- Between the softmax and the second gemm sit only row reshapes and at most
-  one cast. A cast there must be matched by a cast to the softmax type in the
-  first kernel (f16 gemm, cast to f32, f32 softmax, cast to f16, f16 gemm).
-  Those are the chains rocMLIR's attention matcher takes. It rejects others,
-  and a gemm kernel that fails to compile has no fallback.
+- Between the softmax and the second gemm sit only reshapes that regroup the
+  batch dims (rows and columns unchanged) and at most one cast. A cast there
+  must be matched by a cast to the softmax type in the first kernel (f16
+  gemm, cast to f32, f32 softmax, cast to f16, f16 gemm). Those are the
+  chains rocMLIR's attention matcher takes. It rejects others, and a gemm
+  kernel that fails to compile has no fallback.
 
-The f32 cutoff is the L2 size that the HIP runtime reports. On a chip with a
-larger last-level cache behind L2, scores between the two sizes stay on chip
-unfused as well, so the L2 size is a lower bound and not a tuned threshold.
+The f32 cutoff is the L2 size that the HIP runtime reports for device 0,
+used only when device 0 is the target chip (target features such as
+`:xnack-` are ignored). On a chip with a larger last-level cache behind L2,
+scores between the two sizes stay on chip unfused as well, so the L2 size is
+a lower bound and not a tuned threshold.
 A target that accelerates f32 lists it in `gemm-gemm-accel-types` and never
 reaches the cutoff. f16 and bf16 merge at every score size.
 
