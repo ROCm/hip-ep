@@ -2798,8 +2798,8 @@ HIP_KERNEL_API int hip_matmul_nbits_grouped_wmma(
     int64_t block_size,
     int64_t element_size_bytes);
 
-/* int4 x fp16 GEMM over a ragged batch of expert row slices (MoE prefill),
- * fp16 activations and fp32 accumulation. Streams each weight once straight
+/* int4 (or int2) x fp16 GEMM over a ragged batch of expert row slices (MoE
+ * prefill), fp16 activations and fp32 accumulation. Streams each weight once straight
  * into WMMA fragments instead of staging it through LDS, which is what bounds
  * the general WMMA tile at small M. One launch covers every expert, driven by
  * a device-side row-tile list so nothing is read back.
@@ -2811,9 +2811,12 @@ HIP_KERNEL_API int hip_matmul_nbits_grouped_wmma(
  *                        gathered from A (e.g. the token rows of a MoE input)
  *                        without staging them.
  *   B, scales          : expert-major MatMulNBits layout
- *                        ([E, N, ceil(K/2)] packed, fp16 [E, N, ceil(K/bs)])
- *   zero_points        : nullptr for symmetric (zp = 8); with zp_packed_u4 != 0
- *                        the packed uint8 tensor [E, N, ceil(ceil(K/bs)/2)],
+ *                        ([E, N, ceil(K/2)] packed, or [E, N, K/4] for
+ *                        bits == 2; fp16 [E, N, ceil(K/bs)])
+ *   zero_points        : nullptr for symmetric (zp = 8, or 2 for bits == 2);
+ *                        with zp_packed_u4 != 0 the tensor packed at the
+ *                        weights' width ([E, N, ceil(ceil(K/bs)/2)] nibbles,
+ *                        or [E, N, ceil(ceil(K/bs)/4)] 2-bit values),
  *                        otherwise fp16 [E, N, ceil(K/bs)]. Both give
  *                        bit-identical results.
  *   bias               : fp16 [E, N] or nullptr
@@ -2824,7 +2827,7 @@ HIP_KERNEL_API int hip_matmul_nbits_grouped_wmma(
  *   tile_rows          : tile height the list was built with; cfg < 0 picks
  *                        the default config for it, and a cfg whose row tile
  *                        is shorter returns -1.
- * Requires wave32 WMMA, bits == 4, fp16, K % 32 == 0, power-of-two
+ * Requires wave32 WMMA, bits == 4 or 2, fp16, K % 32 == 0, power-of-two
  * block_size >= 32 and K small enough for one workgroup per column tile
  * (default configs: K <= 9216 for tile_rows <= 32, K <= 5120 above); returns
  * -1 otherwise. */
@@ -3517,9 +3520,10 @@ HIP_KERNEL_API int hip_qmoe_decode_fused_dp4a(
 
 // W2A8 dp4a decode for 2-bit experts (fp16, packed 2-bit zero points or
 // none). Same buffers as hip_qmoe_decode_fused_dp4a plus a_sum_in
-// ([num_tokens, hidden/64] int32) and a_sum_mid ([num_tokens*k, inter/64]
-// int32). Returns -1 without launching unless block_size is a power of two in
-// [64, 512] dividing hidden and inter.
+// ([num_tokens, hidden/S] int32) and a_sum_mid ([num_tokens*k, inter/S]
+// int32), S = 32 when block_size is 32 and 64 otherwise. Returns -1 without
+// launching unless block_size is a power of two in [32, 512] dividing hidden
+// and inter, and hidden and inter are multiples of 64.
 HIP_KERNEL_API int hip_qmoe_decode_fused_dp4a_u2(
     void* stream, const void* input, const void* expert_indices,
     const void* expert_weights, const void* fc1_weights, const void* fc1_scales,
