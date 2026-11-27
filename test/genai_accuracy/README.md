@@ -11,8 +11,17 @@ Licensed under the MIT License.
 framework and is the GitHub Actions port of the HIP EP GenAI Jenkins accuracy
 flow (`TEST_MODE=accuracy`, `GENAI_ACCURACY_TESTS=PPL`, `LLM_RUN_EPS=hip`).
 
-The `Windows GPU Test` workflow (`.github/workflows/windows-gpu-test.yml`) runs
-it on every PR, merge group, and push.
+The `genai_accuracy` job of the `Windows GPU Test` workflow
+(`.github/workflows/windows-gpu-test.yml`) runs it on every PR, merge group,
+and push, as a matrix with one leg per self-hosted GPU runner. It currently
+runs on one runner:
+
+| Runner label | Results artifact |
+|--------------|------------------|
+| `Strix` | `genai-accuracy-results-strix` |
+
+Each runner is gated and reported on its own. To add a runner, add a matrix
+entry with its label and a unique artifact name; the legs run in parallel.
 
 ## What runs
 
@@ -22,21 +31,27 @@ follows the modelzoo profile, as in the Jenkins flow:
 | Model | Test | Source |
 |-------|------|--------|
 | `Qwen3.8-Flash-Next` | `PPL_VLM` | Hugging Face `amd/Qwen3.8-Flash-Next_gpuep_1.0_gpu_128`, pinned revision |
-| `Qwen3.8-27B` | `PPL_VLM` | model share |
-| `Gemma-4-E4B-it` | `PPL_VLM` | model share |
-| `gpt-oss-20b` | `PPL` | model share |
-| `Llama-3.1-8B` | `PPL` | model share |
+| `gpt-oss-20b-webgpu-int4-rtn-block-32` | `PPL` | OGA/VLM benchmark model staged on the runner |
+| `Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml` | `PPL` | OGA/VLM benchmark model staged on the runner |
+| `gemma-4-E4B-it-fp16-int4-kquant-prune-logits` | `PPL_VLM` | OGA/VLM benchmark model staged on the runner |
+| `Qwen3.8-27B-fp16-ve-fp16-int4-k_quant-gs128-text-dml-onnx` | `PPL_VLM` | OGA/VLM benchmark model staged on the runner |
+
+The staged models are the same ones the `Run OGA benchmark` and `Run VLM
+benchmark` steps use: `<runner.workspace>/amdgpu-oga-models/<model>` or
+`<runner.workspace>/amdgpu-vlm-models/<model>`, looked up by directory name.
+They are used in place, not copied, and must be staged on every runner the job
+runs on.
 
 - `PPL_VLM` (VLM profile): conditional perplexity of `lmms-lab/flickr30k` test
   captions given the image. Parameters come from the framework's
   `test_config_vlm.json`.
-- `PPL` (LLM profile): wikitext2 perplexity with a 512-token window over 2% of the
-  corpus (`nsamples=0.02`); the other parameters, such as `stride`, come from the
-  framework's `test_config.json`.
+- `PPL` (LLM profile): wikitext2 perplexity with a 512-token window over 2% of
+  the corpus (`nsamples=0.02`); the other parameters, such as `stride`, come from
+  the framework's `test_config.json`.
 
 | Item | Value |
 |------|-------|
-| EP | `AMDGPU` with `profile: hip` in every session, `session.disable_cpu_ep_fallback=1`, `search.chunk_size=512` (`Gemma-4-E4B-it` sets no chunk size and uses `enable_graph_capture=0`) |
+| EP | `AMDGPU` with `profile: hip` in every session, `session.disable_cpu_ep_fallback=1`, `search.chunk_size=512` (`gemma-4-E4B-it-fp16-int4-kquant-prune-logits` sets no chunk size and uses `enable_graph_capture=0`; a staged model whose `genai_config.json` already selects `AMDGPU` keeps its provider options) |
 | Framework | hipdnn-accuracy-test at a pinned commit |
 | Python | 3.14 venv with the package's `onnxruntime_directml` and `onnxruntime_genai_directml` wheels |
 
@@ -49,16 +64,18 @@ would fall back to the CPU EP. A passing run therefore measured the GPU path.
    that ran. Otherwise the `Run GenAI accuracy` step fails. A skipped model (see
    below) does not fail the step.
 2. On pull requests and merge groups, each model's perplexity may rise by at
-   most 2% over its `<model>/result.json` in the `genai-accuracy-results`
+   most 2% over its `<model>/result.json` in the same runner's results
    artifact of the latest successful `Windows Build` push run on `main` that
    has one. Lower perplexity is better. A model's baseline is used only when its
    model revision, framework commit, and test parameters match this run. Pushes
    report the delta without gating. A model with no comparable baseline is not
    gated.
 
-Results appear in the job summary and, on PRs, in one comment marked
-`<!-- morphizen-genai-accuracy-results -->` with a section per model. The
-`genai-accuracy-results` artifact has one subdirectory per model
+Results appear in the job summary and, on PRs, in one comment per runner
+marked `<!-- morphizen-<artifact name> -->`: one table with a row per model
+(perplexity, main baseline, delta, samples, time, status), followed by notes for
+skipped, failed, or non-comparable models. Each
+results artifact has one subdirectory per model
 (`<model>/result.json`, the framework logs, and the generated
 `genai_config_AMDGPU.json`).
 
@@ -73,56 +90,33 @@ hf-home/                Hugging Face cache (datasets)
 genai-models/<model>    link to the model in the model store
 ```
 
-The models live in the machine-wide model store `--models-root` (default
-`$GENAI_MODELS_ROOT`, or `C:\models` on Windows) as `<models-root>/<model>`, so
-every runner workspace shares one copy. `prepare` sets up the framework, venv and
-wheels once, then for each model:
+The models live in the model store `--models-root` as `<models-root>/<model>`.
+CI uses `<runner.workspace>/genai-accuracy/models`; the default is
+`$GENAI_MODELS_ROOT`, or `C:\models` on Windows. `prepare` sets up the
+framework, venv and wheels once, then for each model:
 
 1. Uses the model in the store when `<models-root>/<model>/genai_config.json`
-   exists and no `.download_incomplete` marker is left by an interrupted copy or
+   exists and no `.download_incomplete` marker is left by an interrupted
    download. A model placed there by hand is used as is.
-2. Otherwise copies it from the model share `--source-root` (default
-   `$GENAI_MODELS_SOURCE`, or `R:/` on Windows) into `<models-root>/<model>`
-   with `robocopy`, which resumes a partial copy.
-3. Otherwise, for a model with a Hugging Face source, downloads the pinned
-   revision.
-4. Links `<cache-root>/genai-models/<model>` to the store directory: a symlink,
-   or a directory junction when the account cannot create symlinks.
+2. Otherwise, for a model with a Hugging Face source, downloads the pinned
+   revision. The download is incremental, so an interrupted one resumes.
+3. Otherwise uses the staged OGA/VLM benchmark copy under `--staged-root`
+   (`<runner.workspace>` in CI) in place.
+4. Links `<cache-root>/genai-models/<model>` to that directory: a symlink, or a
+   directory junction when the account cannot create symlinks.
 
-One model failing to copy or download does not stop the others; `prepare` then
-exits non-zero.
+One model failing to download does not stop the others; `prepare` then exits
+non-zero.
 
 Each run hard-links the model into its work dir, because `run_accuracy.py`
-overwrites `genai_config.json` in the model directory. The work dir must be on
-the same volume as the model store. The five models take roughly 150 GB or more
-in the store.
-
-### Model share layout
-
-The share is mapped as `R:/` on the runner.
-A drive mapped in an interactive session is not visible to the runner
-service. When `R:` is missing, the CI prepare step emits a warning, and
-`prepare` logs why each share lookup failed (share not accessible, directory
-missing, or no `genai_config.json`).
-
-It holds one directory per model, named after the modelzoo alias. Each must
-contain `genai_config.json`:
-
-| Model | Directory under `R:/` |
-|-------|----------------------|
-| `Qwen3.8-27B` | `Qwen3.8-27B-fp16-ve-fp16-int4-k_quant-gs128-text-dml-onnx` (16 GB) |
-| `Gemma-4-E4B-it` | `gemma-4-E4B-it-awq-uint4-onnx-split-fp16-pruned_lm_head` (11 GB) |
-| `gpt-oss-20b` | `gpt-oss-20b-webgpu-int4-rtn-block-32-pruned_lm_head` (12 GB) |
-| `Llama-3.1-8B` | `Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml-pruned_lm_head` (4.7 GB) |
-
-The directory names are the `MODELS[...]["source_dirs"]` entries in
-`run_genai_accuracy.py`. These models have no pinned revision; the copy from the
-share is used as is.
+overwrites `genai_config.json` in the model directory; the metadata files are
+copied, so a staged model is never modified. The work dir must be on the same
+volume as the model store and the staged models.
 
 ### Skipped models
 
-A model with no Hugging Face source that is neither in the store nor on the
-share is skipped, not failed: `prepare` logs `[SKIP]`, `run` writes a
+A model with no Hugging Face source that is neither in the store nor staged is
+skipped, not failed: `prepare` logs `[SKIP]` and emits a CI warning, `run` writes a
 `result.json` with `skipped: true`, the report shows `SKIPPED`, and the job does
 not gate on it.
 
@@ -133,16 +127,18 @@ On a Windows Strix Halo machine with Python 3.14 and an extracted
 
 ```bash
 python test/genai_accuracy/run_genai_accuracy.py prepare \
-  --model Qwen3.8-27B gpt-oss-20b \
+  --model Qwen3.8-Flash-Next Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml \
   --package-dir gpu-test-package --cache-root D:/genai-accuracy \
-  --models-root D:/models --source-root R:/
+  --models-root D:/models --staged-root D:/runner-workspace
 python test/genai_accuracy/run_genai_accuracy.py run \
-  --model gpt-oss-20b \
+  --model Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml \
   --package-dir gpu-test-package --cache-root D:/genai-accuracy \
-  --work-dir D:/genai-accuracy-work --results-dir genai-accuracy-results
+  --models-root D:/models \
+  --work-dir D:/genai-accuracy-work \
+  --results-dir genai-accuracy-results/Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml
 python test/genai_accuracy/run_genai_accuracy.py report \
-  --current genai-accuracy-results/result.json \
-  --baseline main/result.json \
+  --model Qwen3.8-Flash-Next Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml \
+  --results-dir genai-accuracy-results --baseline-dir main \
   --summary-out summary.md --regressions-out regressions.txt
 ```
 

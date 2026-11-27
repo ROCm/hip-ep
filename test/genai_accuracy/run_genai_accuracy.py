@@ -12,12 +12,14 @@ with the latest main run. See test/genai_accuracy/README.md.
 Subcommands:
   prepare  Clone the pinned framework, build or reuse the Python venv, install
            the package's ORT/OGA wheels, and make each model available: in the
-           model store, else copied from the model share, else downloaded from
-           Hugging Face. A model found nowhere is skipped by run.
+           model store, else downloaded from Hugging Face, else the copy staged
+           for the OGA/VLM benchmarks used in place. A model found nowhere is
+           skipped by run.
   run      Mirror the model, generate its AMDGPU genai_config, run the test and
            write <results-dir>/result.json. Exits 1 when the test fails.
-  report   Render a Markdown summary of result.json against a main baseline
-           and list perplexity regressions beyond the tolerance.
+  report   Render one Markdown table of every model's result.json against
+           the main baseline and list perplexity regressions beyond the
+           tolerance.
 
 Only the standard library is used here; the framework runs in the venv.
 """
@@ -57,27 +59,41 @@ MODELS = {
         },
         "hip_provider_options": {},
     },
-    # The models below have no pinned Hugging Face revision: they are copied
-    # from the model share (--source-root) into the model store when missing,
-    # and their test is skipped when the share does not have them either.
-    # "source_dirs" are the directory names tried under the share, in order.
-    "Qwen3.8-27B": {
+    # The models below have no Hugging Face source: they are the models the OGA
+    # and VLM benchmark steps use, staged once on the runner under
+    # <staged-root>/<WORKSPACE_MODEL_DIRS>/<name>, and are used in place. A model
+    # that is not staged is skipped. The keys are the staged directory names.
+    "gpt-oss-20b-webgpu-int4-rtn-block-32": {
         "hf_repo": None,
         "revision": None,
-        "source_dirs": ["Qwen3.8-27B-fp16-ve-fp16-int4-k_quant-gs128-text-dml-onnx"],
-        "test": "PPL_VLM",
-        "template": VLM_TEMPLATE_CONFIG,
-        "variant": "allgpu",
+        # LLMs run the text PPL test the way the Jenkins flow does: wikitext2, a
+        # 512-token window, 2% of the corpus (the template's stride is kept).
+        "test": "PPL",
+        "template": TEXT_TEMPLATE_CONFIG,
+        "seq_len": 512,
+        "param_overrides": {"nsamples": 0.02},
         "ci_options": {
             "LLM_TOKENS_MITRIX": "128|128,2048|128,16384|128",
             "HIP_CHUNK_SIZE": 512,
         },
         "hip_provider_options": {},
     },
-    "Gemma-4-E4B-it": {
+    "Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml": {
         "hf_repo": None,
         "revision": None,
-        "source_dirs": ["gemma-4-E4B-it-awq-uint4-onnx-split-fp16-pruned_lm_head"],
+        "test": "PPL",
+        "template": TEXT_TEMPLATE_CONFIG,
+        "seq_len": 512,
+        "param_overrides": {"nsamples": 0.02},
+        "ci_options": {
+            "LLM_TOKENS_MITRIX": "128|128,2048|128,16384|128",
+            "HIP_CHUNK_SIZE": 512,
+        },
+        "hip_provider_options": {},
+    },
+    "gemma-4-E4B-it-fp16-int4-kquant-prune-logits": {
+        "hf_repo": None,
+        "revision": None,
         "test": "PPL_VLM",
         "template": VLM_TEMPLATE_CONFIG,
         "variant": "allgpu",
@@ -86,30 +102,12 @@ MODELS = {
         },
         "hip_provider_options": {"enable_graph_capture": "0"},
     },
-    # LLMs run the text PPL test the way the Jenkins flow does: wikitext2, a
-    # 512-token window, 2% of the corpus (the template's stride is kept).
-    "gpt-oss-20b": {
+    "Qwen3.8-27B-fp16-ve-fp16-int4-k_quant-gs128-text-dml-onnx": {
         "hf_repo": None,
         "revision": None,
-        "source_dirs": ["gpt-oss-20b-webgpu-int4-rtn-block-32-pruned_lm_head"],
-        "test": "PPL",
-        "template": TEXT_TEMPLATE_CONFIG,
-        "seq_len": 512,
-        "param_overrides": {"nsamples": 0.02},
-        "ci_options": {
-            "LLM_TOKENS_MITRIX": "128|128,2048|128,16384|128",
-            "HIP_CHUNK_SIZE": 512,
-        },
-        "hip_provider_options": {},
-    },
-    "Llama-3.1-8B": {
-        "hf_repo": None,
-        "revision": None,
-        "source_dirs": ["Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml-pruned_lm_head"],
-        "test": "PPL",
-        "template": TEXT_TEMPLATE_CONFIG,
-        "seq_len": 512,
-        "param_overrides": {"nsamples": 0.02},
+        "test": "PPL_VLM",
+        "template": VLM_TEMPLATE_CONFIG,
+        "variant": "allgpu",
         "ci_options": {
             "LLM_TOKENS_MITRIX": "128|128,2048|128,16384|128",
             "HIP_CHUNK_SIZE": 512,
@@ -118,6 +116,9 @@ MODELS = {
     },
 }
 DEFAULT_MODEL = "Qwen3.8-Flash-Next"
+# Directories under --staged-root holding the models the OGA and VLM benchmark
+# steps use, one subdirectory per model.
+WORKSPACE_MODEL_DIRS = ("amdgpu-oga-models", "amdgpu-vlm-models")
 # result.json source label for a model without a pinned Hugging Face revision.
 STAGED_SOURCE = "staged"
 
@@ -178,28 +179,18 @@ def _default_models_root() -> str:
     return r"C:\models" if os.name == "nt" else str(Path.home() / "models")
 
 
-def _default_source_root() -> str | None:
-    env = os.environ.get("GENAI_MODELS_SOURCE")
-    if env:
-        return env
-    return "R:/" if os.name == "nt" else None
-
-
 def _paths(args, model: str) -> dict:
     cache_root = Path(args.cache_root).resolve()
     models_root = Path(args.models_root).resolve()
-    source_root = getattr(args, "source_root", None)
     return {
         "framework": cache_root / "hipdnn-accuracy-test",
         "venv": cache_root / "genai-accuracy-venv",
         "hf_home": cache_root / "hf-home",
-        # The model lives in the machine-wide store (models_root) so it is
-        # shared across runner workspaces; "model" is the link to it under the
-        # cache root that the rest of the flow reads.
+        # The model lives in the model store (models_root; CI puts it under the
+        # runner workspace); "model" is the link to it under the cache root that
+        # the rest of the flow reads.
         "model_store": models_root / model,
         "model": cache_root / "genai-models" / model,
-        # Where a missing model is copied from; None when there is no share.
-        "source_root": Path(source_root) if source_root else None,
     }
 
 
@@ -388,84 +379,46 @@ def _link_model(store_dir: Path, link: Path) -> None:
         _run(["cmd", "/c", "mklink", "/J", link, store_dir])
 
 
-def _find_source_dir(spec: dict, source_root: Path | None) -> Path | None:
-    # Log why the share was not usable: a silent miss turns into a skipped model
-    # and a green job, which hides an unmounted or misnamed share.
-    if source_root is None:
-        _log("[INFO] no model share configured (--source-root)")
+def _find_staged_model(name: str, staged_root: Path | None) -> Path | None:
+    """The OGA/VLM benchmark copy of the model under the staged root, if any."""
+    if staged_root is None:
         return None
-    if not source_root.is_dir():
-        # A mapped drive letter is per logon session, so a share mapped by an
-        # interactive user is invisible to a runner running as a service.
-        _log(
-            f"[WARN] model share {source_root} is not accessible from this "
-            f"process (user {os.environ.get('USERNAME') or os.environ.get('USER')})"
-        )
-        return None
-    for name in spec.get("source_dirs", []):
-        candidate = source_root / name
+    for subdir in WORKSPACE_MODEL_DIRS:
+        candidate = staged_root / subdir / name
         if (candidate / "genai_config.json").is_file():
             return candidate
-        state = "has no genai_config.json" if candidate.is_dir() else "does not exist"
-        _log(f"[WARN] {candidate} {state}")
     return None
 
 
-def _copy_model(source: Path, store: Path) -> None:
-    """Copy a model directory from the share into the model store."""
-    store.mkdir(parents=True, exist_ok=True)
-    marker = store / DOWNLOAD_MARKER
-    marker.write_text(f"copied from {source}\n", encoding="utf-8")
-    if os.name == "nt":
-        # robocopy resumes a partial copy and copies in parallel; exit codes
-        # below 8 mean success (files copied, extra files, or nothing to do).
-        command = [
-            "robocopy",
-            source,
-            store,
-            "/E",
-            "/R:2",
-            "/W:5",
-            "/MT:8",
-            "/NFL",
-            "/NDL",
-            "/NP",
-        ]
-        _log("[CMD] " + subprocess.list2cmdline([str(c) for c in command]))
-        returncode = subprocess.run([str(c) for c in command]).returncode
-        if returncode >= 8:
-            raise SystemExit(f"robocopy failed ({returncode}) copying {source}")
-    else:
-        shutil.copytree(source, store, dirs_exist_ok=True)
-    marker.unlink()
-
-
-def _ensure_model(venv_python: Path, spec: dict, paths: dict, name: str) -> bool:
+def _ensure_model(
+    venv_python: Path, spec: dict, paths: dict, name: str, staged_root: Path | None
+) -> bool:
     """Make the model available; return False when it cannot be obtained.
 
-    Order: already in the store, copy from the share, download from Hugging
-    Face. A model with none of these is skipped instead of failing the run.
+    Order: already in the store, download from Hugging Face, the staged
+    OGA/VLM benchmark copy. A model with none of these is skipped instead of
+    failing the run.
     """
     store = paths["model_store"]
     if _model_present(store):
-        _log(f"Model already in store, skipping copy and download: {store}")
+        _log(f"Model already in store, skipping download: {store}")
+    elif spec["hf_repo"] is not None:
+        _log(f"Model not found in store, downloading to: {store}")
+        _download_model(venv_python, spec, store, paths["hf_home"])
     else:
-        source = _find_source_dir(spec, paths["source_root"])
-        if source is not None:
-            _log(f"Model not in store, copying from {source} to {store}")
-            _copy_model(source, store)
-        elif spec["hf_repo"] is not None:
-            _log(f"Model not found in store, downloading to: {store}")
-            _download_model(venv_python, spec, store, paths["hf_home"])
-        else:
+        staged = _find_staged_model(name, staged_root)
+        if staged is None:
             _log(
-                f"[SKIP] {name} is not in {store} and was not found on the model "
-                f"share ({paths['source_root']}; tried {spec.get('source_dirs')}); "
-                "its test is skipped."
+                f"[SKIP] {name} is not in {store} and not staged under "
+                f"{staged_root} ({', '.join(WORKSPACE_MODEL_DIRS)}); its test is "
+                "skipped."
             )
             if os.environ.get("GITHUB_ACTIONS") == "true":
                 print(f"::warning::GenAI accuracy: {name} not found, test skipped")
             return False
+        # Used in place: run mirrors it into the work dir and never writes here.
+        _log(f"Using the staged benchmark model: {staged}")
+        store = staged
     _link_model(store, paths["model"])
     return True
 
@@ -475,11 +428,14 @@ def cmd_prepare(args) -> int:
     first = _paths(args, args.model[0])
     _sync_framework(first["framework"])
     venv_python = _ensure_venv(first["venv"])
+    staged_root = Path(args.staged_root).resolve() if args.staged_root else None
     _install_package_wheels(venv_python, package_dir)
     failed = []
     for name in args.model:
         try:
-            _ensure_model(venv_python, _model_spec(name), _paths(args, name), name)
+            _ensure_model(
+                venv_python, _model_spec(name), _paths(args, name), name, staged_root
+            )
         except (SystemExit, subprocess.CalledProcessError, OSError) as exc:
             # One model failing to copy or download must not stop the others.
             _log(f"[ERROR] could not prepare {name}: {exc}")
@@ -659,12 +615,12 @@ def cmd_run(args) -> int:
     work_dir = Path(args.work_dir).resolve()
     results_dir = Path(args.results_dir).resolve()
     venv_python = _venv_python(paths["venv"])
-    if spec["hf_repo"] is None and not _model_present(paths["model_store"]):
-        # No Hugging Face source, and prepare found it neither in the store nor
-        # on the model share: skip, do not fail the job.
+    if spec["hf_repo"] is None and not _model_present(paths["model"]):
+        # No Hugging Face source, and prepare linked it neither from the store
+        # nor from the staged benchmark models: skip, do not fail the job.
         reason = (
-            f"{args.model} is not in {paths['model_store']} and was not found on "
-            "the model share"
+            f"{args.model} is not in {paths['model_store']} and is not staged "
+            "for the OGA/VLM benchmarks"
         )
         results_dir.mkdir(parents=True, exist_ok=True)
         _write_skipped_result(args, spec, results_dir, reason)
@@ -807,71 +763,100 @@ def _perplexity(result: dict | None) -> float | None:
     return float(value) if value is not None else None
 
 
-def cmd_report(args) -> int:
-    current = _load_result(args.current)
-    baseline = _load_result(args.baseline)
-    tolerance = args.tolerance
-    lines = ["## GenAI Accuracy Results (HIP EP)", ""]
-    regressions = []
-
+def _report_row(model: str, current: dict | None, baseline: dict | None, tolerance):
+    """One summary table row, an optional note, and an optional regression."""
     if current is None:
-        lines.append("No result: the accuracy run did not produce result.json.")
-    elif current.get("skipped"):
-        lines += [
-            "| Model | Test | EP | Perplexity | main | Delta | Samples | Time (s) | Status |",
-            "|-------|------|----|-----------|------|---|---------|----------|--------|",
-            f"| {current['model']} | {current['test']} | {current['ep']} | - | - | - | - | - | "
-            "SKIPPED |",
-            "",
-            f"Skipped: {current.get('error') or 'model not available'}",
-        ]
-    else:
-        cur = _perplexity(current)
-        base = _perplexity(baseline)
-        comparable = baseline is not None and all(
-            current.get(key) == baseline.get(key) for key in COMPARABLE_KEYS
-        )
-        metrics = current.get("metrics", {})
-        samples = (
-            f"{metrics['samples_evaluated']}/{metrics['samples_total']}"
-            if "samples_evaluated" in metrics and "samples_total" in metrics
-            else "-"
-        )
-        if cur is None:
-            status = f"FAIL: {current.get('error') or 'no perplexity'}"
-            main_cell, delta_cell = (f"{base:.4f}" if base is not None else "-"), "-"
-        elif base is None or not comparable:
-            status = "PASS (no comparable main baseline)"
-            main_cell = delta_cell = "-"
-        else:
-            delta = (cur - base) / base
-            main_cell, delta_cell = f"{base:.4f}", f"{delta * 100:+.2f}%"
-            if delta > tolerance:
-                status = "REGRESSION"
-                regressions.append(
-                    f"{current['model']} {current['test']}: perplexity {cur:.4f} vs "
-                    f"main {base:.4f} ({delta * 100:+.2f}% > {tolerance * 100:.1f}%)"
-                )
-            else:
-                status = "PASS"
-        lines += [
-            "| Model | Test | EP | Perplexity | main | Delta | Samples | Time (s) | Status |",
-            "|-------|------|----|-----------|------|---|---------|----------|--------|",
-            f"| {current['model']} | {current['test']} | {current['ep']} | "
-            f"{f'{cur:.4f}' if cur is not None else '-'} | {main_cell} | {delta_cell} | "
-            f"{samples} | {current.get('elapsed_seconds', '-')} | {status} |",
-            "",
-            f"Model `{current['hf_repo']}@{current['revision'][:8]}` - framework "
-            f"`{current['framework_commit'][:8]}` - lower perplexity is better; "
-            f"PRs fail above +{tolerance * 100:.1f}% vs main.",
-        ]
+        cells = [model, "-", "-", "-", "-", "-", "-", "FAIL"]
+        return cells, f"`{model}`: the run did not produce result.json.", None
+    test = current.get("test", "-")
+    if current.get("skipped"):
+        cells = [model, test, "-", "-", "-", "-", "-", "SKIPPED"]
+        reason = current.get("error") or "model not available"
+        return cells, f"`{model}` skipped: {reason}", None
+
+    cur = _perplexity(current)
+    base = _perplexity(baseline)
+    comparable = baseline is not None and all(
+        current.get(key) == baseline.get(key) for key in COMPARABLE_KEYS
+    )
+    metrics = current.get("metrics", {})
+    samples = (
+        f"{metrics['samples_evaluated']}/{metrics['samples_total']}"
+        if "samples_evaluated" in metrics and "samples_total" in metrics
+        else "-"
+    )
+    note = regression = None
+    main_cell = f"{base:.4f}" if base is not None and comparable else "-"
+    delta_cell = "-"
+    if cur is None:
+        status = "FAIL"
+        note = f"`{model}` failed: {current.get('error') or 'no perplexity'}"
+    elif base is None or not comparable:
+        status = "PASS (no baseline)"
         if baseline is not None and not comparable:
-            lines.append(
-                "Main baseline used a different model revision, framework commit or "
-                "test parameters, so it was not compared."
+            note = (
+                f"`{model}`: the main baseline used a different model revision, "
+                "framework commit or test parameters, so it was not compared."
             )
+    else:
+        delta = (cur - base) / base
+        delta_cell = f"{delta * 100:+.2f}%"
+        if delta > tolerance:
+            status = "REGRESSION"
+            regression = (
+                f"{model} {test}: perplexity {cur:.4f} vs main {base:.4f} "
+                f"({delta * 100:+.2f}% > {tolerance * 100:.1f}%)"
+            )
+        else:
+            status = "PASS"
+    cells = [
+        model,
+        test,
+        f"{cur:.4f}" if cur is not None else "-",
+        main_cell,
+        delta_cell,
+        samples,
+        str(current.get("elapsed_seconds", "-")),
+        status,
+    ]
+    return cells, note, regression
+
+
+def cmd_report(args) -> int:
+    results_dir = Path(args.results_dir)
+    baseline_dir = Path(args.baseline_dir) if args.baseline_dir else None
+    tolerance = args.tolerance
+    rows, notes, regressions = [], [], []
+    framework = None
+    for model in args.model:
+        current = _load_result(results_dir / model / "result.json")
+        baseline = (
+            _load_result(baseline_dir / model / "result.json") if baseline_dir else None
+        )
+        cells, note, regression = _report_row(model, current, baseline, tolerance)
+        rows.append("| " + " | ".join(cells) + " |")
+        if note:
+            notes.append(f"- {note}")
+        if regression:
+            regressions.append(regression)
+        if current and not framework:
+            framework = current.get("framework_commit")
+
+    lines = [
+        "## GenAI Accuracy Results (HIP EP)",
+        "",
+        "| Model | Test | Perplexity | main | Delta | Samples | Time (s) | Status |",
+        "|-------|------|-----------:|-----:|------:|--------:|---------:|--------|",
+        *rows,
+        "",
+        "Lower perplexity is better; PRs fail above "
+        f"+{tolerance * 100:.1f}% vs main."
+        + (f" Framework `{framework[:8]}`." if framework else ""),
+    ]
     if args.baseline_note:
         lines.append(f"Main baseline: {args.baseline_note}")
+    if notes:
+        lines += ["", *notes]
 
     summary = "\n".join(lines) + "\n"
     Path(args.summary_out).write_text(summary, encoding="utf-8")
@@ -902,14 +887,8 @@ def main() -> int:
         p.add_argument(
             "--models-root",
             default=_default_models_root(),
-            help="Machine-wide model store; a missing model is copied or "
-            "downloaded here (default: $GENAI_MODELS_ROOT, C:\\models on Windows)",
-        )
-        p.add_argument(
-            "--source-root",
-            default=_default_source_root(),
-            help="Model share a missing model is copied from (default: "
-            "$GENAI_MODELS_SOURCE, R:/ on Windows)",
+            help="Model store; a missing model is downloaded here (default: "
+            "$GENAI_MODELS_ROOT, C:\\models on Windows)",
         )
 
     p_prepare = sub.add_parser("prepare", help="Sync framework, venv and models")
@@ -919,6 +898,12 @@ def main() -> int:
         default=[DEFAULT_MODEL],
         choices=sorted(MODELS),
         help="Models to prepare (framework, venv and wheels are set up once)",
+    )
+    p_prepare.add_argument(
+        "--staged-root",
+        help="Root holding the OGA/VLM benchmark models ("
+        + ", ".join(WORKSPACE_MODEL_DIRS)
+        + "); models without a Hugging Face source are used from there in place",
     )
     add_common(p_prepare)
     p_prepare.set_defaults(func=cmd_prepare)
@@ -931,8 +916,19 @@ def main() -> int:
     p_run.set_defaults(func=cmd_run)
 
     p_report = sub.add_parser("report", help="Compare against a main baseline")
-    p_report.add_argument("--current", required=True, help="result.json of this run")
-    p_report.add_argument("--baseline", help="result.json of the main baseline")
+    p_report.add_argument(
+        "--model",
+        nargs="+",
+        required=True,
+        choices=sorted(MODELS),
+        help="Models to report, one table row each",
+    )
+    p_report.add_argument(
+        "--results-dir", required=True, help="Holds <model>/result.json of this run"
+    )
+    p_report.add_argument(
+        "--baseline-dir", help="Holds <model>/result.json of the main baseline"
+    )
     p_report.add_argument(
         "--baseline-note", default="", help="Markdown baseline source"
     )
