@@ -5136,12 +5136,17 @@ void MatMulNBitsWMMA_Tiled_Grouped(
 }
 #undef TILED_GROUPED_VARIANT_ARGS
 
-// The tile is chosen per device family. gfx115x runs a K-step of 64 over a 2x4
-// warp tile with the two-deep prefetch, the LDS-staged epilogue and the XOR
-// swizzle: 5-8% over the shipped tile on the gpt-oss expert shapes (fc1
-// N=5760 / fc2 N=2880, K=2880, 2k and 8k token chunks) on gfx1151. Other
-// devices, and a K that is not a multiple of 64, keep the shipped 4x4 / K=32
-// tile.
+// The tile is chosen per device family and expert size. gfx115x runs a K-step
+// of 64 over a 2x4 warp tile with the two-deep prefetch, the LDS-staged
+// epilogue and the XOR swizzle on wide, deep experts: 5-8% over the shipped
+// tile on the gpt-oss expert shapes (fc1 N=5760 / fc2 N=2880, K=2880, 2k and
+// 8k token chunks) on gfx1151. On narrow or shallow experts it is slower: the
+// wider block leaves too few column tiles, and a short K too few K-steps to
+// fill the two-deep pipeline (N=1024 and K=512 experts lost 3-33% per call).
+// Those, other devices, and a K that is not a multiple of 64, keep the shipped
+// 4x4 / K=32 tile.
+static constexpr int64_t kTiledGroupedWideMinN = 2048;
+static constexpr int64_t kTiledGroupedWideMinK = 2048;
 static bool tiled_grouped_gfx115_device() {
     constexpr int kMaxCachedDevices = 16;
     // 0 == not probed yet, 1 == no, 2 == yes.
@@ -5199,7 +5204,8 @@ extern "C" int hip_matmul_nbits_wmma_tiled_grouped(
         static_cast<const int32_t*>(num_row_tiles),                           \
         static_cast<int>(block_size), ngk, static_cast<_Float16*>(output))
   // The core runs whole K-steps, so the 64-wide step needs K % 64 == 0.
-  if (tiled_grouped_gfx115_device() && (K % 64) == 0) {
+  if (tiled_grouped_gfx115_device() && (K % 64) == 0 &&
+      N >= kTiledGroupedWideMinN && K >= kTiledGroupedWideMinK) {
     TILED_GROUPED_LAUNCH(128, 2, 4, 64, 97);
   } else {
     TILED_GROUPED_LAUNCH(128, 4, 4, 32, 1);
