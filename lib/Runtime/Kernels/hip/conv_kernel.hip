@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <type_traits>
+#include <utility>
 
 // =============================================================================
 // Conv — general forward convolution (1D / 2D / 3D spatial)
@@ -2057,8 +2058,19 @@ bool launchWmmaIfProfitable<__half>(hipStream_t stream, const void *x,
 // only worth it when the tile grid is badly short of the device, and the slices
 // must stay long enough to amortise their own prologue.
 
+// The tiles split-K may use, widest first. The planner reads bm and bn from a
+// row and launchSplitK instantiates the kernel with all four from the same row,
+// so the two cannot drift apart.
+struct SplitTile {
+  int bm, bn, tm, tn;
+};
+constexpr SplitTile kSplitTiles[] = {
+    {128, 128, 8, 8}, {64, 64, 4, 4}, {32, 128, 2, 8}, {32, 32, 2, 2}};
+constexpr int kSplitTileCount =
+    static_cast<int>(sizeof(kSplitTiles) / sizeof(kSplitTiles[0]));
+
 struct SplitPlan {
-  int tile = -1; // index into the candidate list below; -1 = do not split
+  int tile = -1; // index into kSplitTiles; -1 = do not split
   int split = 1;
   int64_t chunk = 0;
 };
@@ -2074,15 +2086,11 @@ static SplitPlan planSplitK(const ConvParams &pr, int64_t cus,
   SplitPlan best;
   *outBytes = 0;
   if (pr.MPerGroup < 32 || pr.K < 2 * kSplitMinTaps) return best;
-  struct Cand {
-    int bm, bn;
-  };
-  static constexpr Cand kCands[] = {{128, 128}, {64, 64}, {32, 128}, {32, 32}};
   const int64_t target = 2 * cus;
   const int64_t bytesPerSlice = pr.N * pr.Cout * pr.Nout * 4;
   int64_t bestBlocks = 0;
-  for (int id = 0; id < 4; ++id) {
-    const Cand &c = kCands[id];
+  for (int id = 0; id < kSplitTileCount; ++id) {
+    const SplitTile &c = kSplitTiles[id];
     if (pr.MPerGroup < c.bm) continue;
     if (c.bn > 2 * pr.Nout) continue;
     const int64_t blocks = tileBlocks(pr, c.bm, c.bn);
@@ -2112,31 +2120,47 @@ struct SplitKValidated : std::false_type {};
 template <>
 struct SplitKValidated<float> : std::true_type {};
 
+template <typename T, int Id>
+static void launchSplitTile(hipStream_t stream, const void *x, const void *w,
+                            const void *bias, void *y, const ConvParams &pr,
+                            const SplitPlan &plan, float *ws) {
+  constexpr SplitTile t = kSplitTiles[Id];
+  launchTile<T, t.bm, t.bn, t.tm, t.tn>(stream, x, w, bias, y, pr, plan.split,
+                                        plan.chunk, ws);
+}
+
+// Launches the row of kSplitTiles that `plan.tile` names; false if there is no
+// such row.
+template <typename T, int... Ids>
+static bool dispatchSplitTile(std::integer_sequence<int, Ids...>,
+                              hipStream_t stream, const void *x, const void *w,
+                              const void *bias, void *y, const ConvParams &pr,
+                              const SplitPlan &plan, float *ws) {
+  return ((plan.tile == Ids
+               ? (launchSplitTile<T, Ids>(stream, x, w, bias, y, pr, plan, ws),
+                  true)
+               : false) ||
+          ...);
+}
+
 template <typename T>
-static void launchSplitK(hipStream_t stream, const void *x, const void *w,
-                         const void *bias, void *y, const ConvParams &pr,
-                         const SplitPlan &plan, float *ws) {
+static hipError_t launchSplitK(hipStream_t stream, const void *x,
+                               const void *w, const void *bias, void *y,
+                               const ConvParams &pr, const SplitPlan &plan,
+                               float *ws) {
   static_assert(SplitKValidated<T>::value,
                 "split-K is enabled per element type; add this one to "
                 "SplitKValidated together with a test that reaches it");
-  switch (plan.tile) {
-  case 0:
-    launchTile<T, 128, 128, 8, 8>(stream, x, w, bias, y, pr, plan.split,
-                                  plan.chunk, ws);
-    break;
-  case 1:
-    launchTile<T, 64, 64, 4, 4>(stream, x, w, bias, y, pr, plan.split,
-                                plan.chunk, ws);
-    break;
-  case 2:
-    launchTile<T, 32, 128, 2, 8>(stream, x, w, bias, y, pr, plan.split,
-                                 plan.chunk, ws);
-    break;
-  default:
-    launchTile<T, 32, 32, 2, 2>(stream, x, w, bias, y, pr, plan.split,
-                                plan.chunk, ws);
-    break;
+  if (!dispatchSplitTile<T>(std::make_integer_sequence<int, kSplitTileCount>{},
+                            stream, x, w, bias, y, pr, plan, ws)) {
+    // The planner only returns rows of kSplitTiles, so this is a bug, and
+    // running any other tile would give a result nobody planned for.
+    fprintf(stderr,
+            "[custom_kernels] hip_conv: split-K plan names tile %d of %d\n",
+            plan.tile, kSplitTileCount);
+    return hipErrorInvalidValue;
   }
+  return hipSuccess;
 }
 
 // Whether a convolution is the plain GEMM conv1x1_wmma_kernel computes: unit
@@ -2235,8 +2259,9 @@ static int launch(hipStream_t stream, const void *x, const void *w,
     const SplitPlan plan = planSplitK(pr, units * cusPerUnit(), &wsBytes);
     if (plan.tile >= 0) {
       if (float *ws = wsrc.get(static_cast<size_t>(wsBytes))) {
-        launchSplitK<T>(stream, x, w, bias, y, pr, plan, ws);
-        const hipError_t serr = hipGetLastError();
+        hipError_t serr = launchSplitK<T>(stream, x, w, bias, y, pr, plan, ws);
+        if (serr == hipSuccess)
+          serr = hipGetLastError();
         if (serr != hipSuccess)
           fprintf(stderr, "[custom_kernels] hip_conv split-K launch failed: %s\n",
                   hipGetErrorString(serr));
