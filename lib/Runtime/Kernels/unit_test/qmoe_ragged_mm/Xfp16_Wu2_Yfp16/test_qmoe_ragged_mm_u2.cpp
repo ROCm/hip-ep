@@ -346,6 +346,132 @@ bool rejects(int64_t hidden, int64_t inter, int64_t blockSize) {
 
 } // namespace decode
 
+// The direct-B small-M grouped WMMA kernel (QMoE prefill) on 2-bit experts,
+// over a host-built row-tile list: expert 1 spans several tiles.
+namespace grouped {
+
+bool runCase(int tileRows, int kK, int blockSize, bool gather,
+             bool withZeroPoints) {
+  const int rows0 = 5, rows1 = tileRows + 4, totalRows = rows0 + rows1;
+  const int kBlocks = (kK + blockSize - 1) / blockSize;
+  const int rowBytes = kK / 4;
+  const int zpRowBytes = (kBlocks + 3) / 4;
+  std::vector<__half> input(static_cast<size_t>(totalRows) * kK);
+  std::vector<uint8_t> weights(static_cast<size_t>(kExperts) * kN * rowBytes);
+  std::vector<__half> scales(static_cast<size_t>(kExperts) * kN * kBlocks);
+  std::vector<uint8_t> zeroPoints(scales.size());
+  std::vector<uint8_t> packedZeroPoints(
+      static_cast<size_t>(kExperts) * kN * zpRowBytes, 0);
+  std::vector<__half> bias(static_cast<size_t>(kExperts) * kN);
+  for (size_t i = 0; i < input.size(); ++i)
+    input[i] = __float2half(
+        static_cast<float>(static_cast<int>(i % 13) - 6) / 16.0f);
+  for (size_t i = 0; i < weights.size(); ++i)
+    weights[i] = static_cast<uint8_t>((i * 29 + 7) & 0xff);
+  for (size_t i = 0; i < scales.size(); ++i) {
+    scales[i] = __float2half(0.01f * static_cast<float>(1 + (i * 3) % 5));
+    zeroPoints[i] = static_cast<uint8_t>((i * 5 + 1) & 3);
+  }
+  for (int row = 0; row < kExperts * kN; ++row)
+    for (int g = 0; g < kBlocks; ++g)
+      packedZeroPoints[static_cast<size_t>(row) * zpRowBytes + g / 4] |=
+          static_cast<uint8_t>(zeroPoints[static_cast<size_t>(row) * kBlocks + g]
+                               << ((g % 4) * 2));
+  for (size_t i = 0; i < bias.size(); ++i)
+    bias[i] =
+        __float2half(static_cast<float>(static_cast<int>(i % 5) - 2) / 32.0f);
+
+  const std::vector<int32_t> offsets = {0, rows0, totalRows};
+  std::vector<int32_t> rowIds(totalRows), rowTiles;
+  for (int r = 0; r < totalRows; ++r)
+    rowIds[r] = (r * 7 + 2) % totalRows;
+  for (int e = 0; e < kExperts; ++e) {
+    const int count = offsets[e + 1] - offsets[e];
+    for (int r0 = 0; r0 < count; r0 += tileRows)
+      rowTiles.insert(rowTiles.end(), {e, r0, std::min(tileRows, count - r0)});
+  }
+  const std::vector<int32_t> numTiles = {
+      static_cast<int32_t>(rowTiles.size() / 3)};
+
+  std::vector<float> expected(static_cast<size_t>(totalRows) * kN);
+  for (int r = 0; r < totalRows; ++r) {
+    const int e = r < rows0 ? 0 : 1;
+    const int src = gather ? rowIds[r] : r;
+    for (int n = 0; n < kN; ++n) {
+      const size_t col = static_cast<size_t>(e) * kN + n;
+      float sum = __half2float(bias[col]);
+      for (int k = 0; k < kK; ++k) {
+        const uint8_t byte = weights[col * rowBytes + k / 4];
+        const float q = static_cast<float>((byte >> ((k & 3) * 2)) & 3u);
+        const size_t p = col * kBlocks + k / blockSize;
+        const float zp =
+            withZeroPoints ? static_cast<float>(zeroPoints[p]) : 2.0f;
+        sum += __half2float(input[static_cast<size_t>(src) * kK + k]) *
+               (q - zp) * __half2float(scales[p]);
+      }
+      expected[static_cast<size_t>(r) * kN + n] = sum;
+    }
+  }
+
+  __half *dInput = nullptr, *dScales = nullptr, *dBias = nullptr,
+         *dOutput = nullptr;
+  uint8_t *dWeights = nullptr, *dZeroPoints = nullptr;
+  int32_t *dRowIds = nullptr, *dOffsets = nullptr, *dTiles = nullptr,
+          *dNumTiles = nullptr;
+  bool ok = upload(&dInput, input) && upload(&dWeights, weights) &&
+            upload(&dScales, scales) &&
+            upload(&dZeroPoints, packedZeroPoints) && upload(&dBias, bias) &&
+            upload(&dRowIds, rowIds) && upload(&dOffsets, offsets) &&
+            upload(&dTiles, rowTiles) && upload(&dNumTiles, numTiles) &&
+            hipMalloc(&dOutput, expected.size() * sizeof(__half)) == hipSuccess;
+  hipStream_t stream = nullptr;
+  if (ok)
+    ok = hipStreamCreate(&stream) == hipSuccess;
+  int status = -2;
+  if (ok) {
+    status = hip_matmul_nbits_wmma_smallm_grouped(
+        stream, -1, dInput, gather ? dRowIds : nullptr, dWeights, dScales,
+        withZeroPoints ? dZeroPoints : nullptr, /*zp_packed_u4=*/1, dBias,
+        dOffsets, dTiles, dNumTiles, dOutput, numTiles[0], tileRows, kN, kK,
+        kBits, blockSize, sizeof(__half));
+    ok = status == static_cast<int>(hipSuccess) &&
+         hipStreamSynchronize(stream) == hipSuccess;
+  }
+
+  std::vector<__half> actual(expected.size());
+  if (ok)
+    ok = hipMemcpy(actual.data(), dOutput, actual.size() * sizeof(__half),
+                   hipMemcpyDeviceToHost) == hipSuccess;
+  double errSq = 0.0, refSq = 0.0;
+  if (ok) {
+    for (size_t i = 0; i < actual.size(); ++i) {
+      const double d = __half2float(actual[i]) - expected[i];
+      errSq += d * d;
+      refSq += static_cast<double>(expected[i]) * expected[i];
+    }
+  }
+  const double relL2 = refSq > 0.0 ? std::sqrt(errSq / refSq) : 1.0;
+  ok = ok && std::isfinite(relL2) && relL2 <= 0.01;
+
+  if (stream)
+    hipStreamDestroy(stream);
+  for (void *p : {static_cast<void *>(dInput), static_cast<void *>(dScales),
+                  static_cast<void *>(dBias), static_cast<void *>(dOutput),
+                  static_cast<void *>(dWeights),
+                  static_cast<void *>(dZeroPoints),
+                  static_cast<void *>(dRowIds), static_cast<void *>(dOffsets),
+                  static_cast<void *>(dTiles), static_cast<void *>(dNumTiles)})
+    hipFree(p);
+
+  std::cout << (ok ? "PASS" : "FAIL") << " grouped tile_rows=" << tileRows
+            << " K=" << kK << " block_size=" << blockSize
+            << " gather=" << gather << " zero_points=" << withZeroPoints
+            << " status=" << status << " rel_l2=" << relL2 << '\n';
+  return ok;
+}
+
+} // namespace grouped
+
 } // namespace
 
 int main() {
@@ -362,5 +488,12 @@ int main() {
   ok = decode::rejects(decode::kHidden, decode::kInter, 16) && ok;
   ok = decode::rejects(decode::kHidden, 96, 32) && ok;
   ok = decode::rejects(decode::kHidden, decode::kInter, 48) && ok;
+  for (int tileRows : {16, 32})
+    for (int k : {96, 2048})
+      for (int blockSize : {32, 64})
+        for (bool gather : {false, true})
+          for (bool zeroPoints : {false, true})
+            ok = grouped::runCase(tileRows, k, blockSize, gather, zeroPoints) &&
+                 ok;
   return ok ? 0 : 1;
 }

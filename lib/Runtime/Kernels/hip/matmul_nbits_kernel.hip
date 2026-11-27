@@ -4716,21 +4716,33 @@ __device__ __forceinline__ void smallmDequant8(uint32_t packed, uint32_t bias_pk
     }
 }
 
+// Eight 2-bit values (bits 0-15, k order, low first) -> the same eight values
+// one per nibble, so smallmDequant8 converts them unchanged.
+__device__ __forceinline__ uint32_t smallmSpread2(uint32_t x) {
+    x = (x | (x << 8)) & 0x00FF00FFu;
+    x = (x | (x << 4)) & 0x0F0F0F0Fu;
+    return (x | (x << 2)) & 0x33333333u;
+}
+
 // One workgroup computes rows [row0, row0 + TM*16) x columns
 // [col0, col0 + TN*16) of C = A * dequant(B)^T (+ bias). FULL means every wave
 // owns exactly CPW chunks (nchunk % CPW == 0); otherwise the last wave's run
 // is shorter and its loads are guarded. red is the dynamic LDS reduction
-// buffer, [waves][TM*TN][8][32] floats. zp_mode: 0 none (symmetric 8),
-// kSmallMZpFp16 fp16 [N][zp_stride], kSmallMZpU4 MatMulNBits packed nibbles
-// [N][zp_stride bytes]; a 4-bit integer converts to fp16 exactly, so both give
-// the same B values. GATHER reads A through a_row_ids: row m reads A row
+// buffer, [waves][TM*TN][8][32] floats. zp_mode: 0 none (symmetric 8, or 2
+// for BITS == 2), kSmallMZpFp16 fp16 [N][zp_stride], kSmallMZpU4 MatMulNBits
+// packed nibbles, kSmallMZpU2 packed 2-bit values (four per byte, low first)
+// [N][zp_stride bytes]; a small integer converts to fp16 exactly, so packed and
+// fp16 zero points give the same B values. BITS == 2 reads 8 bytes per 32-wide
+// chunk instead of 16 and spreads them to nibbles before the same dequant. GATHER reads A through a_row_ids: row m reads A row
 // a_row_ids[m]. It is a template parameter because a runtime test around the
 // id load made the compiler wait for all prologue loads before the A loads,
 // slowing the kernels that do not gather.
 constexpr int kSmallMZpFp16 = 1;
 constexpr int kSmallMZpU4 = 2;
+constexpr int kSmallMZpU2 = 3;
 
-template <int TM, int TN, int CPW, int DB, int DA, bool FULL, bool GATHER = false>
+template <int TM, int TN, int CPW, int DB, int DA, bool FULL, bool GATHER = false,
+          int BITS = 4>
 __device__ __forceinline__ void SmallMWmmaImpl(
     float* red, int M, int N, int K, int row0, int col0,
     const _Float16* __restrict__ A, int lda,
@@ -4746,6 +4758,10 @@ __device__ __forceinline__ void SmallMWmmaImpl(
     // fp16), a gfx12-style lane half of it (4 dwords).
     constexpr int FRAG_U32 = HIPDNN_WMMA_FRAG_ELEMS / 2;
     constexpr int T = TM * TN;
+    static_assert(BITS == 4 || BITS == 2, "4- or 2-bit packed weights");
+    // Packed bytes of one 32-wide K chunk of a B column.
+    constexpr int CHUNK_BYTES = BITS * 4;
+    using BChunk = std::conditional_t<BITS == 2, u32x2, u32x4>;
 
     const int lid  = threadIdx.x & 31;
     const int wid  = threadIdx.x >> 5;
@@ -4781,13 +4797,13 @@ __device__ __forceinline__ void SmallMWmmaImpl(
     for (int tn = 0; tn < TN; tn++) {
         const int n = col0 + tn * 16 + lane;
         ns[tn] = static_cast<size_t>(n < N ? n : 0);
-        b_col[tn] = B + ns[tn] * b_row_bytes + c0 * 16;
+        b_col[tn] = B + ns[tn] * b_row_bytes + c0 * CHUNK_BYTES;
         const _Float16* s_col = scales + ns[tn] * num_groups_k;
 #pragma unroll
         for (int j = 0; j < CPW; j++) {
             const _Float16 s = s_col[grp[j]];
             rs[j][tn] = (FULL || j < cnt) ? s : (_Float16)0;
-            rz[j][tn] = 8;
+            rz[j][tn] = BITS == 2 ? 2 : 8;
         }
     }
     if (zp_mode == kSmallMZpU4) {
@@ -4799,6 +4815,14 @@ __device__ __forceinline__ void SmallMWmmaImpl(
                 const uint8_t b = z4[grp[j] >> 1];
                 rz[j][tn] = static_cast<_Float16>((grp[j] & 1) ? (b >> 4) : (b & 0xF));
             }
+        }
+    } else if (zp_mode == kSmallMZpU2) {
+#pragma unroll
+        for (int tn = 0; tn < TN; tn++) {
+            const uint8_t* z2 = static_cast<const uint8_t*>(zeros) + ns[tn] * zp_stride;
+#pragma unroll
+            for (int j = 0; j < CPW; j++)
+                rz[j][tn] = static_cast<_Float16>((z2[grp[j] >> 2] >> ((grp[j] & 3) * 2)) & 3);
         }
     } else if (zp_mode == kSmallMZpFp16) {
 #pragma unroll
@@ -4816,14 +4840,15 @@ __device__ __forceinline__ void SmallMWmmaImpl(
         a_row[tm] = A + static_cast<size_t>(a_src[tm]) * lda + c0 * 32 + k_off;
     }
 
-    u32x4    rb[DB][TN];
+    BChunk   rb[DB][TN];
     uint32_t ra[DA][TM][2][FRAG_U32];
 
     auto issueB = [&](int slot, int j) __attribute__((always_inline)) {
 #pragma unroll
         for (int tn = 0; tn < TN; tn++) {
-            u32x4 v = {0, 0, 0, 0};
-            if (FULL || j < cnt) v = *reinterpret_cast<const u32x4*>(b_col[tn] + j * 16);
+            BChunk v = {};
+            if (FULL || j < cnt)
+                v = *reinterpret_cast<const BChunk*>(b_col[tn] + j * CHUNK_BYTES);
             rb[slot][tn] = v;
         }
     };
@@ -4874,9 +4899,17 @@ __device__ __forceinline__ void SmallMWmmaImpl(
                 // Packed words covering this lane's k range of step ks.
                 uint32_t bw[FRAG_U32];
 #pragma unroll
-                for (int w = 0; w < FRAG_U32 / 4; w++)
-                    smallmDequant8(rb[sb][tn][(ks * 16 + k_off) / 8 + w], b_pk, s_pk,
-                                   &bw[w * 4]);
+                for (int w = 0; w < FRAG_U32 / 4; w++) {
+                    if constexpr (BITS == 2) {
+                        const int kk = ks * 16 + k_off + w * 8;
+                        smallmDequant8(
+                            smallmSpread2((rb[sb][tn][kk / 16] >> ((kk & 15) * 2)) & 0xFFFFu),
+                            b_pk, s_pk, &bw[w * 4]);
+                    } else {
+                        smallmDequant8(rb[sb][tn][(ks * 16 + k_off) / 8 + w], b_pk, s_pk,
+                                       &bw[w * 4]);
+                    }
+                }
                 half16 b_frag = __builtin_bit_cast(half16, bw);
 #pragma unroll
                 for (int tm = 0; tm < TM; tm++) {
@@ -4921,10 +4954,9 @@ __device__ __forceinline__ void SmallMWmmaImpl(
 // Column-fastest order keeps concurrently running workgroups on contiguous
 // weights of one expert; slot-fastest (every expert at once) measured 25-35%
 // slower on real gpt-oss routing.
-template <int TM, int TN, int CPW, int DB, int DA, bool FULL, bool GATHER>
-__global__ __launch_bounds__(512)
-void MatMulNBitsWMMA_SmallM_Grouped(
-    int N, int K,
+template <int TM, int TN, int CPW, int DB, int DA, bool FULL, bool GATHER, int BITS>
+__device__ __forceinline__ void SmallMGroupedImpl(
+    float* smallm_red, int N, int K,
     const _Float16* __restrict__ A,
     const int32_t* __restrict__ a_row_ids,
     const unsigned char* __restrict__ B, int b_row_bytes,
@@ -4937,7 +4969,6 @@ void MatMulNBitsWMMA_SmallM_Grouped(
     int group_shift, int num_groups_k,
     _Float16* __restrict__ C)
 {
-    extern __shared__ float smallm_red[];
     const int slot = static_cast<int>(blockIdx.y);
     if (slot >= *num_row_tiles) return;
     const int expert = row_tiles[3 * slot];
@@ -4946,7 +4977,7 @@ void MatMulNBitsWMMA_SmallM_Grouped(
     const size_t off = static_cast<size_t>(expert_row_offsets[expert]);
     const size_t e_rows = static_cast<size_t>(expert) * N;
     const size_t zp_elem = zp_mode == kSmallMZpFp16 ? sizeof(_Float16) : 1;
-    SmallMWmmaImpl<TM, TN, CPW, DB, DA, FULL, GATHER>(
+    SmallMWmmaImpl<TM, TN, CPW, DB, DA, FULL, GATHER, BITS>(
         smallm_red, row0 + rows, N, K, row0,
         static_cast<int>(blockIdx.x) * TN * 16, GATHER ? A : A + off * K, K,
         B + e_rows * b_row_bytes, b_row_bytes,
@@ -4956,6 +4987,28 @@ void MatMulNBitsWMMA_SmallM_Grouped(
         zp_mode, zp_stride, bias ? bias + e_rows : nullptr, group_shift,
         num_groups_k, C + off * N, N, GATHER ? a_row_ids + off : nullptr);
 }
+
+#define SMALLM_GROUPED_KERNEL(NAME, BITS)                                      \
+    template <int TM, int TN, int CPW, int DB, int DA, bool FULL, bool GATHER> \
+    __global__ __launch_bounds__(512) void NAME(                               \
+        int N, int K, const _Float16* __restrict__ A,                          \
+        const int32_t* __restrict__ a_row_ids,                                 \
+        const unsigned char* __restrict__ B, int b_row_bytes,                  \
+        const _Float16* __restrict__ scales, const void* __restrict__ zeros,   \
+        int zp_mode, int zp_stride, const _Float16* __restrict__ bias,         \
+        const int32_t* __restrict__ expert_row_offsets,                        \
+        const int32_t* __restrict__ row_tiles,                                 \
+        const int32_t* __restrict__ num_row_tiles, int group_shift,            \
+        int num_groups_k, _Float16* __restrict__ C) {                          \
+        extern __shared__ float smallm_red[];                                  \
+        SmallMGroupedImpl<TM, TN, CPW, DB, DA, FULL, GATHER, BITS>(            \
+            smallm_red, N, K, A, a_row_ids, B, b_row_bytes, scales, zeros,     \
+            zp_mode, zp_stride, bias, expert_row_offsets, row_tiles,           \
+            num_row_tiles, group_shift, num_groups_k, C);                      \
+    }
+SMALLM_GROUPED_KERNEL(MatMulNBitsWMMA_SmallM_Grouped, 4)
+SMALLM_GROUPED_KERNEL(MatMulNBitsWMMA_SmallM_Grouped_U2, 2)
+#undef SMALLM_GROUPED_KERNEL
 
 // Config chosen by tile height when the caller passes cfg < 0. Picked from a
 // sweep on gfx1151 with the gpt-oss expert shapes (fc1 N=5760 / fc2 N=2880,
@@ -4977,7 +5030,7 @@ static int smallMWmmaDefaultConfig(int64_t M, int64_t K) {
 // Launch geometry; false when the shape or config cannot run this kernel.
 struct SmallMWmmaLaunch {
     SmallMWmmaConfig c;
-    int waves, group_shift, ngk, b_row_bytes, zp_mode, zp_stride;
+    int bits, waves, group_shift, ngk, b_row_bytes, zp_mode, zp_stride;
     bool full;
     size_t lds_bytes;
 };
@@ -4986,12 +5039,13 @@ static bool smallMWmmaPlan(int cfg, int64_t N, int64_t K, int64_t bits,
                            int64_t block_size, int64_t element_size_bytes,
                            const void* zero_points, int zp_packed_u4,
                            SmallMWmmaLaunch* p) {
-    if (hipdnn_device_is_wave64() || bits != 4 || element_size_bytes != 2 ||
+    if (hipdnn_device_is_wave64() || (bits != 4 && bits != 2) || element_size_bytes != 2 ||
         N <= 0 || K <= 0 || (K % 32) != 0 || block_size < 32 ||
         (block_size & (block_size - 1)) != 0)
         return false;
     if (cfg < 0 || cfg >= kNumSmallMWmmaConfigs) return false;
     p->c = kSmallMWmmaConfigs[cfg];
+    p->bits = static_cast<int>(bits);
     const int nchunk = static_cast<int>(K / 32);
     p->waves = (nchunk + p->c.cpw - 1) / p->c.cpw;
     p->full = (nchunk % p->c.cpw) == 0;
@@ -5000,9 +5054,15 @@ static bool smallMWmmaPlan(int cfg, int64_t N, int64_t K, int64_t bits,
     p->group_shift = 0;
     while ((32LL << p->group_shift) < block_size) p->group_shift++;
     p->ngk = static_cast<int>((K + block_size - 1) / block_size);
-    p->b_row_bytes = static_cast<int>((K + 1) / 2);
-    p->zp_mode = !zero_points ? 0 : zp_packed_u4 ? kSmallMZpU4 : kSmallMZpFp16;
-    p->zp_stride = zp_packed_u4 ? (p->ngk + 1) / 2 : p->ngk;
+    p->b_row_bytes = static_cast<int>(bits == 2 ? K / 4 : (K + 1) / 2);
+    // Packed zero points use the weights' bit width (ONNX MatMulNBits layout).
+    p->zp_mode = !zero_points    ? 0
+                 : !zp_packed_u4 ? kSmallMZpFp16
+                 : bits == 2     ? kSmallMZpU2
+                                 : kSmallMZpU4;
+    p->zp_stride = !zp_packed_u4 ? p->ngk
+                   : bits == 2   ? (p->ngk + 3) / 4
+                                 : (p->ngk + 1) / 2;
     return true;
 }
 
@@ -5044,10 +5104,9 @@ extern "C" int hip_matmul_nbits_wmma_smallm_grouped(
             static_cast<unsigned>(max_row_tiles));
   dim3 block(static_cast<unsigned>(p.waves * 32));
 
-#define SMALLM_GROUPED_LAUNCH_ONE(TM, TN, CPW, DB, DA, FULL, GATHER)            \
+#define SMALLM_GROUPED_LAUNCH_KERNEL(KERNEL, TM, TN, CPW, DB, DA, FULL, GATHER) \
   hipLaunchKernelGGL(                                                         \
-      HIP_KERNEL_NAME(                                                        \
-          MatMulNBitsWMMA_SmallM_Grouped<TM, TN, CPW, DB, DA, FULL, GATHER>), \
+      HIP_KERNEL_NAME(KERNEL<TM, TN, CPW, DB, DA, FULL, GATHER>),             \
       grid, block, p.lds_bytes, s, static_cast<int>(N), static_cast<int>(K),  \
       static_cast<const _Float16*>(A),                                        \
       static_cast<const int32_t*>(a_row_ids),                                 \
@@ -5058,6 +5117,15 @@ extern "C" int hip_matmul_nbits_wmma_smallm_grouped(
       static_cast<const int32_t*>(row_tiles),                                 \
       static_cast<const int32_t*>(num_row_tiles), p.group_shift, p.ngk,       \
       static_cast<_Float16*>(output))
+#define SMALLM_GROUPED_LAUNCH_ONE(TM, TN, CPW, DB, DA, FULL, GATHER)            \
+  do {                                                                        \
+    if (p.bits == 2)                                                          \
+      SMALLM_GROUPED_LAUNCH_KERNEL(MatMulNBitsWMMA_SmallM_Grouped_U2, TM, TN, \
+                                   CPW, DB, DA, FULL, GATHER);                \
+    else                                                                      \
+      SMALLM_GROUPED_LAUNCH_KERNEL(MatMulNBitsWMMA_SmallM_Grouped, TM, TN,    \
+                                   CPW, DB, DA, FULL, GATHER);                \
+  } while (0)
 #define SMALLM_GROUPED_LAUNCH(ID, TM, TN, CPW, DB, DA)                         \
   case ID:                                                                    \
     if (p.full && a_row_ids)                                                  \
@@ -5073,6 +5141,7 @@ extern "C" int hip_matmul_nbits_wmma_smallm_grouped(
   switch (cfg) { SMALLM_WMMA_CASES(SMALLM_GROUPED_LAUNCH) }
 #undef SMALLM_GROUPED_LAUNCH
 #undef SMALLM_GROUPED_LAUNCH_ONE
+#undef SMALLM_GROUPED_LAUNCH_KERNEL
 
   hipError_t err = hipGetLastError();
   if (err != hipSuccess)
