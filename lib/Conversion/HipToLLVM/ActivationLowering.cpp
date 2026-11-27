@@ -327,7 +327,8 @@ struct LRNOpLowering : public ConvertOpToLLVMPattern<LRNOp> {
 };
 
 // hip.swish(ctx, input, output)
-//   -> wrap_swish(state, input, output, num_elements, data_type, alpha)
+//   -> wrap_swish(state, input, output, num_elements, data_type, alpha,
+//                 input_scale)
 // Supports static and dynamic shapes and the complete ONNX Swish type set.
 struct SwishOpLowering : public ConvertOpToLLVMPattern<SwishOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -377,16 +378,20 @@ struct SwishOpLowering : public ConvertOpToLLVMPattern<SwishOp> {
     Value alphaConst = LLVM::ConstantOp::create(
         rewriter, loc, f64Type,
         rewriter.getF64FloatAttr(op.getAlpha().convertToDouble()));
+    Value inputScaleConst = LLVM::ConstantOp::create(
+        rewriter, loc, f64Type,
+        rewriter.getF64FloatAttr(op.getInputScale().convertToDouble()));
 
-    SmallVector<Type, 6> paramTypes = {ptrType, ptrType, ptrType,
-                                       i64Type, i64Type, f64Type};
+    SmallVector<Type, 7> paramTypes = {ptrType, ptrType, ptrType, i64Type,
+                                       i64Type, f64Type, f64Type};
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapSwish, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 6> args = {statePtr,    inputPtr,    outputPtr,
-                                  numElements, dataTypeVal, alphaConst};
+    SmallVector<Value, 7> args = {statePtr,       inputPtr,    outputPtr,
+                                  numElements,    dataTypeVal, alphaConst,
+                                  inputScaleConst};
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
     return success();

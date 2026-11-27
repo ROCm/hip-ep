@@ -225,13 +225,11 @@ int wrap_engram_gate(RuntimeState *state, void *key, void *query, void *value,
                          rows, hc, hidden, epsilon, hip_dtype);
 }
 
-int wrap_hyper_connection_pre_mix(RuntimeState *state, void *streams,
-                                  void *pre_mix, void *output,
-                                  int64_t stream_num_elements, int64_t branches,
-                                  int64_t hidden, int64_t feature_gate,
-                                  int64_t gate_sigmoid,
-                                  int64_t element_size_bytes,
-                                  float reduction_scale) {
+int wrap_hyper_connection_pre_mix(
+    RuntimeState *state, void *streams, void *pre_mix, void *output,
+    int64_t stream_num_elements, int64_t branches, int64_t hidden,
+    int64_t feature_gate, int64_t gate_sigmoid, int64_t element_size_bytes,
+    float reduction_scale, void *a_quant, void *a_scale) {
   OP_PROFILE(
       "hyper_connection",
       [&] {
@@ -267,11 +265,17 @@ int wrap_hyper_connection_pre_mix(RuntimeState *state, void *streams,
             (long long)element_size_bytes);
     return -1;
   }
+  const int64_t rows = stream_num_elements / span;
+  if (a_quant && a_scale && hip_dtype == HIP_DTYPE_FLOAT16 &&
+      hip_norm_quant_supported(rows, hidden, 32))
+    return hip_hyper_connection_pre_mix_quant(
+        hipdnn_ep_state_get_stream(state), streams, pre_mix, output, rows,
+        branches, hidden, static_cast<int>(feature_gate),
+        static_cast<int>(gate_sigmoid), reduction_scale, a_quant, a_scale);
   return hip_hyper_connection_pre_mix(
-      hipdnn_ep_state_get_stream(state), streams, pre_mix, output,
-      stream_num_elements / span, branches, hidden,
-      static_cast<int>(feature_gate), static_cast<int>(gate_sigmoid),
-      reduction_scale, hip_dtype);
+      hipdnn_ep_state_get_stream(state), streams, pre_mix, output, rows,
+      branches, hidden, static_cast<int>(feature_gate),
+      static_cast<int>(gate_sigmoid), reduction_scale, hip_dtype);
 }
 
 int wrap_hyper_connection_post_mix(RuntimeState *state, void *streams,
@@ -327,7 +331,7 @@ int wrap_hyper_connection_post_mix_norm(
     void *stream_mix, void *norm_scale, void *residual, void *normed,
     int64_t stream_num_elements, int64_t branches, int64_t hidden,
     int64_t feature_gate, int64_t gate_activation, int64_t element_size_bytes,
-    float epsilon) {
+    float epsilon, void *a_quant, void *a_scale) {
   OP_PROFILE(
       "hyper_connection",
       [&] {
@@ -365,9 +369,17 @@ int wrap_hyper_connection_post_mix_norm(
             (long long)element_size_bytes);
     return -1;
   }
+  const int64_t rows = stream_num_elements / span;
+  if (a_quant && a_scale && hip_dtype == HIP_DTYPE_FLOAT16 &&
+      hip_norm_quant_supported(rows, span, 32))
+    return hip_hyper_connection_post_mix_norm_quant(
+        hipdnn_ep_state_get_stream(state), streams, block_output, gate,
+        stream_mix, norm_scale, residual, normed, rows, branches, hidden,
+        static_cast<int>(feature_gate), static_cast<int>(gate_activation),
+        epsilon, a_quant, a_scale);
   return hip_hyper_connection_post_mix_norm(
       hipdnn_ep_state_get_stream(state), streams, block_output, gate,
-      stream_mix, norm_scale, residual, normed, stream_num_elements / span,
-      branches, hidden, static_cast<int>(feature_gate),
-      static_cast<int>(gate_activation), epsilon, hip_dtype);
+      stream_mix, norm_scale, residual, normed, rows, branches, hidden,
+      static_cast<int>(feature_gate), static_cast<int>(gate_activation),
+      epsilon, hip_dtype);
 }

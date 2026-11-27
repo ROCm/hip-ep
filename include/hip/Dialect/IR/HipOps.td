@@ -1055,6 +1055,101 @@ def Hip_DequantBnb4Op : Hip_DpsOp_AutoReifyInfer<"dequant_bnb4"> {
   let hasVerifier = 1;
 }
 
+def Hip_MatMulNBitsGroupOp : Hip_DpsOp_AutoReify<"matmul_nbits_group",
+                                       /*traits=*/[AttrSizedOperandSegments,
+                                                   OpStateOpInterface]> {
+  let summary = "MatMulNBits projections that read the same activation";
+  let description = [{
+    Formed by fusion from 1-4 hip.matmul_nbits ops that share `A`, have no
+    g_idx and no bias, and the same K, bits and block_size. `weights[i]` /
+    `scales[i]` are the B / scales operands of the i-th original op and
+    `N[i]` its output width. `zero_points` is empty for symmetric weights,
+    or holds one packed uint8 zero_points operand per weight
+    (zp_elem_size = 1) when every original op had one.
+
+    `epilogue` selects how the projections are written:
+      0 (concat):   outputs[i] = A @ dequant(weights[i])^T, one output per
+                    weight.
+      1 (silu_mul): two weights with equal N and a single output,
+                    outputs[0] = silu(A @ dequant(weights[0])^T)
+                               * (A @ dequant(weights[1])^T).
+
+    For a single activation row the runtime quantizes A once and computes
+    every projection in one launch; other shapes run each projection
+    through the MatMulNBits kernels.
+
+    Optional `quantized(%a_quant, %a_scale)` names a quantized copy of A
+    written by its producer (the quant_outputs of hip.skip_rms_norm,
+    hip.hyper_connection_pre_mix or hip.hyper_connection_post_mix_norm). The runtime
+    reads it instead of quantizing A whenever hip_norm_quant_supported()
+    holds for A's shape, the same test the producer used to write it.
+
+    Optional `row_offsets` (one per weight) makes member i read rows
+    [row_offsets[i], row_offsets[i] + N[i]) of `weights[i]`, `scales[i]` and
+    `zero_points[i]` instead of rows [0, N[i]). Several members may name the
+    same weight: a projection whose output is only consumed in column slices
+    becomes one member per slice, each writing its slice as a separate
+    contiguous output.
+
+    Example:
+    ```mlir
+    hip.matmul_nbits_group(%handle) ins(%A : memref<1x1x5120xf16, 1>)
+        weights(%Bq, %Bk, %Bv : memref<5120x160x16xui8, 1>,
+                memref<5120x160x16xui8, 1>, memref<5120x160x16xui8, 1>)
+        scales(%Sq, %Sk, %Sv : memref<5120x160xf16, 1>,
+               memref<5120x160xf16, 1>, memref<5120x160xf16, 1>)
+        outs(%q, %k, %v : memref<1x1x5120xf16, 1>, memref<1x1x5120xf16, 1>,
+             memref<1x1x5120xf16, 1>)
+        {K = 5120, N = [5120, 5120, 5120], bits = 4, block_size = 32,
+         accuracy_level = 4, epilogue = 0}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$handle,
+    Hip_TensorOrMemRef:$A,                      // activation [..., K]
+    Variadic<Hip_TensorOrMemRef>:$weights,      // packed uint8 [N_i, k_blocks, blob_size]
+    Variadic<Hip_TensorOrMemRef>:$scales,       // dequant scales [N_i, k_blocks]
+    Variadic<Hip_TensorOrMemRef>:$zero_points,  // packed uint8 zero points (none, or one per weight)
+    Optional<Hip_TensorOrMemRef>:$a_quant,      // int8 copy of A (optional)
+    Optional<Hip_TensorOrMemRef>:$a_scale,      // its group scales (optional)
+    Variadic<Hip_TensorOrMemRef>:$outputs,      // results [..., N_i] (silu_mul: one)
+    I64Attr:$K,
+    I64ArrayAttr:$N,
+    I64Attr:$bits,
+    I64Attr:$block_size,
+    I64Attr:$accuracy_level,
+    DefaultValuedAttr<I64Attr, "2">:$scale_elem_size, // 2=fp16, 4=fp32
+    DefaultValuedAttr<I64Attr, "0">:$epilogue,         // 0=concat, 1=silu_mul
+    OptionalAttr<DenseI64ArrayAttr>:$row_offsets       // first weight row per member
+  );
+
+  let assemblyFormat = [{
+    `(` $handle `)` `ins` `(` $A `:` type($A) `)`
+    `weights` `(` $weights `:` type($weights) `)`
+    `scales` `(` $scales `:` type($scales) `)`
+    (`zero_points` `(` $zero_points^ `:` type($zero_points) `)`)?
+    (`quantized` `(` $a_quant^ `,` $a_scale `:` type($a_quant) `,`
+        type($a_scale) `)`)?
+    `outs` `(` $outputs `:` type($outputs) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+
+  // Shares MatMulNBits' per-session state: its zero-point unpack cache serves
+  // the grouped kernel, and the per-projection fallback goes through the same
+  // entry point as hip.matmul_nbits.
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+                                      ::mlir::Location loc,
+                                      ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(
+          builder, loc, statePtr, slot,
+          "hipdnn_ep_op_state_construct_matmul_nbits", {});
+    }
+  }];
+}
+
 def Hip_QMoEOp : Hip_DpsOp_WithInfer<"qmoe", "Output", [AttrSizedOperandSegments]> {
   let summary = "Quantized Mixture-of-Experts (com.microsoft QMoE)";
   let description = [{
@@ -1736,7 +1831,9 @@ def Hip_EngramGateOp : Hip_DpsOp_AutoReify<"engram_gate", [AttrSizedOperandSegme
 }
 
 def Hip_HyperConnectionPreMixOp :
-    Hip_DpsOp_AutoReifyInfer<"hyper_connection_pre_mix"> {
+    Hip_DpsOp<"hyper_connection_pre_mix", [
+        DeclareOpInterfaceMethods<InferTypeOpInterface, ["inferReturnTypes"]>
+    ]> {
   let summary = "com.microsoft HyperConnectionPreMix";
   let description = [{
     Reduces C streams to one feature tensor. `gate_sigmoid` 0 multiplies the
@@ -1751,6 +1848,10 @@ def Hip_HyperConnectionPreMixOp :
     when the gate is (..., C, H) or flattened (..., C * H), and `branch`
     when it is (..., C) or (..., C, 1). The product is accumulated in FP32
     and rounded to the element type once. f16 and f32 only.
+
+    Optional quantized copy of `output` (0 or 2 buffers in `quant_outputs`),
+    attached by fusion when the output feeds hip.matmul_nbits_group, with the
+    layout and contract of hip.skip_rms_norm's quant_outputs.
 
     Example:
     ```mlir
@@ -1767,12 +1868,15 @@ def Hip_HyperConnectionPreMixOp :
     Hip_TensorOrMemRef:$streams,
     Hip_TensorOrMemRef:$pre_mix,
     Hip_TensorOrMemRef:$output,
+    // Optional quantized output: [] or [a_quant, a_scale]
+    Variadic<Hip_TensorOrMemRef>:$quant_outputs,
     I64Attr:$branches,
     I64Attr:$hidden,
     I64Attr:$flattened,
     StrAttr:$gate_layout,
     F32Attr:$reduction_scale,
-    DefaultValuedAttr<I64Attr, "0">:$gate_sigmoid
+    DefaultValuedAttr<I64Attr, "0">:$gate_sigmoid,
+    DefaultValuedAttr<I64Attr, "0">:$quant_block_size
   );
 
   let assemblyFormat = [{
@@ -1780,9 +1884,34 @@ def Hip_HyperConnectionPreMixOp :
         $streams `,` $pre_mix `:` type($streams) `,` type($pre_mix)
     `)`
     `outs` `(` $output `:` type($output) `)`
+    (`quant_outs` `(` $quant_outputs^ `:` type($quant_outputs) `)`)?
     attr-dict (`:` type($result_tensors)^)?
   }];
   let hasVerifier = 1;
+
+  // Results follow the inits: output, then the quantized copy if present.
+  let extraClassDefinition = [{
+    ::mlir::LogicalResult $cppClass::reifyResultShapes(
+        ::mlir::OpBuilder &b,
+        ::mlir::ReifiedRankedShapedTypeDims &reified) {
+      return ::llvm::cast<::mlir::hip::HipDpsOp>(getOperation())
+          .reifyResultShapes(b, reified);
+    }
+    ::llvm::LogicalResult $cppClass::inferReturnTypes(
+        ::mlir::MLIRContext *, ::std::optional<::mlir::Location>,
+        ::mlir::ValueRange operands, ::mlir::DictionaryAttr attrs,
+        ::mlir::PropertyRef props, ::mlir::RegionRange regions,
+        ::llvm::SmallVectorImpl<::mlir::Type> &results) {
+      $cppClass::Adaptor adaptor(operands, attrs, props, regions);
+      if (auto t = ::llvm::dyn_cast<::mlir::RankedTensorType>(
+              adaptor.getOutput().getType()))
+        results.push_back(t);
+      for (::mlir::Value q : adaptor.getQuantOutputs())
+        if (auto t = ::llvm::dyn_cast<::mlir::RankedTensorType>(q.getType()))
+          results.push_back(t);
+      return ::mlir::success();
+    }
+  }];
 }
 
 def Hip_HyperConnectionPostMixOp :
@@ -1860,6 +1989,15 @@ def Hip_HyperConnectionPostMixNormOp : Hip_DpsOp_AutoReify<
 
     `outputs` is [residual, normed], both the streams shape. `norm_scale` is
     1-D of length branches * hidden, one hidden-vector per branch.
+
+    Calls with at most 64 (row, branch) pairs and hidden <= 4096, as at
+    decode, reduce the sum of squares in a 1024-thread block; larger calls
+    use 256 threads. The reduction order differs, so `normed` for a given
+    row may differ by one fp16 ulp depending on how many rows the call has.
+
+    Optional quantized copy of `normed` over its flattened (branches * hidden)
+    row (0 or 2 buffers in `quant_outputs`), with the layout and contract of
+    hip.skip_rms_norm's quant_outputs.
   }];
 
   let arguments = (ins
@@ -1870,12 +2008,15 @@ def Hip_HyperConnectionPostMixNormOp : Hip_DpsOp_AutoReify<
     Hip_TensorOrMemRef:$norm_scale,
     Optional<Hip_TensorOrMemRef>:$stream_mix,
     Variadic<Hip_TensorOrMemRef>:$outputs,
+    // Optional quantized normed: [] or [a_quant, a_scale]
+    Variadic<Hip_TensorOrMemRef>:$quant_outputs,
     I64Attr:$branches,
     I64Attr:$hidden,
     I64Attr:$flattened,
     StrAttr:$gate_layout,
     DefaultValuedAttr<I64Attr, "0">:$gate_activation,
-    F32Attr:$epsilon
+    F32Attr:$epsilon,
+    DefaultValuedAttr<I64Attr, "0">:$quant_block_size
   );
 
   let assemblyFormat = [{
@@ -1885,6 +2026,7 @@ def Hip_HyperConnectionPostMixNormOp : Hip_DpsOp_AutoReify<
         type($norm_scale) (`,` type($stream_mix)^)?
     `)`
     `outs` `(` $outputs `:` type($outputs) `)`
+    (`quant_outs` `(` $quant_outputs^ `:` type($quant_outputs) `)`)?
     attr-dict (`:` type($result_tensors)^)?
   }];
   let hasVerifier = 1;
@@ -1912,6 +2054,17 @@ def Hip_SkipRmsNormOp :
     DPS output buffers (1-2, passed as Variadic `outputs`):
       outputs[0] = output             (required, T) - normalized result
       outputs[1] = input_skip_bias_sum (optional, T) - residual sum (input + skip [+ bias])
+
+    Optional quantized copy of `output` (0 or 2 buffers in `quant_outputs`),
+    attached by fusion when the normalized row feeds hip.matmul_nbits_group:
+      quant_outputs[0] = int8 [..., hidden] in the dp4a deinterleaved layout
+      quant_outputs[1] = f32  [..., hidden / quant_block_size] group scales
+    quant_block_size must be 32, the only group the producer kernels write.
+    The runtime fills them only for the shapes hip_norm_quant_supported()
+    accepts; the consumer applies the same test before reading them. The
+    buffers are sized for every row regardless, so for other shapes
+    (prefill, where the consumer quantizes per projection) they are
+    allocated but neither written nor read.
 
     Uses destination-passing style: output buffers are provided as arguments.
 
@@ -1950,9 +2103,12 @@ def Hip_SkipRmsNormOp :
 
     // DPS output buffers: [output] or [output, input_skip_bias_sum]
     Variadic<Hip_TensorOrMemRef>:$outputs,
+    // Optional quantized output: [] or [a_quant, a_scale]
+    Variadic<Hip_TensorOrMemRef>:$quant_outputs,
 
     // Attributes
-    F32Attr:$epsilon
+    F32Attr:$epsilon,
+    DefaultValuedAttr<I64Attr, "0">:$quant_block_size
   );
 
   let assemblyFormat = [{
@@ -1963,6 +2119,7 @@ def Hip_SkipRmsNormOp :
         ( `,` type($bias)^ )?
     `)`
     `outs` `(` $outputs `:` type($outputs) `)`
+    (`quant_outs` `(` $quant_outputs^ `:` type($quant_outputs) `)`)?
     attr-dict (`:` type($result_tensors)^)?
   }];
 
@@ -2981,6 +3138,10 @@ def Hip_SwishOp : Hip_DpsOp_AutoReify<"swish"> {
     Applies the ONNX Swish activation element-wise. com.microsoft QuickGelu
     is the same formula; its alpha defaults to 1.702 rather than 1.
 
+    `input_scale` first replaces x with z = input_scale * x, rounded to the
+    element type, then computes z * sigmoid(alpha * z). That is
+    com.microsoft ScaledSiLU with alpha = 1; the default of 1 leaves x as is.
+
     Uses destination-passing style: the output buffer is provided as an
     argument. The fused runtime kernel supports f16, f32, bf16, and f64.
 
@@ -2996,7 +3157,8 @@ def Hip_SwishOp : Hip_DpsOp_AutoReify<"swish"> {
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$input,
     Hip_TensorOrMemRef:$output,
-    DefaultValuedAttr<F64Attr, "1.0">:$alpha
+    DefaultValuedAttr<F64Attr, "1.0">:$alpha,
+    DefaultValuedAttr<F64Attr, "1.0">:$input_scale
   );
 
   let assemblyFormat = [{

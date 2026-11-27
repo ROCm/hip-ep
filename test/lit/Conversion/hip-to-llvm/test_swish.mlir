@@ -10,7 +10,7 @@ module {
       %output: memref<2x3xf32, 1>) {
     // CHECK-LABEL: llvm.func @swish_static
     // CHECK: llvm.mlir.constant(5.000000e-01 : f64) : f64
-    // CHECK: llvm.call @wrap_swish({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f64) -> i32
+    // CHECK: llvm.call @wrap_swish({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f64, f64) -> i32
     hip.swish(%ctx) ins(%input : memref<2x3xf32, 1>)
                     outs(%output : memref<2x3xf32, 1>)
                     {alpha = 0.5 : f64}
@@ -26,9 +26,24 @@ module {
     // CHECK-DAG: llvm.extractvalue %{{.*}}[3, 1]
     // CHECK-DAG: llvm.mlir.constant(16 : i64) : i64
     // CHECK-DAG: llvm.mlir.constant(2 : i64) : i64
-    // CHECK: llvm.call @wrap_swish({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f64) -> i32
+    // CHECK: llvm.call @wrap_swish({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f64, f64) -> i32
     hip.swish(%ctx) ins(%input : memref<?x?x16xbf16, 1>)
                     outs(%output : memref<?x?x16xbf16, 1>)
+    return
+  }
+
+  // input_scale (com.microsoft ScaledSiLU) is the trailing f64.
+  func.func @swish_input_scale(
+      %ctx: !hip.context,
+      %input: memref<1x1x320xf16, 1>,
+      %output: memref<1x1x320xf16, 1>) {
+    // CHECK-LABEL: llvm.func @swish_input_scale
+    // CHECK-DAG: %[[ALPHA:.*]] = llvm.mlir.constant(1.000000e+00 : f64) : f64
+    // CHECK-DAG: %[[SCALE:.*]] = llvm.mlir.constant(2.500000e-01 : f64) : f64
+    // CHECK: llvm.call @wrap_swish({{.*}}, %[[ALPHA]], %[[SCALE]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f64, f64) -> i32
+    hip.swish(%ctx) ins(%input : memref<1x1x320xf16, 1>)
+                    outs(%output : memref<1x1x320xf16, 1>)
+                    {input_scale = 0.25 : f64}
     return
   }
 
@@ -38,7 +53,7 @@ module {
       %output: memref<8xf64, 1>) {
     // CHECK-LABEL: llvm.func @swish_f64
     // CHECK-DAG: llvm.mlir.constant(6 : i64) : i64
-    // CHECK: llvm.call @wrap_swish({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f64) -> i32
+    // CHECK: llvm.call @wrap_swish({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f64, f64) -> i32
     hip.swish(%ctx) ins(%input : memref<8xf64, 1>)
                     outs(%output : memref<8xf64, 1>)
     return
