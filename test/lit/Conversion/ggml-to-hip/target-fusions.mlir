@@ -5,7 +5,7 @@
 // RUN: hip-mlir-opt %t/add-rms-q8.mlir --convert-ggml-to-hip | FileCheck %s --check-prefix=ADD-RMS
 // RUN: hip-mlir-opt %t/packed-swiglu.mlir --convert-ggml-to-hip | FileCheck %s --check-prefix=PACKED-SWIGLU
 // RUN: hip-mlir-opt %t/flash.mlir --hip-add-context-arg --convert-ggml-to-hip | FileCheck %s --check-prefix=FLASH
-// RUN: hip-mlir-opt %t/flash-live-rows.mlir --hip-add-context-arg --convert-ggml-to-hip | FileCheck %s --check-prefix=FLASH-ROWS
+// RUN: hip-mlir-opt %t/flash-cache-update.mlir --hip-add-context-arg --convert-ggml-to-hip | FileCheck %s --check-prefix=FLASH-UPDATE
 
 // ADD-RMS-LABEL: func.func @add_rms_q8(
 // ADD-RMS: %[[FUSED:.*]]:2 = hip.skip_rms_norm_q8_1
@@ -75,13 +75,15 @@ func.func @packed_swiglu(
 // FLASH-NOT: hip.transpose
 // FLASH-NOT: = ggml.
 
-// A cache produced by an indexed update supplies its destination rows, so the
-// kernel can bound the traversal to the live part of the cache.
-// FLASH-ROWS-LABEL: func.func @flash_live_rows(
-// FLASH-ROWS: hip.scatter_nd
-// FLASH-ROWS: hip.token_major_gqa
-// FLASH-ROWS-SAME: rows(%[[INDICES:.*]] : tensor<1x1x1x3xi64>)
-// FLASH-ROWS-NOT: = ggml.
+// A cache produced by an indexed update does not hand attention its
+// destination rows: llama.cpp reuses freed cells, so the rows a step writes
+// do not bound the rows its queries see. The mask does.
+// FLASH-UPDATE-LABEL: func.func @flash_cache_update(
+// FLASH-UPDATE: hip.scatter_nd
+// FLASH-UPDATE: hip.token_major_gqa
+// FLASH-UPDATE-NOT: rows(
+// FLASH-UPDATE-SAME: outs(
+// FLASH-UPDATE-NOT: = ggml.
 
 //--- flash.mlir
 // The heads are permuted rather than copied, so the operands the fusion sees
@@ -111,8 +113,8 @@ func.func @flash(
   return %result : tensor<1x3x4x64xf32, #query>
 }
 
-//--- flash-live-rows.mlir
-func.func @flash_live_rows(
+//--- flash-cache-update.mlir
+func.func @flash_cache_update(
     %query: tensor<1x3x4x64xf32> {ggml.contiguous = true},
     %new_key: tensor<1x1x3x128xf32> {
       ggml.contiguous = true, ggml.storage_id = 0 : i64},
