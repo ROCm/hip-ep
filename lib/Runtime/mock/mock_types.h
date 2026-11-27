@@ -31,6 +31,7 @@ struct hipDeviceProp_t {
 #define hipHostMallocDefault 0
 #define hipHostMallocMapped 0
 #define hipHostMallocNonCoherent 0
+#define hipHostMallocCoherent 0
 #define hipEventDisableTiming 0
 // Mock stub: the real flag drops hipEventRecord's system-scope fence (see
 // op_profile.cpp). The mock hipEventCreateWithFlags ignores flags, so the

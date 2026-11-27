@@ -491,6 +491,30 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
 // historical exit codes 1-9) is returned. On success *out_state holds the
 // RuntimeState ready for constants_blob allocation; no constant memory has
 // been touched yet.
+// Places the error flag in host-mapped coherent memory (see
+// RuntimeState::host_error_flag). Returns false and leaves the state untouched
+// when that is unavailable, so the caller can fall back to device memory.
+static bool allocate_host_mapped_error_flag(RuntimeState *state) {
+  int *host_flag = nullptr;
+  if (hipHostMalloc((void **)&host_flag, sizeof(int),
+                    hipHostMallocMapped | hipHostMallocCoherent) !=
+      hipSuccess) {
+    (void)hipGetLastError();
+    return false;
+  }
+  int *device_flag = nullptr;
+  if (hipHostGetDevicePointer((void **)&device_flag, host_flag, 0) !=
+      hipSuccess) {
+    (void)hipGetLastError();
+    HIP_CLEANUP(hipHostFree(host_flag));
+    return false;
+  }
+  *(volatile int *)host_flag = 0;
+  state->host_error_flag = host_flag;
+  state->device_error_flag = device_flag;
+  return true;
+}
+
 static int initialize_state_handles(RuntimeState **out_state) {
   auto t_prev = timing_now();
 
@@ -553,6 +577,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->gqa_autotune_policy = nullptr;
   state->provider_options = nullptr;
   state->device_error_flag = nullptr;
+  state->host_error_flag = nullptr;
   state->hipdnn_handle = nullptr;
   state->hipdnn_graph_registry = nullptr;
   state->seqlens_k_cached_valid = false;
@@ -609,8 +634,14 @@ static int initialize_state_handles(RuntimeState **out_state) {
 
   TIMING_LOG("[Session] hipBLASLt init: %.3fs\n", record_elapsed(t_prev));
 
-  // Allocate device-side error flag used by kernels for runtime error
-  // propagation (e.g., Range delta==0).
+  // Error flag used by kernels for runtime error propagation (e.g., Range
+  // delta==0). Prefer host-mapped memory: the per-inference reset and the
+  // post-graph read then need no GPU work and no second round trip. Fall back
+  // to device memory if it cannot be allocated.
+  if (allocate_host_mapped_error_flag(state)) {
+    *out_state = state;
+    return 0;
+  }
   if (hipMalloc((void **)&state->device_error_flag, sizeof(int)) !=
       hipSuccess) {
     fprintf(stderr, "Failed to allocate device error flag\n");
@@ -1202,7 +1233,9 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     HIP_CLEANUP(hipHostFree(state->loop_cond_host));
   }
 
-  if (state->device_error_flag) {
+  if (state->host_error_flag) {
+    HIP_CLEANUP(hipHostFree(state->host_error_flag));
+  } else if (state->device_error_flag) {
     HIP_CLEANUP(hipFree(state->device_error_flag));
   }
 
@@ -2223,6 +2256,12 @@ int hipdnn_ep_state_reset_error_flag(RuntimeState *state) {
     fprintf(stderr, "hipdnn_ep_state_reset_error_flag: invalid state\n");
     return -1;
   }
+  if (state->host_error_flag) {
+    // Called before this inference queues any kernel; the previous one ended
+    // with a stream sync, so nothing on the GPU can be writing the flag.
+    *(volatile int *)state->host_error_flag = 0;
+    return 0;
+  }
   hipError_t err =
       hipMemsetAsync(state->device_error_flag, 0, sizeof(int), state->stream);
   return (err == hipSuccess) ? 0 : -1;
@@ -2234,6 +2273,13 @@ int hipdnn_ep_state_set_error_flag(RuntimeState *state, int code) {
   if (!state || !state->device_error_flag || !state->stream) {
     fprintf(stderr, "hipdnn_ep_state_set_error_flag: invalid state\n");
     return -1;
+  }
+  if (state->host_error_flag) {
+    // Drain first so no in-flight kernel can overwrite the code afterwards.
+    if (hipStreamSynchronize(state->stream) != hipSuccess)
+      return -1;
+    *(volatile int *)state->host_error_flag = code;
+    return 0;
   }
   // Same stream as the post-graph read. Synchronize before returning so the
   // stack source is not read after this call, and so the flag is visible even
@@ -2254,6 +2300,14 @@ int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state) {
   }
 
   int host_error = 0;
+  if (state->host_error_flag) {
+    // The generated code calls hipdnn_ep_stream_sync right before this, so
+    // the sync below finds an idle stream; it only covers work queued in
+    // between. A set flag is left set, as on the device-memory path.
+    if (hipStreamSynchronize(state->stream) != hipSuccess)
+      return -1;
+    return *(volatile int *)state->host_error_flag;
+  }
   hipError_t err =
       hipMemcpyAsync(&host_error, state->device_error_flag, sizeof(int),
                      hipMemcpyDeviceToHost, state->stream);
