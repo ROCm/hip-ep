@@ -203,3 +203,43 @@ func.func @no_reuse_different_element_type(
   hip.miopen.softmax(%ctx) ins(%c : memref<64xf16>) outs(%alloc1 : memref<64xf16>)
   return %alloc1 : memref<64xf16>
 }
+
+// An i1 buffer takes one byte per element, so memref<9xi1> (9 bytes) is too
+// small for memref<16xi1> (16 bytes) and its slot must not be reused. Packing
+// the bits sized both as 2 bytes and let the 16-byte write land in the
+// 9-byte slot.
+// CHECK-LABEL: func.func @no_reuse_i1_slot_too_small
+// CHECK:         memref.alloc(){{.*}}: memref<9xi1>
+// CHECK:         memref.alloc(){{.*}}: memref<16xi1>
+// CHECK-NOT:     memref.reinterpret_cast
+func.func @no_reuse_i1_slot_too_small(
+    %ctx: !hip.context,
+    %a: memref<16xf32>,
+    %b: memref<16xf32>,
+    %c: memref<9xf32>,
+    %d: memref<9xf32>) -> memref<16xi1> {
+  %small = memref.alloc() : memref<9xi1>
+  hip.less(%ctx) ins(%c, %d : memref<9xf32>, memref<9xf32>) outs(%small : memref<9xi1>)
+  %big = memref.alloc() : memref<16xi1>
+  hip.less(%ctx) ins(%a, %b : memref<16xf32>, memref<16xf32>) outs(%big : memref<16xi1>)
+  return %big : memref<16xi1>
+}
+
+// The reverse is fine: a freed memref<16xi1> slot (16 bytes) holds memref<9xi1>
+// (9 bytes), so the second allocation reuses it through a reinterpret_cast.
+// CHECK-LABEL: func.func @reuse_i1_slot_large_enough
+// CHECK:         memref.alloc(){{.*}}: memref<16xi1>
+// CHECK-NOT:     memref.alloc()
+// CHECK:         memref.reinterpret_cast
+func.func @reuse_i1_slot_large_enough(
+    %ctx: !hip.context,
+    %a: memref<16xf32>,
+    %b: memref<16xf32>,
+    %c: memref<9xf32>,
+    %d: memref<9xf32>) -> memref<9xi1> {
+  %big = memref.alloc() : memref<16xi1>
+  hip.less(%ctx) ins(%a, %b : memref<16xf32>, memref<16xf32>) outs(%big : memref<16xi1>)
+  %small = memref.alloc() : memref<9xi1>
+  hip.less(%ctx) ins(%c, %d : memref<9xf32>, memref<9xf32>) outs(%small : memref<9xi1>)
+  return %small : memref<9xi1>
+}

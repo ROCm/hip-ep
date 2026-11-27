@@ -84,10 +84,9 @@ struct GatherElementsOpLowering
     Value axisVal = createI64Const(axisAttr);
     Value rankVal = createI64Const(rank);
 
-    unsigned elementSizeBytes =
-        dataType.getElementType().getIntOrFloatBitWidth() / 8;
+    unsigned elementSizeBytes = getElementSizeBytes(dataType.getElementType());
     unsigned indicesElemBytes =
-        indicesType.getElementType().getIntOrFloatBitWidth() / 8;
+        getElementSizeBytes(indicesType.getElementType());
     Value elemSizeVal = createI64Const(elementSizeBytes);
     Value indicesElemSizeVal = createI64Const(indicesElemBytes);
 

@@ -95,11 +95,10 @@ struct OneHotOpLowering : public ConvertOpToLLVMPattern<OneHotOp> {
     Value outputRankVal = createI64Const(outputRank);
 
     unsigned elementSizeBytes =
-        outputType.getElementType().getIntOrFloatBitWidth() / 8;
+        getElementSizeBytes(outputType.getElementType());
     unsigned indicesElemBytes =
-        indicesType.getElementType().getIntOrFloatBitWidth() / 8;
-    unsigned depthElemBytes =
-        depthType.getElementType().getIntOrFloatBitWidth() / 8;
+        getElementSizeBytes(indicesType.getElementType());
+    unsigned depthElemBytes = getElementSizeBytes(depthType.getElementType());
     Value elemSizeVal = createI64Const(elementSizeBytes);
     Value indicesElemSizeVal = createI64Const(indicesElemBytes);
     Value depthElemSizeVal = createI64Const(depthElemBytes);

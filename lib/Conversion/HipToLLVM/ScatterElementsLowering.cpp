@@ -92,10 +92,9 @@ struct ScatterElementsOpLowering
     if (axisAttr < 0)
       axisAttr += rank;
 
-    unsigned elementSizeBytes =
-        dataType.getElementType().getIntOrFloatBitWidth() / 8;
+    unsigned elementSizeBytes = getElementSizeBytes(dataType.getElementType());
     unsigned indicesElemBytes =
-        indicesType.getElementType().getIntOrFloatBitWidth() / 8;
+        getElementSizeBytes(indicesType.getElementType());
 
     SmallVector<Type, 12> paramTypes = {
         ptrType, ptrType, ptrType,

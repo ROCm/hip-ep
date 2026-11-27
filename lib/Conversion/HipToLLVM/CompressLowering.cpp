@@ -90,8 +90,7 @@ struct CompressOpLowering : public ConvertOpToLLVMPattern<CompressOp> {
     Value inputRankVal = createI64Const(inputRank);
     Value outputRankVal = createI64Const(outputRank);
 
-    unsigned elementSizeBytes =
-        inputType.getElementType().getIntOrFloatBitWidth() / 8;
+    unsigned elementSizeBytes = getElementSizeBytes(inputType.getElementType());
     Value elemSizeVal = createI64Const(elementSizeBytes);
 
     SmallVector<Type, 12> paramTypes = {

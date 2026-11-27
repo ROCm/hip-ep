@@ -63,8 +63,7 @@ struct GatherOpLowering : public ConvertOpToLLVMPattern<GatherOp> {
         computeNumElements(outputType, adaptor.getOutput(), rewriter, loc);
 
     // element_size_bytes
-    unsigned elementSizeBytes =
-        dataType.getElementType().getIntOrFloatBitWidth() / 8;
+    unsigned elementSizeBytes = getElementSizeBytes(dataType.getElementType());
     Value elemSizeVal = LLVM::ConstantOp::create(
         rewriter, loc, i64Type, rewriter.getI64IntegerAttr(elementSizeBytes));
 
@@ -93,7 +92,7 @@ struct GatherOpLowering : public ConvertOpToLLVMPattern<GatherOp> {
     // kernel reads them with the correct stride (reading int32 as int64
     // otherwise fuses adjacent indices into out-of-range values).
     unsigned indicesElemBytes =
-        indicesType.getElementType().getIntOrFloatBitWidth() / 8;
+        getElementSizeBytes(indicesType.getElementType());
     Value indicesElemSizeVal = LLVM::ConstantOp::create(
         rewriter, loc, i64Type, rewriter.getI64IntegerAttr(indicesElemBytes));
 

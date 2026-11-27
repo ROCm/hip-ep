@@ -119,6 +119,11 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   // The rocMLIR path runs the same pass in its separate pre-fusion head.
   pm.addNestedPass<func::FuncOp>(mlir::hip::createDecomposeConvTransposePass());
 
+  // The cast kernels convert by value, so a cast to i1 from any other type
+  // becomes x != 0 here. It emits a hip.constant zero, so it must precede
+  // `hip-externalize-constants`.
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createDecomposeBoolCastPass());
+
   // 1a*. Resolve constant-index `tensor.extract` of assembled constant
   //      vectors (ONNX shape vectors) to the scalar they read, so 1b sees
   //      them as constants and no host readback is left for them. Reads
@@ -570,6 +575,9 @@ void mlir::hip::buildRocMlirPipeline(
 void mlir::hip::addRocMlirFusionPasses(
     OpPassManager &pm, const FuseRocMlirAnchorPassOptions &fuseOptions,
     llvm::StringRef reportPath) {
+  // A fused float -> bool cast would otherwise lower to a by-value TOSA cast
+  // (0.5 -> 0); rewrite it as x != 0 before the elementwise grouping.
+  pm.addNestedPass<func::FuncOp>(createDecomposeBoolCastPass());
   pm.addNestedPass<func::FuncOp>(createHoistPointwiseOverViewsPass());
   pm.addNestedPass<func::FuncOp>(createRocMlirPrepareQuantPass());
   pm.addNestedPass<func::FuncOp>(createFuseRocMlirElementwisePass());

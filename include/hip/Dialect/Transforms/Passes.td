@@ -412,6 +412,46 @@ def DecomposeConvTransposePass
   ];
 }
 
+def DecomposeBoolCastPass
+    : Pass<"hip-decompose-bool-cast", "mlir::func::FuncOp"> {
+  let summary = "Rewrite a non-bool hip.cast to bool as x != 0";
+  let description = [{
+    ONNX Cast and torch `to(bool)` both map zero to false and anything else
+    to true. The cast kernels convert by value, so an int64 5 or a float 2.5
+    would reach the mask unnormalized, and `convert-hip-to-llvm` rejects such
+    a cast to i1. A cast to bool is one with an i1 result (torch) or with
+    `to = 9` (ONNX BOOL; the ONNX importer stores BOOL as ui8, so the result
+    type alone reads as UINT8). This pass rewrites a tensor-form one from a
+    non-i1 element type as `hip.not(hip.equal(x, 0))`:
+
+    ```mlir
+    %y = hip.cast(%ctx) ins(%x : tensor<4xi64>) outs(%e : tensor<4xi1>)
+         {to = 9 : i64}
+    // becomes
+    %z = hip.constant {value = dense<0> : tensor<i64>} : tensor<i64>
+    %q = hip.equal(%ctx) ins(%x, %z : tensor<4xi64>, tensor<i64>)
+         outs(%e0 : tensor<4xi1>)
+    %y = hip.not(%ctx) ins(%q : tensor<4xi1>) outs(%e : tensor<4xi1>)
+    ```
+
+    NaN is not equal to zero and so becomes true, as in both frontends. A
+    bf16 source is widened to f32 first because `hip.equal` has no bf16
+    kernel. A cast that also reshapes (tensor<1xT> to tensor<U>) builds the
+    mask in the input shape and keeps a 0/1 cast for the reshape. `hip.equal`
+    takes at most four dimensions, so a static cast of rank above 4 is
+    flattened to rank 1 around the rewrite; a dynamic one is left unchanged.
+    f64 has no `hip.equal` kernel and is left unchanged too; the lowering
+    rejects any cast to bool from a non-i1 type that this pass leaves, so the
+    op falls back instead of writing a wrong mask. The pass runs in the
+    ONNX-to-HIP tail and ahead of the rocMLIR fusion passes, so a fused float
+    to bool cast is not lowered as a by-value TOSA cast. Emits `hip.constant`,
+    so it must run before `hip-externalize-constants`.
+  }];
+  let dependentDialects = [
+    "mlir::tensor::TensorDialect"
+  ];
+}
+
 def FoldBatchNormPass
     : Pass<"hip-fold-batchnorm", "mlir::func::FuncOp"> {
   let summary = "Fold constant-parameter hip.batch_norm into hip.conv weights";
