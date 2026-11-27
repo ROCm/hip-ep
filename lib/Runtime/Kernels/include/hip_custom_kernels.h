@@ -3205,8 +3205,9 @@ HIP_KERNEL_API int hip_qmoe_topk_routing(
  *   expert_indices  - GPU [num_tokens, k] int32 (output), in descending
  *                     sigmoid + bias order, ties to the lower expert index
  *   expert_weights  - GPU [num_tokens, k] fp16 (output):
- *                     s / sum_k(s) * scale (no sum when normalize == 0),
- *                     s = sigmoid(logit) of the selected expert
+ *                     s / (sum_k(s) + norm_eps) * scale (no sum when
+ *                     normalize == 0), s = sigmoid(logit) of the selected
+ *                     expert
  * Same output layout as hip_qmoe_topk_routing. element_size_bytes is that
  * of expert_weights; only fp16 is supported.
  */
@@ -3221,6 +3222,7 @@ HIP_KERNEL_API int hip_qmoe_sigmoid_bias_routing(
     int64_t k,
     int64_t normalize,
     float scale,
+    float norm_eps,
     int64_t element_size_bytes);
 
 /* Gather rows: gathered[i,:] = input[token_ids[i],:]
