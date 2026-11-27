@@ -1456,18 +1456,26 @@ void matmul_nbits_gemv_dp4a_kernel(
         const int grp = k32 >> bs_shift;
 
         // 4 deinterleaved chunks (a_lo/a_hi) covering the 32 activations, for
-        // each row this block owns. Out-of-range rows alias row 0 and are
-        // dropped at the store: the row loop has to stay a compile-time unroll
-        // or partial[][] gets a runtime index and spills to scratch.
+        // each row this block owns. Out-of-range rows alias the tile's first
+        // row and are dropped at the store: the row loop has to stay a
+        // compile-time unroll or partial[][] gets a runtime index and spills to
+        // scratch.
+        //
+        // The row is m0 + tm, not tm. Indexing by tm alone made every row tile
+        // after the first (blockIdx.y > 0) read the activations of rows
+        // 0..TILE_M-1 and store them at its own rows. The heuristic picks
+        // read-once tiles (one row tile), so it stayed hidden except where it
+        // falls back to the tile_m = 4 default: N = 1 at 5..8 rows, which is
+        // Flash-Next's shared_expert_gate, 48 nodes per verify call.
         int   a_lo[TILE_M][4], a_hi[TILE_M][4];
         int   a_sum_q[TILE_M];
         float a_sc[TILE_M];
 #pragma unroll
         for (int tm = 0; tm < TILE_M; tm++) {
-            const int tm_r = (TILE_M == 1 || tm < rows) ? tm : 0;
-            const int8_t* aq = a_qb + static_cast<int64_t>(tm_r) * K +
+            const int64_t row = m0 + ((TILE_M == 1 || tm < rows) ? tm : 0);
+            const int8_t* aq = a_qb + row * K +
                                static_cast<int64_t>(idx) * 32;
-            a_sc[tm] = a_scale[static_cast<int64_t>(tm_r) * k_blocks + grp];
+            a_sc[tm] = a_scale[row * k_blocks + grp];
 #pragma unroll
             for (int j = 0; j < 4; j++) {
                 a_lo[tm][j] = *reinterpret_cast<const int*>(aq + j * 8);
