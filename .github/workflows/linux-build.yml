@@ -20,37 +20,33 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  # Pins (kept in lockstep with cmake/deps.txt).
-  # LLVM/MLIR/LLD are cloned from deps.txt llvm_project. The hash column is a
-  # full commit, and the llvm-install cache key is that commit.
-  # rocmlirTriton's vendored external/llvm-project is not built.
-  ONNXRUNTIME_VERSION: "1.31.0"
-  # Space-separated microsoft/onnxruntime PR numbers `git apply`-ed on top of
-  # the pinned tag during the from-source build (an empty list applies nothing;
-  # ORT is still built from source either way). Part of the ort-install cache
-  # key. Remove a PR once its fix lands in the pinned ONNX Runtime release.
-  ONNXRUNTIME_PR_PATCHES: ""
-  OGA_VERSION: "0.19.0"
-  # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
-  # pull/<n>.diff and applied on top of v<OGA_VERSION>. Part of the OGA cache
-  # key. Remove a PR once it lands in the pinned OGA release.
-  OGA_PR_PATCHES: "2875"
+  # The LLVM, ORT and OGA pins live in linux-deps.yml (kept in lockstep with
+  # cmake/deps.txt); this workflow consumes the prefixes it prebuilds.
   # The GPU arch the artifact targets. CI runners have no GPU, so it is passed
   # explicitly (build.py auto-detects from /sys on a real GPU host).
   HIP_ARCHITECTURES: gfx11-generic
   SCCACHE_CACHE_SIZE: "200M"
+  SCCACHE_IDLE_TIMEOUT: "0"
 
 jobs:
   build_required:
     uses: ./.github/workflows/build-required.yml
 
-  build-linux:
+  # LLVM, ONNX Runtime and OGA are built (or restored) in parallel jobs shared
+  # with Linux RMT Build. Each saves its cache before the build job starts, so
+  # the hip-ep link gets its own runner budget.
+  prebuild:
     needs: build_required
-    if: needs.build_required.outputs.run == 'true'
     # No draft-PR gate: cache priming needs every code change, including
     # drafts. build-required.yml skips this job for a documentation or
     # Jekyll diff on a pull request or merge group. Pushes always build.
+    if: needs.build_required.outputs.run == 'true'
+    uses: ./.github/workflows/linux-deps.yml
+
+  build-linux:
+    needs: prebuild
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     steps:
       # MorphiZen is vendored in-tree as a git subtree under morphizen,
       # so no deploy key or submodule initialization is needed.
@@ -85,8 +81,9 @@ jobs:
           [ "$fail" = 0 ] || { echo "HIPDNN_EP_DISABLE_VENDOR_BLAS wiring is broken"; exit 1; }
           echo "HIPDNN_EP_DISABLE_VENDOR_BLAS wiring OK"
 
-      # ubuntu-latest ships ~14 GB usable SSD; the from-source LLVM build + ORT
-      # need much more. Reclaim ~30 GB by pruning preinstalled toolchains.
+      # ubuntu-latest ships ~14 GB usable SSD; the restored LLVM/ORT prefixes
+      # plus the hip-ep build need more. Reclaim ~30 GB by pruning preinstalled
+      # toolchains.
       # Keep swap. Deleting it makes the rmt-core LLVM link OOM the runner,
       # which GitHub reports as "lost communication" and drops the log.
       - name: Free disk space
@@ -100,7 +97,6 @@ jobs:
           large-packages: false
           swap-storage: false
 
-      # Pin the Python the whole job uses (ORT/OGA wheels are built against it).
       - name: Setup Python 3.14
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
@@ -114,12 +110,7 @@ jobs:
             build-essential ninja-build git ca-certificates curl
           # backend-mlir-compiler needs cmake >= 3.29; pip cmake wins over apt's.
           python3 -m pip install --upgrade pip
-          # numpy/wheel/setuptools/packaging are needed at ORT configure time:
-          # --build_wheel makes onnxruntime_python.cmake run find_package(Python
-          # ... NumPy), which fails the generate step if numpy is absent.
-          # requests: OGA build.py's util.dependency_resolver imports it at
-          # module load (the pinned Python 3.14 has no preinstalled requests).
-          python3 -m pip install cmake ninja lit numpy wheel setuptools packaging requests
+          python3 -m pip install cmake ninja lit requests
           cmake --version
           ninja --version
 
@@ -132,181 +123,83 @@ jobs:
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/sccache-dir
-          key: sccache-linux-${{ env.SCCACHE_KEY_DATE }}
+          key: sccache-linux-build-${{ env.SCCACHE_KEY_DATE }}-${{ github.run_id }}
           restore-keys: |
-            sccache-linux-
+            sccache-linux-build-
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
 
       # -----------------------------------------------------------------------
-      # LLVM/MLIR/LLD/Clang from source -> llvm-install (cached). Caching is a CI
-      # concern, so the prefix build lives here (not in build.py). Source is
-      # deps.txt llvm_project (a pinned commit, which is also the cache key).
-      # Recipe matches cmake/deps.cmake's from-source fallback: clang;mlir;lld,
-      # X86 only, RTTI on, zlib/zstd off, INSTALL_UTILS on. The install holds
-      # only LLVM_DISTRIBUTION_COMPONENTS, which also scopes the exported CMake
-      # targets so find_package does not expect the omitted tools.
+      # LLVM/MLIR/LLD/Clang -> llvm-install, ONNX Runtime -> ort-install and the
+      # OGA artifact set, all prebuilt by linux-deps.yml (the recipes and pins
+      # live there). Caches are the fast path. When the prebuild had to build an
+      # entry it also uploads a tar.zst artifact, so download-artifact still works
+      # after a later cache eviction. A prebuild cache hit uploads nothing: if the
+      # entry is evicted before this restore, re-run the workflow to rebuild it.
       # -----------------------------------------------------------------------
-      - name: Resolve LLVM commit
-        id: llvm
-        run: |
-          set -euo pipefail
-          LINE=$(grep -E '^llvm_project;' cmake/deps.txt)
-          LLVM_URL=$(echo "$LINE" | cut -d';' -f2)
-          LLVM_REF=$(echo "$LINE" | cut -d';' -f3)
-          LLVM_COMMIT="$LLVM_REF"
-          if ! [[ "$LLVM_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "ERROR: deps.txt llvm_project must pin a full commit, got '$LLVM_REF'" >&2
-            exit 1
-          fi
-          echo "url=$LLVM_URL" >> "$GITHUB_OUTPUT"
-          echo "ref=$LLVM_REF" >> "$GITHUB_OUTPUT"
-          echo "commit=$LLVM_COMMIT" >> "$GITHUB_OUTPUT"
-
-      - name: Cache LLVM install prefix
-        id: cache-llvm
-        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+      - name: Restore llvm-install
+        id: restore-llvm
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/llvm-install
-          # Keyed on the pinned commit: a protobuf/ORT bump must not
-          # evict the multi-hour LLVM cache, and an LLVM bump must.
-          key: linux-llvm-dist-${{ steps.llvm.outputs.commit }}
+          key: ${{ needs.prebuild.outputs.llvm_cache_key }}
 
-      - name: Build LLVM/MLIR/LLD from source
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
+      - name: Download llvm-install
+        if: steps.restore-llvm.outputs.cache-hit != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.prebuild.outputs.llvm_cache_key }}
+          path: ${{ runner.temp }}/llvm-artifact
+
+      - name: Extract llvm-install
+        if: steps.restore-llvm.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          # Shallow fetch of the pinned commit. The cmake project lives at llvm/.
-          SRC="${{ runner.workspace }}/llvm-project"
-          git init "$SRC"
-          git -C "$SRC" remote add origin "${{ steps.llvm.outputs.url }}"
-          git -C "$SRC" fetch --depth 1 origin "${{ steps.llvm.outputs.commit }}"
-          git -C "$SRC" checkout FETCH_HEAD
-          rm -rf "$SRC/.git"
-          cmake -G Ninja -S "$SRC/llvm" -B "${{ runner.workspace }}/build-llvm" \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DLLVM_ENABLE_PROJECTS="clang;mlir;lld" \
-            -DLLVM_TARGETS_TO_BUILD=X86 \
-            -DCMAKE_INSTALL_PREFIX="${{ runner.workspace }}/llvm-install" \
-            -DLLVM_ENABLE_RTTI=ON \
-            -DLLVM_ENABLE_ZLIB=OFF \
-            -DLLVM_ENABLE_ZSTD=OFF \
-            -DLLVM_INCLUDE_TESTS=OFF \
-            -DLLVM_INCLUDE_EXAMPLES=OFF \
-            -DLLVM_INCLUDE_BENCHMARKS=OFF \
-            -DLLVM_BUILD_TOOLS=ON \
-            -DLLVM_INSTALL_UTILS=ON \
-            -DLLVM_PARALLEL_LINK_JOBS=4 \
-            -DLLVM_TOOL_LTO_BUILD=OFF \
-            -DLLVM_TOOL_REMARKS_SHLIB_BUILD=OFF \
-            -DLLVM_DISTRIBUTION_COMPONENTS="clang;clang-resource-headers;llvm-link;llvm-config;llvm-tblgen;mlir-tblgen;mlir-pdll;mlir-linalg-ods-yaml-gen;mlir-opt;lld;FileCheck;not;count;split-file;llvm-headers;llvm-libraries;cmake-exports;mlir-headers;mlir-libraries;mlir-cmake-exports;lld-headers;lld-libraries;lld-cmake-exports" \
-            -DCMAKE_CXX_VISIBILITY_PRESET=hidden \
-            -DCMAKE_C_VISIBILITY_PRESET=hidden \
-            -DCMAKE_VISIBILITY_INLINES_HIDDEN=ON \
-            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
-          cmake --build "${{ runner.workspace }}/build-llvm" --target install-distribution
-          du -sh "${{ runner.workspace }}"/llvm-install/{bin,include,lib}
-          rm -rf "$SRC" "${{ runner.workspace }}/build-llvm"
+          mkdir -p "${{ runner.workspace }}/llvm-install"
+          tar -I zstd -xf "${{ runner.temp }}/llvm-artifact/llvm-install.tar.zst" -C "${{ runner.workspace }}/llvm-install"
 
-      # -----------------------------------------------------------------------
-      # ONNX Runtime built from source into ort-install (cached): checkout ->
-      # apply PR patches -> build.sh -> cmake --install. The prefix is consumed
-      # by build.py
-      # (find_package) and reused as OGA's ORT_HOME. Each step is gated on the
-      # ort-install cache so a warm run skips the 50-90 min build.
-      # -----------------------------------------------------------------------
-      - name: Cache ONNX Runtime install prefix
-        id: cache-ort
-        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+      - name: Restore ort-install
+        id: restore-ort
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/ort-install
-          key: linux-ort-${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}-whl
+          key: ${{ needs.prebuild.outputs.ort_cache_key }}
 
-      - name: Checkout ONNX Runtime v${{ env.ONNXRUNTIME_VERSION }}
-        if: steps.cache-ort.outputs.cache-hit != 'true'
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Download ort-install
+        if: steps.restore-ort.outputs.cache-hit != 'true'
+        uses: actions/download-artifact@v4
         with:
-          repository: Microsoft/onnxruntime
-          ref: v${{ env.ONNXRUNTIME_VERSION }}
-          path: source-onnxruntime
-          submodules: true
-          fetch-depth: 1
-          show-progress: false
+          name: ${{ needs.prebuild.outputs.ort_cache_key }}
+          path: ${{ runner.temp }}/ort-artifact
 
-      # Apply microsoft/onnxruntime PR patches listed in ONNXRUNTIME_PR_PATCHES
-      # on top of the pinned tag. The fresh checkout always lands clean, so the
-      # patches apply directly (the PR list is in the ort-install cache key, so
-      # editing it forces a rebuild). Empty list => nothing to apply.
-      - name: Apply ONNX Runtime PR patches
-        if: steps.cache-ort.outputs.cache-hit != 'true'
-        working-directory: source-onnxruntime
-        env:
-          ORT_PRS: ${{ env.ONNXRUNTIME_PR_PATCHES }}
+      - name: Extract ort-install
+        if: steps.restore-ort.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          prs="$(echo "$ORT_PRS" | xargs || true)"
-          if [ -z "$prs" ]; then
-            echo "ONNXRUNTIME_PR_PATCHES is empty; nothing to apply"
-            exit 0
-          fi
-          for pr in $prs; do
-            url="https://github.com/microsoft/onnxruntime/pull/${pr}.patch"
-            echo "Fetching $url"
-            # github.com throttles raw .patch fetches with HTTP 429; retry with
-            # backoff (--retry-all-errors covers 429/5xx) to ride out the limit.
-            curl -fsSL --retry 6 --retry-delay 10 --retry-all-errors \
-              "$url" -o "/tmp/ort-pr-${pr}.patch"
-            echo "Applying PR #${pr}"
-            git apply --whitespace=nowarn "/tmp/ort-pr-${pr}.patch"
-          done
+          mkdir -p "${{ runner.workspace }}/ort-install"
+          tar -I zstd -xf "${{ runner.temp }}/ort-artifact/ort-install.tar.zst" -C "${{ runner.workspace }}/ort-install"
 
-      - name: Build ONNX Runtime
-        if: steps.cache-ort.outputs.cache-hit != 'true'
-        working-directory: source-onnxruntime
+      - name: Restore oga-artifacts
+        id: restore-oga
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/oga-artifacts
+          key: ${{ needs.prebuild.outputs.oga_cache_key }}
+
+      - name: Download oga-artifacts
+        if: steps.restore-oga.outputs.cache-hit != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.prebuild.outputs.oga_cache_key }}
+          path: ${{ runner.temp }}/oga-artifact
+
+      - name: Extract oga-artifacts
+        if: steps.restore-oga.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          ./build.sh \
-            --config Release \
-            --build_shared_lib \
-            --parallel \
-            --compile_no_warning_as_error \
-            --skip_submodule_sync \
-            --build_dir "${{ runner.workspace }}/build-onnxruntime" \
-            --skip_tests \
-            --cmake_generator Ninja \
-            --build_wheel \
-            --cmake_extra_defines \
-              CMAKE_C_COMPILER_LAUNCHER=sccache \
-              CMAKE_CXX_COMPILER_LAUNCHER=sccache
-
-      - name: Install ORT into ort-install
-        if: steps.cache-ort.outputs.cache-hit != 'true'
-        run: |
-          set -euo pipefail
-          # ORT's Linux build.sh writes to <build_dir>/Release.
-          cmake --install "${{ runner.workspace }}/build-onnxruntime/Release" \
-            --prefix "${{ runner.workspace }}/ort-install"
-          # perf_test is not a cmake install target; copy it into the cached prefix.
-          PERF=$(find "${{ runner.workspace }}/build-onnxruntime" -name onnxruntime_perf_test -type f | head -1)
-          if [ -z "$PERF" ]; then
-            echo "ERROR: onnxruntime_perf_test not found in build tree"
-            exit 1
-          fi
-          mkdir -p "${{ runner.workspace }}/ort-install/bin"
-          cp "$PERF" "${{ runner.workspace }}/ort-install/bin/"
-          # Cache the ORT Python wheel inside ort-install so it rides the same
-          # cache key. Output: build-onnxruntime/Release/dist/onnxruntime-<ver>-cp<py>-linux_x86_64.whl
-          ORT_WHEEL=$(find "${{ runner.workspace }}/build-onnxruntime" \
-            -name "onnxruntime-*.whl" -type f | head -1)
-          if [ -z "$ORT_WHEEL" ]; then
-            echo "ERROR: onnxruntime wheel not found in build tree (need --build_wheel)"
-            exit 1
-          fi
-          mkdir -p "${{ runner.workspace }}/ort-install/wheels"
-          cp "$ORT_WHEEL" "${{ runner.workspace }}/ort-install/wheels/"
-          echo "Cached ORT wheel: $(basename "$ORT_WHEEL")"
+          mkdir -p "${{ runner.workspace }}/oga-artifacts"
+          tar -I zstd -xf "${{ runner.temp }}/oga-artifact/oga-artifacts.tar.zst" -C "${{ runner.workspace }}/oga-artifacts"
 
       # TheRock is auto-downloaded fresh by cmake/deps.cmake during the configure
       # (not cached).
@@ -325,6 +218,29 @@ jobs:
             --hip_arch "${{ env.HIP_ARCHITECTURES }}" \
             --cmake_prefix_path "${{ runner.workspace }}/llvm-install;${{ runner.workspace }}/ort-install"
 
+      # Build-step sccache report. It runs right after the build so the numbers
+      # cover it; SCCACHE_IDLE_TIMEOUT=0 keeps the server (and its counters)
+      # alive across the tests that run inside build.py.
+      # Cache entries are immutable and each main push saves a new one, so the
+      # save below is skipped when the build wrote almost nothing; otherwise
+      # near-duplicate entries fill the repository cache quota that the
+      # LLVM/ORT prefixes share.
+      - name: sccache stats
+        id: sccache-stats
+        if: always()
+        continue-on-error: true
+        run: |
+          {
+            echo "### sccache (${{ github.workflow }})"
+            echo '```'
+            sccache --show-stats
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          writes=$(sccache --show-stats --stats-format=json | jq -r '.stats.cache_writes // empty') || writes=""
+          if [ -n "$writes" ] && [ "$writes" -lt 50 ]; then
+            echo "save=false" >> "$GITHUB_OUTPUT"
+          fi
+
       # Require DF_1_NODELETE and the plugin entry points. No GPU: constructors
       # must not touch a device.
       - name: Check libhipgpu.so ELF contract
@@ -335,119 +251,9 @@ jobs:
           export LD_LIBRARY_PATH="${THEROCK}/lib:${LD_LIBRARY_PATH:-}"
           ctest --test-dir "$BUILD" -C Release -R '^HipGpuElfContract$' --output-on-failure
 
-      # -----------------------------------------------------------------------
-      # OGA (onnxruntime-genai) for model_benchmark: a dedicated step using the
-      # ort-install prefix as ORT_HOME. Kept out of
-      # build.py (whose target is the project .so) because OGA is a
-      # CI/artifact concern.
-      # -----------------------------------------------------------------------
-      - name: Cache OGA artifacts
-        id: cache-oga
-        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
-        with:
-          path: ${{ runner.workspace }}/oga-artifacts
-          key: linux-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
-
-      # Checkout + build are skipped on an OGA cache hit (step-level gate); the
-      # install-copy below always runs so the
-      # cached artifacts land in install/ either way.
-      - name: Checkout OGA
-        if: steps.cache-oga.outputs.cache-hit != 'true'
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          repository: microsoft/onnxruntime-genai
-          ref: v${{ env.OGA_VERSION }}
-          submodules: recursive
-          path: onnxruntime-genai
-          # Full history: `git apply --3way` below resolves each hunk against the
-          # blob the PR was prepared from, which lives at the PR's merge base.
-          fetch-depth: 0
-          show-progress: false
-
-      - name: Apply OGA PR patches
-        if: steps.cache-oga.outputs.cache-hit != 'true'
-        working-directory: onnxruntime-genai
-        env:
-          OGA_PRS: ${{ env.OGA_PR_PATCHES }}
-        run: |
-          set -euo pipefail
-          prs="$(echo "$OGA_PRS" | xargs || true)"
-          if [ -z "$prs" ]; then
-            echo "OGA_PR_PATCHES is empty; nothing to apply"
-            exit 0
-          fi
-          # pull/<n>.diff is the PR's net diff against its merge base. Replaying
-          # pull/<n>.patch with `git am` drops the conflict resolution of any
-          # "merge main" commit in the PR.
-          # --3way is required, not an optimization: a PR branched off main
-          # carries context lines that main has since edited but the pinned tag
-          # has not, and a plain apply rejects those hunks. The merge keeps the
-          # tag's version of every line the PR did not touch, so unrelated main
-          # commits stay out; a hunk needing code absent from the tag conflicts
-          # and fails the step. Tests are excluded because OGA does not build
-          # them and their fixtures do conflict; OGA's own CI workflows are
-          # excluded because the build does not use them and some no longer
-          # exist at the pinned tag. Markdown is excluded because the build
-          # does not read it and doc edits across the listed PRs conflict.
-          for pr in $prs; do
-            url="https://github.com/microsoft/onnxruntime-genai/pull/${pr}.diff"
-            echo "Fetching $url"
-            # github.com throttles raw .diff fetches with HTTP 429; retry with
-            # backoff (--retry-all-errors covers 429/5xx) to ride out the limit.
-            curl -fsSL --retry 6 --retry-delay 10 --retry-all-errors \
-              "$url" -o "/tmp/oga-pr-${pr}.diff"
-            echo "Applying PR #${pr}"
-            git apply --whitespace=nowarn --3way --exclude='test/*' \
-              --exclude='.github/*' --exclude='*.md' "/tmp/oga-pr-${pr}.diff" \
-              || { echo "PR #${pr} failed to apply"; exit 1; }
-          done
-
-      - name: Build OGA
-        if: steps.cache-oga.outputs.cache-hit != 'true'
-        run: |
-          set -euo pipefail
-          ART="${{ runner.workspace }}/oga-artifacts"
-          ORT_PREFIX="${{ runner.workspace }}/ort-install"
-          ORT_HOME="${{ runner.workspace }}/oga-ort-home"
-          mkdir -p "$ORT_HOME/include" "$ORT_HOME/lib"
-          # ORT_HOME wants flat C API headers + the .so. Source-built ORT nests
-          # headers under include/onnxruntime/; the prebuilt tgz is already flat.
-          if [ -d "$ORT_PREFIX/include/onnxruntime" ]; then
-            cp -r "$ORT_PREFIX/include/onnxruntime/." "$ORT_HOME/include/"
-          else
-            cp -r "$ORT_PREFIX/include/." "$ORT_HOME/include/"
-          fi
-          cp -a "$ORT_PREFIX"/lib/libonnxruntime.so* "$ORT_HOME/lib/" 2>/dev/null || true
-          cp -a "$ORT_PREFIX"/lib/libonnxruntime_providers_shared.so* "$ORT_HOME/lib/" 2>/dev/null || true
-          # ENABLE_TESTS=OFF is not redundant with --skip_tests: build.py only
-          # turns the option off for mobile targets, so on desktop --skip_tests
-          # skips *running* the tests while still building them. This job needs
-          # only the shared library, model_benchmark and the wheel.
-          python3 onnxruntime-genai/build.py \
-            --config Release \
-            --cmake_generator Ninja \
-            --no_telemetry \
-            --ort_home "$ORT_HOME" \
-            --skip_tests --skip_examples \
-            --parallel \
-            --build_dir "${{ runner.workspace }}/build-oga" \
-            --cmake_extra_defines \
-              ENABLE_TESTS=OFF \
-              CMAKE_C_COMPILER_LAUNCHER=sccache \
-              CMAKE_CXX_COMPILER_LAUNCHER=sccache
-          mkdir -p "$ART"
-          cp "${{ runner.workspace }}/build-oga/Release/benchmark/c/model_benchmark" "$ART/"
-          cp -a "${{ runner.workspace }}/build-oga/Release"/libonnxruntime-genai.so* "$ART/"
-          # Cache the OGA python wheel alongside the other OGA artifacts.
-          OGA_WHEEL=$(find "${{ runner.workspace }}/build-oga" \
-            -name "onnxruntime_genai-*.whl" -type f | head -1)
-          if [ -z "$OGA_WHEEL" ]; then
-            echo "ERROR: onnxruntime_genai wheel not found in build tree"
-            exit 1
-          fi
-          cp "$OGA_WHEEL" "$ART/"
-          echo "Cached OGA wheel: $(basename "$OGA_WHEEL")"
-
+      # OGA model_benchmark and its library come from the oga-artifacts restored
+      # above. They are copied into install/ here so the bundling steps below see
+      # them next to the other tools.
       - name: Install OGA artifacts into install/
         run: |
           set -euo pipefail
@@ -578,7 +384,8 @@ jobs:
           cp -a "${{ runner.workspace }}/install/lib/." staging/lib/
 
           # onnxruntime_perf_test only exists on the from-source ORT path
-          # (ONNXRUNTIME_PR_PATCHES); the prebuilt release tarball omits it.
+          # (ONNXRUNTIME_PR_PATCHES in linux-deps.yml); the prebuilt release
+          # tarball omits it.
           if [ -f "${{ runner.workspace }}/ort-install/bin/onnxruntime_perf_test" ]; then
             cp "${{ runner.workspace }}/ort-install/bin/onnxruntime_perf_test" staging/bin/
           else
@@ -634,9 +441,9 @@ jobs:
           retention-days: ${{ (github.ref == 'refs/heads/main' || contains(github.ref, 'release')) && 90 || 3 }}
 
       - name: Save sccache directory
-        if: always() && github.ref_name == 'main'
+        if: always() && github.ref_name == 'main' && steps.sccache-stats.outputs.save != 'false'
         continue-on-error: true
         uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/sccache-dir
-          key: sccache-linux-${{ env.SCCACHE_KEY_DATE }}
+          key: sccache-linux-build-${{ env.SCCACHE_KEY_DATE }}
