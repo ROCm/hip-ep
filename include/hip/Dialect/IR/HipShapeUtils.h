@@ -42,6 +42,15 @@ inferMatmulShape(ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
                  function_ref<InFlightDiagnostic()> emitError,
                  int64_t transA = 0, int64_t transB = 0);
 
+/// Reify the matmul result shape that inferMatmulShape computes. Each batch
+/// dim comes from the operand that carries it, with the batch dims right
+/// aligned: A's, unless A has no such dim or it is 1. M comes from A and N
+/// from B (swapped under transA / transB). Static extents stay attributes and
+/// dynamic ones are tensor.dim queries. Failure leaves the IR unchanged.
+FailureOr<SmallVector<OpFoldResult>>
+reifyMatmulShape(OpBuilder &b, Location loc, Value A, Value B, int64_t transA,
+                 int64_t transB, function_ref<InFlightDiagnostic()> emitError);
+
 /// Verify one DPS destination against the shape returned by inferShape.
 /// The operation must implement DestinationStyleOpInterface.
 /// Propagate inference failure without a second diagnostic.

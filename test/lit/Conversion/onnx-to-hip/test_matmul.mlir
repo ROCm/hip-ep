@@ -65,4 +65,48 @@ module {
   // CHECK: hip.matmul(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<?x?x?xf16>, tensor<?x?xf16>) outs(%[[INIT]] : tensor<?x?x?xf16>)
   // CHECK-NOT: hip.alloc
   // CHECK-NOT: hip.copy
+
+  // ===== Test 4: A without the dynamic batch dim =====
+  // The destination takes its batch dim from the operand that carries it, as
+  // hip.matmul's result-shape reification does. It used to be dim 0 of A for
+  // every batch dim, which is A's row count for a rank-2 A.
+
+  func.func @shared_rank2_a_dynamic_b_batch(%A: tensor<64x32xf32>, %B: tensor<?x32x49xf32>) -> tensor<?x64x49xf32> {
+    %result = "onnx.MatMul"(%A, %B) : (tensor<64x32xf32>, tensor<?x32x49xf32>) -> tensor<?x64x49xf32>
+    return %result : tensor<?x64x49xf32>
+  }
+
+  // CHECK-LABEL: func.func @shared_rank2_a_dynamic_b_batch
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[A:.*]]: tensor<64x32xf32>, %[[B:.*]]: tensor<?x32x49xf32>)
+  // CHECK-NOT: tensor.dim %[[A]]
+  // CHECK: %[[BATCH:.*]] = tensor.dim %[[B]], %{{.*}} : tensor<?x32x49xf32>
+  // CHECK: %[[INIT:.*]] = tensor.empty(%[[BATCH]]) : tensor<?x64x49xf32>
+  // CHECK: hip.matmul(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<64x32xf32>, tensor<?x32x49xf32>) outs(%[[INIT]] : tensor<?x64x49xf32>)
+
+  // ===== Test 5: A with a unit batch dim, B with a dynamic batch =====
+
+  func.func @unit_batch_a_dynamic_b_batch(%A: tensor<1x64x32xf32>, %B: tensor<?x32x49xf32>) -> tensor<?x64x49xf32> {
+    %result = "onnx.MatMul"(%A, %B) : (tensor<1x64x32xf32>, tensor<?x32x49xf32>) -> tensor<?x64x49xf32>
+    return %result : tensor<?x64x49xf32>
+  }
+
+  // CHECK-LABEL: func.func @unit_batch_a_dynamic_b_batch
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[A:.*]]: tensor<1x64x32xf32>, %[[B:.*]]: tensor<?x32x49xf32>)
+  // CHECK-NOT: tensor.dim %[[A]]
+  // CHECK: %[[BATCH:.*]] = tensor.dim %[[B]], %{{.*}} : tensor<?x32x49xf32>
+  // CHECK: %[[INIT:.*]] = tensor.empty(%[[BATCH]]) : tensor<?x64x49xf32>
+  // CHECK: hip.matmul(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<1x64x32xf32>, tensor<?x32x49xf32>) outs(%[[INIT]] : tensor<?x64x49xf32>)
+
+  // ===== Test 6: A carries the dynamic batch, B is shared (unchanged) =====
+
+  func.func @dynamic_a_batch_shared_b(%A: tensor<?x64x32xf32>, %B: tensor<32x49xf32>) -> tensor<?x64x49xf32> {
+    %result = "onnx.MatMul"(%A, %B) : (tensor<?x64x32xf32>, tensor<32x49xf32>) -> tensor<?x64x49xf32>
+    return %result : tensor<?x64x49xf32>
+  }
+
+  // CHECK-LABEL: func.func @dynamic_a_batch_shared_b
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[A:.*]]: tensor<?x64x32xf32>, %[[B:.*]]: tensor<32x49xf32>)
+  // CHECK: %[[BATCH:.*]] = tensor.dim %[[A]], %{{.*}} : tensor<?x64x32xf32>
+  // CHECK: %[[INIT:.*]] = tensor.empty(%[[BATCH]]) : tensor<?x64x49xf32>
+  // CHECK: hip.matmul(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<?x64x32xf32>, tensor<32x49xf32>) outs(%[[INIT]] : tensor<?x64x49xf32>)
 }

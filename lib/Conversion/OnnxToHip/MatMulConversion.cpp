@@ -42,37 +42,21 @@ MatMulToHip::matchAndRewrite(mlir::Operation *op,
   if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("hipdnn.transB"))
     transB = attr.getValue().getSExtValue();
 
-  // MatMul: result[..., M, N] = A[..., M, K] @ B[..., K, N].
-  // Batch and M dims come from A; N comes from B's last dim.
-  llvm::SmallVector<mlir::Value> dynSizes;
-  const int64_t rank = resultType.getRank();
-  const auto aType = mlir::cast<mlir::RankedTensorType>(a.getType());
-  const auto bType = mlir::cast<mlir::RankedTensorType>(b.getType());
-  const int64_t aRank = aType.getRank();
-  const int64_t bRank = bType.getRank();
-  for (int64_t dimIdx : llvm::seq<int64_t>(rank)) {
-    if (!resultType.isDynamicDim(dimIdx))
-      continue;
-    if (dimIdx == rank - 1) {
-      int64_t bDim = transB ? bRank - 2 : bRank - 1;
-      dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, b, bDim));
-    } else if (dimIdx == rank - 2) {
-      int64_t aDim = transA ? aRank - 1 : aRank - 2;
-      dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, a, aDim));
-    } else {
-      dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, a, dimIdx));
-    }
-  }
-
-  mlir::Value init =
-      mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
-                                    resultType.getElementType(), dynSizes);
+  // MatMul: result[..., M, N] = A[..., M, K] @ B[..., K, N]. The destination
+  // takes its extents from the same rule as hip.matmul's result-shape
+  // reification: a batch dim comes from the operand that carries it, which is
+  // B's when A has no such dim or it is 1.
+  FailureOr<mlir::Value> init =
+      createMatmulEmptyTensor(rewriter, loc, resultType, a, b, transA, transB);
+  if (failed(init))
+    return rewriter.notifyMatchFailure(
+        op, "matmul destination does not match the operand shapes");
   llvm::SmallVector<mlir::NamedAttribute> attrs;
   attrs.push_back(
       rewriter.getNamedAttr("transA", rewriter.getI64IntegerAttr(transA)));
   attrs.push_back(
       rewriter.getNamedAttr("transB", rewriter.getI64IntegerAttr(transB)));
-  llvm::SmallVector<mlir::Value> operands = {context, a, b, init};
+  llvm::SmallVector<mlir::Value> operands = {context, a, b, *init};
   auto hipOp = mlir::hip::MatmulOp::create(rewriter, loc, operands, attrs);
   rewriter.replaceOp(op, hipOp.getResult(0));
   return mlir::success();

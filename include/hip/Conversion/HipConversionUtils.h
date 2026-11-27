@@ -34,6 +34,16 @@ FailureOr<Value> createReductionEmptyTensor(
     OpBuilder &builder, Location loc, RankedTensorType resultType, Value data,
     llvm::ArrayRef<int64_t> axes, int64_t keepdims, int64_t noopWithEmptyAxes);
 
+/// Build the tensor.empty destination of a matmul. Extents follow
+/// reifyMatmulShape, so the destination agrees with the result-shape
+/// reification: a batch dim comes from the operand that carries it (right
+/// aligned), not from A's dim at the same position. Reject conflicts with
+/// resultType, leaving the IR unchanged.
+FailureOr<Value> createMatmulEmptyTensor(OpBuilder &builder, Location loc,
+                                         RankedTensorType resultType, Value a,
+                                         Value b, int64_t transA,
+                                         int64_t transB);
+
 /// Return !hip.context from function argument 0.
 FailureOr<Value> getContextArg(Operation *op, PatternRewriter &rewriter);
 

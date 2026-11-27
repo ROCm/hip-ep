@@ -112,3 +112,45 @@ class TestMatMul:
 
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1e-3)
+
+    @staticmethod
+    def _model_b_dynamic_batch(a_shape, k, n):
+        """MatMul of a constant A and an input B whose batch dim is dynamic."""
+        tp = TensorProto.FLOAT16
+        rng = np.random.default_rng(654)
+        a = numpy_helper.from_array(
+            rng.uniform(-0.5, 0.5, a_shape).astype(np.float16), name="A"
+        )
+        B = helper.make_tensor_value_info("B", tp, ["batch", k, n])
+        Y = helper.make_tensor_value_info("Y", tp, ["batch", a_shape[-2], n])
+        model = make_model_from_nodes(
+            [helper.make_node("MatMul", ["A", "B"], ["Y"])], [B], [Y], initializers=[a]
+        )
+        return model, rng
+
+    @pytest.mark.parametrize("a_shape", [[24, 16], [1, 24, 16]], ids=["rank2", "unit"])
+    def test_matmul_b_dynamic_batch_one(self, model_runner, a_shape):
+        """A has no batch (or a unit one) and B's dynamic batch is 1 at run time.
+
+        The output must be [1, M, N]. The destination used to take its batch
+        from A's first dim, which is M for a rank-2 A.
+        """
+        model, rng = self._model_b_dynamic_batch(a_shape, 16, 8)
+        b = rng.uniform(-1, 1, [1, 16, 8]).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [b], reference="cpu")
+        assert actual[0].shape == (1, 24, 8)
+        compare_outputs(actual, expected, atol=1e-3)
+
+    @pytest.mark.parametrize("batch", [2, 3])
+    @pytest.mark.parametrize("a_shape", [[24, 16], [1, 24, 16]], ids=["rank2", "unit"])
+    def test_matmul_b_dynamic_batch_shape(self, model_runner, a_shape, batch):
+        """The output shape follows B's batch, whatever its size.
+
+        Only the shape is compared: the values of a matmul with a shared A
+        and a batch above 1 depend on the matmul lowering, not on the shape
+        of the destination.
+        """
+        model, rng = self._model_b_dynamic_batch(a_shape, 16, 8)
+        b = rng.uniform(-1, 1, [batch, 16, 8]).astype(np.float16)
+        actual, _ = model_runner.run_sample(model, [b], reference="cpu")
+        assert actual[0].shape == (batch, 24, 8)

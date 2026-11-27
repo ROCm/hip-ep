@@ -116,6 +116,40 @@ FailureOr<Value> createReductionEmptyTensor(
   return result;
 }
 
+FailureOr<Value> createMatmulEmptyTensor(OpBuilder &builder, Location loc,
+                                         RankedTensorType resultType, Value a,
+                                         Value b, int64_t transA,
+                                         int64_t transB) {
+  // As in createBroadcastEmptyTensor, build detached until the checks pass.
+  Block pending;
+  OpBuilder shapeBuilder(builder.getContext());
+  shapeBuilder.setInsertionPointToEnd(&pending);
+  FailureOr<llvm::SmallVector<OpFoldResult>> shape = reifyMatmulShape(
+      shapeBuilder, loc, a, b, transA, transB, [&] { return emitError(loc); });
+  if (failed(shape) ||
+      static_cast<int64_t>(shape->size()) != resultType.getRank())
+    return failure();
+
+  llvm::SmallVector<Value> dynSizes;
+  for (auto [extent, reified] :
+       llvm::zip_equal(resultType.getShape(), *shape)) {
+    auto constant = getConstantIntValue(reified);
+    if (constant && !ShapedType::isDynamic(extent) && extent != *constant)
+      return failure();
+    if (ShapedType::isDynamic(extent))
+      dynSizes.push_back(
+          getValueOrCreateConstantIndexOp(shapeBuilder, loc, reified));
+  }
+  Value result =
+      tensor::EmptyOp::create(shapeBuilder, loc, resultType, dynSizes);
+  while (!pending.empty()) {
+    Operation *op = &pending.front();
+    op->remove();
+    builder.insert(op);
+  }
+  return result;
+}
+
 FailureOr<Value> getContextArg(Operation *op, PatternRewriter &rewriter) {
   auto funcOp = op->getParentOfType<func::FuncOp>();
   if (!funcOp)
