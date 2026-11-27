@@ -194,6 +194,7 @@ ONNX-to-HIP tail; the others do not. The fusion design is in
 | `hip-hoist-pointwise-over-views` | func.func | Move a pointwise op whose other inputs are constant scalars above a chain of single-use element-move views over a single-use conv, matmul or gemm result, so the anchor fusion takes it into the epilogue. The anchor result may have at most 50% more elements than the op's input. |
 | `hip-rocmlir-prepare-quant` | func.func | Split each static 4-bit `hip.matmul_nbits` into unpack, blocked dequantize and `hip.matmul`, then sink each per-tensor `hip.quantize_linear` back through element-move ops to its dequantizes, replace each QLinearConv / QLinearMatMul whose channels all have a requantize multiplier below 2^-33 with a constant of its output zero point, split each QLinearConv / QLinearMatMul with ui8 weights or a non-zero weight zero point into integer ops on `w - offset` and over the shifted zero point, then rebias each ui8 tree that reaches an integer anchor to i8. |
 | `hip-fuse-rocmlir-elementwise` | func.func | Group the pointwise ops, transposes, static reshapes and per-tensor quantizes and dequantizes into `hip.rocmlir_elementwise` modules that an anchor can take whole. |
+| `hip-rocmlir-pre-fusion` | func.func | Apply the pre-fusion patterns to main_graph's top-level block, without folding. A `hip.gather` of one constant index on static float data becomes a size-1 `tensor.extract_slice` (plus a `tensor.collapse_shape` for a scalar index) when its one reader will likely run in a rocMLIR kernel: an anchor, a module next to an anchor, a module the anchor pass makes into a kernel of its own (its `outlinesAlone` test), or a fusable view with such a reader; inside a module, one op must read it. A gather with an identical sibling is skipped. |
 | `hip-fuse-rocmlir-anchor` | func.func | Plan an epilogue and a prologue of modules for each conv, matmul and gemm anchor, and outline each plan into a `rock.kernel` function (stamped with `rock.arch` from the `arch` option when set) behind `hip.rocmlir`. A module that no plan takes and that saves a launch becomes a `rock.elementwise` kernel when `standalone-elementwise` is on (the default; `HIPDNN_EP_ROCMLIR_NO_STANDALONE_ELEMENTWISE=1` turns it off in the EP), after its boundary transposes that move the innermost dimension are peeled into HIP transposes and the slice chains of its inputs are copied into it; the other modules are inlined. Decomposes the QLinear ops and dequantized convs that become integer anchors, then merges gemm-elementwise-gemm pairs. |
 | `hip-inline-rocmlir-elementwise` | func.func | Put the body of each `hip.rocmlir_elementwise` back in its block. For tests and replays. |
 | `hip-rocmlir-fusion-report` | module | Append one JSON line for each kernel and host function to the `report` file. |
@@ -205,13 +206,16 @@ to outline the op at all. `hip-hoist-pointwise-over-views` then moves the
 activation after the interleave and crop onto the convolution's result.
 `hip-rocmlir-prepare-quant` fixes the quantize trees
 before the elementwise pass groups them, and the anchor pass plans its kernels
-on those modules. The registered pipeline runs
+on those modules. `hip-rocmlir-pre-fusion` runs between the two, so its
+patterns can tell a pointwise reader inside a module from one that stays a HIP
+op. The registered pipeline runs
 
 ```
 func.func(hip-decompose-conv-transpose)
 func.func(hip-hoist-pointwise-over-views)
 func.func(hip-rocmlir-prepare-quant)
 func.func(hip-fuse-rocmlir-elementwise)
+func.func(hip-rocmlir-pre-fusion)
 func.func(hip-fuse-rocmlir-anchor)
 duplicate-function-elimination
 func.func(convert-hip-to-tosa)

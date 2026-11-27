@@ -573,6 +573,7 @@ void mlir::hip::addRocMlirFusionPasses(
   pm.addNestedPass<func::FuncOp>(createHoistPointwiseOverViewsPass());
   pm.addNestedPass<func::FuncOp>(createRocMlirPrepareQuantPass());
   pm.addNestedPass<func::FuncOp>(createFuseRocMlirElementwisePass());
+  pm.addNestedPass<func::FuncOp>(createRocMlirPreFusionPass());
   pm.addNestedPass<func::FuncOp>(createFuseRocMlirAnchorPass(fuseOptions));
   pm.addPass(func::createDuplicateFunctionEliminationPass());
   if (!reportPath.empty()) {

@@ -47,33 +47,164 @@ __global__ void gather_kernel(
   output[tid] = data[data_off];
 }
 
-// Rows of 16-byte multiples: one thread per 16-byte vector, 32-bit offsets.
-template <typename IdxT>
-__global__ void gather_rows_vec_kernel(const uint4* __restrict__ data,
-                                       const IdxT* __restrict__ indices,
-                                       uint4* __restrict__ output,
-                                       uint32_t axis_size,
-                                       uint32_t vecs_per_row,
-                                       uint32_t indices_num,
-                                       uint32_t total_vecs) {
+// Unsigned division by a launch-invariant divisor as a multiply-high plus
+// shift. Exact for dividends and divisors below 2^31.
+struct GatherFastDivmod {
+  uint32_t divisor;
+  uint32_t multiplier;
+  uint32_t shift;
+
+  static GatherFastDivmod make(uint32_t d) {
+    uint32_t s = 0;
+    while ((uint64_t(1) << s) < d)
+      ++s;
+    uint64_t m = ((uint64_t(1) << 32) * ((uint64_t(1) << s) - d)) / d + 1;
+    return {d, static_cast<uint32_t>(m), s};
+  }
+
+  __device__ uint32_t div(uint32_t n) const {
+    return (__umulhi(n, multiplier) + n) >> shift;
+  }
+};
+
+// The widest load a row allows: B bytes, a divisor of the row size and of the
+// data and output alignment.
+template <int B> struct alignas(B) GatherChunk {
+  unsigned char bytes[B];
+};
+
+// Rows of more than kSmallRowChunks chunks: one thread per B-byte chunk.
+template <int B, typename IdxT>
+__global__ void gather_row_chunks_kernel(const GatherChunk<B>* __restrict__ data,
+                                         const IdxT* __restrict__ indices,
+                                         GatherChunk<B>* __restrict__ output,
+                                         uint32_t axis_size,
+                                         GatherFastDivmod chunks_per_row,
+                                         GatherFastDivmod indices_num,
+                                         uint32_t total_chunks) {
   uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-  if (tid >= total_vecs) {
+  if (tid >= total_chunks)
     return;
-  }
-  uint32_t v = tid % vecs_per_row;
-  uint32_t row = tid / vecs_per_row;
-  uint32_t idx_off = row % indices_num;
-  uint32_t outer_off = row / indices_num;
+  uint32_t row = chunks_per_row.div(tid);
+  uint32_t chunk = tid - row * chunks_per_row.divisor;
+  uint32_t outer = indices_num.div(row);
+  uint32_t idx_off = row - outer * indices_num.divisor;
   int64_t index_val = static_cast<int64_t>(indices[idx_off]);
-  if (index_val < 0) {
+  if (index_val < 0)
     index_val += axis_size;
-  }
   if (index_val < 0 || index_val >= axis_size) {
-    output[tid] = make_uint4(0, 0, 0, 0);
+    output[tid] = GatherChunk<B>{};
     return;
   }
-  output[tid] = data[(outer_off * axis_size +
-                      static_cast<uint32_t>(index_val)) * vecs_per_row + v];
+  output[tid] = data[(outer * axis_size + static_cast<uint32_t>(index_val)) *
+                         chunks_per_row.divisor +
+                     chunk];
+}
+
+// Rows of N <= kSmallRowChunks chunks: one thread per row reads the index once
+// and copies the row.
+template <int B, int N, typename IdxT>
+__global__ void gather_small_rows_kernel(const GatherChunk<B>* __restrict__ data,
+                                         const IdxT* __restrict__ indices,
+                                         GatherChunk<B>* __restrict__ output,
+                                         uint32_t axis_size,
+                                         GatherFastDivmod indices_num,
+                                         uint32_t rows) {
+  uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
+  if (row >= rows)
+    return;
+  uint32_t outer = indices_num.div(row);
+  uint32_t idx_off = row - outer * indices_num.divisor;
+  int64_t index_val = static_cast<int64_t>(indices[idx_off]);
+  if (index_val < 0)
+    index_val += axis_size;
+  GatherChunk<B>* dst = output + static_cast<size_t>(row) * N;
+  if (index_val < 0 || index_val >= axis_size) {
+#pragma unroll
+    for (int i = 0; i < N; ++i)
+      dst[i] = GatherChunk<B>{};
+    return;
+  }
+  const GatherChunk<B>* src =
+      data + (outer * axis_size + static_cast<uint32_t>(index_val)) * N;
+#pragma unroll
+  for (int i = 0; i < N; ++i)
+    dst[i] = src[i];
+}
+
+constexpr int kGatherBlockSize = 256;
+constexpr int64_t kSmallRowChunks = 4;
+
+template <int B, typename IdxT>
+static void launch_gather_rows(hipStream_t stream, const void* data,
+                               const void* indices, void* output,
+                               uint32_t axis_size, uint32_t chunks_per_row,
+                               uint32_t indices_num, uint32_t total_chunks) {
+  GatherFastDivmod idx_div = GatherFastDivmod::make(indices_num);
+  auto src = static_cast<const GatherChunk<B>*>(data);
+  auto idx = static_cast<const IdxT*>(indices);
+  auto dst = static_cast<GatherChunk<B>*>(output);
+  if (chunks_per_row <= kSmallRowChunks) {
+    uint32_t rows = total_chunks / chunks_per_row;
+    dim3 grid((rows + kGatherBlockSize - 1) / kGatherBlockSize);
+    switch (chunks_per_row) {
+    case 1:
+      hipLaunchKernelGGL(HIP_KERNEL_NAME(gather_small_rows_kernel<B, 1, IdxT>),
+                         grid, dim3(kGatherBlockSize), 0, stream, src, idx,
+                         dst, axis_size, idx_div, rows);
+      return;
+    case 2:
+      hipLaunchKernelGGL(HIP_KERNEL_NAME(gather_small_rows_kernel<B, 2, IdxT>),
+                         grid, dim3(kGatherBlockSize), 0, stream, src, idx,
+                         dst, axis_size, idx_div, rows);
+      return;
+    case 3:
+      hipLaunchKernelGGL(HIP_KERNEL_NAME(gather_small_rows_kernel<B, 3, IdxT>),
+                         grid, dim3(kGatherBlockSize), 0, stream, src, idx,
+                         dst, axis_size, idx_div, rows);
+      return;
+    default:
+      hipLaunchKernelGGL(HIP_KERNEL_NAME(gather_small_rows_kernel<B, 4, IdxT>),
+                         grid, dim3(kGatherBlockSize), 0, stream, src, idx,
+                         dst, axis_size, idx_div, rows);
+      return;
+    }
+  }
+  dim3 grid((total_chunks + kGatherBlockSize - 1) / kGatherBlockSize);
+  hipLaunchKernelGGL(HIP_KERNEL_NAME(gather_row_chunks_kernel<B, IdxT>), grid,
+                     dim3(kGatherBlockSize), 0, stream, src, idx, dst,
+                     axis_size, GatherFastDivmod::make(chunks_per_row), idx_div,
+                     total_chunks);
+}
+
+template <typename IdxT>
+static void dispatch_gather_rows(int chunk_bytes, hipStream_t stream,
+                                 const void* data, const void* indices,
+                                 void* output, uint32_t axis_size,
+                                 uint32_t chunks_per_row, uint32_t indices_num,
+                                 uint32_t total_chunks) {
+  switch (chunk_bytes) {
+  case 16:
+    launch_gather_rows<16, IdxT>(stream, data, indices, output, axis_size,
+                                 chunks_per_row, indices_num, total_chunks);
+    break;
+  case 8:
+    launch_gather_rows<8, IdxT>(stream, data, indices, output, axis_size,
+                                chunks_per_row, indices_num, total_chunks);
+    break;
+  case 4:
+    launch_gather_rows<4, IdxT>(stream, data, indices, output, axis_size,
+                                chunks_per_row, indices_num, total_chunks);
+    break;
+  case 2:
+    launch_gather_rows<2, IdxT>(stream, data, indices, output, axis_size,
+                                chunks_per_row, indices_num, total_chunks);
+    break;
+  default:
+    launch_gather_rows<1, IdxT>(stream, data, indices, output, axis_size,
+                                chunks_per_row, indices_num, total_chunks);
+    break;
+  }
 }
 
 // Dispatch on the index element type (4 = int32, 8 = int64). The data element
@@ -158,38 +289,37 @@ extern "C" int hip_gather(
   // unrelated earlier API call as this kernel's launch failure.
   (void)hipGetLastError();
 
+  // Copy whole rows in the widest chunk the row size and both pointers allow,
+  // with 32-bit offsets when every chunk index fits. Larger tensors keep the
+  // 64-bit per-element kernel below.
   const int64_t row_bytes = inner_size * element_size_bytes;
-  const int64_t data_vecs = data_num_elements * element_size_bytes / 16;
-  const int64_t out_vecs = output_num_elements * element_size_bytes / 16;
-  if ((element_size_bytes == 2 || element_size_bytes == 4 ||
-       element_size_bytes == 8) &&
-      row_bytes % 16 == 0 &&
-      reinterpret_cast<uintptr_t>(data) % 16 == 0 &&
-      reinterpret_cast<uintptr_t>(output) % 16 == 0 &&
-      data_vecs <= static_cast<int64_t>(UINT32_MAX) &&
-      out_vecs <= static_cast<int64_t>(UINT32_MAX)) {
-    const uint32_t vecs_per_row = static_cast<uint32_t>(row_bytes / 16);
-    const uint32_t total_vecs = static_cast<uint32_t>(out_vecs);
-    const dim3 grid((total_vecs + kBlockSize - 1) / kBlockSize);
-    if (indices_element_size_bytes == 4) {
-      hipLaunchKernelGGL(HIP_KERNEL_NAME(gather_rows_vec_kernel<int32_t>),
-                         grid, dim3(kBlockSize), 0, hip_stream,
-                         static_cast<const uint4*>(data),
-                         static_cast<const int32_t*>(indices),
-                         static_cast<uint4*>(output),
-                         static_cast<uint32_t>(axis_size), vecs_per_row,
-                         static_cast<uint32_t>(indices_num_elements),
-                         total_vecs);
-    } else {
-      hipLaunchKernelGGL(HIP_KERNEL_NAME(gather_rows_vec_kernel<int64_t>),
-                         grid, dim3(kBlockSize), 0, hip_stream,
-                         static_cast<const uint4*>(data),
-                         static_cast<const int64_t*>(indices),
-                         static_cast<uint4*>(output),
-                         static_cast<uint32_t>(axis_size), vecs_per_row,
-                         static_cast<uint32_t>(indices_num_elements),
-                         total_vecs);
-    }
+  int chunk_bytes = 16;
+  while (chunk_bytes > 1 &&
+         (row_bytes % chunk_bytes != 0 ||
+          reinterpret_cast<uintptr_t>(data) % chunk_bytes != 0 ||
+          reinterpret_cast<uintptr_t>(output) % chunk_bytes != 0))
+    chunk_bytes /= 2;
+  const int64_t data_chunks = data_num_elements * element_size_bytes / chunk_bytes;
+  const int64_t out_chunks = output_num_elements * element_size_bytes / chunk_bytes;
+  constexpr int64_t kMax32 = int64_t(1) << 31;
+  if ((element_size_bytes == 1 || element_size_bytes == 2 ||
+       element_size_bytes == 4 || element_size_bytes == 8) &&
+      data_chunks < kMax32 && out_chunks < kMax32 && axis_size < kMax32 &&
+      indices_num_elements < kMax32) {
+    const uint32_t chunks_per_row =
+        static_cast<uint32_t>(row_bytes / chunk_bytes);
+    if (indices_element_size_bytes == 4)
+      dispatch_gather_rows<int32_t>(
+          chunk_bytes, hip_stream, data, indices, output,
+          static_cast<uint32_t>(axis_size), chunks_per_row,
+          static_cast<uint32_t>(indices_num_elements),
+          static_cast<uint32_t>(out_chunks));
+    else
+      dispatch_gather_rows<int64_t>(
+          chunk_bytes, hip_stream, data, indices, output,
+          static_cast<uint32_t>(axis_size), chunks_per_row,
+          static_cast<uint32_t>(indices_num_elements),
+          static_cast<uint32_t>(out_chunks));
     hipError_t err = hipGetLastError();
     if (err != hipSuccess) {
       fprintf(stderr, "[custom_kernels] hip_gather launch failed: %s\n",
