@@ -402,13 +402,13 @@ class TestQMoE:
         )
 
     @pytest.mark.parametrize("seq_len", [1, 37])
-    @pytest.mark.parametrize("top_k", [4, 8])
-    @pytest.mark.parametrize("num_experts", [64, 128, 256])
+    @pytest.mark.parametrize("top_k", [4, 8, 10])
+    @pytest.mark.parametrize("num_experts", [64, 128, 256, 512])
     def test_qmoe_many_experts(self, model_runner, num_experts, top_k, seq_len):
-        """Expert counts of gpt-oss-120b (128) and Qwen3.5-35B-A3B (256) and
-        between, at small hidden/intermediate sizes. Routing holds 2, 4 or 8
-        experts per wave lane for these counts; seq_len=1 is the fused decode
-        path, 37 the prefill path.
+        """Expert counts of gpt-oss-120b (128), Qwen3.5-35B-A3B (256) and
+        Qwen3.8-Flash-Next (512, top-10) and between, at small hidden and
+        intermediate sizes. Routing holds 2 to 16 experts per wave lane for
+        these counts; seq_len=1 is the fused decode path, 37 the prefill path.
         """
         model = _make_qmoe_model(1, seq_len, 64, 128, num_experts, top_k)
 

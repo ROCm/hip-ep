@@ -760,8 +760,8 @@ extern "C" int hip_qmoe_topk_routing(
     return -1;
   }
   (void)hipGetLastError();
-  if (num_experts <= 256 && k <= num_experts) {
-    // One 32-lane group per token, up to 8 experts per lane. With
+  if (num_experts <= 512 && k <= num_experts) {
+    // One 32-lane group per token, up to 16 experts per lane. With
     // k > num_experts the argmax would pick padding lanes, whose indices lie
     // past num_experts; the block kernel keeps every index in range.
     const auto* probs = static_cast<const __half*>(router_probs);
@@ -780,8 +780,11 @@ extern "C" int hip_qmoe_topk_routing(
     else if (num_experts <= 128)
       hipLaunchKernelGGL(HIP_KERNEL_NAME(topk_routing_wave_kernel<4>), grid,
                          block, 0, s, probs, rw, idx, w, ne, ik, nz);
-    else
+    else if (num_experts <= 256)
       hipLaunchKernelGGL(HIP_KERNEL_NAME(topk_routing_wave_kernel<8>), grid,
+                         block, 0, s, probs, rw, idx, w, ne, ik, nz);
+    else
+      hipLaunchKernelGGL(HIP_KERNEL_NAME(topk_routing_wave_kernel<16>), grid,
                          block, 0, s, probs, rw, idx, w, ne, ik, nz);
   } else {
     // One block per token, kRoutingBlock threads cooperating over experts.
@@ -2775,7 +2778,9 @@ extern "C" int hip_qmoe_decode_fused_dp4a(
   // FC2 + reduce kernel (128, 2, 32), the fastest or tied for fastest
   // in-model on the shapes measured. They skip the online tuner, which times
   // one call per sample and in-model locked FC1/FC2 configs that were slower
-  // in steady state. Multi-token calls keep the online tuner.
+  // in steady state. Multi-token calls keep the online tuner. When k is not a
+  // multiple of the 4 FC2 segments, 2 segments of a 64-thread block split the
+  // slots evenly instead (k=10: 5/5 rather than 3/3/2/2).
   const bool single = (T == 1);
 
   // FC1 + SwiGLU (dp4a). N=fusion_inter, K=hidden.
@@ -2829,7 +2834,10 @@ extern "C" int hip_qmoe_decode_fused_dp4a(
   }
 
   if (single) {
-    hipError_t e = launch_qmoe_fc2_reduce_dp4a<128, 2, 32>(
+    auto fc2 = k % 4 != 0 && k % 2 == 0
+                   ? &launch_qmoe_fc2_reduce_dp4a<64, 2, 32>
+                   : &launch_qmoe_fc2_reduce_dp4a<128, 2, 32>;
+    hipError_t e = fc2(
         s, T, static_cast<int>(k), a_qb_mid, a_scale_mid, expert_indices,
         expert_weights, fc2_weights, fc2_scales, fc2_zero_points, fc2_bias,
         output, static_cast<int>(inter_size), static_cast<int>(hidden_size),
