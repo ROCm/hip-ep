@@ -35,7 +35,7 @@ falls back to a plan that needs no workspace.
 
 ## Scalar tiles (fp32)
 
-`planSplitK` runs before the tile ladder, for shapes no tile covers on its own.
+`planSplitK` runs before the tile ladder, for grids short of two blocks per CU.
 It applies only when `M >= 32` and `K >= 2 * kSplitMinTaps`.
 
 - It tries the 128x128, 64x64, 32x128 and 32x32 tiles, widest first, skipping
@@ -46,6 +46,8 @@ It applies only when `M >= 32` and `K >= 2 * kSplitMinTaps`.
   split ends the search with no plan, so the ladder handles that shape.
 - `sliceSplit` caps the count so a slice keeps at least `kSplitMinTaps` taps and
   the partial sums fit in `kSplitMaxWorkspace`.
+- The target is looser than the ladder's (one block per unit), so some grids the
+  ladder would accept split.
 - The scalar split path runs for fp32 only. bf16 shares the tile kernels but is
   not split: no bf16 convolution can reach the runtime from a model yet, because
   the importer types bf16 as f32, so nothing could test it. A type is allowed by
@@ -58,9 +60,7 @@ fp16 has its own kernels and its own planner, `planFp16Split`, which uses the
 same `sliceSplit` arithmetic. It does not choose a tile: it splits whatever tile
 the fp16 ladder chose.
 
-- It applies only when that tile's grid is at most one block per CU, so that the
-  grid is properly starved. Above that, a split costs more in workspace traffic
-  than the parallelism returns.
+- It applies only when the tile's grid is at most one block per CU. Not swept.
 - The target is again two blocks per CU, a slice keeps at least `kSplitMinTaps`
   taps, and a chunk is a multiple of the WMMA depth (16).
 - The window kernel (stride-1, rank-2, kernel larger than 1x1) splits over input

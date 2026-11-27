@@ -1723,10 +1723,10 @@ struct SplitEnv {
 // Split-K for the WMMA kernels, applied to whatever tile the ladder chose. The
 // reduction (`total` units: taps for conv_wmma_kernel, input channels for
 // conv_window_kernel) is cut into `split` chunks of `chunk` units, a multiple of
-// `granule` (the WMMA depth), when the tile's grid is under one block per CU and
-// the reduction is long enough that each chunk keeps at least `minLen` units.
-// Above one block per CU a split costs more in workspace traffic than the extra
-// parallelism returns, so the grid has to be properly starved to qualify.
+// `granule` (the WMMA depth), when the tile's grid has at most one block per CU
+// and the reduction is long enough that each chunk keeps at least `minLen`
+// units.
+// Not swept for fp16.
 static bool planFp16Split(const ConvParams &pr, int64_t blocks, int64_t total,
                           int64_t granule, int64_t minLen, int64_t cus,
                           int &split, int64_t &chunk) {
@@ -2075,7 +2075,8 @@ struct SplitPlan {
   int64_t chunk = 0;
 };
 
-// Picks a tile and a split for a shape no tile covers on its own. Tiles are
+// Picks a tile and a split for a grid short of `target`, two blocks per CU. The
+// ladder asks one per unit, so some shapes it would accept split here. Tiles are
 // tried widest first, and the first that reaches `target` blocks wins -- a wider
 // tile does more FMAs per LDS read -- otherwise the one that gets closest.
 // Tiles more than twice as wide as the output are skipped: a 128-column tile on
@@ -2252,8 +2253,8 @@ static int launch(hipStream_t stream, const void *x, const void *w,
     }
   }
 
-  // Split-K, for the shapes no tile covers on its own. fp16 has its own
-  // kernels below and is not handled here.
+  // Split-K, for grids short of two blocks per CU. fp16 has its own kernels
+  // below.
   if constexpr (SplitKValidated<T>::value) {
     int64_t wsBytes = 0;
     const SplitPlan plan = planSplitK(pr, units * cusPerUnit(), &wsBytes);
