@@ -558,6 +558,10 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->seqlens_k_cached_valid = false;
   state->seqlens_k_cached_val = 0;
   state->seqlens_k_cached_ptr = nullptr;
+  state->seqlens_k_pinned = nullptr;
+  state->seqlens_k_pinned_valid = false;
+  state->seqlens_k_copy_issued = false;
+  state->seqlens_k_estimate = 0;
   state->sai_past_len_cached_valid = false;
   state->sai_past_len_cached_val = 0;
   state->sai_past_len_cached_ptr = nullptr;
@@ -1138,6 +1142,9 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   if (state->qmoe_amd_host_scratch) {
     HIP_CLEANUP(hipHostFree(state->qmoe_amd_host_scratch));
   }
+  if (state->seqlens_k_pinned) {
+    HIP_CLEANUP(hipHostFree(state->seqlens_k_pinned));
+  }
 
   // Free the convolution workspace pool (if allocated). The stream
   // sync above has drained any in-flight conv that may still be reading it.
@@ -1451,6 +1458,7 @@ extern "C"
   }
   state->seqlens_k_cached_valid = false;
   state->seqlens_k_cached_ptr = nullptr;
+  state->seqlens_k_copy_issued = false;
   state->sai_past_len_cached_valid = false;
   state->sai_past_len_cached_ptr = nullptr;
   // Publish the session stream for ABI-fixed helpers (memrefCopy) that run

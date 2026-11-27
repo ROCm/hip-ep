@@ -296,6 +296,17 @@ struct RuntimeState {
   int32_t seqlens_k_cached_val;
   const void *seqlens_k_cached_ptr;
 
+  // Decode length used only to pick the flash-decode launch config when the
+  // kernels read the exact length from seqlens_k on the device (in-place KV
+  // cache). Each Compute enqueues an async copy of seqlens_k into the pinned
+  // seqlens_k_pinned; the next Compute, which starts after the previous one's
+  // stream synchronize, uses that value + 1. No step waits on the stream.
+  int32_t *seqlens_k_pinned;   // hipHostMalloc'd on first use, freed in cleanup
+  bool seqlens_k_pinned_valid; // holds a completed copy or a host write
+  bool seqlens_k_copy_issued;  // this Compute's copy is enqueued; reset with
+                               // the cache above
+  int32_t seqlens_k_estimate;  // this Compute's length estimate
+
   // SparseAttentionIndexer past_sequence_length, same lifetime as above.
   bool sai_past_len_cached_valid;
   int32_t sai_past_len_cached_val;
