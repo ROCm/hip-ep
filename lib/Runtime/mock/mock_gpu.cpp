@@ -2180,6 +2180,30 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   return 0;
 }
 
+int wrap_qmoe_offload(RuntimeState *state, const void *, const void *,
+                      const void *, int64_t fc1_weights, int64_t fc1_scales,
+                      int64_t fc1_bias, int64_t fc2_weights, int64_t fc2_scales,
+                      int64_t fc2_bias, const void *, const void *,
+                      const void *, const void *, const void *, const void *,
+                      void *, int64_t num_tokens, int64_t, int64_t,
+                      int64_t num_experts, int64_t k, int64_t, int64_t, int64_t,
+                      int64_t, float, float, float, int64_t, int64_t,
+                      const void *, int64_t, float, float, int64_t node,
+                      int64_t num_nodes) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_qmoe_offload\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_qmoe_offload(node=%lld/%lld, num_tokens=%lld, "
+             "num_experts=%lld, k=%lld, constants=%lld,%lld,%lld,%lld,%lld,"
+             "%lld)\n",
+             (long long)node, (long long)num_nodes, (long long)num_tokens,
+             (long long)num_experts, (long long)k, (long long)fc1_weights,
+             (long long)fc1_scales, (long long)fc1_bias, (long long)fc2_weights,
+             (long long)fc2_scales, (long long)fc2_bias);
+  return 0;
+}
+
 // com.amd::QMoE (LatentMoE) mock stub. Independent pipeline from wrap_qmoe
 // above -- see lib/Runtime/real/qmoe_amd.cpp for the real implementation.
 // Just logs and zero-fills the output.

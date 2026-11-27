@@ -1009,6 +1009,12 @@ def ResolveExternConstantsPass
     via morphizen::FileSystem, uploading constants to GPU memory, and
     returning GPU pointers via hipdnn_ep_constant_get(state, index).
 
+    A `disk_resident` global becomes a hip.get_constant carrying
+    `hip.disk_resident`; its uses must be hip.gather / hip.gather_block_quantized
+    data or hip.qmoe expert operands. Each hip.qmoe whose fc1 weights are
+    disk-resident gets `hip.expert_offload_node = array<i64: node, num_nodes>`,
+    numbered in module walk order.
+
     This pass should run after all buffer optimizations (hip-pool-allocs,
     hip-lower-allocs) and before --convert-hip-to-llvm.
   }];
@@ -1043,6 +1049,12 @@ def ExternalizeConstantsPass
     `hip.gather_block_quantized` gets a `disk_resident` unit entry in its
     `hip.external_data`, takes no range in the GPU constants layout, and is
     recorded with source kind `DiskFile`.
+
+    With `skip-constant-data`, unless `HIPDNN_EP_QMOE_EXPERT_OFFLOAD=0`, the
+    same applies to the fc1 / fc2 weights, scales, and bias of a `hip.qmoe`
+    that has no zero points, when each of them is a file-backed carrier used
+    only by that `hip.qmoe` as expert data. A `hip.qmoe` gets all of them
+    disk-resident or none.
 
     This pass preserves full-sidecar, streaming, and hybrid skip-data behavior.
     It must run after all constant producers and shape inference, and before

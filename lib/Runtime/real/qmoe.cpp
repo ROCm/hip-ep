@@ -7,6 +7,7 @@
 #include "../op_profile.h"
 #include "error_check_macros.h"
 #include "hip_custom_kernels.h"
+#include "qmoe_expert_cache.h"
 #include "runtime_types.h"
 #include "zp_unpack_cache.h"
 
@@ -31,6 +32,34 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
               int64_t normalize_routing_weights, int64_t elem_size,
               const void *correction_bias, int64_t routing_type,
               float routed_scaling_factor, float routing_norm_eps) {
+  return hipdnn_ep_qmoe_run(
+      state, input, router_probs, router_weights, fc1_weights, fc1_scales,
+      fc1_bias, fc2_weights, fc2_scales, fc2_bias, fc3_weights, fc3_scales,
+      fc3_bias, fc1_zero_points, fc2_zero_points, fc3_zero_points, output,
+      num_tokens, hidden_size, inter_size, num_experts, k, expert_weight_bits,
+      block_size, swiglu_fusion, activation_type, activation_alpha,
+      activation_beta, swiglu_limit, normalize_routing_weights, elem_size,
+      correction_bias, routing_type, routed_scaling_factor, routing_norm_eps,
+      nullptr);
+}
+
+int hipdnn_ep_qmoe_run(RuntimeState *state, const void *input,
+                       const void *router_probs, const void *router_weights,
+                       const void *fc1_weights, const void *fc1_scales,
+                       const void *fc1_bias, const void *fc2_weights,
+                       const void *fc2_scales, const void *fc2_bias,
+                       const void *fc3_weights, const void *fc3_scales,
+                       const void *fc3_bias, const void *fc1_zero_points,
+                       const void *fc2_zero_points, const void *fc3_zero_points,
+                       void *output, int64_t num_tokens, int64_t hidden_size,
+                       int64_t inter_size, int64_t num_experts, int64_t k,
+                       int64_t expert_weight_bits, int64_t block_size,
+                       int64_t swiglu_fusion, int64_t activation_type,
+                       float activation_alpha, float activation_beta,
+                       float swiglu_limit, int64_t normalize_routing_weights,
+                       int64_t elem_size, const void *correction_bias,
+                       int64_t routing_type, float routed_scaling_factor,
+                       float routing_norm_eps, const QMoEExpertHook *hook) {
   OP_PROFILE(
       "qmoe",
       [&] {
@@ -100,6 +129,18 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
             (long long)inter_size, (long long)num_experts, (long long)k,
             (long long)elem_size);
     return -1;
+  }
+
+  // Routing picks among the model's experts; everything after it indexes the
+  // hook's slot rows instead.
+  const int64_t routing_experts = num_experts;
+  if (hook) {
+    if (fc1_zero_points || fc2_zero_points || hook->num_slots < num_experts) {
+      fprintf(stderr, "wrap_qmoe: expert offload needs no zero points and at "
+                      "least num_experts slots\n");
+      return -1;
+    }
+    num_experts = hook->num_slots;
   }
 
   void *stream = hipdnn_ep_state_get_stream(state);
@@ -273,7 +314,14 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   size_t off_tile_lists = off_a_scale_mid + sz_a_scale_mid;
   size_t off_num_tiles = off_tile_lists + sz_tile_lists;
   size_t off_row_scale = off_num_tiles + sz_num_tiles;
-  size_t total_scratch = off_row_scale + sz_row_scale;
+  // Routed expert ids kept for the prefill reduce's order once the hook has
+  // rewritten d_expert_indices to slot rows.
+  const bool fused_decode =
+      num_tokens <= hipdnn_ep_qmoe_fused_max_tokens() && swiglu;
+  size_t sz_order_ids =
+      hook && !fused_decode ? align_up_64(routed_rows * sizeof(int32_t)) : 0;
+  size_t off_order_ids = off_row_scale + sz_row_scale;
+  size_t total_scratch = off_order_ids + sz_order_ids;
 
   if (hipdnn_ep_state_ensure_qmoe_scratch(state, total_scratch) != 0) {
     fprintf(stderr, "wrap_qmoe: ensure_qmoe_scratch(%zu) failed\n",
@@ -315,25 +363,42 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
       reinterpret_cast<int32_t *>(scratch_base + off_num_tiles);
   // relu2 activations are stored unscaled, so only SwiGLU has row scales.
   void *d_row_scale = swiglu ? scratch_base + off_row_scale : nullptr;
+  void *d_order_ids = sz_order_ids ? scratch_base + off_order_ids : nullptr;
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: %s routing(tokens=%lld, experts=%lld, "
                     "k=%lld, normalize=%lld, router_weights=%s)\n",
                     sigmoid_bias ? "sigmoid_bias" : "topk",
-                    (long long)num_tokens, (long long)num_experts, (long long)k,
-                    (long long)normalize_routing_weights,
+                    (long long)num_tokens, (long long)routing_experts,
+                    (long long)k, (long long)normalize_routing_weights,
                     router_weights ? "yes" : "no");
   if (sigmoid_bias) {
     OP_ROCTX_MARK("hip_ep.op.qmoe.route.sigmoid_bias");
     HIP_CHECK(hip_qmoe_sigmoid_bias_routing(
         stream, router_probs, correction_bias, d_expert_indices,
-        d_expert_weights, num_tokens, num_experts, k, normalize_routing_weights,
-        routed_scaling_factor, routing_norm_eps, elem_size));
+        d_expert_weights, num_tokens, routing_experts, k,
+        normalize_routing_weights, routed_scaling_factor, routing_norm_eps,
+        elem_size));
   } else {
     OP_ROCTX_MARK("hip_ep.op.qmoe.route.topk");
     HIP_CHECK(hip_qmoe_topk_routing(stream, router_probs, router_weights,
                                     d_expert_indices, d_expert_weights,
-                                    num_tokens, num_experts, k,
+                                    num_tokens, routing_experts, k,
                                     normalize_routing_weights, elem_size));
+  }
+
+  if (hook) {
+    const void *pools[6] = {};
+    if (hook->prepare(hook->ctx, d_expert_indices, d_order_ids, num_tokens, k,
+                      pools) != 0) {
+      fprintf(stderr, "wrap_qmoe: expert offload prepare failed\n");
+      return -1;
+    }
+    fc1_weights = pools[0];
+    fc1_scales = pools[1];
+    fc1_bias = pools[2];
+    fc2_weights = pools[3];
+    fc2_scales = pools[4];
+    fc2_bias = pools[5];
   }
 
   // Fused path: one token's MoE collapses to three back-to-back kernel
@@ -546,7 +611,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                            hidden_size, inter_size));
       OP_ROCTX_MARK("hip_ep.op.qmoe.prefill.reduce");
       HIP_CHECK(hip_qmoe_reduce_sorted_pairs(
-          stream, d_fc2_buf, d_pair_to_sorted, d_expert_indices,
+          stream, d_fc2_buf, d_pair_to_sorted, d_expert_indices, d_order_ids,
           d_expert_weights, d_row_scale, fc2_reduce_bias, output, num_tokens,
           hidden_size, k, elem_size));
       return 0;
@@ -570,9 +635,9 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
 
     OP_ROCTX_MARK("hip_ep.op.qmoe.prefill.reduce");
     HIP_CHECK(hip_qmoe_reduce_sorted_pairs(
-        stream, d_fc2_buf, d_pair_to_sorted, d_expert_indices, d_expert_weights,
-        d_row_scale, fc2_reduce_bias, output, num_tokens, hidden_size, k,
-        elem_size));
+        stream, d_fc2_buf, d_pair_to_sorted, d_expert_indices, d_order_ids,
+        d_expert_weights, d_row_scale, fc2_reduce_bias, output, num_tokens,
+        hidden_size, k, elem_size));
     return 0;
   }
 

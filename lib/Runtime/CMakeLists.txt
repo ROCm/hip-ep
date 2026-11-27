@@ -342,6 +342,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/matmul_nbits.cpp runtime_matmul_nbits.bc)
     compile_to_bitcode(real/dequant_bnb4.cpp runtime_dequant_bnb4.bc)
     compile_to_bitcode(real/qmoe.cpp runtime_qmoe.bc)
+    compile_to_bitcode(real/qmoe_expert_cache.cpp runtime_qmoe_expert_cache.bc)
     compile_to_bitcode(real/qmoe_amd.cpp runtime_qmoe_amd.bc)
     compile_to_bitcode(real/gather_block_quantized.cpp runtime_gather_block_quantized.bc)
     compile_to_bitcode(real/qdq.cpp runtime_qdq.bc)
@@ -453,6 +454,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_matmul_nbits.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_dequant_bnb4.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qmoe.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_qmoe_expert_cache.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qmoe_amd.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_causal_conv_with_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/test_hip_from_dll.bc

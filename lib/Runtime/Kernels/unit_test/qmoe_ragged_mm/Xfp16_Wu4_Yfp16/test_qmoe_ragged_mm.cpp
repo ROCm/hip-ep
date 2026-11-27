@@ -1592,7 +1592,7 @@ bool run_reduce_scaled_case(hipStream_t stream, int width) {
   upload(d_bias, bias);
   const int status = hip_qmoe_reduce_sorted_pairs(
       reinterpret_cast<void*>(stream), d_sorted.get(), d_pair_to_sorted.get(),
-      d_indices.get(), d_weights.get(), d_scale.get(), d_bias.get(),
+      d_indices.get(), nullptr, d_weights.get(), d_scale.get(), d_bias.get(),
       d_output.get(), tokens, width, top_k, sizeof(__half));
   if (status != static_cast<int>(hipSuccess)) return false;
   HIP_CHECK(hipStreamSynchronize(stream));
@@ -1817,7 +1817,8 @@ bool run_pipeline_case(hipStream_t stream) {
     if (status != static_cast<int>(hipSuccess)) return false;
     status = hip_qmoe_reduce_sorted_pairs(
         reinterpret_cast<void*>(stream), d_fc2_output.get(),
-        d_pair_to_sorted.get(), d_expert_indices.get(), d_expert_weights.get(),
+        d_pair_to_sorted.get(), d_expert_indices.get(), nullptr,
+        d_expert_weights.get(),
         d_row_scale.get(), d_fc2_bias.get(), d_output.get(), tokens, hidden,
         top_k, sizeof(__half));
     if (status != static_cast<int>(hipSuccess)) return false;

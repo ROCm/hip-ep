@@ -379,6 +379,12 @@ struct RuntimeState {
   // constants blob so the weights keep placement priority over it; null when
   // the session runs without an arena.
   void *transient_arena;
+
+  // QMoE expert slot cache (real/qmoe_expert_cache.cpp), created by the first
+  // wrap_qmoe_offload. Cleanup calls the destroy hook it installs, before the
+  // disk-resident views go away.
+  void *qmoe_expert_cache;
+  void (*qmoe_expert_cache_destroy)(RuntimeState *state);
 };
 
 // Every session-owned device transient (pools, workspace, op scratch) must be

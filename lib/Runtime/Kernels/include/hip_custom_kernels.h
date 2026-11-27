@@ -3423,13 +3423,17 @@ HIP_KERNEL_API int hip_qmoe_ragged_matmul_nbits_get_task_kind(
  * [sorted rows], may be null) multiplies each sorted row's contribution; it is
  * the buffer hip_qmoe_swiglu filled for that row's fc2 input. fc2_bias (fp16
  * [num_experts, width], may be null) is added to each contribution after the
- * row scale, so the fc2 GEMM must not also add it.
+ * row scale, so the fc2 GEMM must not also add it. order_ids (int32
+ * [num_tokens, k], may be null) replaces expert_indices as the ordering key
+ * when expert_indices hold remapped rows; fc2_bias is still indexed by
+ * expert_indices.
  */
 HIP_KERNEL_API int hip_qmoe_reduce_sorted_pairs(
     void* stream,
     const void* sorted_expert_output,
     const void* pair_to_sorted,
     const void* expert_indices,
+    const void* order_ids,
     const void* expert_weights,
     const void* row_scale,
     const void* fc2_bias,

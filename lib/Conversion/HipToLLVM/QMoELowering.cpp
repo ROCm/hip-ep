@@ -5,6 +5,8 @@
 
 #include "HipToLLVMUtils.h"
 
+#include "mlir/IR/Matchers.h"
+
 namespace mlir {
 namespace hip {
 namespace {
@@ -136,7 +138,40 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
                                               ? kQMoERoutingSigmoidBias
                                               : kQMoERoutingSoftmax);
 
-    SmallVector<Type, 35> paramTypes = {
+    Value expertOperands[] = {
+        op.getFc1ExpertsWeights(), op.getFc1Scales(), op.getFc1ExpertsBias(),
+        op.getFc2ExpertsWeights(), op.getFc2Scales(), op.getFc2ExpertsBias()};
+    SmallVector<int64_t, 6> diskIndices;
+    int numPresent = 0;
+    int numDisk = 0;
+    for (Value operand : expertOperands) {
+      int64_t diskIndex = -1;
+      if (operand) {
+        ++numPresent;
+        auto getConst = operand.getDefiningOp<GetConstantOp>();
+        if (getConst && getConst->hasAttr("hip.disk_resident")) {
+          llvm::APInt index;
+          if (!matchPattern(getConst.getIndex(), m_ConstantInt(&index))) {
+            return op.emitOpError(
+                "disk-resident expert constant index is not a constant");
+          }
+          diskIndex = index.getSExtValue();
+          ++numDisk;
+        }
+      }
+      diskIndices.push_back(diskIndex);
+    }
+    const bool offload = numDisk != 0;
+    auto offloadNode =
+        op->getAttrOfType<DenseI64ArrayAttr>("hip.expert_offload_node");
+    if (offload &&
+        (numDisk != numPresent || !offloadNode || offloadNode.size() != 2)) {
+      return op.emitOpError("expert offload needs every fc1/fc2 weight, scale, "
+                            "and bias disk-resident and a "
+                            "hip.expert_offload_node attribute");
+    }
+
+    SmallVector<Type, 37> paramTypes = {
         ptrType, // state
         ptrType, // input
         ptrType, // router_probs
@@ -174,13 +209,22 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
         f32Type  // routing_norm_eps
     };
 
+    if (offload) {
+      for (size_t i = 0; i < diskIndices.size(); ++i) {
+        paramTypes[4 + i] = i64Type;
+      }
+      paramTypes.push_back(i64Type); // offload node
+      paramTypes.push_back(i64Type); // offload num_nodes
+    }
+
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kWrapQMoE, paramTypes, i32Type);
+        rewriter, module, offload ? kWrapQMoEOffload : kWrapQMoE, paramTypes,
+        i32Type);
     if (failed(funcOp)) {
       return failure();
     }
 
-    SmallVector<Value, 35> args = {statePtr,
+    SmallVector<Value, 37> args = {statePtr,
                                    inputPtr,
                                    routerPtr,
                                    routerWeightsPtr,
@@ -215,6 +259,13 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
                                    routingTypeVal,
                                    routedScaleVal,
                                    routingNormEpsVal};
+    if (offload) {
+      for (size_t i = 0; i < diskIndices.size(); ++i) {
+        args[4 + i] = createI64Const(diskIndices[i]);
+      }
+      args.push_back(createI64Const(offloadNode[0]));
+      args.push_back(createI64Const(offloadNode[1]));
+    }
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
