@@ -818,6 +818,38 @@ static bool isContiguousAtBase(MemRefType type) {
   return true;
 }
 
+LogicalResult WinogradConvOp::verify() {
+  auto shaped = [](Value v) { return cast<ShapedType>(v.getType()); };
+  ShapedType input = shaped(getInput()), weights = shaped(getWeights()),
+             output = shaped(getOutput());
+  if (!input.hasStaticShape() || !weights.hasStaticShape() ||
+      !output.hasStaticShape())
+    return emitOpError("requires static shapes");
+  if (input.getRank() != 4 || weights.getRank() != 4 || output.getRank() != 4)
+    return emitOpError("requires rank-4 input, weights and output");
+  if (!input.getElementType().isF16() || !weights.getElementType().isF16() ||
+      !output.getElementType().isF16())
+    return emitOpError("requires f16 input, weights and output");
+  ArrayRef<int64_t> x = input.getShape(), w = weights.getShape(),
+                    y = output.getShape();
+  if (w[2] != 3 || w[3] != 3)
+    return emitOpError("requires a 3x3 filter");
+  if (w[1] != x[1] || y[0] != x[0] || y[1] != w[0] || y[2] != x[2] ||
+      y[3] != x[3])
+    return emitOpError("requires output [N, K, H, W] for input [N, C, H, W] "
+                       "and weights [K, C, 3, 3]");
+  if (Value bias = getBias()) {
+    ShapedType b = shaped(bias);
+    if (!b.hasStaticShape() || b.getRank() != 1 || b.getDimSize(0) != w[0] ||
+        !b.getElementType().isF16())
+      return emitOpError("requires an f16 bias of shape [K]");
+  }
+  StringRef act = getActivation();
+  if (act != "none" && act != "relu" && act != "leaky_relu")
+    return emitOpError("activation must be none, relu or leaky_relu");
+  return success();
+}
+
 LogicalResult RocMlirOp::verify() {
   if (getOutputs().empty())
     return emitOpError("requires at least one outs operand");
@@ -927,6 +959,20 @@ MutableOperandRange ConvTransposeOp::getDpsInitsMutable() {
 }
 
 void ConvTransposeOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// WinogradConvOp: ins(input, weights, bias), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange WinogradConvOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void WinogradConvOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);

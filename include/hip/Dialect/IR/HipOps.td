@@ -823,6 +823,70 @@ def Hip_ConvTransposeOp : Hip_DpsOp_AutoReify<
   }];
 }
 
+def Hip_WinogradConvOp : Hip_DpsOp_AutoReify<
+    "winograd_conv", /*traits=*/[OpStateOpInterface]> {
+  let summary = "fp16 3x3 conv as one fused Winograd F(2x2, 3x3) kernel";
+  let description = [{
+    A 2D fp16 convolution with a 3x3 filter, stride 1, dilation 1, padding 1
+    on every side and group 1, NCHW, computed by one fused Winograd F(2x2,
+    3x3) kernel (input transform, WMMA products, output transform). The
+    optional per-channel bias and the activation run inside the kernel, after
+    the conv.
+
+    `hip-winograd-conv` creates the op from a `hip.conv` and the activation
+    that follows it. The compiler then builds the kernel for this shape and
+    epilogue and stores it in `kernel_binary`, `kernel_name`, `grid_size` and
+    `block_size`; `full_transform` records which filter store that kernel
+    reads. The runtime builds that store from `weights` once per op state.
+
+    Attributes:
+    - activation: "none", "relu" or "leaky_relu"
+    - alpha: the LeakyRelu slope (unused otherwise)
+
+    Example:
+    ```mlir
+    hip.winograd_conv(%ctx) ins(%x, %w, %b : memref<1x64x72x84xf16>,
+                                memref<64x64x3x3xf16>, memref<64xf16>)
+                        outs(%y : memref<1x64x72x84xf16>)
+                        {activation = "leaky_relu", alpha = 0.1 : f64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$weights,
+    Optional<Hip_TensorOrMemRef>:$bias,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<StrAttr, "\"none\"">:$activation,
+    DefaultValuedAttr<F64Attr, "0.0">:$alpha,
+    DefaultValuedAttr<StrAttr, "\"\"">:$kernel_name,
+    DefaultValuedAttr<StrAttr, "\"\"">:$kernel_binary,
+    DefaultValuedAttr<I64Attr, "0">:$grid_size,
+    DefaultValuedAttr<I64Attr, "0">:$block_size,
+    DefaultValuedAttr<BoolAttr, "false">:$full_transform
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $weights (`,` $bias^)? `:`
+    type($input) `,` type($weights) (`,` type($bias)^)? `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^ )?
+  }];
+
+  let hasVerifier = 1;
+
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+                                      ::mlir::Location loc,
+                                      ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(
+          builder, loc, statePtr, slot,
+          "hipdnn_ep_op_state_construct_winograd_conv", {});
+    }
+  }];
+}
+
 // ===== hipBLASLt ops =========================================================
 
 // Matmul reifies shapes from input dimensions in HipReifyResultShapesImpl.cpp.

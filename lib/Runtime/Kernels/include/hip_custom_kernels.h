@@ -1220,6 +1220,14 @@ HIP_KERNEL_API int hip_gqa_softmax_inplace(
  * equal `output`. Used by the standalone `hip_softmax_typed` runtime entry
  * point, which is destination-passing and would otherwise have to copy its
  * input over its output before running an in-place kernel. */
+/* Rewrite a [K, C, 3, 3] fp16 conv filter into the Winograd F(2x2, 3x3) store
+ * that the generated Winograd conv kernel reads, C innermost: T = G g as
+ * [4, 3, K, C] (full_transform = 0) or the raw g as [3, 3, K, C]
+ * (full_transform = 1). `store` holds (full_transform ? 9 : 12) * K * C
+ * halves. Returns the launch status. */
+HIP_KERNEL_API int hip_winograd_f23_weight_transform_f16(void* stream, const void* weights, void* store,
+                                                         int64_t K, int64_t C, int full_transform);
+
 HIP_KERNEL_API int hip_softmax_row_2d(void* stream, const void* input, void* output, int rows, int cols);
 
 /* fp32 and bf16 variants of the above, with the same contract. All three

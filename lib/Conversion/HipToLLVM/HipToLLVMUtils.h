@@ -65,6 +65,7 @@ inline constexpr const char *kWrapConvTranspose = "wrap_conv_transpose";
 inline constexpr const char *kWrapHipblasltMatmul = "wrap_hipblasLtMatmul";
 inline constexpr const char *kWrapMatmulI32 = "wrap_matmul_i32";
 inline constexpr const char *kWrapRocMlir = "wrap_rocmlir";
+inline constexpr const char *kWrapWinogradConv = "wrap_winograd_conv";
 inline constexpr const char *kWrapRocMlirPrefill = "wrap_rocmlir_prefill";
 inline constexpr const char *kWrapRmsNorm = "wrap_rms_norm";
 inline constexpr const char *kWrapSkipSimplifiedLayerNorm =
@@ -488,6 +489,8 @@ void populateMatmulLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns);
 void populateRocMlirLoweringPatterns(const LLVMTypeConverter &converter,
                                      RewritePatternSet &patterns);
+void populateWinogradConvLoweringPatterns(const LLVMTypeConverter &converter,
+                                          RewritePatternSet &patterns);
 void populateElementwiseLoweringPatterns(const LLVMTypeConverter &converter,
                                          RewritePatternSet &patterns);
 void populatePowerLoweringPatterns(const LLVMTypeConverter &converter,

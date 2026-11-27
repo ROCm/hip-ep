@@ -1445,6 +1445,80 @@ void RocMlirAutotuner::installInto(RocMlirEmbedOptions &opts) {
   opts.finishCompiles = state->finishFn;
 }
 
+std::optional<double> benchmarkKernel(StringRef binary, StringRef func,
+                                      unsigned grid, unsigned block,
+                                      ArrayRef<size_t> bufferBytes,
+                                      unsigned runs) {
+  const HipRuntime &fns = hipRuntime();
+  if (!fns.complete || runs == 0)
+    return std::nullopt;
+  int device = 0;
+  if (fns.hipGetDevice(&device) != hipSuccess)
+    return std::nullopt;
+  hipStream_t stream = nullptr;
+  hipModule_t module = nullptr;
+  std::vector<void *> buffers;
+  std::vector<hipEvent_t> events;
+  llvm::scope_exit cleanup([&] {
+    for (hipEvent_t e : events)
+      (void)fns.hipEventDestroy(e);
+    for (void *b : buffers)
+      (void)fns.hipFree(b);
+    if (module)
+      (void)fns.hipModuleUnload(module);
+    if (stream)
+      (void)fns.hipStreamDestroy(stream);
+    (void)fns.hipGetLastError();
+  });
+  if (fns.hipStreamCreate(&stream) != hipSuccess)
+    return std::nullopt;
+  for (size_t bytes : bufferBytes) {
+    void *b = nullptr;
+    if (fns.hipMalloc(&b, bytes) != hipSuccess)
+      return std::nullopt;
+    buffers.push_back(b);
+    if (fns.hipMemsetAsync(b, 0, bytes, stream) != hipSuccess)
+      return std::nullopt;
+  }
+  std::string code = binary.str();
+  std::string name = func.str();
+  hipFunction_t function = nullptr;
+  if (fns.hipModuleLoadData(&module, code.data()) != hipSuccess ||
+      fns.hipModuleGetFunction(&function, module, name.c_str()) != hipSuccess)
+    return std::nullopt;
+  size_t argBytes = buffers.size() * sizeof(void *);
+  void *config[] = {HIP_LAUNCH_PARAM_BUFFER_POINTER, buffers.data(),
+                    HIP_LAUNCH_PARAM_BUFFER_SIZE, &argBytes,
+                    HIP_LAUNCH_PARAM_END};
+  auto launch = [&] {
+    return fns.hipModuleLaunchKernel(function, grid, 1, 1, block, 1, 1, 0,
+                                     stream, nullptr, config) == hipSuccess;
+  };
+  for (unsigned i = 0; i < 3; ++i)
+    if (!launch())
+      return std::nullopt;
+  events.resize(2 * runs, nullptr);
+  for (hipEvent_t &e : events)
+    if (fns.hipEventCreate(&e) != hipSuccess)
+      return std::nullopt;
+  for (unsigned i = 0; i < runs; ++i)
+    if (fns.hipEventRecord(events[2 * i], stream) != hipSuccess || !launch() ||
+        fns.hipEventRecord(events[2 * i + 1], stream) != hipSuccess)
+      return std::nullopt;
+  if (fns.hipStreamSynchronize(stream) != hipSuccess)
+    return std::nullopt;
+  std::vector<double> samples;
+  for (unsigned i = 0; i < runs; ++i) {
+    float ms = 0.0f;
+    if (fns.hipEventElapsedTime(&ms, events[2 * i], events[2 * i + 1]) !=
+        hipSuccess)
+      return std::nullopt;
+    samples.push_back(ms);
+  }
+  llvm::sort(samples);
+  return samples[samples.size() / 2];
+}
+
 #else // no HIP runtime to benchmark against
 
 struct RocMlirAutotuner::Impl {
@@ -1460,6 +1534,11 @@ const AutotunePhaseTimes &RocMlirAutotuner::phaseTimes() const {
 }
 bool RocMlirAutotuner::dumpProblemCache(StringRef) const { return false; }
 void RocMlirAutotuner::installInto(RocMlirEmbedOptions &) {}
+
+std::optional<double> benchmarkKernel(StringRef, StringRef, unsigned, unsigned,
+                                      ArrayRef<size_t>, unsigned) {
+  return std::nullopt;
+}
 
 #endif
 
