@@ -138,7 +138,7 @@ void ResolveExternConstantsPass::runOnOperation() {
       auto getConstOp = hip::GetConstantOp::create(builder, loc, origMemRefType,
                                                    ctxArg, indexVal);
       if (info.diskResident) {
-        auto isGatherData = [](OpOperand &use) {
+        auto isDiskData = [](OpOperand &use) {
           Operation *user = use.getOwner();
           if (auto gather = dyn_cast<hip::GatherOp>(user)) {
             return use.getOperandNumber() ==
@@ -148,13 +148,17 @@ void ResolveExternConstantsPass::runOnOperation() {
             return use.getOperandNumber() ==
                    gbq.getDataMutable().getOperandNumber();
           }
+          if (auto qmoe = dyn_cast<hip::QMoEOp>(user)) {
+            return qmoe.isExpertOperand(use);
+          }
           return false;
         };
         for (OpOperand &use : getGlobalOp.getResult().getUses()) {
-          if (!isGatherData(use)) {
+          if (!isDiskData(use)) {
             use.getOwner()->emitError(
                 "disk-resident constant has no GPU copy; only hip.gather / "
-                "hip.gather_block_quantized data may use it");
+                "hip.gather_block_quantized data and hip.qmoe expert operands "
+                "may use it");
             return signalPassFailure();
           }
         }
@@ -165,6 +169,22 @@ void ResolveExternConstantsPass::runOnOperation() {
       getGlobalOp.erase();
       ++NumGlobalsResolved;
     }
+  }
+
+  SmallVector<hip::QMoEOp> offloaded;
+  module.walk([&](hip::QMoEOp qmoe) {
+    auto source =
+        qmoe.getFc1ExpertsWeights().getDefiningOp<hip::GetConstantOp>();
+    if (source && source->hasAttr("hip.disk_resident")) {
+      offloaded.push_back(qmoe);
+    }
+  });
+  for (auto [node, qmoe] : llvm::enumerate(offloaded)) {
+    qmoe->setAttr(
+        "hip.expert_offload_node",
+        DenseI64ArrayAttr::get(module.getContext(),
+                               {static_cast<int64_t>(node),
+                                static_cast<int64_t>(offloaded.size())}));
   }
 
   // Clean up -- erase extern globals and strip module attribute.

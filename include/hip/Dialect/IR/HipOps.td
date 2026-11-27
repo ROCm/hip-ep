@@ -1146,6 +1146,12 @@ def Hip_QMoEOp : Hip_DpsOp_WithInfer<"qmoe", "Output", [AttrSizedOperandSegments
   );
   let hasVerifier = 1;
 
+  let extraClassDeclaration = [{
+    /// True for the fc1 / fc2 weights, scales, and bias operands, whose
+    /// leading dimension indexes the expert.
+    bool isExpertOperand(::mlir::OpOperand &operand);
+  }];
+
   let assemblyFormat = [{
     `(` $handle `)` `ins` `(`
         $input `,` $router_probs `,`

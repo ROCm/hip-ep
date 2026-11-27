@@ -22,6 +22,7 @@
 #include "hip/Dialect/Transforms/Passes.h"
 #include "hip/Support/ConstantsIO.h"
 #include "hip/Support/DiskFileSystem.h"
+#include "hip/debug_log.h"
 #include "morphizen-foundation/file_io.hpp"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -309,6 +310,7 @@ public:
         collectOrderedCarriers(module);
     if (failed(constants))
       return failure();
+    collectOffloadedQMoEExperts();
 
     llvm::StringSet<> plannedSymbols;
     int64_t currentOffset = 0;
@@ -375,7 +377,8 @@ private:
       return failure();
     }
 
-    plan.diskResident = isDiskResidentGatherTable(plan);
+    plan.diskResident = isDiskResidentGatherTable(plan) ||
+                        offloadedQMoEExperts.contains(op.getOperation());
     if (plan.externalize &&
         failed(assignExternalStorage(plan, currentOffset, plannedSymbols)))
       return failure();
@@ -423,6 +426,37 @@ private:
     }
     return plan.numElements * elementsPerStored >=
            kMinDiskResidentGatherElements;
+  }
+
+  // A QMoE offloads all of its expert operands or none of them.
+  void collectOffloadedQMoEExperts() {
+    if (!skipData || minElements <= 0 ||
+        hip_get_env("HIPDNN_EP_QMOE_EXPERT_OFFLOAD") != "1") {
+      return;
+    }
+    module.walk([&](hip::QMoEOp qmoe) {
+      if (qmoe.getFc1ZeroPoints() || qmoe.getFc2ZeroPoints()) {
+        return;
+      }
+      SmallVector<Operation *, 6> carriers;
+      for (OpOperand &operand : qmoe->getOpOperands()) {
+        if (!qmoe.isExpertOperand(operand)) {
+          continue;
+        }
+        auto carrier = operand.get().getDefiningOp<hip::ConstantOp>();
+        if (!carrier || carrier.getSourceKind() != SourceKind::File) {
+          return;
+        }
+        for (OpOperand &use : carrier.getResult().getUses()) {
+          if (use.getOwner() != qmoe.getOperation() ||
+              !qmoe.isExpertOperand(use)) {
+            return;
+          }
+        }
+        carriers.push_back(carrier);
+      }
+      offloadedQMoEExperts.insert(carriers.begin(), carriers.end());
+    });
   }
 
   LogicalResult planInlineSource(ConstantPlan &plan) {
@@ -816,6 +850,7 @@ private:
   int64_t partialBlobSize = 0;
   std::vector<ConstantPlan> plans;
   std::optional<SymbolTable> symbolTable;
+  llvm::DenseSet<Operation *> offloadedQMoEExperts;
 };
 
 struct ExternalizeConstantsPass

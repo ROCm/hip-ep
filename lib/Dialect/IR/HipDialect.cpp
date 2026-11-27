@@ -3322,6 +3322,15 @@ void QMoEOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+bool QMoEOp::isExpertOperand(OpOperand &operand) {
+  auto in = [&](MutableOperandRange range) {
+    return llvm::any_of(range, [&](OpOperand &o) { return &o == &operand; });
+  };
+  return in(getFc1ExpertsWeightsMutable()) || in(getFc1ScalesMutable()) ||
+         in(getFc1ExpertsBiasMutable()) || in(getFc2ExpertsWeightsMutable()) ||
+         in(getFc2ScalesMutable()) || in(getFc2ExpertsBiasMutable());
+}
+
 //===----------------------------------------------------------------------===//
 // QMoEAmdOp
 //===----------------------------------------------------------------------===//
