@@ -919,28 +919,67 @@ std::shared_ptr<Compiled> Engine::load(const std::string &directory,
 namespace {
 
 /// Hands each output the memory the caller gave its tensor (the artifact's
-/// output allocator).
+/// output allocator). Never null: the code makes a memref of what it is handed
+/// and writes there (output-allocator-design.md). An output that is not its
+/// tensor's size is written aside, and the run fails (`mismatched`).
 struct TensorOutputs {
   const std::vector<size_t> &bytes;
   const std::vector<void *> &targets;
+  bool mismatched = false;
+  /// Which output, and its sizes.
   std::string mismatch;
+  /// The outputs written aside, freed once the run is done.
+  std::vector<void *> aside;
+
+  TensorOutputs(const std::vector<size_t> &bytes,
+                const std::vector<void *> &targets)
+      : bytes(bytes), targets(targets) {
+    aside.reserve(bytes.size());
+  }
+  TensorOutputs(const TensorOutputs &) = delete;
+  TensorOutputs &operator=(const TensorOutputs &) = delete;
+  ~TensorOutputs() {
+    for (void *data : aside)
+      (void)hipFree(data);
+  }
 
   static void *allocate(void *self, int64_t outputIndex, const int64_t *shape,
-                        int64_t rank, int64_t elementSize) {
+                        int64_t rank, int64_t elementSize) noexcept {
     auto &outputs = *static_cast<TensorOutputs *>(self);
     const auto index = static_cast<size_t>(outputIndex);
-    if (outputIndex < 0 || index >= outputs.bytes.size())
-      return nullptr;
-    size_t bytes = static_cast<size_t>(elementSize);
+    const bool known = outputIndex >= 0 && index < outputs.bytes.size();
+    size_t bytes = static_cast<size_t>(std::max<int64_t>(elementSize, 0));
     for (int64_t i = 0; i < rank; ++i)
-      bytes *= static_cast<size_t>(shape[i]);
-    if (bytes != outputs.bytes[index] || outputs.targets[index] == nullptr) {
-      outputs.mismatch = "output " + std::to_string(index) + ": " +
-                         std::to_string(bytes) + " bytes newHandle, " +
-                         std::to_string(outputs.bytes[index]) + " allocated";
-      return nullptr;
+      bytes *= static_cast<size_t>(std::max<int64_t>(shape[i], 0));
+    if (known && bytes == outputs.bytes[index] &&
+        outputs.targets[index] != nullptr)
+      return outputs.targets[index];
+    if (!outputs.mismatched) {
+      outputs.mismatched = true;
+      try {
+        outputs.mismatch =
+            "output " + std::to_string(outputIndex) + ": " +
+            std::to_string(bytes) + " bytes requested, " +
+            (known ? std::to_string(outputs.bytes[index]) + " allocated"
+                   : std::string("no such output"));
+      } catch (...) {
+      }
     }
-    return outputs.targets[index];
+    void *data = nullptr;
+    if (hipMalloc(&data, std::max<size_t>(bytes, 256)) != hipSuccess) {
+      // Nothing valid to hand out: the code would write through null.
+      std::fprintf(stderr,
+                   "hipep_backend: cannot allocate %zu bytes for output %lld "
+                   "written aside\n",
+                   bytes, static_cast<long long>(outputIndex));
+      std::abort();
+    }
+    try {
+      outputs.aside.push_back(data);
+    } catch (...) {
+      // Leaked rather than freed under the code that writes it.
+    }
+    return data;
   }
 };
 
@@ -1071,7 +1110,7 @@ bool Engine::run(const hipep_backend_code &handle, void *const *data,
     targets.push_back(buffer.data);
     staged.push_back(o);
   }
-  TensorOutputs tensorOutputs{bytes, targets, {}};
+  TensorOutputs tensorOutputs(bytes, targets);
   const output_allocator_t allocator{&tensorOutputs, &TensorOutputs::allocate};
   code.setOutputAllocator(code.state, &allocator);
   if (code.beginCompute)
@@ -1079,11 +1118,11 @@ bool Engine::run(const hipep_backend_code &handle, void *const *data,
   span_t span{inputs.data(), inputs.size()};
   const int status = code.compute(code.state, &span);
   code.setOutputAllocator(code.state, nullptr);
-  if (status != 0) {
-    error =
-        "inference_compute failed: " + std::to_string(status) +
-        (tensorOutputs.mismatch.empty() ? ""
-                                        : " (" + tensorOutputs.mismatch + ")");
+  if (status != 0 || tensorOutputs.mismatched) {
+    error = status != 0 ? "inference_compute failed: " + std::to_string(status)
+                        : std::string("an output is not its tensor's size");
+    if (!tensorOutputs.mismatch.empty())
+      error += " (" + tensorOutputs.mismatch + ")";
     return false;
   }
   // inference_compute returns with its stream synchronized.
