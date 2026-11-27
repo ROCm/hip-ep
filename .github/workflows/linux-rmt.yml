@@ -237,7 +237,9 @@ jobs:
         if: steps.cache-ort.outputs.cache-hit != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: Microsoft/onnxruntime
+          # NOTE: Temporarily use an onnxruntime fork until issues with original repo availability are resolved.
+          #repository: Microsoft/onnxruntime
+          repository: mingyueliuh/onnxruntime
           ref: v${{ env.ONNXRUNTIME_VERSION }}
           path: source-onnxruntime
           submodules: true
