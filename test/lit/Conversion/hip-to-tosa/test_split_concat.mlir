@@ -24,7 +24,7 @@ func.func @split(%x: tensor<2x6xf32>)
 // OnnxToHip lowers Concat to a tensor.empty plus a contiguous insert_slice
 // chain. The complete chain maps to one tosa.concat.
 // CHECK-LABEL: func.func @concat
-// CHECK: tosa.concat %arg0, %arg1, %arg2 {axis = 1 : i32}
+// CHECK: tosa.concat %arg0, %arg1, %arg2 axis(1)
 // CHECK-NOT: tensor.insert_slice
 // CHECK-NOT: tensor.empty
 func.func @concat(%a: tensor<2x3xf16>, %b: tensor<2x4xf16>,

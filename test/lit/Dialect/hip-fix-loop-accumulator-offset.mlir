@@ -30,16 +30,16 @@ module {
     %c1 = arith.constant 1 : index
     %0 = memref.get_global @hip_ext_constant_373 : memref<i64>
     %1 = hip.readback_scalar(%arg0, %arg1 : memref<i64>) -> i64
-    %alloc = memref.alloc() {alignment = 64 : i64} : memref<1xi64>
+    %alloc = memref.alloc() alignment = 64 : memref<1xi64>
     memref.store %1, %alloc[%c0] : memref<1xi64>
-    %alloc_0 = memref.alloc() {alignment = 64 : i64} : memref<1xi32>
+    %alloc_0 = memref.alloc() alignment = 64 : memref<1xi32>
     hip.gather(%arg0) ins(%arg4, %alloc : memref<?xi32>, memref<1xi64>) outs(%alloc_0 : memref<1xi32>)
-    %alloc_1 = memref.alloc() {alignment = 64 : i64} : memref<1xi64>
+    %alloc_1 = memref.alloc() alignment = 64 : memref<1xi64>
     hip.add(%arg0) ins(%alloc, %0 : memref<1xi64>, memref<i64>) outs(%alloc_1 : memref<1xi64>)
-    %alloc_2 = memref.alloc() {alignment = 64 : i64} : memref<1xi32>
+    %alloc_2 = memref.alloc() alignment = 64 : memref<1xi32>
     hip.gather(%arg0) ins(%arg4, %alloc_1 : memref<?xi32>, memref<1xi64>) outs(%alloc_2 : memref<1xi32>)
     %dim_7 = memref.dim %arg8, %c1 : memref<1x?x1152xf16>
-    %alloc_10 = memref.alloc(%dim_7) {alignment = 64 : i64} : memref<1x?x1152xf16>
+    %alloc_10 = memref.alloc(%dim_7) alignment = 64 : memref<1x?x1152xf16>
     %dim_12 = memref.dim %arg3, %c1 : memref<1x?x1152xf16>
     %subview = memref.subview %arg9[0, 0, 0] [1, %dim_12, 1152] [1, 1, 1] : memref<1x?x1152xf16> to memref<1x?x1152xf16, strided<[?, 1152, 1]>>
     memref.copy %arg3, %subview : memref<1x?x1152xf16> to memref<1x?x1152xf16, strided<[?, 1152, 1]>>

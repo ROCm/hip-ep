@@ -16,16 +16,13 @@
 
 //--- gather.mlir
 module {
-  memref.global "private" @ple : memref<4x8xf16> {
-    alignment = 64 : i64,
+  memref.global "private" @ple : memref<4x8xf16> alignment = 64 {
     hip.external_data = {disk_resident, index = 0 : i64, offset = 0 : i64, size = 64 : i64}
   }
-  memref.global "private" @dense : memref<4x8xf16> {
-    alignment = 64 : i64,
+  memref.global "private" @dense : memref<4x8xf16> alignment = 64 {
     hip.external_data = {index = 1 : i64, offset = 0 : i64, size = 64 : i64}
   }
-  memref.global "private" @ple_q4 : memref<4x4xui8> {
-    alignment = 64 : i64,
+  memref.global "private" @ple_q4 : memref<4x4xui8> alignment = 64 {
     hip.external_data = {disk_resident, index = 2 : i64, offset = 0 : i64, size = 16 : i64}
   }
   func.func @gather(%ctx: !hip.context, %idx: memref<2xi64>,
@@ -47,8 +44,7 @@ module {
 
 //--- other-use.mlir
 module {
-  memref.global "private" @ple : memref<4x8xf16> {
-    alignment = 64 : i64,
+  memref.global "private" @ple : memref<4x8xf16> alignment = 64 {
     hip.external_data = {disk_resident, index = 0 : i64, offset = 0 : i64, size = 64 : i64}
   }
   func.func @other_use(%ctx: !hip.context) -> memref<4x8xf16> {
