@@ -475,6 +475,31 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
   return 0;
 }
 
+int wrap_hipblasLtMatmulStrided(RuntimeState *state, int op_state_slot,
+                                const void *A, const void *B, void *output,
+                                int64_t M, int64_t N, int64_t K,
+                                int64_t batch_count, int64_t data_type,
+                                int64_t a_batch_stride, int64_t b_batch_stride,
+                                int64_t transA, int64_t transB) {
+  (void)A;
+  (void)B;
+  (void)output;
+  (void)op_state_slot;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_hipblasLtMatmulStrided\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_hipblasLtMatmulStrided(M=%lld, N=%lld, K=%lld, "
+             "batch=%lld, data_type=%s, a_batch_stride=%lld, "
+             "b_batch_stride=%lld, transA=%lld, transB=%lld)\n",
+             (long long)M, (long long)N, (long long)K, (long long)batch_count,
+             hipdnn_ep_datatype_name(data_type), (long long)a_batch_stride,
+             (long long)b_batch_stride, (long long)transA, (long long)transB);
+
+  return 0;
+}
+
 int wrap_matmul_i32(RuntimeState *state, const void *A, const void *B,
                     void *output, int64_t M, int64_t N, int64_t K,
                     int64_t batch_count, int64_t b_batch_stride) {

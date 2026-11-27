@@ -72,6 +72,63 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
     Value N = transB ? BDesc.size(rewriter, loc, BRank - 2)
                      : BDesc.size(rewriter, loc, BRank - 1);
 
+    // A single A shared by a batched B: A has no leading dims, or only static
+    // unit ones, while B's leading dims hold more than one matrix (or may, when
+    // they are dynamic). The output's batch is then B's, which the general path
+    // below cannot express -- it takes the batch from A and always steps A by
+    // M*K -- so this shape gets the strided entry point with A's batch stride
+    // 0 and B's K*N. A 1x1 convolution rewritten to `[Cout, Cin] x [N, Cin, P]`
+    // is the producer that needs it. An i32 matmul keeps the integer kernel
+    // path below.
+    //
+    // Before:
+    //   hip.matmul ins(%W, %X : memref<64x32xf16>, memref<?x32x3136xf16>)
+    //              outs(%Y : memref<?x64x3136xf16>)
+    // After:
+    //   %batch = <product of %X's leading sizes>
+    //   llvm.call @wrap_hipblasLtMatmulStrided(..., %batch, %dtype,
+    //                                          %c0 /*A*/, %KN /*B*/, ...)
+    auto isUnitDim = [](int64_t d) { return d == 1; };
+    const bool aIsOneMatrix =
+        llvm::all_of(AType.getShape().drop_back(2), isUnitDim);
+    const bool bIsOneMatrix =
+        llvm::all_of(BType.getShape().drop_back(2), isUnitDim);
+    if (aIsOneMatrix && !bIsOneMatrix &&
+        !AType.getElementType().isInteger(32)) {
+      Value bBatch = createI64Const(1);
+      for (int64_t i : llvm::seq<int64_t>(0, BRank - 2))
+        bBatch = LLVM::MulOp::create(rewriter, loc, bBatch,
+                                     BDesc.size(rewriter, loc, i))
+                     .getRes();
+      Value bStride = LLVM::MulOp::create(rewriter, loc, K, N).getRes();
+      SmallVector<Type, 14> stridedParams = {
+          ptrType, i32Type, ptrType, ptrType, ptrType, i64Type, i64Type,
+          i64Type, i64Type, i64Type, i64Type, i64Type, i64Type, i64Type};
+      FailureOr<LLVM::LLVMFuncOp> stridedFn =
+          LLVM::lookupOrCreateFn(rewriter, module, kWrapHipblasltMatmulStrided,
+                                 stridedParams, i32Type);
+      if (failed(stridedFn))
+        return failure();
+      SmallVector<Value, 14> stridedArgs = {
+          statePtr,
+          getOpStateSlotValue(op, rewriter, loc),
+          APtr,
+          BPtr,
+          outputPtr,
+          M,
+          N,
+          K,
+          bBatch,
+          createI64Const(dataType),
+          createI64Const(0),
+          bStride,
+          createI64Const(transA),
+          createI64Const(transB)};
+      LLVM::CallOp::create(rewriter, loc, *stridedFn, stridedArgs);
+      rewriter.eraseOp(op);
+      return success();
+    }
+
     // Compute batch count from leading dimensions of A
     Value batchCount;
     if (ARank == 2) {

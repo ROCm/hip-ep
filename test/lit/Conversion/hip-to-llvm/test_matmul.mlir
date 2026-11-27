@@ -121,3 +121,111 @@ module {
 // CHECK-NEXT: llvm.mlir.constant(0 : i64) : i64
 // CHECK-NEXT: llvm.mlir.constant(0 : i64) : i64
 // CHECK-NEXT: llvm.call @wrap_hipblasLtMatmul({{.*}}, %[[DT]], %{{[0-9]+}}, %{{[0-9]+}}, %{{[0-9]+}}) :
+
+// ----- Rank-2 A shared by a batched B [batch, K, N] -------------------------
+// The batch is B's, which wrap_hipblasLtMatmul cannot take (it reads the
+// batch off A and steps A by M*K), so the strided entry point is called with
+// A's batch stride 0 and B's K*N. This is a 1x1 convolution as a matmul:
+// [Cout, Cin] x [N, Cin, H*W].
+
+module {
+  func.func @test_matmul_broadcast_a(%ctx: !hip.context,
+                                     %A: memref<64x32xf16, 1>,
+                                     %B: memref<8x32x3136xf16, 1>,
+                                     %output: memref<8x64x3136xf16, 1>) {
+    hip.matmul(%ctx)
+        ins(%A, %B : memref<64x32xf16, 1>, memref<8x32x3136xf16, 1>)
+        outs(%output : memref<8x64x3136xf16, 1>)
+    return
+  }
+}
+
+// The batch is 1 times B's leading size, then K*N; A's stride is the constant
+// 0 after the slot (-1: no slot assignment in this RUN) and data_type (1, HALF).
+// CHECK-LABEL: llvm.func @test_matmul_broadcast_a
+// CHECK-NOT: llvm.call @wrap_hipblasLtMatmul(
+// CHECK: %[[BATCH:.*]] = llvm.mul %{{.*}}, %{{.*}} : i64
+// CHECK-NEXT: %[[KN:.*]] = llvm.mul %{{.*}}, %{{.*}} : i64
+// CHECK-NEXT: llvm.mlir.constant(-1 : i32) : i32
+// CHECK-NEXT: %[[DT:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK-NEXT: %[[ZERO:.*]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK: llvm.call @wrap_hipblasLtMatmulStrided({{.*}}, %[[BATCH]], %[[DT]], %[[ZERO]], %[[KN]], %{{[0-9]+}}, %{{[0-9]+}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK-NOT: llvm.call @wrap_hipblasLtMatmul(
+
+// ----- Rank-2 A with a dynamic-batch B [?, K, N] -----------------------------
+// A dynamic leading dim may hold more than one matrix, so the strided entry
+// point is taken and the batch is B's runtime extent.
+
+module {
+  func.func @test_matmul_broadcast_a_dynamic(%ctx: !hip.context,
+                                             %A: memref<64x32xf32, 1>,
+                                             %B: memref<?x32x49xf32, 1>,
+                                             %output: memref<?x64x49xf32, 1>) {
+    hip.matmul(%ctx)
+        ins(%A, %B : memref<64x32xf32, 1>, memref<?x32x49xf32, 1>)
+        outs(%output : memref<?x64x49xf32, 1>)
+    return
+  }
+}
+
+// CHECK-LABEL: llvm.func @test_matmul_broadcast_a_dynamic
+// CHECK: llvm.call @wrap_hipblasLtMatmulStrided({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK-NOT: llvm.call @wrap_hipblasLtMatmul(
+
+// ----- Rank-2 A with a leading-one B [1, K, N] -------------------------------
+// Neither operand is batched: the plain entry point, batch 1.
+
+module {
+  func.func @test_matmul_rank2_a_leading_one_b(%ctx: !hip.context,
+                                               %A: memref<64x32xf16, 1>,
+                                               %B: memref<1x32x49xf16, 1>,
+                                               %output: memref<1x64x49xf16, 1>) {
+    hip.matmul(%ctx)
+        ins(%A, %B : memref<64x32xf16, 1>, memref<1x32x49xf16, 1>)
+        outs(%output : memref<1x64x49xf16, 1>)
+    return
+  }
+}
+
+// CHECK-LABEL: llvm.func @test_matmul_rank2_a_leading_one_b
+// CHECK-NOT: wrap_hipblasLtMatmulStrided
+// CHECK: llvm.call @wrap_hipblasLtMatmul({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+
+// ----- Leading-one A [1, M, K] with a batched B [batch, K, N] ----------------
+// A's leading dims hold one matrix, so this is the shared-A case too: the
+// batch is B's. The general path used to take the batch (1) from A and compute
+// only the first of B's matrices.
+
+module {
+  func.func @test_matmul_leading_one_a_batched_b(%ctx: !hip.context,
+                                                 %A: memref<1x64x32xf32, 1>,
+                                                 %B: memref<4x32x16xf32, 1>,
+                                                 %output: memref<4x64x16xf32, 1>) {
+    hip.matmul(%ctx)
+        ins(%A, %B : memref<1x64x32xf32, 1>, memref<4x32x16xf32, 1>)
+        outs(%output : memref<4x64x16xf32, 1>)
+    return
+  }
+}
+
+// CHECK-LABEL: llvm.func @test_matmul_leading_one_a_batched_b
+// CHECK: llvm.call @wrap_hipblasLtMatmulStrided({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK-NOT: llvm.call @wrap_hipblasLtMatmul(
+
+// ----- i32 with a shared A keeps the integer kernel --------------------------
+
+module {
+  func.func @test_matmul_i32_shared_a(%ctx: !hip.context,
+                                      %A: memref<8x4xi32, 1>,
+                                      %B: memref<2x4x16xi32, 1>,
+                                      %output: memref<2x8x16xi32, 1>) {
+    hip.matmul(%ctx)
+        ins(%A, %B : memref<8x4xi32, 1>, memref<2x4x16xi32, 1>)
+        outs(%output : memref<2x8x16xi32, 1>)
+    return
+  }
+}
+
+// CHECK-LABEL: llvm.func @test_matmul_i32_shared_a
+// CHECK-NOT: wrap_hipblasLtMatmulStrided
+// CHECK: llvm.call @wrap_matmul_i32(

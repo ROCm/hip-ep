@@ -63,6 +63,8 @@ inline constexpr const char *kWrapStridedCopy = "wrap_strided_copy";
 inline constexpr const char *kWrapConv = "wrap_conv";
 inline constexpr const char *kWrapConvTranspose = "wrap_conv_transpose";
 inline constexpr const char *kWrapHipblasltMatmul = "wrap_hipblasLtMatmul";
+inline constexpr const char *kWrapHipblasltMatmulStrided =
+    "wrap_hipblasLtMatmulStrided";
 inline constexpr const char *kWrapMatmulI32 = "wrap_matmul_i32";
 inline constexpr const char *kWrapRocMlir = "wrap_rocmlir";
 inline constexpr const char *kWrapRocMlirPrefill = "wrap_rocmlir_prefill";
