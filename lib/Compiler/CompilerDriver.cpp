@@ -475,10 +475,11 @@ bool CompilerDriver::runMLIRPasses(
         compiledGraphs_ =
             std::make_shared<llvm::StringMap<mlir::hip::OwnedGraph>>();
         mlir::hip::buildOnnxToHipPipelineHead(
-            headPm, static_cast<hipdnnHandle_t>(hipdnnHandle_),
-            compiledGraphs_);
+            headPm, static_cast<hipdnnHandle_t>(hipdnnHandle_), compiledGraphs_,
+            /*convIntegerQuantConv=*/true);
       } else {
-        mlir::hip::buildOnnxToHipPipelineHead(headPm);
+        mlir::hip::buildOnnxToHipPipelineHead(headPm, /*handle=*/nullptr, {},
+                                              /*convIntegerQuantConv=*/true);
       }
       // rocMLIR has no transposed-convolution anchor, so split
       // conv_transpose into plain convolutions before anything tries to
