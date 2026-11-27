@@ -214,6 +214,9 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
   add_kernel_package_ut(${_arch}
     hipdnn-kernel-ut-group-norm-xfp64-wfp64-yfp64
     group_norm/Xfp64_Wfp64_Yfp64/test_group_norm.cpp)
+  add_kernel_package_ut(${_arch}
+    hipdnn-kernel-ut-elementwise-bcast-xany-wany-yany
+    elementwise_bcast/Xany_Wany_Yany/test_elementwise_bcast.cpp)
 endforeach()
 
 # One package-facing entry point finds the live GPU arch, invokes every leaf

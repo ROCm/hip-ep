@@ -213,6 +213,7 @@ unit_test/
   gather_block_quantized/Xi64_W{u4,u8,fp8}_Yfp16/
   cast/Xany_Yany_bf16/
   group_norm/X{fp16,bf16,fp32,fp64}_W<same>_Y<same>/
+  elementwise_bcast/Xany_Wany_Yany/
 ```
 
 `unit_test/` holds one directory per op and nothing else besides the files

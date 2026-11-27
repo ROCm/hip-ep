@@ -80,6 +80,8 @@ static const Leaf kLeaves[] = {
      "hipdnn-kernel-ut-group-norm-xfp32-wfp32-yfp32.exe"},
     {"group_norm", "Xfp64_Wfp64_Yfp64",
      "hipdnn-kernel-ut-group-norm-xfp64-wfp64-yfp64.exe"},
+    {"elementwise_bcast", "Xany_Wany_Yany",
+     "hipdnn-kernel-ut-elementwise-bcast-xany-wany-yany.exe"},
 };
 
 static std::string executableDirectory() {
