@@ -5,14 +5,15 @@ Licensed under the MIT License.
 # llama.cpp's ggml graphs: compiled splits
 
 llama.cpp stays the host: model loading, KV cache, batching, sampling and the
-server are its own. A ggml backend in its tree, `ggml-hipep`, takes the
-operations hip-ep compiles; the ggml scheduler hands it each run of them as a
-split, and the split runs as code hip-ep compiled for it. Everything of
-hip-ep the backend needs is one library, `libhipep_backend.so`, behind one C
-header, `hipep_backend.h`.
+server are its own. Its ROCm backend, ggml-hip, built with `GGML_HIP_HIPEP`,
+cuts each split the ggml scheduler hands it into runs: what hip-ep compiles
+runs as code hip-ep compiled for it, the rest - and a run whose code is not
+ready or fails - by ggml-hip's own kernels. The device is still ROCm0.
+Everything of hip-ep ggml-hip needs is one library, `libhipep_backend.so`,
+behind one C header, `hipep_backend.h`.
 
 ```
-llama.cpp ── ggml ── ggml-hipep (llama.cpp's tree: ggml/src/ggml-hipep)
+llama.cpp ── ggml ── ggml-hip (llama.cpp's tree: ggml/src/ggml-cuda/hipep)
                           │  hipep_backend.h: descriptions in, code out
                           ▼
                   libhipep_backend.so (lib/HipepBackend)
@@ -52,20 +53,14 @@ library with `find_package(hipep_backend)` and includes `hipep_backend.h`
 alone:
 
 ```bash
-cmake -B build -DGGML_HIPEP=ON \
+cmake -B build -DGGML_HIP=ON -DGGML_HIP_HIPEP=ON \
   -Dhipep_backend_DIR=<hip-ep-install>/lib/cmake/hipep_backend
-llama-cli -m model.gguf --device HIPEP0 -ngl 99 -fa on
+llama-cli -m model.gguf -ngl 99 -fa on
 ```
 
-HIPEP0 is a device over ROCm0: the layers llama.cpp gives it are its, and it
-takes every operation of them ggml-hip runs. Each split the scheduler hands it
-is cut into runs: what the library compiles runs by compiled code, the rest
-by ggml-hip on the same device, in the same memory.
-
-| Which layers | |
-|---|---|
-| all of them | `--device HIPEP0` |
-| the last ones (here a quarter), ggml-hip the others | `--device ROCm0,HIPEP0 -ts 3,1` |
+Nothing else changes for llama.cpp's tools: the device is ROCm0, and every
+option means what it meant. `GGML_HIP_HIPEP=0` in the environment runs every
+split by ggml-hip alone.
 
 ## What it takes
 
@@ -169,9 +164,10 @@ split, means anything to it. For Llama that is
 two symbols - the step's tokens and the KV cells it attends -, so prefill of
 any length is one dynamic-shape code and decode another (llama.cpp's reserved
 graphs compile both while the context is made). The llama.cpp side is the
-`ggml-hipep` branch: the backend, the scheduler marking each split's
-outputs (`GGML_TENSOR_FLAG_SPLIT_OUTPUT`) for the backends that ask for them,
-and the reserved graphs' splits compiled while the context is made.
+`ggml-hipep` branch: ggml-hip's use of the library
+(`ggml/src/ggml-cuda/hipep`), the scheduler marking each split's outputs
+(`GGML_TENSOR_FLAG_SPLIT_OUTPUT`) for the backends that ask for them, and the
+reserved graphs' splits compiled while the context is made.
 
 ## Layout
 
@@ -218,7 +214,8 @@ with every split run by compiled code.
 | Environment | |
 |---|---|
 | `HIPEP_BACKEND_LOG=1` | each split (compiled or ggml-hip, and why), each compile, and a summary |
-| `HIPEP_BACKEND_WAIT=1` | compiles on the calling thread (ggml-hipep) |
+| `GGML_HIP_HIPEP=0` | ggml-hip runs every split alone |
+| `HIPEP_BACKEND_WAIT=1` | compiles on the calling thread (ggml-hip) |
 | `HIPEP_BACKEND_OPS=MUL_MAT,ADD` | only these operations (bisecting) |
-| `HIPEP_BACKEND_PROFILE=1` | where the time went (ggml-hipep) |
+| `HIPEP_BACKEND_PROFILE=1` | where the time went (ggml-hip) |
 | `HIPEP_BACKEND_COMPILE=0` | code from the cache only |

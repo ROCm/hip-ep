@@ -130,9 +130,10 @@ option(HIPDNN_EP_ENABLE_NATIVE_ARTIFACTS
 
 # llama.cpp's ggml graphs (docs/design/ggml-backend.md): the K-quant, Q8_1
 # and token-major GQA kernels and their runtime wrappers, the ggml dialect, its
-# conversion to HIP and the ggml-to-hip pipeline.
+# conversion to HIP and the ggml-to-hip pipeline, the split frontend and
+# libhipep_backend.
 option(HIPDNN_EP_BUILD_GGML
-  "Build the ggml-to-hip pipeline and the kernels llama.cpp's ggml-hipep backend uses"
+  "Build the ggml-to-hip pipeline, its kernels and libhipep_backend for llama.cpp's ggml-hip (GGML_HIP_HIPEP)"
   OFF)
 
 # Build rocMLIR/Triton (rocmlirTriton) in-tree as a subdirectory, reusing the
@@ -304,6 +305,14 @@ endif()
 # Out-of-tree plugin dirs (HIPDNN_EP_COMPILER_PLUGIN_PATHS): add each so it can
 # register its plugin. Must run before finalize (below).
 hipdnn_ep_add_external_plugins()
+
+# The split frontend and libhipep_backend, the library llama.cpp's ggml-hip
+# backend compiles and runs its splits with; after the compiler and the EP's
+# JIT (backend-mlir-compiler) they build on.
+if(HIPDNN_EP_BUILD_GGML)
+  add_subdirectory(lib/Frontend/Ggml)
+  add_subdirectory(lib/HipepBackend)
+endif()
 
 # Finalize static compiler plugins: generate the registrar include and link
 # the selected plugin static libs into LibHipCompiler. Must run after every
