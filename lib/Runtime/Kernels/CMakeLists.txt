@@ -117,6 +117,16 @@ set(_kernel_sources
     hip/nonzero_kernel.hip
     hip/strided_copy_kernel.hip
 )
+# The kernels of llama.cpp's ggml path, built with it (HIPDNN_EP_BUILD_GGML).
+set(_ggml_kernel_sources
+    hip/kquant/kquant_matmul_kernel.hip
+    hip/kquant/kquant_mmq_kernel.hip
+    hip/token_major_gqa/token_major_gqa_kernel.hip
+    hip/token_major_gqa/token_major_gqa_tile.hip
+)
+if(HIPDNN_EP_BUILD_GGML)
+    list(APPEND _kernel_sources ${_ggml_kernel_sources})
+endif()
 
 # MatMulNBits offline autotune table.
 #
@@ -267,6 +277,19 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
             -DHIP_EP_RING_ENABLED=${HIP_EP_RING_ENABLED}
             -DHIP_EP_RING_DEVICE_ENABLED=${_ring_device_enabled})
     endif()
+    set(_compile_options ${_ring_compile_options})
+    if(HIPDNN_EP_BUILD_GGML)
+        # MMQ runs on gfx1151 only, from either slice a gfx1151 loads: its own
+        # or the gfx11-generic release one. kquant_mmq_device.h generates the
+        # device code, and the launcher reports MMQ supported, only where this
+        # is 1, so the two cannot disagree.
+        set(_kquant_mmq_device_enabled 0)
+        if(_arch STREQUAL "gfx1151" OR _arch STREQUAL "gfx11-generic")
+            set(_kquant_mmq_device_enabled 1)
+        endif()
+        list(APPEND _compile_options
+            -DHIP_KQUANT_MMQ_DEVICE_ENABLED=${_kquant_mmq_device_enabled})
+    endif()
     set(_target custom_kernels_${_arch})
     _matmul_nbits_lut_data_source(${_arch} _matmul_lut_src)
     _gqa_lut_data_source(${_arch} _gqa_lut_src)
@@ -277,18 +300,20 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
             ${_gqa_lut_src}
         INCLUDE_DIRECTORIES
             ${CMAKE_CURRENT_SOURCE_DIR}/include
+            # hip/kquant_abi.h, shared with the compiler.
+            ${PROJECT_SOURCE_DIR}/include
             # matmul_nbits_autotune_generated.h and gqa_autotune_generated.h;
             # flatbuffers is header-only for reading, so no link library needed.
             ${CMAKE_BINARY_DIR}/schemas
             $<TARGET_PROPERTY:flatbuffers::flatbuffers,INTERFACE_INCLUDE_DIRECTORIES>
-        COMPILE_OPTIONS ${_ring_compile_options}
+        COMPILE_OPTIONS ${_compile_options}
         OFFLOAD_ARCHS
             ${_arch}
         DEPENDS
             HipSchemas
     )
     if(NOT WIN32)
-        target_compile_options(${_target} PRIVATE ${_ring_compile_options})
+        target_compile_options(${_target} PRIVATE ${_compile_options})
     endif()
     set_target_properties(${_target} PROPERTIES
         OUTPUT_NAME custom_kernels_${_arch}

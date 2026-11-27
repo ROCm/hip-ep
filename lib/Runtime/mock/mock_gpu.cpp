@@ -800,6 +800,106 @@ int wrap_gated_delta_net(RuntimeState *state, const void *qkv,
   return 0;
 }
 
+int wrap_quantize_q8_1(RuntimeState *state, const float *activation,
+                       void *quantized_activation, int64_t M, int64_t K,
+                       int64_t batch_count) {
+  if (!state || !activation || !quantized_activation)
+    return -1;
+  MOCK_PRINT("[MOCK] wrap_quantize_q8_1(M=%lld, K=%lld, batch=%lld)\n",
+             (long long)M, (long long)K, (long long)batch_count);
+  return 0;
+}
+
+int wrap_skip_rms_norm_q8_1(RuntimeState *state, const float *input,
+                            const float *skip, const float *gamma, float *sum,
+                            void *quantized_activation, int64_t input_dim0,
+                            int64_t input_dim1, int64_t input_dim2,
+                            int64_t skip_dim0, int64_t skip_dim1,
+                            int64_t skip_dim2, int64_t gamma_elements,
+                            int64_t sum_dim0, int64_t sum_dim1,
+                            int64_t sum_dim2, int64_t quantized_dim0,
+                            int64_t quantized_dim1, int64_t quantized_dim2,
+                            int64_t K, float epsilon) {
+  (void)skip_dim0, (void)skip_dim1, (void)skip_dim2, (void)gamma_elements;
+  (void)sum_dim0, (void)sum_dim1, (void)sum_dim2, (void)quantized_dim0;
+  (void)quantized_dim1, (void)quantized_dim2, (void)epsilon;
+  if (!state || !input || !skip || !gamma || !sum || !quantized_activation)
+    return -1;
+  MOCK_PRINT("[MOCK] wrap_skip_rms_norm_q8_1(%lldx%lldx%lld, K=%lld)\n",
+             (long long)input_dim0, (long long)input_dim1,
+             (long long)input_dim2, (long long)K);
+  return 0;
+}
+
+int wrap_kquant_matmul(RuntimeState *state, const float *activation,
+                       const void *packed_weights, float *output, int64_t M,
+                       int64_t N, int64_t K, int64_t batch_count,
+                       int64_t format_id) {
+  if (!state || !activation || !packed_weights || !output)
+    return -1;
+  MOCK_PRINT("[MOCK] wrap_kquant_matmul(M=%lld, N=%lld, K=%lld, batch=%lld, "
+             "format=%lld)\n",
+             (long long)M, (long long)N, (long long)K, (long long)batch_count,
+             (long long)format_id);
+  return 0;
+}
+
+int wrap_kquant_matmul_q8_1(RuntimeState *state,
+                            const void *quantized_activation,
+                            const void *packed_weights, float *output,
+                            int64_t M, int64_t N, int64_t K,
+                            int64_t batch_count, int64_t format_id) {
+  if (!state || !quantized_activation || !packed_weights || !output)
+    return -1;
+  MOCK_PRINT("[MOCK] wrap_kquant_matmul_q8_1(M=%lld, N=%lld, K=%lld, "
+             "batch=%lld, format=%lld)\n",
+             (long long)M, (long long)N, (long long)K, (long long)batch_count,
+             (long long)format_id);
+  return 0;
+}
+
+int wrap_kquant_swiglu_q8_1(RuntimeState *state,
+                            const void *quantized_activation,
+                            const void *gate_weights, const void *up_weights,
+                            float *output, int64_t q8_dim0, int64_t q8_dim1,
+                            int64_t q8_dim2, int64_t gate_weight_bytes,
+                            int64_t up_weight_bytes, int64_t output_dim0,
+                            int64_t output_dim1, int64_t output_dim2, int64_t K,
+                            int64_t N, int64_t gate_format_id,
+                            int64_t up_format_id) {
+  (void)q8_dim0, (void)q8_dim1, (void)gate_weight_bytes, (void)up_weight_bytes;
+  (void)output_dim0, (void)output_dim1, (void)output_dim2;
+  (void)gate_format_id, (void)up_format_id;
+  if (!state || !quantized_activation || !gate_weights || !up_weights ||
+      !output)
+    return -1;
+  MOCK_PRINT("[MOCK] wrap_kquant_swiglu_q8_1(M=%lld, N=%lld, K=%lld)\n",
+             (long long)q8_dim2, (long long)N, (long long)K);
+  return 0;
+}
+
+int wrap_token_major_gqa(RuntimeState *state, const float *query,
+                         const void *key_cache, const void *value_cache,
+                         const void *mask, float *output, int64_t batch_count,
+                         int64_t query_tokens, int64_t query_heads,
+                         int64_t kv_heads, int64_t cache_capacity,
+                         int64_t head_dimension, int64_t mask_batch_count,
+                         int64_t mask_query_tokens, int64_t output_query_tokens,
+                         float scale, const void *written_rows,
+                         int64_t written_row_count) {
+  (void)mask_batch_count, (void)mask_query_tokens, (void)output_query_tokens;
+  (void)scale, (void)written_rows, (void)written_row_count;
+  if (!state || !query || !key_cache || !value_cache || !mask || !output)
+    return -1;
+  MOCK_PRINT(
+      "[MOCK] wrap_token_major_gqa(B=%lld, S=%lld, H=%lld, G=%lld, C=%lld, "
+      "D=%lld)\n",
+      (long long)batch_count, (long long)query_tokens, (long long)query_heads,
+      (long long)kv_heads, (long long)cache_capacity,
+      (long long)head_dimension);
+  return 0;
+}
+
 int wrap_dynamic_sparse_attention(
     RuntimeState *state, const void *query, const void *key, const void *value,
     const void *past_key, const void *past_value, const void *selected_indices,

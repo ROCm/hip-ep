@@ -263,6 +263,9 @@ populateLoweringPatterns(LLVMTypeConverter &typeConverter,
   populateGemmLoweringPatterns(typeConverter, patterns);
   populateLinearAttentionLoweringPatterns(typeConverter, patterns);
   populateGatedDeltaNetLoweringPatterns(typeConverter, patterns);
+#ifdef HIPDNN_EP_BUILD_GGML
+  populateKQuantLoweringPatterns(typeConverter, patterns);
+#endif
   populateDynamicSparseAttentionLoweringPatterns(typeConverter, patterns);
   populateSparseAttentionIndexerLoweringPatterns(typeConverter, patterns);
   populateGraphLoweringPatterns(typeConverter, patterns);

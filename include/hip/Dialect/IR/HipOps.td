@@ -6831,4 +6831,234 @@ def Hip_QSigmoidOp : Hip_DpsOp_AutoReifyInfer<"qsigmoid"> {
     attr-dict (`:` type($result_tensors)^)?
   }];
 }
+
+//===----------------------------------------------------------------------===//
+// K-quant projections over Q8_1 activations, and attention over a cached
+// token-major KV state.
+//
+// Packed weights are rank-1 `ui8` views of a logical `[N, K]` matrix in one of
+// the K-quant block formats (`format`): Q4_K (144-byte blocks), Q5_K (176) and
+// Q6_K (210), 256 values a block, read in place. A Q8_1 activation is
+// `[..., M, (K / 32) * 36]` `ui8`: per 32 values an F16 scale, a 16-bit sum
+// field and 32 signed quants. The sum field holds the F16 `scale * sum(quants)`
+// or, when the activation is a single row, the exact signed `sum(quants)`
+// integer bits (hip/kquant_abi.h). Q4_K and Q5_K read the sum; Q6_K does not.
+//===----------------------------------------------------------------------===//
+
+def Hip_QuantizeQ8_1Op : Hip_DpsOp_AutoReifyInfer<"quantize_q8_1"> {
+  let summary = "Quantize an F32 activation into Q8_1 blocks";
+  let description = [{
+    Quantizes `activation` `[..., M, K]` (F32, `K` a multiple of 32) into the
+    Q8_1 layout `[..., M, (K / 32) * 36]` (`ui8`) that the `kquant_*_q8_1`
+    projections read, so several projections of one activation quantize it
+    once.
+
+    Example:
+    ```mlir
+    hip.quantize_q8_1(%ctx) ins(%x : memref<1x1x4x3072xf32, 1>)
+        outs(%q : memref<1x1x4x3456xui8, 1>) {K = 3072 : i64}
+    ```
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$activation,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$K
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $activation `:` type($activation) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
+
+def Hip_SkipRmsNormQ8_1Op : Hip_DpsOp_AutoReify<"skip_rms_norm_q8_1"> {
+  let summary = "Residual add and RMS normalization into a Q8_1 activation";
+  let description = [{
+    `outputs[0] = input + skip` (F32, rank 4, trailing extent `K`), then
+    `RMSNorm(outputs[0]) * gamma` quantized into Q8_1 as `outputs[1]`
+    (`[D0, D1, D2, (K / 32) * 36]` `ui8`): `hip.skip_rms_norm` whose
+    normalized value is only read by K-quant projections. `K` is a multiple of
+    256.
+
+    Example:
+    ```mlir
+    hip.skip_rms_norm_q8_1(%ctx)
+        ins(%input, %skip, %gamma : memref<1x1x4x3072xf32, 1>,
+            memref<1x1x4x3072xf32, 1>, memref<3072xf32, 1>)
+        outs(%sum, %q : memref<1x1x4x3072xf32, 1>, memref<1x1x4x3456xui8, 1>)
+        {K = 3072 : i64, epsilon = 1.0e-05 : f32}
+    ```
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$skip,
+    Hip_TensorOrMemRef:$gamma,
+    Variadic<Hip_TensorOrMemRef>:$outputs,
+    I64Attr:$K,
+    F32Attr:$epsilon
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $skip `,` $gamma `:`
+    type($input) `,` type($skip) `,` type($gamma) `)`
+    `outs` `(` $outputs `:` type($outputs) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
+
+def Hip_KQuantMatmulOp : Hip_DpsOp_AutoReifyInfer<"kquant_matmul"> {
+  let summary = "Matrix multiplication by packed K-quant weights";
+  let description = [{
+    `output[..., M, N] = activation[..., M, K] * weights^T` with F32
+    activation and output and `packed_weights` the `[N, K]` matrix in
+    `format` ("q4_k", "q5_k" or "q6_k"), never materialized densely. The
+    activation is quantized to Q8_1 on the way.
+
+    Example:
+    ```mlir
+    hip.kquant_matmul(%ctx) ins(%x, %w : memref<1x1x4x3072xf32, 1>,
+                                         memref<1327104xui8, 1>)
+        outs(%y : memref<1x1x4x768xf32, 1>)
+        {K = 3072 : i64, N = 768 : i64, format = "q4_k"}
+    ```
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$activation,
+    Hip_TensorOrMemRef:$packed_weights,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$K,
+    I64Attr:$N,
+    StrAttr:$format
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $activation `,` $packed_weights `:`
+    type($activation) `,` type($packed_weights) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
+
+def Hip_KQuantMatmulQ8_1Op : Hip_DpsOp_AutoReifyInfer<"kquant_matmul_q8_1"> {
+  let summary = "K-quant matrix multiplication of a Q8_1 activation";
+  let description = [{
+    `hip.kquant_matmul` of an activation already in Q8_1
+    (`[..., M, (K / 32) * 36]`, from `hip.quantize_q8_1` or
+    `hip.skip_rms_norm_q8_1`). The leading dimensions are 1.
+
+    Example:
+    ```mlir
+    hip.kquant_matmul_q8_1(%ctx) ins(%q, %w : memref<1x1x4x3456xui8, 1>,
+                                             memref<1327104xui8, 1>)
+        outs(%y : memref<1x1x4x768xf32, 1>)
+        {K = 3072 : i64, N = 768 : i64, format = "q4_k"}
+    ```
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$quantized_activation,
+    Hip_TensorOrMemRef:$packed_weights,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$K,
+    I64Attr:$N,
+    StrAttr:$format
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $quantized_activation `,` $packed_weights `:`
+    type($quantized_activation) `,` type($packed_weights) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
+
+def Hip_KQuantSwigluQ8_1Op : Hip_DpsOp_AutoReifyInfer<"kquant_swiglu_q8_1"> {
+  let summary = "Gate and up K-quant projections of a Q8_1 activation, SwiGLU";
+  let description = [{
+    Projects one rank-4 Q8_1 activation by `gate_weights` and `up_weights`
+    (each `[N, K]`, "q4_k" or "q6_k") and returns
+    `(gate * sigmoid(gate)) * up` as F32 `[D0, D1, M, N]`: a feed-forward
+    block's first half in one call. The leading dimensions are 1.
+
+    Example:
+    ```mlir
+    hip.kquant_swiglu_q8_1(%ctx)
+        ins(%q, %gate, %up : memref<1x1x4x3456xui8, 1>,
+            memref<4644864xui8, 1>, memref<4644864xui8, 1>)
+        outs(%y : memref<1x1x4x8192xf32, 1>)
+        {K = 3072 : i64, N = 8192 : i64, gate_format = "q4_k",
+         up_format = "q4_k"}
+    ```
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$quantized_activation,
+    Hip_TensorOrMemRef:$gate_weights,
+    Hip_TensorOrMemRef:$up_weights,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$K,
+    I64Attr:$N,
+    StrAttr:$gate_format,
+    StrAttr:$up_format
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $quantized_activation `,` $gate_weights `,`
+    $up_weights `:` type($quantized_activation) `,` type($gate_weights) `,`
+    type($up_weights) `)` `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
+
+def Hip_TokenMajorGqaOp : Hip_DpsOp_AutoReifyInfer<"token_major_gqa"> {
+  let summary = "Grouped-query attention over a cached token-major KV state";
+  let description = [{
+    Attention of F32 `query` `[B, S, H, D]` over F16 `key_cache` and
+    `value_cache` `[B, C, G, D]` (token-major: a row of `C` holds every KV
+    head) under an additive F16 `mask` `[1|B, 1, S, C]`, into F32 `output`
+    `[B, S, H, D]`. The caches are only read; `H` is a multiple of `G`.
+    Unlike `hip.gqa`, which appends to a BNSH cache and masks by sequence
+    lengths, the cache is written beforehand (by `hip.scatter_nd`) and the
+    mask says which rows each query sees. Only `S` and `C` may be dynamic.
+    `D` is one of 40, 64, 72, 80, 96, 112, 128 and 256.
+
+    `written_rows`, optional i64 `[1, 1, 1, S]`, are the cache rows the
+    preceding update wrote for these queries: the rows past the largest are
+    not read. Without it every row is read and the mask excludes the
+    unwritten ones.
+
+    Example:
+    ```mlir
+    hip.token_major_gqa(%ctx) ins(%q, %k, %v, %mask : memref<1x?x24x128xf32, 1>,
+        memref<1x?x8x128xf16, 1>, memref<1x?x8x128xf16, 1>,
+        memref<1x1x?x?xf16, 1>)
+        rows(%rows : memref<1x1x1x?xi64, 1>)
+        outs(%o : memref<1x?x24x128xf32, 1>) {scale = 0.0883883461 : f32}
+    ```
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$query,
+    Hip_TensorOrMemRef:$key_cache,
+    Hip_TensorOrMemRef:$value_cache,
+    Hip_TensorOrMemRef:$mask,
+    Optional<Hip_TensorOrMemRef>:$written_rows,
+    Hip_TensorOrMemRef:$output,
+    F32Attr:$scale
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $query `,` $key_cache `,` $value_cache `,` $mask
+    `:` type($query) `,` type($key_cache) `,` type($value_cache) `,`
+    type($mask) `)`
+    (`rows` `(` $written_rows^ `:` type($written_rows) `)`)?
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
+
 #endif // HIP_OPS

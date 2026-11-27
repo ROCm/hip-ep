@@ -100,3 +100,7 @@ config.substitutions.append(("%python", sys.executable))
 # covered GPU-free by the StaticPlugins unit test (test/plugin/test_static_plugins).
 if getattr(config, "hip_static_plugins", False):
     config.available_features.add("hip_static_plugins")
+
+# What llama.cpp's ggml path builds (HIPDNN_EP_BUILD_GGML).
+if getattr(config, "hip_ggml", False):
+    config.available_features.add("hip_ggml")
