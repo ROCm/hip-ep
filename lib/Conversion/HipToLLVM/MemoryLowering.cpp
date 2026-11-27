@@ -6,12 +6,12 @@
 #include "HipToLLVMUtils.h"
 #include "hip/Dialect/Transforms/BufferUtils.h"
 
-#include "llvm/Support/MathExtras.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypeInterfaces.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "llvm/Support/MathExtras.h"
 
 namespace mlir {
 namespace hip {
