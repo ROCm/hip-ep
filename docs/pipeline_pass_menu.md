@@ -118,7 +118,8 @@ own symbol. `--autotune[=quick|full|exhaustive]`
 overrides the search space. A given tuning type skips the shipped
 problem-cache LUT; with none given, the shipped LUT is consulted before the
 search. `--problem-cache` / `HIP_ROCMLIR_PROBLEM_CACHE` still takes priority over
-the search and replaces the shipped table. A repeated problem in the same
+the search and replaces the shipped table; the provider honors
+`HIP_ROCMLIR_PROBLEM_CACHE` the same way. A repeated problem in the same
 compile reuses the in-session winner, then a miss searches the selected space.
 A provider artifact records `+autotune=<space>` only.
 `--dump-problem-cache <file.json>` writes that JSON after autotune, one

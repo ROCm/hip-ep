@@ -80,8 +80,11 @@ which is empty when `HIPDNN_EP_ROCMLIR` was off, the arch with an
 There is no `+lut=` fingerprint. A provided `HIPDNN_EP_ROCMLIR_AUTOTUNE`
 skips the shipped `tools/problem-cache/lut/*.fb`; when it is unset, the shipped
 table is consulted before the search. `hip-rocmlir-compiler` still honors
-`--problem-cache` / `HIP_ROCMLIR_PROBLEM_CACHE` ahead of the search. The
-provider does not read `HIP_ROCMLIR_PROBLEM_CACHE`. `hip-rocmlir-compiler` and
+`--problem-cache` / `HIP_ROCMLIR_PROBLEM_CACHE` ahead of the search, and the
+provider honors `HIP_ROCMLIR_PROBLEM_CACHE` the same way: the external table
+replaces the shipped one and its entries skip the search. Neither table is
+part of the artifact identity, so delete the model cache after pointing the
+variable at a different table. `hip-rocmlir-compiler` and
 the ONNX Runtime provider both read the skip variable: unset or `0`
 benchmarks. A present empty value skips, and so does any other value. Autotune
 otherwise runs for a rocMLIR session. Unset `HIPDNN_EP_ROCMLIR_AUTOTUNE`
