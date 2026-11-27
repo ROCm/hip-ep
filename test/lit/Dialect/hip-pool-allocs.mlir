@@ -92,6 +92,28 @@ func.func @mixed_element_types(
   return %alloc1 : memref<8x8xf16>
 }
 
+// ===== Bool buffers: one byte per element =====
+//
+// Kernels address i1 one byte per element, so memref<512xi1> takes 512 bytes,
+// not 64. The overlapping second buffer starts at 512 -> pool needs 1024.
+//
+// CHECK-LABEL: func.func @bool_allocs_byte_sized
+// CHECK:         %[[SIZE:.*]] = arith.constant 1024 : index
+// CHECK:         %[[POOL:.*]] = hip.get_pool(%{{.*}}, %[[SIZE]]) : memref<?xi8>
+// CHECK-DAG:     %[[OFF0:.*]] = arith.constant 0 : index
+// CHECK-DAG:     %[[OFF1:.*]] = arith.constant 512 : index
+// CHECK:         memref.view %[[POOL]][%[[OFF0]]][] : memref<?xi8> to memref<512xi1>
+// CHECK:         memref.view %[[POOL]][%[[OFF1]]][] : memref<?xi8> to memref<512xi1>
+func.func @bool_allocs_byte_sized(
+    %ctx: !hip.context,
+    %in: memref<512xi1>) -> memref<512xi1> {
+  %alloc0 = memref.alloc() : memref<512xi1>
+  hip.reverse(%ctx) ins(%in : memref<512xi1>) outs(%alloc0 : memref<512xi1>) {axes = [0]}
+  %alloc1 = memref.alloc() : memref<512xi1>
+  hip.reverse(%ctx) ins(%alloc0 : memref<512xi1>) outs(%alloc1 : memref<512xi1>) {axes = [0]}
+  return %alloc1 : memref<512xi1>
+}
+
 // ===== Single alloc: still pooled (a lone hip.alloc would otherwise lower to
 // the undefined hip_device_malloc — every transient must be pooled or written
 // through to an out-param) =====

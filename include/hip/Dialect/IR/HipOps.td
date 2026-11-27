@@ -2338,6 +2338,76 @@ def Hip_TransposeOp : Hip_DpsOp_WithInfer<"transpose", "Output",
   let hasCanonicalizer = 1;
 }
 
+def Hip_ReverseOp : Hip_DpsOp_AutoReifyInfer<"reverse"> {
+  let summary = "Reverse the element order along the given axes";
+  let description = [{
+    Copies `input` to `output` with the element order reversed along every
+    axis in `axes`: output[..., i, ...] = input[..., n - 1 - i, ...].
+    `input` and `output` have the same shape and element type.
+
+    A constant negative-step ONNX Slice becomes a positive-step
+    `tensor.extract_slice` over the same elements followed by this op, so the
+    slice needs neither its parameters on the device nor a host
+    synchronization.
+
+    The input may keep a strided layout after bufferization (for example a
+    `memref.subview` of the sliced tensor): the lowering reads the view through
+    its descriptor, so no identity-layout copy is made first. The lowering is
+    one `wrap_strided_copy_nd` call with negated source strides on the
+    reversed axes.
+
+    Example:
+    ```mlir
+    hip.reverse(%ctx) ins(%x : memref<2x49xf32, strided<[51, 1], offset: 1>, 1>)
+                      outs(%y : memref<2x49xf32, 1>) {axes = [1]}
+    ```
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    I64ArrayAttr:$axes
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
+
+def Hip_ConcatOp : Hip_DpsOp_AutoReifyInfer<"concat"> {
+  let summary = "Concatenate tensors along an axis in one kernel launch";
+  let description = [{
+    Writes `inputs` side by side along `axis` into `output`. Every input has
+    the output's rank and element type and matches it on every other axis.
+
+    Each input and the output are viewed as [outer, width], where `outer` is
+    the product of the dims before `axis`; one kernel reads every input and
+    writes the joined rows. ONNX Concat uses this op when `outer` is greater
+    than one, where copying each input on its own would need one strided copy
+    per input; other concats keep the `tensor.insert_slice` form.
+
+    Example:
+    ```mlir
+    hip.concat(%ctx) ins(%a, %b : memref<4x3xf32, 1>, memref<4x5xf32, 1>)
+                     outs(%r : memref<4x8xf32, 1>) {axis = 1 : i64}
+    ```
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Variadic<Hip_TensorOrMemRef>:$inputs,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$axis
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $inputs `:` type($inputs) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+  let hasVerifier = 1;
+}
+
 def Hip_GatherOp : Hip_DpsOp_WithInfer<"gather"> {
   let summary = "Gather elements along an axis";
   let description = [{

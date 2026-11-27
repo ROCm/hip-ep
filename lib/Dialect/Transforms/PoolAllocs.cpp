@@ -112,7 +112,7 @@ static int64_t staticFactorBytes(MemRefType type) {
     if (!ShapedType::isDynamic(dim))
       staticElems *= dim;
   return static_cast<int64_t>(
-      llvm::divideCeil(staticElems * type.getElementTypeBitWidth(), 8));
+      llvm::divideCeil(staticElems * getStorageBitWidth(type), 8));
 }
 
 /// Max-load lower bound: the peak sum of `sizeOf` over members live at a single
