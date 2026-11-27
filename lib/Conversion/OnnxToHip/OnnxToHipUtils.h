@@ -73,6 +73,38 @@ inline mlir::Value createEmptyTensor(mlir::OpBuilder &builder,
                                        resultType.getElementType(), dynSizes);
 }
 
+/// FuseRocMlirAnchorPass outlines anchors only from @main_graph's entry
+/// block. A hip.quant_conv or hip.quant_matmul left in any other function,
+/// including an outlined Loop, Scan, or If body, has no lowering.
+inline bool inMainGraphEntry(mlir::Operation *op) {
+  auto func = op->getParentOfType<mlir::func::FuncOp>();
+  return func && func.getSymName() == "main_graph" && !func.getBody().empty() &&
+         op->getBlock() == &func.getBody().front();
+}
+
+/// True when every element of a constant 8-bit zero point is the rebase
+/// offset (128 for ui8, 0 for i8), so its correction term is the zero tensor.
+/// A non-constant zero point is not known to be zero.
+inline bool rebasedZeroPointIsZero(mlir::Value zp) {
+  auto cst = zp.getDefiningOp<mlir::hip::ConstantOp>();
+  if (!cst || !cst.getValue())
+    return false;
+  auto attr = mlir::dyn_cast<mlir::DenseIntElementsAttr>(*cst.getValue());
+  if (!attr)
+    return false;
+  auto elem = mlir::cast<mlir::RankedTensorType>(zp.getType()).getElementType();
+  const bool ui8 = elem.isUnsignedInteger(8);
+  if (!ui8 && !elem.isSignlessInteger(8))
+    return false;
+  for (const llvm::APInt &value : attr) {
+    const int64_t n =
+        ui8 ? static_cast<int64_t>(value.getZExtValue()) : value.getSExtValue();
+    if (n != (ui8 ? 128 : 0))
+      return false;
+  }
+  return true;
+}
+
 /// Resolve the ranked result type of an ONNX reduction op (ReduceMax / Sum /
 /// Mean / Prod / ...).
 ///
@@ -619,9 +651,11 @@ void populateQdqConversionPatterns(RewritePatternSet &patterns,
 void populateDynamicQuantizeLinearConversionPatterns(
     RewritePatternSet &patterns, MLIRContext *ctx);
 void populateConvIntegerConversionPatterns(RewritePatternSet &patterns,
-                                           MLIRContext *ctx);
+                                           MLIRContext *ctx,
+                                           bool quantConv = false);
 void populateMatMulIntegerConversionPatterns(RewritePatternSet &patterns,
-                                             MLIRContext *ctx);
+                                             MLIRContext *ctx,
+                                             bool quantMatmul = false);
 
 /// Canonicalize com.microsoft QuantizeLinear / DequantizeLinear represented as
 /// onnx.Custom into native ONNX QDQ ops. Must run before QDQ conversion, which
