@@ -32,10 +32,11 @@
 //     overwrites rather than accumulates -- so it followed every convolution
 //     with a separate miopenOpTensor pass over the whole output. That pass is
 //     gone.
-//   * There is no op state, no solution cache and no workspace. MIOpen needed a
-//     per-shape Find() and a cached solution; this kernel derives everything
-//     from its arguments, so `op_state_slot` is accepted for ABI stability and
-//     ignored.
+//   * There is no op state and no solution cache. MIOpen needed a per-shape
+//     Find() and a cached solution; this kernel derives everything from its
+//     arguments, so `op_state_slot` is accepted for ABI stability and ignored.
+//     The one thing it may want from the runtime is scratch for split-K partial
+//     sums; see conv_workspace below.
 //
 // Only pads_begin is passed. Pad positions are never read, so the trailing pad
 // affects nothing except how many output positions exist, and that is already
@@ -55,6 +56,18 @@ extern "C" int8_t hipdnn_ep_op_state_construct_conv(RuntimeState *state,
                                                     int32_t slot) {
   hipdnn_ep_op_state_set(state, slot, ConvState::create().release());
   return 0;
+}
+
+// Split-K workspace for hip_conv, served from the session's conv scratch: one
+// buffer shared by every convolution on the session stream, grown on demand and
+// freed with the session. Reuse across convolutions is safe because the stream
+// serialises them. Returning NULL (allocation failure) is not an error -- the
+// kernel falls back to a plan that needs no workspace.
+static void *conv_workspace(void *ctx, size_t bytes) {
+  auto *state = static_cast<RuntimeState *>(ctx);
+  if (hipdnn_ep_state_ensure_conv_scratch(state, bytes) != 0)
+    return nullptr;
+  return hipdnn_ep_state_get_conv_scratch(state);
 }
 
 static int hipdnn_ep_to_hip_dtype(int64_t data_type) {
@@ -118,7 +131,9 @@ int wrap_conv(RuntimeState *state, int32_t op_state_slot, const void *input,
     return -1;
   }
 
-  // No op state: this kernel needs no cached solution or workspace.
+  // No op state: this kernel caches no solution. Its split-K plans take their
+  // partial-sum workspace from the session's conv scratch, through the callback
+  // below, only when a shape wants one.
   (void)op_state_slot;
 
   void *stream = hipdnn_ep_state_get_stream(state);
@@ -139,7 +154,7 @@ int wrap_conv(RuntimeState *state, int32_t op_state_slot, const void *input,
   int rc = hip_conv(stream, input, weights, bias, output, hip_dtype,
                     static_cast<int>(spatial_rank), N, Cin, Cout, in0, in1, in2,
                     out0, out1, out2, k0, k1, k2, s0, s1, s2, p0, p1, p2, dil0,
-                    dil1, dil2, group);
+                    dil1, dil2, group, conv_workspace, state);
   if (rc != 0) {
     fprintf(stderr, "[REAL] wrap_conv: kernel launch failed (%d)\n", rc);
     return -1;

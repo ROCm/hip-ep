@@ -166,13 +166,11 @@ struct RuntimeState {
   void *qmoe_amd_host_scratch; // pinned host mirror for D2H of expert counts
   size_t qmoe_amd_host_scratch_size;
 
-  // Per-session convolution workspace. Currently allocated by nobody: both
-  // convolution directions now run on in-tree kernels (hip_conv,
-  // hip_conv_transpose) that need no workspace at all. Kept only because the
-  // accessors are
-  // part of the runtime's exported surface. Same grow-on-demand policy as
-  // qmoe_scratch above if it is ever wired up again: lazily allocated on first
-  // use, never shrinks, freed in hipdnn_ep_state_cleanup.
+  // Per-session convolution workspace: the split-K partial sums of hip_conv
+  // (wrap_conv hands the kernel an allocation callback over it).
+  // hip_conv_transpose needs none. Same grow-on-demand policy as qmoe_scratch
+  // above: lazily allocated on first use, never shrinks, freed in
+  // hipdnn_ep_state_cleanup.
   void *conv_scratch;
   size_t conv_scratch_size;
 

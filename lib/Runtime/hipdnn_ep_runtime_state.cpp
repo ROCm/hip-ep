@@ -1985,10 +1985,9 @@ int hipdnn_ep_state_ensure_qmoe_amd_host_scratch(RuntimeState *state,
   return 0;
 }
 
-// Convolution workspace pool. Same grow-on-demand policy as qmoe_scratch
-// above. Currently unused: both convolution directions run on in-tree kernels
-// that need no workspace. Single-buffer reuse is safe because the stream is
-// serialised.
+// Convolution workspace pool: the split-K partial sums of hip_conv (see
+// real/conv.cpp). Same grow-on-demand policy as qmoe_scratch above.
+// Single-buffer reuse is safe because the stream is serialised.
 void *hipdnn_ep_state_get_conv_scratch(RuntimeState *state) {
   return state ? state->conv_scratch : nullptr;
 }

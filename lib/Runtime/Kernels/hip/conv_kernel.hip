@@ -12,6 +12,8 @@
 #include <hip/hip_bfloat16.h>
 #include <cstdint>
 #include <cstdio>
+#include <type_traits>
+#include <utility>
 
 // =============================================================================
 // Conv — general forward convolution (1D / 2D / 3D spatial)
@@ -199,6 +201,15 @@ struct ConvParams {
   // has to split back into a row and a column of that 2-D grid.
   int32_t nBlkW;
   FastDiv rBlkW;
+
+  // Split-K: the reduction is cut into kSplit slices of kChunk taps (a
+  // multiple of the tile's BK), one per blockIdx.y. Each writes a partial sum
+  // to the workspace and conv_splitk_reduce_kernel adds them. 0 or 1 = no
+  // split. Honoured by conv_tiled_kernel and conv_wmma_kernel, and by
+  // conv_window_kernel, whose chunk counts input channels (a multiple of the
+  // WMMA depth) rather than taps.
+  int32_t kSplit;
+  int64_t kChunk;
 };
 
 // The input coordinate that kernel tap (0,0,0) of an output position reads.
@@ -496,7 +507,7 @@ template <typename T, int BM, int BN, int BK, int TM, int TN>
 __global__ __launch_bounds__((BM / TM) * (BN / TN)) void
 conv_tiled_kernel(const T *__restrict__ x, const T *__restrict__ w,
                   const T *__restrict__ bias, T *__restrict__ y,
-                  ConvParams pr) {
+                  float *__restrict__ ws, ConvParams pr) {
   constexpr int kThreads = (BM / TM) * (BN / TN);
   static_assert(kThreads % BN == 0, "B column tiling");
   static_assert((BK * BM) % kThreads == 0 && (BK * BN) % kThreads == 0,
@@ -526,6 +537,13 @@ conv_tiled_kernel(const T *__restrict__ x, const T *__restrict__ w,
   const int64_t m0 = static_cast<int64_t>(blkM) * BM; // first channel
   int64_t nbatch, g;
   blockBases(pr, blockIdx.z, nbatch, g);
+  // The slice of the reduction this block covers. Chunks are multiples of BK,
+  // so no slice straddles two blocks' ranges and nothing is summed twice.
+  const bool split = pr.kSplit > 1;
+  const int splitIdx = split ? static_cast<int>(blockIdx.y) : 0;
+  const int64_t kBeg = split ? splitIdx * pr.kChunk : 0;
+  const int64_t kEnd =
+      split ? (kBeg + pr.kChunk < pr.K ? kBeg + pr.kChunk : pr.K) : pr.K;
 
   // Filter staging: one contiguous run of K per thread, resolved once.
   const int rowA = tid / kRowThreadsA;
@@ -562,7 +580,7 @@ conv_tiled_kernel(const T *__restrict__ x, const T *__restrict__ w,
   // are masked rather than skipped (see gatherMasked), so they carry no branch.
   float aReg[kVecA];
   float bReg[kLoadsB];
-  const int64_t nSlices = (pr.K + BK - 1) / BK;
+  const int64_t nSlices = (kEnd - kBeg + BK - 1) / BK;
 
   const auto loadSlice = [&](int64_t kBase, int ksBuf) {
     const int64_t wBase = wRowBase + kBase + kOffA;
@@ -586,18 +604,18 @@ conv_tiled_kernel(const T *__restrict__ x, const T *__restrict__ w,
   };
 
   if (tid < BK) {
-    ks[0][tid] = makeKSlice(pr, tid);
-    ks[1][tid] = makeKSlice(pr, BK + tid);
+    ks[0][tid] = makeKSlice(pr, kBeg + tid);
+    ks[1][tid] = makeKSlice(pr, kBeg + BK + tid);
   }
   __syncthreads();
-  loadSlice(0, 0);
+  loadSlice(kBeg, 0);
   storeSlice(0);
   __syncthreads();
 
   for (int64_t s = 0; s < nSlices; ++s) {
     const int cur = static_cast<int>(s & 1);
     const bool hasNext = s + 1 < nSlices;
-    if (hasNext) loadSlice((s + 1) * BK, cur ^ 1);
+    if (hasNext) loadSlice(kBeg + (s + 1) * BK, cur ^ 1);
 
     // Unrolled by eight, not fully. Each unrolled step needs TM+TN live LDS
     // reads, and the scheduler hoists them to cover the ds_read latency, so
@@ -616,9 +634,29 @@ conv_tiled_kernel(const T *__restrict__ x, const T *__restrict__ w,
 #pragma unroll
         for (int j = 0; j < TN; ++j) acc[i][j] += a[i] * b[j];
     }
-    if (tid < BK) ks[cur][tid] = makeKSlice(pr, (s + 2) * BK + tid);
+    if (tid < BK) ks[cur][tid] = makeKSlice(pr, kBeg + (s + 2) * BK + tid);
     if (hasNext) storeSlice(cur ^ 1);
     __syncthreads();
+  }
+
+  if (split) {
+    // Partial sum, no bias: ws is [split][N][Cout][Nout]. The reduce kernel
+    // adds the slices in a fixed order, so the result is deterministic.
+    const int64_t total = pr.N * pr.Cout * pr.Nout;
+    float *wsb = ws + splitIdx * total + nbatch * pr.Cout * pr.Nout;
+#pragma unroll
+    for (int i = 0; i < TM; ++i) {
+      const int64_t m = m0 + aOff + i;
+      if (m >= pr.MPerGroup) break;
+      float *row = wsb + (g * pr.MPerGroup + m) * pr.Nout;
+#pragma unroll
+      for (int j = 0; j < TN; ++j) {
+        const int64_t o = n0 + bOff + j;
+        if (o >= pr.Nout) break;
+        row[o] = acc[i][j];
+      }
+    }
+    return;
   }
 
   // Store, folding in the bias. Both loops are unrolled so that acc[i][j] is
@@ -730,7 +768,7 @@ __global__ __launch_bounds__((BM / (WM * kWmma)) * (BN / (WN * kWmma)) * 32)
 void conv_wmma_kernel(const __half *__restrict__ x,
                       const __half *__restrict__ w,
                       const __half *__restrict__ bias, __half *__restrict__ y,
-                      ConvParams pr) {
+                      float *__restrict__ ws, ConvParams pr) {
   constexpr int kWavesM = BM / (WM * kWmma);
   constexpr int kWavesN = BN / (WN * kWmma);
   constexpr int kThreads = kWavesM * kWavesN * 32;
@@ -785,6 +823,12 @@ void conv_wmma_kernel(const __half *__restrict__ x,
   const int64_t m0 = static_cast<int64_t>(blkM) * BM;
   int64_t nbatch, g;
   blockBases(pr, blockIdx.z, nbatch, g);
+  // This block's slice of the reduction (split-K). Chunks are multiples of the
+  // 16-tap WMMA depth, so slices never overlap.
+  const bool split = pr.kSplit > 1;
+  const int64_t kBeg = split ? static_cast<int64_t>(blockIdx.y) * pr.kChunk : 0;
+  const int64_t kEnd =
+      split ? (kBeg + pr.kChunk < pr.K ? kBeg + pr.kChunk : pr.K) : pr.K;
 
   // Filter staging: contiguous run of K per row, as in the scalar kernel.
   constexpr int kVecA = (BM * kWmma) / kThreads;
@@ -842,10 +886,10 @@ void conv_wmma_kernel(const __half *__restrict__ x,
     for (int j = 0; j < WN; ++j) acc[i][j] = (float8)0.0f;
 
   int cur = 0;
-  if (tid < kWmma) ks[0][tid] = makeKSlice(pr, tid);
+  if (tid < kWmma) ks[0][tid] = makeKSlice(pr, kBeg + tid);
   __syncthreads();
 
-  for (int64_t kBase = 0; kBase < pr.K; kBase += kWmma) {
+  for (int64_t kBase = kBeg; kBase < kEnd; kBase += kWmma) {
     const int64_t wBase = wRowBase + kBase + kOffA;
     const int64_t kRem = pr.K - kBase - kOffA;
 #pragma unroll
@@ -920,6 +964,30 @@ void conv_wmma_kernel(const __half *__restrict__ x,
     cur ^= 1;
   }
 
+  if (split) {
+    // Partial sum, no bias: ws is [split][N][Cout][Nout], added by
+    // conv_splitk_reduce_kernel.
+    const int64_t total = pr.N * pr.Cout * pr.Nout;
+    float *wsb = ws + static_cast<int64_t>(blockIdx.y) * total +
+                 nbatch * pr.Cout * pr.Nout;
+#pragma unroll
+    for (int i = 0; i < WM; ++i) {
+#pragma unroll
+      for (int j = 0; j < WN; ++j) {
+        const int64_t o = n0 + waveN * WN * kWmma + j * kWmma + lane16;
+        if (o >= pr.Nout) continue;
+#pragma unroll
+        for (int e = 0; e < 8; ++e) {
+          const int64_t m = m0 + waveM * WM * kWmma + i * kWmma +
+                            hipdnn_wmma_acc_row(pair, e);
+          if (m >= pr.MPerGroup) continue;
+          wsb[(g * pr.MPerGroup + m) * pr.Nout + o] = acc[i][j][e];
+        }
+      }
+    }
+    return;
+  }
+
   const int64_t yBatchBase = nbatch * pr.Cout * pr.Nout;
 #pragma unroll
   for (int i = 0; i < WM; ++i) {
@@ -984,7 +1052,7 @@ __global__
 __launch_bounds__((BM / (WM * kWmma)) * ((TH * TW) / (WN * kWmma)) * 32) void
 conv_window_kernel(const __half *__restrict__ x, const __half *__restrict__ w,
                    const __half *__restrict__ bias, __half *__restrict__ y,
-                   ConvParams pr) {
+                   float *__restrict__ ws, ConvParams pr) {
   constexpr int BN = TH * TW;
   constexpr int kWavesM = BM / (WM * kWmma);
   constexpr int kWavesN = BN / (WN * kWmma);
@@ -1029,6 +1097,15 @@ conv_window_kernel(const __half *__restrict__ x, const __half *__restrict__ w,
   const int64_t ow0 = static_cast<int64_t>(bw) * TW;
   int64_t nbatch, g;
   blockBases(pr, blockIdx.z, nbatch, g);
+  // This block's slice of the reduction (split-K). The window kernel's outer
+  // loop runs over channel slices, so here kChunk counts input channels, in
+  // multiples of the 16-channel WMMA depth.
+  const bool split = pr.kSplit > 1;
+  const int64_t cBeg = split ? static_cast<int64_t>(blockIdx.y) * pr.kChunk : 0;
+  const int64_t cEnd = split ? (cBeg + pr.kChunk < pr.CinPerGroup
+                                    ? cBeg + pr.kChunk
+                                    : pr.CinPerGroup)
+                              : pr.CinPerGroup;
 
   // Input window origin. Unit stride and dilation, so an output at (oh, ow)
   // reads input rows oh - p0 + tr for tr in [0, k0), and the whole tile's
@@ -1065,7 +1142,7 @@ conv_window_kernel(const __half *__restrict__ x, const __half *__restrict__ w,
   const int32_t ww = TW + k1 - 1;
 
   int buf = 0;
-  for (int64_t c0 = 0; c0 < pr.CinPerGroup; c0 += kWmma) {
+  for (int64_t c0 = cBeg; c0 < cEnd; c0 += kWmma) {
     // Stage the window for this channel slice. Out-of-input elements are
     // written as zero, which is what padding means and what removes the bounds
     // test from every tap below.
@@ -1121,6 +1198,32 @@ conv_window_kernel(const __half *__restrict__ x, const __half *__restrict__ w,
               HIPDNN_WMMA_F32_16X16X16_F16(aFrag[i], bFrag[j], acc[i][j]);
       buf ^= 1; // next tap stages the buffer this one is not reading
     }
+  }
+
+  if (split) {
+    // Partial sum, no bias: ws is [split][N][Cout][Nout], added by
+    // conv_splitk_reduce_kernel.
+    const int64_t total = pr.N * pr.Cout * pr.Nout;
+    float *wsb = ws + static_cast<int64_t>(blockIdx.y) * total +
+                 nbatch * pr.Cout * pr.Nout;
+#pragma unroll
+    for (int j = 0; j < WN; ++j) {
+      const int n = waveN * WN * kWmma + j * kWmma + lane16;
+      const int64_t oh = oh0 + n / TW, ow = ow0 + (n % TW);
+      if (oh >= pr.out0 || ow >= pr.out1) continue;
+      const int64_t o = oh * pr.out1 + ow;
+#pragma unroll
+      for (int i = 0; i < WM; ++i) {
+#pragma unroll
+        for (int e = 0; e < 8; ++e) {
+          const int64_t m = m0 + waveM * WM * kWmma + i * kWmma +
+                            hipdnn_wmma_acc_row(pair, e);
+          if (m >= pr.MPerGroup) continue;
+          wsb[(g * pr.MPerGroup + m) * pr.Nout + o] = acc[i][j][e];
+        }
+      }
+    }
+    return;
   }
 
   const int64_t yBatchBase = nbatch * pr.Cout * pr.Nout;
@@ -1523,26 +1626,152 @@ static inline void logPick(const char *what, const ConvParams &pr) {
       (long long)pr.k1, (long long)pr.s0, (long long)pr.s1);
 }
 
+// Split-K limits shared by the scalar and the WMMA kernels: the fewest taps a
+// slice may have, and the largest workspace a split may ask for. Both were tuned
+// on one 40-CU gfx1151 only, and the cap is a footprint limit rather than a
+// tuned value. docs/design/conv-split-k.md has the measurements behind them.
+//
+// TODO: re-derive both per architecture (other gfx11.5 parts, gfx12, CDNA)
+// before relying on them elsewhere; see "Constants" in that document.
+constexpr int64_t kSplitMinTaps = 256;
+constexpr int64_t kSplitMaxWorkspace = 32ll << 20;
+
+// Splits a reduction of `total` units across blocks. It starts from enough
+// slices to take a grid of `blocks` up to `target`, caps the count so a slice
+// keeps at least `minLen` units and the partial sums (`bytesPerSlice` each) fit
+// in kSplitMaxWorkspace, then rounds the slice length up to a multiple of
+// `granule` and recomputes the count that length implies. split == 1 means the
+// reduction is not worth cutting.
+struct SliceSplit {
+  int split;
+  int64_t chunk;
+};
+
+static SliceSplit sliceSplit(int64_t blocks, int64_t total, int64_t granule,
+                             int64_t minLen, int64_t target,
+                             int64_t bytesPerSlice) {
+  int64_t s = (target + blocks - 1) / blocks;
+  const int64_t maxSplit = total / minLen > 1 ? total / minLen : 1;
+  if (s > maxSplit) s = maxSplit;
+  while (s > 1 && s * bytesPerSlice > kSplitMaxWorkspace) --s;
+  int64_t chunk = (total + s - 1) / s;
+  chunk = (chunk + granule - 1) / granule * granule;
+  s = (total + chunk - 1) / chunk;
+  return {static_cast<int>(s), chunk};
+}
+
+// Source of the partial-sum workspace: the caller's allocation callback, or
+// nothing, in which case split-K is simply not used.
+struct WorkspaceSource {
+  hip_conv_workspace_fn fn;
+  void *ctx;
+  float *get(size_t bytes) const {
+    return fn ? static_cast<float *>(fn(ctx, bytes)) : nullptr;
+  }
+};
+
+// y = bias + sum over the split-K slices, one thread per output element so the
+// reads and the write are coalesced. The slices are added in index order, so the
+// result does not depend on which block finished first.
+template <typename T>
+__global__ void conv_splitk_reduce_kernel(const float *__restrict__ ws,
+                                          const T *__restrict__ bias,
+                                          T *__restrict__ y, int64_t total,
+                                          int split, int64_t Cout,
+                                          int64_t Nout) {
+  const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (i >= total) return;
+  float acc = 0.0f;
+  for (int s = 0; s < split; ++s) acc += ws[s * total + i];
+  if (bias) acc += to_float<T>(bias[(i / Nout) % Cout]);
+  y[i] = from_float<T>(acc);
+}
+
+// Launches one scalar tile. With split > 1 the reduction is cut across
+// blockIdx.y into slices of `chunk` taps whose partial sums go to `ws`, and a
+// reduce kernel finishes the job.
 template <typename T, int BM, int BN, int TM, int TN>
 static void launchTile(hipStream_t stream, const void *x, const void *w,
-                       const void *bias, void *y, const ConvParams &base) {
-  const ConvParams pr = withTileGrid(base, BM, BN);
-  logPick("tiled", pr);
-  dim3 grid(swizzledGridX(pr), 1u,
+                       const void *bias, void *y, const ConvParams &base,
+                       int split = 0, int64_t chunk = 0, float *ws = nullptr) {
+  ConvParams pr = withTileGrid(base, BM, BN);
+  pr.kSplit = split;
+  pr.kChunk = chunk;
+  logPick(split > 1 ? "tiled+splitk" : "tiled", pr);
+  dim3 grid(swizzledGridX(pr), split > 1 ? static_cast<unsigned>(split) : 1u,
             static_cast<unsigned>(pr.N * pr.group));
   hipLaunchKernelGGL((conv_tiled_kernel<T, BM, BN, kBK, TM, TN>), grid,
                      dim3((BM / TM) * (BN / TN)), 0, stream,
                      static_cast<const T *>(x), static_cast<const T *>(w),
-                     static_cast<const T *>(bias), static_cast<T *>(y), pr);
+                     static_cast<const T *>(bias), static_cast<T *>(y), ws, pr);
+  if (split > 1) {
+    const int64_t total = pr.N * pr.Cout * pr.Nout;
+    hipLaunchKernelGGL(conv_splitk_reduce_kernel<T>,
+                       dim3(static_cast<unsigned>((total + 255) / 256)),
+                       dim3(256), 0, stream, ws, static_cast<const T *>(bias),
+                       static_cast<T *>(y), total, split, pr.Cout, pr.Nout);
+  }
+}
+
+// What the fp16 launchers need to decide on a split: the workspace source and
+// the device's CU count.
+struct SplitEnv {
+  WorkspaceSource wsrc;
+  int64_t cus;
+};
+
+// Split-K for the WMMA kernels, applied to whatever tile the ladder chose. The
+// reduction (`total` units: taps for conv_wmma_kernel, input channels for
+// conv_window_kernel) is cut into `split` chunks of `chunk` units, a multiple of
+// `granule` (the WMMA depth), when the tile's grid has at most one block per CU
+// and the reduction is long enough that each chunk keeps at least `minLen`
+// units.
+// Not swept for fp16.
+static bool planFp16Split(const ConvParams &pr, int64_t blocks, int64_t total,
+                          int64_t granule, int64_t minLen, int64_t cus,
+                          int &split, int64_t &chunk) {
+  split = 1;
+  chunk = 0;
+  if (blocks > cus) return false;
+  const SliceSplit sp = sliceSplit(blocks, total, granule, minLen, 2 * cus,
+                                   pr.N * pr.Cout * pr.Nout * 4);
+  if (sp.split <= 1) return false;
+  split = sp.split;
+  chunk = sp.chunk;
+  return true;
+}
+
+// Adds the split-K slices (and the bias) into y, as for the scalar tiles.
+static void launchFp16SplitReduce(hipStream_t stream, const void *bias, void *y,
+                                  float *ws, const ConvParams &pr, int split) {
+  const int64_t total = pr.N * pr.Cout * pr.Nout;
+  hipLaunchKernelGGL(conv_splitk_reduce_kernel<__half>,
+                     dim3(static_cast<unsigned>((total + 255) / 256)),
+                     dim3(256), 0, stream, ws,
+                     static_cast<const __half *>(bias), static_cast<__half *>(y),
+                     total, split, pr.Cout, pr.Nout);
 }
 
 template <int BM, int BN, int WM, int WN>
 static void launchWmma(hipStream_t stream, const void *x, const void *w,
-                       const void *bias, void *y, const ConvParams &base) {
+                       const void *bias, void *y, const ConvParams &base,
+                       const SplitEnv &env) {
   constexpr int threads = (BM / (WM * kWmma)) * (BN / (WN * kWmma)) * 32;
-  const ConvParams pr = withTileGrid(base, BM, BN);
-  logPick("wmma", pr);
-  dim3 grid(swizzledGridX(pr), 1u,
+  ConvParams pr = withTileGrid(base, BM, BN);
+  int split = 1;
+  int64_t chunk = 0;
+  float *ws = nullptr;
+  const int64_t blocks =
+      static_cast<int64_t>(swizzledGridX(pr)) * pr.N * pr.group;
+  if (planFp16Split(pr, blocks, pr.K, kWmma, kSplitMinTaps, env.cus, split,
+                    chunk)) {
+    ws = env.wsrc.get(static_cast<size_t>(split) * pr.N * pr.Cout * pr.Nout * 4);
+    if (!ws) split = 1;
+  }
+  pr.kSplit = split;
+  pr.kChunk = chunk;
+  logPick(split > 1 ? "wmma+splitk" : "wmma", pr);
+  dim3 grid(swizzledGridX(pr), split > 1 ? static_cast<unsigned>(split) : 1u,
             static_cast<unsigned>(pr.N * pr.group));
   // The vectorised stage needs a whole wave's worth of column groups, so it is
   // only instantiated for the tiles wide enough to supply them.
@@ -1555,7 +1784,8 @@ static void launchWmma(hipStream_t stream, const void *x, const void *w,
                          static_cast<const __half *>(x),
                          static_cast<const __half *>(w),
                          static_cast<const __half *>(bias),
-                         static_cast<__half *>(y), pr);
+                         static_cast<__half *>(y), ws, pr);
+      if (split > 1) launchFp16SplitReduce(stream, bias, y, ws, pr, split);
       return;
     }
   }
@@ -1563,31 +1793,50 @@ static void launchWmma(hipStream_t stream, const void *x, const void *w,
                      dim3(threads), 0, stream, static_cast<const __half *>(x),
                      static_cast<const __half *>(w),
                      static_cast<const __half *>(bias),
-                     static_cast<__half *>(y), pr);
+                     static_cast<__half *>(y), ws, pr);
+  if (split > 1) launchFp16SplitReduce(stream, bias, y, ws, pr, split);
 }
 
 constexpr int kWinKMax = 3; // largest kernel extent the window kernel stages
 
-// deviceUnitCount() reports WGPs, and a WGP is two CUs, so a coverage test
-// stated in units of real compute has to double it. Kept as a named constant
-// because the two ladders below disagree about whether they want WGPs or CUs
-// and the difference is otherwise invisible at the call site.
-constexpr int kUnitsPerWgp = 2;
+// How many CUs one unit of deviceUnitCount() stands for. RDNA (wave32) reports
+// WGPs, which are two CUs each, so a coverage test stated in units of real
+// compute has to double it; CDNA (wave64) reports CUs already. Kept as a named
+// function because the two ladders below disagree about whether they want WGPs
+// or CUs and the difference is otherwise invisible at the call site.
+static int cusPerUnit() { return hipdnn_device_is_wave64() ? 1 : 2; }
 
 template <int BM, int TH, int TW, int WM, int WN>
 static void launchWindow(hipStream_t stream, const void *x, const void *w,
-                         const void *bias, void *y, const ConvParams &base) {
+                         const void *bias, void *y, const ConvParams &base,
+                         const SplitEnv &env) {
   constexpr int threads =
       (BM / (WM * kWmma)) * ((TH * TW) / (WN * kWmma)) * 32;
-  const ConvParams pr = withWindowGrid(base, BM, TH, TW);
-  logPick("window", pr);
-  dim3 grid(swizzledGridX(pr), 1u, static_cast<unsigned>(pr.N * pr.group));
+  ConvParams pr = withWindowGrid(base, BM, TH, TW);
+  int split = 1;
+  int64_t chunk = 0;
+  float *ws = nullptr;
+  const int64_t blocks =
+      static_cast<int64_t>(swizzledGridX(pr)) * pr.N * pr.group;
+  // The window kernel's reduction is over input channels, 16 at a time; keep at
+  // least two such slices (32 channels) in a chunk.
+  if (planFp16Split(pr, blocks, pr.CinPerGroup, kWmma, 2 * kWmma, env.cus,
+                    split, chunk)) {
+    ws = env.wsrc.get(static_cast<size_t>(split) * pr.N * pr.Cout * pr.Nout * 4);
+    if (!ws) split = 1;
+  }
+  pr.kSplit = split;
+  pr.kChunk = chunk;
+  logPick(split > 1 ? "window+splitk" : "window", pr);
+  dim3 grid(swizzledGridX(pr), split > 1 ? static_cast<unsigned>(split) : 1u,
+            static_cast<unsigned>(pr.N * pr.group));
   hipLaunchKernelGGL((conv_window_kernel<BM, TH, TW, WM, WN, kWinKMax>), grid,
                      dim3(threads), 0, stream,
                      static_cast<const __half *>(x),
                      static_cast<const __half *>(w),
                      static_cast<const __half *>(bias),
-                     static_cast<__half *>(y), pr);
+                     static_cast<__half *>(y), ws, pr);
+  if (split > 1) launchFp16SplitReduce(stream, bias, y, ws, pr, split);
 }
 
 // Whether the window kernel can run this shape at all. Everything here is a
@@ -1649,14 +1898,15 @@ static bool wmmaSupported() { return hipdnn_device_has_wmma(); }
 template <typename T>
 static bool launchWmmaIfProfitable(hipStream_t, const void *, const void *,
                                    const void *, void *, const ConvParams &,
-                                   int64_t) {
+                                   int64_t, const WorkspaceSource &) {
   return false;
 }
 
 template <>
 bool launchWmmaIfProfitable<__half>(hipStream_t stream, const void *x,
                                     const void *w, const void *bias, void *y,
-                                    const ConvParams &pr, int64_t units) {
+                                    const ConvParams &pr, int64_t units,
+                                    const WorkspaceSource &wsrc) {
   if (!wmmaSupported()) return false;
   // Every coverage test below is in CUs. The rungs were originally calibrated
   // against deviceUnitCount()'s WGPs, which asked each tile for half the grid
@@ -1677,7 +1927,8 @@ bool launchWmmaIfProfitable<__half>(hipStream_t stream, const void *x,
   // caller's second pass and its scalar rungs are now unreachable for __half.
   // That is the intent: the second pass exists to keep small shapes off
   // conv_direct, and a WMMA tile does that better than a scalar one.
-  const int64_t cus = units * kUnitsPerWgp;
+  const int64_t cus = units * cusPerUnit();
+  const SplitEnv env{wsrc, cus};
   // The window-staging kernel gets first refusal on the multi-tap 2-D shapes.
   // Every tile below re-reads the input once per kernel tap, and on those
   // shapes that amplification -- not arithmetic, not occupancy -- is what the
@@ -1700,11 +1951,11 @@ bool launchWmmaIfProfitable<__half>(hipStream_t stream, const void *x,
   // output tile makes few blocks on a 20x20 feature map.
   if (windowEligible(pr) && pr.CinPerGroup >= kWmma) {
     if (pr.MPerGroup >= 64 && windowCovers(pr, 64, 16, 16, cus)) {
-      launchWindow<64, 16, 16, 2, 4>(stream, x, w, bias, y, pr);
+      launchWindow<64, 16, 16, 2, 4>(stream, x, w, bias, y, pr, env);
       return true;
     }
     if (pr.MPerGroup >= 32) {
-      launchWindow<32, 8, 32, 2, 2>(stream, x, w, bias, y, pr);
+      launchWindow<32, 8, 32, 2, 2>(stream, x, w, bias, y, pr, env);
       return true;
     }
   }
@@ -1721,7 +1972,7 @@ bool launchWmmaIfProfitable<__half>(hipStream_t stream, const void *x,
   // reduction is long enough that hiding the filter loads is what matters, and
   // the lost occupancy dominates (whisper_l1 loses 33%).
   if (pr.MPerGroup <= 512 && tileFits(pr, 128, 256, cus)) {
-    launchWmma<128, 256, 4, 4>(stream, x, w, bias, y, pr);
+    launchWmma<128, 256, 4, 4>(stream, x, w, bias, y, pr, env);
     return true;
   }
   // A taller row tile, for the shapes with many output channels. What this buys
@@ -1732,7 +1983,7 @@ bool launchWmmaIfProfitable<__half>(hipStream_t stream, const void *x,
   // 21 MB of unique data at close to what the memory system can deliver, so
   // there is nothing to win by making it faster, only by doing less of it.
   if (tileFits(pr, 256, 128, cus)) {
-    launchWmma<256, 128, 4, 2>(stream, x, w, bias, y, pr);
+    launchWmma<256, 128, 4, 2>(stream, x, w, bias, y, pr, env);
     return true;
   }
   // No coverage test on this one, deliberately. It is the general-purpose tile
@@ -1742,7 +1993,7 @@ bool launchWmmaIfProfitable<__half>(hipStream_t stream, const void *x,
   // even at 8 blocks on a 40-CU device. Gating it only pushes those shapes onto
   // the narrow rungs, which is where the 1.3x-1.7x losses were.
   if (pr.MPerGroup >= 128) {
-    launchWmma<128, 128, 4, 2>(stream, x, w, bias, y, pr);
+    launchWmma<128, 128, 4, 2>(stream, x, w, bias, y, pr, env);
     return true;
   }
   // 64 rows, for the shapes with too few output channels for a 128-row tile but
@@ -1763,14 +2014,14 @@ bool launchWmmaIfProfitable<__half>(hipStream_t stream, const void *x,
   // esrgan is the shape that wants it: 69 of its convs are 192->64 at 250x250,
   // its most expensive by a wide margin, and they sit exactly on this rung.
   if (tileFits(pr, 64, 256, cus)) {
-    launchWmma<64, 256, 2, 4>(stream, x, w, bias, y, pr);
+    launchWmma<64, 256, 2, 4>(stream, x, w, bias, y, pr, env);
     return true;
   }
   // Narrow row block for the grouped and low-channel-count shapes -- the audio
   // encoder's second conv has 32 output channels and would throw away three
   // quarters of a 128-row tile.
   if (tileFits(pr, 32, 256, cus)) {
-    launchWmma<32, 256, 2, 2>(stream, x, w, bias, y, pr);
+    launchWmma<32, 256, 2, 2>(stream, x, w, bias, y, pr, env);
     return true;
   }
   // Fewer output channels than any tile above has rows. The alternative is
@@ -1788,8 +2039,129 @@ bool launchWmmaIfProfitable<__half>(hipStream_t stream, const void *x,
   // With the tests above stated in CUs two yolov5lu shapes fell off the end,
   // and the scalar path is not what a shape the matrix cores can take should
   // get -- a tile that wastes most of its rows still beats conv_direct.
-  launchWmma<16, 256, 1, 2>(stream, x, w, bias, y, pr);
+  launchWmma<16, 256, 1, 2>(stream, x, w, bias, y, pr, env);
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// Split-K for the scalar tiles
+// ---------------------------------------------------------------------------
+//
+// A convolution with few output positions and a long reduction -- a 3x3 over
+// 512 channels at 7x7 is K = 4608 for only 49 columns -- makes a handful of
+// blocks under every tile, so most of the device idles while each block walks
+// the whole reduction. Cutting the reduction across blockIdx.y turns that
+// length into parallelism: each slice writes a partial sum to the workspace and
+// a small reduce kernel adds them (and the bias).
+//
+// The cost is a round trip through the workspace and a second launch, so it is
+// only worth it when the tile grid is badly short of the device, and the slices
+// must stay long enough to amortise their own prologue.
+
+// The tiles split-K may use, widest first. The planner reads bm and bn from a
+// row and launchSplitK instantiates the kernel with all four from the same row,
+// so the two cannot drift apart.
+struct SplitTile {
+  int bm, bn, tm, tn;
+};
+constexpr SplitTile kSplitTiles[] = {
+    {128, 128, 8, 8}, {64, 64, 4, 4}, {32, 128, 2, 8}, {32, 32, 2, 2}};
+constexpr int kSplitTileCount =
+    static_cast<int>(sizeof(kSplitTiles) / sizeof(kSplitTiles[0]));
+
+struct SplitPlan {
+  int tile = -1; // index into kSplitTiles; -1 = do not split
+  int split = 1;
+  int64_t chunk = 0;
+};
+
+// Picks a tile and a split for a grid short of `target`, two blocks per CU. The
+// ladder asks one per unit, so some shapes it would accept split here. Tiles are
+// tried widest first, and the first that reaches `target` blocks wins -- a wider
+// tile does more FMAs per LDS read -- otherwise the one that gets closest.
+// Tiles more than twice as wide as the output are skipped: a 128-column tile on
+// a 49-column output spends most of every block on columns that do not exist.
+// `*outBytes` is the workspace the returned plan needs.
+static SplitPlan planSplitK(const ConvParams &pr, int64_t cus,
+                            int64_t *outBytes) {
+  SplitPlan best;
+  *outBytes = 0;
+  if (pr.MPerGroup < 32 || pr.K < 2 * kSplitMinTaps) return best;
+  const int64_t target = 2 * cus;
+  const int64_t bytesPerSlice = pr.N * pr.Cout * pr.Nout * 4;
+  int64_t bestBlocks = 0;
+  for (int id = 0; id < kSplitTileCount; ++id) {
+    const SplitTile &c = kSplitTiles[id];
+    if (pr.MPerGroup < c.bm) continue;
+    if (c.bn > 2 * pr.Nout) continue;
+    const int64_t blocks = tileBlocks(pr, c.bm, c.bn);
+    // A chunk is a multiple of BK: see the kernel.
+    const SliceSplit sp = sliceSplit(blocks, pr.K, kBK, kSplitMinTaps, target,
+                                     bytesPerSlice);
+    if (blocks * sp.split > bestBlocks) {
+      bestBlocks = blocks * sp.split;
+      best.tile = id;
+      best.split = sp.split;
+      best.chunk = sp.chunk;
+    }
+    if (blocks * sp.split >= target) break;
+  }
+  if (best.tile < 0 || best.split <= 1) return SplitPlan{};
+  *outBytes = best.split * bytesPerSlice;
+  return best;
+}
+
+// The element types the scalar split-K path may run for. A type is added here
+// together with a numeric test that reaches it, not because the shared
+// template happens to compile for it: the path is correct only for the types it
+// has been run on. bf16 is left out because no bf16 convolution can reach the
+// runtime from a model yet, so nothing could exercise it.
+template <typename T>
+struct SplitKValidated : std::false_type {};
+template <>
+struct SplitKValidated<float> : std::true_type {};
+
+template <typename T, int Id>
+static void launchSplitTile(hipStream_t stream, const void *x, const void *w,
+                            const void *bias, void *y, const ConvParams &pr,
+                            const SplitPlan &plan, float *ws) {
+  constexpr SplitTile t = kSplitTiles[Id];
+  launchTile<T, t.bm, t.bn, t.tm, t.tn>(stream, x, w, bias, y, pr, plan.split,
+                                        plan.chunk, ws);
+}
+
+// Launches the row of kSplitTiles that `plan.tile` names; false if there is no
+// such row.
+template <typename T, int... Ids>
+static bool dispatchSplitTile(std::integer_sequence<int, Ids...>,
+                              hipStream_t stream, const void *x, const void *w,
+                              const void *bias, void *y, const ConvParams &pr,
+                              const SplitPlan &plan, float *ws) {
+  return ((plan.tile == Ids
+               ? (launchSplitTile<T, Ids>(stream, x, w, bias, y, pr, plan, ws),
+                  true)
+               : false) ||
+          ...);
+}
+
+template <typename T>
+static hipError_t launchSplitK(hipStream_t stream, const void *x,
+                               const void *w, const void *bias, void *y,
+                               const ConvParams &pr, const SplitPlan &plan,
+                               float *ws) {
+  static_assert(SplitKValidated<T>::value,
+                "split-K is enabled per element type; add this one to "
+                "SplitKValidated together with a test that reaches it");
+  if (!dispatchSplitTile<T>(std::make_integer_sequence<int, kSplitTileCount>{},
+                            stream, x, w, bias, y, pr, plan, ws)) {
+    // The planner only returns rows of kSplitTiles, so this is a bug, and
+    // running any other tile would give a result nobody planned for.
+    fprintf(stderr,
+            "[custom_kernels] hip_conv: split-K plan names tile %d of %d\n",
+            plan.tile, kSplitTileCount);
+    return hipErrorInvalidValue;
+  }
+  return hipSuccess;
 }
 
 // Whether a convolution is the plain GEMM conv1x1_wmma_kernel computes: unit
@@ -1847,9 +2219,11 @@ static bool smallMTileWorthwhile(const ConvParams &pr) {
 
 template <typename T>
 static int launch(hipStream_t stream, const void *x, const void *w,
-                  const void *bias, void *y, const ConvParams &pr) {
+                  const void *bias, void *y, const ConvParams &pr,
+                  const WorkspaceSource &wsrc) {
   const int64_t totalOut = pr.N * pr.Cout * pr.Nout;
   if (totalOut <= 0 || pr.K <= 0) return 0;
+  (void)hipGetLastError(); // so the check after the launch sees only ours
 
   const int64_t units = deviceUnitCount();
 
@@ -1879,6 +2253,24 @@ static int launch(hipStream_t stream, const void *x, const void *w,
     }
   }
 
+  // Split-K, for grids short of two blocks per CU. fp16 has its own kernels
+  // below.
+  if constexpr (SplitKValidated<T>::value) {
+    int64_t wsBytes = 0;
+    const SplitPlan plan = planSplitK(pr, units * cusPerUnit(), &wsBytes);
+    if (plan.tile >= 0) {
+      if (float *ws = wsrc.get(static_cast<size_t>(wsBytes))) {
+        hipError_t serr = launchSplitK<T>(stream, x, w, bias, y, pr, plan, ws);
+        if (serr == hipSuccess)
+          serr = hipGetLastError();
+        if (serr != hipSuccess)
+          fprintf(stderr, "[custom_kernels] hip_conv split-K launch failed: %s\n",
+                  hipGetErrorString(serr));
+        return static_cast<int>(serr);
+      }
+    }
+  }
+
   // Two passes over the ladder. The first asks a tile shape to cover the
   // device. The second accepts whatever grid it gets: the 32x128 or 32x32 tile
   // by block count, or for outputs narrower than any tile the 64x64 tile with
@@ -1898,7 +2290,7 @@ static int launch(hipStream_t stream, const void *x, const void *w,
   // running a kernel without it.
   for (int pass = 0; pass < 2; ++pass) {
     const int64_t need = pass == 0 ? units : 1;
-    if (launchWmmaIfProfitable<T>(stream, x, w, bias, y, pr, need)) {
+    if (launchWmmaIfProfitable<T>(stream, x, w, bias, y, pr, need, wsrc)) {
       hipError_t err = hipGetLastError();
       if (err != hipSuccess)
         fprintf(stderr, "[custom_kernels] hip_conv launch failed: %s\n",
@@ -2075,7 +2467,8 @@ extern "C" int hip_conv(void *stream, const void *input, const void *weights,
                         int64_t k0, int64_t k1, int64_t k2, int64_t s0,
                         int64_t s1, int64_t s2, int64_t p0, int64_t p1,
                         int64_t p2, int64_t dil0, int64_t dil1, int64_t dil2,
-                        int64_t group) {
+                        int64_t group, hip_conv_workspace_fn workspace_fn,
+                        void *workspace_ctx) {
   if (spatial_rank < 1 || spatial_rank > 3) {
     fprintf(stderr, "[custom_kernels] hip_conv: unsupported spatial_rank=%d\n",
             spatial_rank);
@@ -2157,13 +2550,15 @@ extern "C" int hip_conv(void *stream, const void *input, const void *weights,
       bias ? "yes" : "null");
 
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+  const WorkspaceSource wsrc{workspace_fn, workspace_ctx};
   switch (hip_dtype) {
     case HIP_DTYPE_FLOAT32:
-      return launch<float>(hip_stream, input, weights, bias, output, pr);
+      return launch<float>(hip_stream, input, weights, bias, output, pr, wsrc);
     case HIP_DTYPE_FLOAT16:
-      return launch<__half>(hip_stream, input, weights, bias, output, pr);
+      return launch<__half>(hip_stream, input, weights, bias, output, pr, wsrc);
     case HIP_DTYPE_BFLOAT16:
-      return launch<hip_bfloat16>(hip_stream, input, weights, bias, output, pr);
+      return launch<hip_bfloat16>(hip_stream, input, weights, bias, output, pr,
+                                  wsrc);
     default:
       fprintf(stderr, "[custom_kernels] hip_conv: unsupported dtype=%d\n",
               hip_dtype);
