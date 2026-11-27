@@ -524,15 +524,15 @@ gnRowAffine(IndexT row, const T *__restrict__ scale, const T *__restrict__ bias,
 // indices, so each wave loads them once. IndexT is 32-bit when the vector
 // count and the grid fit.
 template <typename T, int V, typename IndexT>
-__global__ void __launch_bounds__(kBlock)
-    gn_apply_nchw(const T *__restrict__ x, const T *__restrict__ scale,
-                  const T *__restrict__ bias, T *__restrict__ y,
-                  const typename GroupNormTraits<T>::Compute *__restrict__ stats,
-                  IndexT rowVecs, IndexT totalVecs, IndexT channels,
-                  IndexT groups, IndexT channelsPerGroup, int activation) {
+__device__ __forceinline__ void
+gnApplyNchwBlock(IndexT first, const T *__restrict__ x,
+                 const T *__restrict__ scale, const T *__restrict__ bias,
+                 T *__restrict__ y,
+                 const typename GroupNormTraits<T>::Compute *__restrict__ stats,
+                 IndexT rowVecs, IndexT totalVecs, IndexT channels,
+                 IndexT groups, IndexT channelsPerGroup, int activation) {
   using Tr = GroupNormTraits<T>;
   using Vec = GnVec<T, V>;
-  const IndexT first = IndexT(blockIdx.x) * blockDim.x;
   const IndexT i = first + threadIdx.x;
 
   GnRowAffine<Tr, IndexT> k;
@@ -564,6 +564,30 @@ __global__ void __launch_bounds__(kBlock)
     o.v[e] = Tr::store(
         applyAffine<Tr>(Tr::load(v.v[e]) - k.mean, k.a, k.b, activation));
   reinterpret_cast<Vec *>(y)[i] = o;
+}
+
+// HIP rejects launches whose gridDim.x * blockDim.x exceeds 32 bits, so a
+// tensor with more vectors than that runs on a capped grid where each block
+// strides over block-sized spans with 64-bit indices.
+template <typename T, int V, typename IndexT, bool GridStride>
+__global__ void __launch_bounds__(kBlock)
+    gn_apply_nchw(const T *__restrict__ x, const T *__restrict__ scale,
+                  const T *__restrict__ bias, T *__restrict__ y,
+                  const typename GroupNormTraits<T>::Compute *__restrict__ stats,
+                  IndexT rowVecs, IndexT totalVecs, IndexT channels,
+                  IndexT groups, IndexT channelsPerGroup, int activation) {
+  if constexpr (GridStride) {
+    const IndexT step = IndexT(gridDim.x) * blockDim.x;
+    for (IndexT first = IndexT(blockIdx.x) * blockDim.x; first < totalVecs;
+         first += step)
+      gnApplyNchwBlock<T, V>(first, x, scale, bias, y, stats, rowVecs,
+                             totalVecs, channels, groups, channelsPerGroup,
+                             activation);
+  } else {
+    gnApplyNchwBlock<T, V>(IndexT(blockIdx.x) * blockDim.x, x, scale, bias, y,
+                           stats, rowVecs, totalVecs, channels, groups,
+                           channelsPerGroup, activation);
+  }
 }
 
 template <typename A> __device__ inline A blockSum(A *sBuf, A v) {
@@ -681,6 +705,34 @@ int64_t minSplitCount() {
     long long parsed = strtoll(buf, &end, 10);
     return end != buf && *end == '\0' && parsed > 0 ? int64_t(parsed)
                                                     : kMinSplitCount;
+  }();
+  return value;
+}
+
+// Most blocks the channels-first flat apply launches; larger tensors use the
+// grid-stride kernel. The default is HIP's launch limit. A smaller value set
+// through the environment sends ordinary shapes down the grid-stride path so
+// that it can be tested without multi-gigabyte tensors.
+int64_t applyMaxBlocks() {
+  static const int64_t value = [] {
+    constexpr int64_t kLimit = int64_t(UINT32_MAX) / kBlock;
+    char buf[32] = {};
+#ifdef _WIN32
+    unsigned long len = GetEnvironmentVariableA(
+        "HIPDNN_EP_GROUPNORM_APPLY_MAX_BLOCKS", buf, sizeof(buf));
+    if (len == 0 || len >= sizeof(buf))
+      return kLimit;
+#else
+    const char *v = getenv("HIPDNN_EP_GROUPNORM_APPLY_MAX_BLOCKS");
+    if (!v)
+      return kLimit;
+    snprintf(buf, sizeof(buf), "%s", v);
+#endif
+    char *end = nullptr;
+    long long parsed = strtoll(buf, &end, 10);
+    return end != buf && *end == '\0' && parsed > 0
+               ? std::min<int64_t>(parsed, kLimit)
+               : kLimit;
   }();
   return value;
 }
@@ -910,21 +962,22 @@ void launchSplit(hipStream_t stream, const T *x, const T *scale, const T *bias,
     hipLaunchKernelGGL(HIP_KERNEL_NAME(gn_finalize<A>),
                        dim3(static_cast<unsigned>(ng)), block, 0, stream,
                        parts, slots, epsilon);
-    const dim3 applyGrid(static_cast<unsigned>(plan.applyBlocks));
     const int64_t rowVecs = spatial / V;
     const int64_t totalVecs = n * c * rowVecs;
-    if (plan.apply32)
-      hipLaunchKernelGGL(HIP_KERNEL_NAME(gn_apply_nchw<T, V, uint32_t>),
-                         applyGrid, block, 0, stream, x, scale, bias, y,
-                         parts.stats, uint32_t(rowVecs), uint32_t(totalVecs),
-                         uint32_t(c), uint32_t(groups), uint32_t(cpg),
-                         activation);
+    const int64_t maxBlocks = applyMaxBlocks();
+    if (plan.apply32 && plan.applyBlocks <= maxBlocks)
+      hipLaunchKernelGGL(HIP_KERNEL_NAME(gn_apply_nchw<T, V, uint32_t, false>),
+                         dim3(static_cast<unsigned>(plan.applyBlocks)), block,
+                         0, stream, x, scale, bias, y, parts.stats,
+                         uint32_t(rowVecs), uint32_t(totalVecs), uint32_t(c),
+                         uint32_t(groups), uint32_t(cpg), activation);
     else
-      hipLaunchKernelGGL(HIP_KERNEL_NAME(gn_apply_nchw<T, V, uint64_t>),
-                         applyGrid, block, 0, stream, x, scale, bias, y,
-                         parts.stats, uint64_t(rowVecs), uint64_t(totalVecs),
-                         uint64_t(c), uint64_t(groups), uint64_t(cpg),
-                         activation);
+      hipLaunchKernelGGL(
+          HIP_KERNEL_NAME(gn_apply_nchw<T, V, uint64_t, true>),
+          dim3(static_cast<unsigned>(std::min(plan.applyBlocks, maxBlocks))),
+          block, 0, stream, x, scale, bias, y, parts.stats, uint64_t(rowVecs),
+          uint64_t(totalVecs), uint64_t(c), uint64_t(groups), uint64_t(cpg),
+          activation);
   }
 }
 

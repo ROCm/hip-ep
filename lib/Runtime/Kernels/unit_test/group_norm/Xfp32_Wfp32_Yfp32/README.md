@@ -53,6 +53,13 @@ spatial extents must return success without touching memory.
 offset arithmetic would wrap. It needs about 9 GB of device memory for fp16
 and bf16, twice that for fp32, and is not part of `make test`.
 
+The suite also caps the channels-first apply grid through
+`HIPDNN_EP_GROUPNORM_APPLY_MAX_BLOCKS` and adds one 2^25 + 96-element NCHW
+case that needs one block more than the cap, so the grid-stride apply used
+past HIP's 32-bit launch limit is checked without a multi-gigabyte tensor. The
+cap is above every shape in the sweep; `--large` and `test_custom` keep the
+default.
+
 ## Shape coverage (3 tiers)
 
 Every tier runs all 8 layout x workspace combinations on each selected shape

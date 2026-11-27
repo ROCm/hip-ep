@@ -712,13 +712,23 @@ template <typename T> bool run_empty(hipStream_t stream) {
   return ok;
 }
 
-// More than 2^31 elements, so any 32-bit offset arithmetic would wrap. The
-// reference is streamed per group to keep host memory at two copies of the
-// tensor in T.
-template <typename T> bool run_large(int channels_last, hipStream_t stream) {
+// More than 2^31 elements, so any 32-bit offset arithmetic would wrap.
+constexpr Shape kLargeShape = {1, 32, (int64_t(1) << 26) + 3, 8, 3};
+
+// The suite caps the channels-first apply grid at kApplyMaxBlocks blocks,
+// above every kShapes entry. This shape's odd spatial forces one value per
+// vector, so its apply needs kApplyMaxBlocks + 1 blocks and runs the
+// grid-stride kernel that serves tensors past the 32-bit launch limit.
+constexpr int64_t kApplyMaxBlocks = int64_t(1) << 17;
+constexpr Shape kGridStrideShape = {1, 32, (int64_t(1) << 20) + 3, 8, 1};
+
+// The reference is streamed per group to keep host memory at two copies of
+// the tensor in T.
+template <typename T>
+bool run_large(const Shape &s, const char *label, int channels_last,
+               hipStream_t stream) {
   using Info = TypeInfo<T>;
   using LD = long double;
-  const Shape s = {1, 32, (int64_t(1) << 26) + 3, 8, 3};
   const int64_t elements = s.n * s.c * s.spatial;
   const int64_t cpg = s.c / s.groups;
   const float epsilon = 1e-5f;
@@ -787,7 +797,8 @@ template <typename T> bool run_large(int channels_last, hipStream_t stream) {
     }
   }
   const bool pass = status == 0 && bad == 0;
-  std::cout << (pass ? "PASS" : "FAIL") << " large shape=" << case_shape(s)
+  std::cout << (pass ? "PASS" : "FAIL") << ' ' << label
+            << " shape=" << case_shape(s)
             << ' ' << Info::kName << ':' << (channels_last ? "nhwc" : "nchw")
             << " elements=" << elements << " maxAbs=" << max_abs
             << " bad=" << bad << '\n';
@@ -893,6 +904,18 @@ int main(int argc, char **argv) try {
             << " coverage=" << coverage << '\n';
   hipdnn_ep_test::timing::printTimingMode();
 
+  // The kernel reads the cap once, so it is set before the first launch. The
+  // --large and custom runs keep the default to time the production path.
+  const bool grid_stride = !options.custom && !options.large;
+  if (grid_stride) {
+    const std::string cap = std::to_string(kApplyMaxBlocks);
+#ifdef _WIN32
+    _putenv_s("HIPDNN_EP_GROUPNORM_APPLY_MAX_BLOCKS", cap.c_str());
+#else
+    setenv("HIPDNN_EP_GROUPNORM_APPLY_MAX_BLOCKS", cap.c_str(), 1);
+#endif
+  }
+
   hipStream_t stream = nullptr;
   HIP_CHECK(hipStreamCreate(&stream));
   if (options.custom) {
@@ -912,9 +935,14 @@ int main(int argc, char **argv) try {
     all_pass = run_dtype<Elem>(shape, seed, coverage, stream) && all_pass;
   }
   all_pass = run_empty<Elem>(stream) && all_pass;
+  if (grid_stride)
+    all_pass =
+        run_large<Elem>(kGridStrideShape, "grid-stride", 0, stream) && all_pass;
   if (options.large)
     for (int channels_last : {1, 0})
-      all_pass = run_large<Elem>(channels_last, stream) && all_pass;
+      all_pass =
+          run_large<Elem>(kLargeShape, "large", channels_last, stream) &&
+          all_pass;
   HIP_CHECK(hipStreamDestroy(stream));
 
   std::cout << (all_pass ? "ALL PASS" : "SOME FAIL") << '\n';
