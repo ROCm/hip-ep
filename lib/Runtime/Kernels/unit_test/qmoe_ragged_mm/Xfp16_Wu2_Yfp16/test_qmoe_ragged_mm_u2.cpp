@@ -16,10 +16,8 @@
 
 namespace {
 
-constexpr int kRows = 3;
 constexpr int kExperts = 2;
 constexpr int kN = 64;
-constexpr int kK = 96;
 constexpr int kBlockSize = 64;
 constexpr int kBits = 2;
 
@@ -30,23 +28,28 @@ template <typename T> bool upload(T **device, const std::vector<T> &host) {
                    hipMemcpyHostToDevice) == hipSuccess;
 }
 
-uint8_t packedValue(const std::vector<uint8_t> &weights, int expert, int n,
-                    int k) {
-  constexpr int rowBytes = (kK + 3) / 4;
+uint8_t packedValue(const std::vector<uint8_t> &weights, int kK, int expert,
+                    int n, int k) {
+  const int rowBytes = (kK + 3) / 4;
   const size_t row = static_cast<size_t>(expert * kN + n) * rowBytes;
   const uint8_t byte = weights[row + k / 4];
   return (byte >> ((k & 3) * 2)) & 3u;
 }
 
-bool runCase(bool gather, bool withZeroPoints) {
-  constexpr int kBlocks = (kK + kBlockSize - 1) / kBlockSize;
-  constexpr int rowBytes = (kK + 3) / 4;
+// kRows covers each task of the ragged kernel for 2-bit groups: up to 2 rows
+// run the GEMV, up to 31 the 16-row WMMA tile (20 rows take two of them), more
+// the 64-row tile. A kK that is not a multiple of 32 exercises the K tail.
+bool runCase(int kRows, int kK, bool gather, bool withZeroPoints) {
+  const int kBlocks = (kK + kBlockSize - 1) / kBlockSize;
+  const int rowBytes = (kK + 3) / 4;
   std::vector<__half> input(kRows * kK);
   std::vector<uint8_t> weights(kExperts * kN * rowBytes);
   std::vector<__half> scales(kExperts * kN * kBlocks);
   std::vector<uint8_t> zeroPoints(kExperts * kN * kBlocks);
   std::vector<__half> bias(kExperts * kN);
-  const std::vector<int32_t> rowIds = {2, 0, 1};
+  std::vector<int32_t> rowIds(kRows);
+  for (int r = 0; r < kRows; ++r)
+    rowIds[r] = (r * 7 + 2) % kRows;
   const std::vector<int32_t> groups = {1, 0, kRows, 0};
   const std::vector<int32_t> groupCount = {1};
 
@@ -59,6 +62,14 @@ bool runCase(bool gather, bool withZeroPoints) {
     scales[i] = __float2half(0.02f + 0.001f * static_cast<float>(i % 7));
   for (size_t i = 0; i < zeroPoints.size(); ++i)
     zeroPoints[i] = static_cast<uint8_t>(i & 3);
+  // The kernel takes 2-bit zero points in the ONNX packing: four per byte,
+  // low bits first, each (expert, n) row padded to a whole byte.
+  const int zpRowBytes = (kBlocks * kBits + 7) / 8;
+  std::vector<uint8_t> packedZeroPoints(kExperts * kN * zpRowBytes, 0);
+  for (int row = 0; row < kExperts * kN; ++row)
+    for (int g = 0; g < kBlocks; ++g)
+      packedZeroPoints[row * zpRowBytes + g / 4] |= static_cast<uint8_t>(
+          zeroPoints[row * kBlocks + g] << ((g % 4) * kBits));
   for (size_t i = 0; i < bias.size(); ++i)
     bias[i] =
         __float2half(static_cast<float>(static_cast<int>(i % 5) - 2) / 32.0f);
@@ -70,7 +81,7 @@ bool runCase(bool gather, bool withZeroPoints) {
       float sum = __half2float(bias[kN + n]);
       for (int k = 0; k < kK; ++k) {
         const int group = k / kBlockSize;
-        const float q = packedValue(weights, 1, n, k);
+        const float q = packedValue(weights, kK, 1, n, k);
         const size_t param = static_cast<size_t>(kN + n) * kBlocks + group;
         const float zp =
             withZeroPoints ? static_cast<float>(zeroPoints[param]) : 2.0f;
@@ -87,7 +98,8 @@ bool runCase(bool gather, bool withZeroPoints) {
   int32_t *dRowIds = nullptr, *dGroups = nullptr, *dGroupCount = nullptr;
   uint32_t *dQueue = nullptr;
   bool ok = upload(&dInput, input) && upload(&dWeights, weights) &&
-            upload(&dScales, scales) && upload(&dZeroPoints, zeroPoints) &&
+            upload(&dScales, scales) &&
+            upload(&dZeroPoints, packedZeroPoints) &&
             upload(&dBias, bias) && upload(&dRowIds, rowIds) &&
             upload(&dGroups, groups) && upload(&dGroupCount, groupCount) &&
             hipMalloc(&dQueue, sizeof(uint32_t)) == hipSuccess &&
@@ -131,7 +143,8 @@ bool runCase(bool gather, bool withZeroPoints) {
   hipFree(dQueue);
   hipFree(dOutput);
 
-  std::cout << (ok ? "PASS" : "FAIL") << " gather=" << gather
+  std::cout << (ok ? "PASS" : "FAIL") << " rows=" << kRows << " K=" << kK
+            << " gather=" << gather
             << " zero_points=" << withZeroPoints << " max_error=" << maxError
             << '\n';
   return ok;
@@ -141,9 +154,10 @@ bool runCase(bool gather, bool withZeroPoints) {
 
 int main() {
   bool ok = true;
-  ok = runCase(false, false) && ok;
-  ok = runCase(true, false) && ok;
-  ok = runCase(false, true) && ok;
-  ok = runCase(true, true) && ok;
+  for (int rows : {2, 3, 20, 64})
+    for (int k : {96, 80})
+      for (bool gather : {false, true})
+        for (bool zeroPoints : {false, true})
+          ok = runCase(rows, k, gather, zeroPoints) && ok;
   return ok ? 0 : 1;
 }

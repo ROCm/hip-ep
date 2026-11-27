@@ -2891,3 +2891,252 @@ extern "C" int hip_qmoe_decode_fused_dp4a(
 
   return 0;
 }
+
+// ===========================================================================
+// W2A8 dp4a fused decode for 2-bit experts.
+//
+// The fp fused kernels spend ~16 ALU ops per packed 2-bit byte (four
+// shift/mask/convert/fma chains), which caps them at 135-150 GB/s. Here the
+// activations are int8 in the 2-bit weight order, so one packed word is four
+// masks and four sudot4.
+//
+// A weight row is shared by LPR lanes, each taking every LPR-th 64-element
+// chunk (16 packed bytes), and a 32-lane group holds 32/LPR rows. fc2 rows are
+// only inter/4 bytes (320 at Step's 1280), which one-row-per-block layouts
+// leave mostly idle.
+// ===========================================================================
+
+// int8 activations in the 2-bit weight order: inside every 16 elements,
+// element e sits at (e & 3) * 4 + (e >> 2), so the four bytes that
+// (w >> 2s) & 0x03030303 extracts from one packed word line up with one int.
+// a_sum[c] is the sum of the quantized values of 64-element chunk c (the zero
+// point correction is per chunk, not per group, because a lane's dot covers
+// one chunk). grid = (n_blk groups, rows); block_size % 64 == 0, <= 512.
+template <int BS, typename TIn>
+__global__ void __launch_bounds__(BS) qmoe_quant_act_u2_kernel(
+    const TIn* __restrict__ A, int8_t* __restrict__ a_qb,
+    float* __restrict__ a_scale, int32_t* __restrict__ a_sum, int row_len,
+    int block_size, int n_blk) {
+  const int grp = blockIdx.x;
+  const int row = blockIdx.y;
+  const int tid = threadIdx.x;
+  const int g0 = grp * block_size;
+  const TIn* a = A + static_cast<size_t>(row) * row_len;
+  __shared__ float red[BS / 32];
+  __shared__ int csum[8];
+  if (tid < block_size / 64) csum[tid] = 0;
+
+  float m = 0.0f;
+  for (int k = g0 + tid; k < g0 + block_size; k += BS)
+    m = fmaxf(m, fabsf(static_cast<float>(a[k])));
+  for (int off = 16; off > 0; off >>= 1)
+    m = fmaxf(m, __shfl_xor(m, off));
+  if ((tid & 31) == 0) red[tid / 32] = m;
+  __syncthreads();
+  m = 0.0f;
+#pragma unroll
+  for (int i = 0; i < BS / 32; i++) m = fmaxf(m, red[i]);
+  const float inv = m > 0.0f ? 127.0f / m : 0.0f;
+  if (tid == 0)
+    a_scale[static_cast<size_t>(row) * n_blk + grp] = m > 0.0f ? m / 127.0f : 1.0f;
+
+  int8_t* q = a_qb + static_cast<size_t>(row) * row_len;
+  for (int k = g0 + tid; k < g0 + block_size; k += BS) {
+    const int v =
+        max(-127, min(127, __float2int_rn(static_cast<float>(a[k]) * inv)));
+    q[(k & ~15) | ((k & 3) << 2) | ((k >> 2) & 3)] = static_cast<int8_t>(v);
+    atomicAdd(&csum[(k - g0) >> 6], v);
+  }
+  __syncthreads();
+  if (tid < block_size / 64)
+    a_sum[static_cast<size_t>(row) * (row_len / 64) + grp * (block_size / 64) +
+          tid] = csum[tid];
+}
+
+__device__ __forceinline__ int qmoe_dot16_u2(int4 a, unsigned w, int d) {
+  d = hipdnn_sudot4(a.x, static_cast<int>(w & 0x03030303u), d);
+  d = hipdnn_sudot4(a.y, static_cast<int>((w >> 2) & 0x03030303u), d);
+  d = hipdnn_sudot4(a.z, static_cast<int>((w >> 4) & 0x03030303u), d);
+  d = hipdnn_sudot4(a.w, static_cast<int>((w >> 6) & 0x03030303u), d);
+  return d;
+}
+
+// Dot of one packed 2-bit row with the quantized activation, summed over the
+// row's LPR lanes (every lane of the row ends with the total).
+template <int LPR>
+__device__ __forceinline__ float qmoe_row_dot_u2(
+    const uint8_t* __restrict__ wrow, const __half* __restrict__ srow,
+    const uint8_t* __restrict__ zrow, const int8_t* __restrict__ aq,
+    const float* __restrict__ as, const int32_t* __restrict__ asum, int nch,
+    int bs_shift, int sub) {
+  float acc = 0.0f;
+#pragma unroll 4
+  for (int c = sub; c < nch; c += LPR) {
+    const uint4 w = reinterpret_cast<const uint4*>(wrow)[c];
+    const int4* ap = reinterpret_cast<const int4*>(aq + c * 64);
+    int dot = qmoe_dot16_u2(ap[0], w.x, 0);
+    dot = qmoe_dot16_u2(ap[1], w.y, dot);
+    dot = qmoe_dot16_u2(ap[2], w.z, dot);
+    dot = qmoe_dot16_u2(ap[3], w.w, dot);
+    const int g = (c * 64) >> bs_shift;
+    const int zv = zrow ? (zrow[g >> 2] >> ((g & 3) * 2)) & 3 : 2;
+    acc += as[g] * __half2float(srow[g]) * static_cast<float>(dot - asum[c] * zv);
+  }
+#pragma unroll
+  for (int off = LPR / 2; off > 0; off >>= 1) acc += __shfl_xor(acc, off);
+  return acc;
+}
+
+// FC1 + SwiGLU. Gate/linear rows 2i/2i+1 land in one 32-lane group (LPR <=
+// 16), so the pair meets through one shuffle. slot = token * k_per_tok + j.
+template <int LPR, int WAVES>
+__global__ void __launch_bounds__(WAVES * 32) qmoe_decode_fc1_dp4a_u2_kernel(
+    const int8_t* __restrict__ a_qb, const float* __restrict__ a_scale,
+    const int32_t* __restrict__ a_sum, const int32_t* __restrict__ expert_indices,
+    const uint8_t* __restrict__ fc1_w, const __half* __restrict__ fc1_s,
+    const uint8_t* __restrict__ fc1_zp, const __half* __restrict__ fc1_b,
+    float* __restrict__ act_out, int hidden, int fusion_inter, int n_blk_in,
+    int bs_shift, float swiglu_alpha, float swiglu_beta, float swiglu_limit,
+    int k_per_tok) {
+  static_assert(LPR <= 16, "the SwiGLU pair must share a 32-lane group");
+  constexpr int RPG = 32 / LPR;
+  const int slot = blockIdx.y;
+  const int tok = slot / k_per_tok;
+  const int E = expert_indices[slot];
+  const int lane = threadIdx.x & 31;
+  const int sub = lane & (LPR - 1);
+  const int row = (blockIdx.x * WAVES + (threadIdx.x >> 5)) * RPG + lane / LPR;
+  const size_t er = static_cast<size_t>(E) * fusion_inter + min(row, fusion_inter - 1);
+  const float v = qmoe_row_dot_u2<LPR>(
+      fc1_w + er * (hidden / 4), fc1_s + er * n_blk_in,
+      fc1_zp ? fc1_zp + er * ((n_blk_in + 3) / 4) : nullptr,
+      a_qb + static_cast<size_t>(tok) * hidden,
+      a_scale + static_cast<size_t>(tok) * n_blk_in,
+      a_sum + static_cast<size_t>(tok) * (hidden / 64), hidden / 64, bs_shift,
+      sub);
+  const float lin = __shfl_down(v, LPR);
+  if (sub == 0 && (row & 1) == 0 && row + 1 < fusion_inter) {
+    float g = v, l = lin;
+    if (fc1_b) {
+      g += __half2float(fc1_b[er]);
+      l += __half2float(fc1_b[er + 1]);
+    }
+    const float G = fminf(g, swiglu_limit);
+    const float L = fmaxf(fminf(l, swiglu_limit), -swiglu_limit);
+    act_out[static_cast<size_t>(slot) * (fusion_inter / 2) + row / 2] =
+        G / (1.0f + expf(-swiglu_alpha * G)) * (L + swiglu_beta);
+  }
+}
+
+// FC2 + routing-weighted write to slot_buf (the reduce kernel then sums).
+template <int LPR, int WAVES>
+__global__ void __launch_bounds__(WAVES * 32) qmoe_decode_fc2_dp4a_u2_kernel(
+    const int8_t* __restrict__ a_qb, const float* __restrict__ a_scale,
+    const int32_t* __restrict__ a_sum, const int32_t* __restrict__ expert_indices,
+    const __half* __restrict__ expert_weights, const uint8_t* __restrict__ fc2_w,
+    const __half* __restrict__ fc2_s, const uint8_t* __restrict__ fc2_zp,
+    const __half* __restrict__ fc2_b, float* __restrict__ slot_buf, int inter,
+    int hidden, int n_blk_mid, int bs_shift) {
+  constexpr int RPG = 32 / LPR;
+  const int slot = blockIdx.y;
+  const int E = expert_indices[slot];
+  const int lane = threadIdx.x & 31;
+  const int sub = lane & (LPR - 1);
+  const int row = (blockIdx.x * WAVES + (threadIdx.x >> 5)) * RPG + lane / LPR;
+  const size_t er = static_cast<size_t>(E) * hidden + min(row, hidden - 1);
+  float v = qmoe_row_dot_u2<LPR>(
+      fc2_w + er * (inter / 4), fc2_s + er * n_blk_mid,
+      fc2_zp ? fc2_zp + er * ((n_blk_mid + 3) / 4) : nullptr,
+      a_qb + static_cast<size_t>(slot) * inter,
+      a_scale + static_cast<size_t>(slot) * n_blk_mid,
+      a_sum + static_cast<size_t>(slot) * (inter / 64), inter / 64, bs_shift,
+      sub);
+  if (sub == 0 && row < hidden) {
+    if (fc2_b) v += __half2float(fc2_b[er]);
+    slot_buf[static_cast<size_t>(slot) * hidden + row] =
+        __half2float(expert_weights[slot]) * v;
+  }
+}
+
+extern "C" int hip_qmoe_decode_fused_dp4a_u2(
+    void* stream, const void* input, const void* expert_indices,
+    const void* expert_weights, const void* fc1_weights, const void* fc1_scales,
+    const void* fc1_zero_points, const void* fc1_bias, const void* fc2_weights,
+    const void* fc2_scales, const void* fc2_zero_points, const void* fc2_bias,
+    void* slot_buf, void* act_out, void* output, void* a_qb_in,
+    void* a_scale_in, void* a_sum_in, void* a_qb_mid, void* a_scale_mid,
+    void* a_sum_mid, int64_t hidden_size, int64_t inter_size, int64_t k,
+    int64_t block_size, float swiglu_alpha, float swiglu_beta,
+    float swiglu_limit, int64_t num_tokens) {
+  if (num_tokens < 1 || k < 1 || block_size < 64 || block_size > 512 ||
+      (block_size & (block_size - 1)) != 0 || hidden_size % block_size != 0 ||
+      inter_size % block_size != 0)
+    return -1;
+  constexpr int kFc1Lpr = 16, kFc2Lpr = 4, kWaves = 4;
+  hipStream_t s = static_cast<hipStream_t>(stream);
+  const int hidden = static_cast<int>(hidden_size);
+  const int inter = static_cast<int>(inter_size);
+  const int fusion_inter = 2 * inter;
+  const int bs = static_cast<int>(block_size);
+  const int bs_shift = __builtin_ctz(static_cast<unsigned>(bs));
+  const int n_blk_in = hidden / bs;
+  const int n_blk_mid = inter / bs;
+  const int T = static_cast<int>(num_tokens);
+  const int slots = T * static_cast<int>(k);
+  (void)hipGetLastError();
+
+  hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_quant_act_u2_kernel<64, __half>),
+                     dim3(n_blk_in, T), dim3(64), 0, s,
+                     static_cast<const __half*>(input),
+                     static_cast<int8_t*>(a_qb_in), static_cast<float*>(a_scale_in),
+                     static_cast<int32_t*>(a_sum_in), hidden, bs, n_blk_in);
+  {
+    constexpr int rows = 32 / kFc1Lpr * kWaves;
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(qmoe_decode_fc1_dp4a_u2_kernel<kFc1Lpr, kWaves>),
+        dim3((fusion_inter + rows - 1) / rows, slots), dim3(kWaves * 32), 0, s,
+        static_cast<const int8_t*>(a_qb_in),
+        static_cast<const float*>(a_scale_in),
+        static_cast<const int32_t*>(a_sum_in),
+        static_cast<const int32_t*>(expert_indices),
+        static_cast<const uint8_t*>(fc1_weights),
+        static_cast<const __half*>(fc1_scales),
+        static_cast<const uint8_t*>(fc1_zero_points),
+        static_cast<const __half*>(fc1_bias), static_cast<float*>(act_out),
+        hidden, fusion_inter, n_blk_in, bs_shift, swiglu_alpha, swiglu_beta,
+        swiglu_limit, static_cast<int>(k));
+  }
+  hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_quant_act_u2_kernel<64, float>),
+                     dim3(n_blk_mid, slots), dim3(64), 0, s,
+                     static_cast<const float*>(act_out),
+                     static_cast<int8_t*>(a_qb_mid),
+                     static_cast<float*>(a_scale_mid),
+                     static_cast<int32_t*>(a_sum_mid), inter, bs, n_blk_mid);
+  {
+    constexpr int rows = 32 / kFc2Lpr * kWaves;
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(qmoe_decode_fc2_dp4a_u2_kernel<kFc2Lpr, kWaves>),
+        dim3((hidden + rows - 1) / rows, slots), dim3(kWaves * 32), 0, s,
+        static_cast<const int8_t*>(a_qb_mid),
+        static_cast<const float*>(a_scale_mid),
+        static_cast<const int32_t*>(a_sum_mid),
+        static_cast<const int32_t*>(expert_indices),
+        static_cast<const __half*>(expert_weights),
+        static_cast<const uint8_t*>(fc2_weights),
+        static_cast<const __half*>(fc2_scales),
+        static_cast<const uint8_t*>(fc2_zero_points),
+        static_cast<const __half*>(fc2_bias), static_cast<float*>(slot_buf),
+        inter, hidden, n_blk_mid, bs_shift);
+  }
+  hipLaunchKernelGGL(qmoe_decode_reduce_kernel,
+                     dim3((hidden + kBlock - 1) / kBlock, T), dim3(kBlock), 0, s,
+                     static_cast<const float*>(slot_buf),
+                     static_cast<__half*>(output), hidden, static_cast<int>(k));
+  hipError_t e = hipGetLastError();
+  if (e != hipSuccess) {
+    fprintf(stderr, "[custom_kernels] hip_qmoe_decode_fused_dp4a_u2 failed: %s\n",
+            hipGetErrorString(e));
+    return static_cast<int>(e);
+  }
+  return 0;
+}
