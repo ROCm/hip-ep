@@ -128,3 +128,18 @@ func.func @expand_batch_rows(%ctx: !hip.context, %rows: index, %b: index) -> mem
       : memref<?x7xf16> into memref<?x5x7xf16>
   return %ret : memref<?x5x7xf16>
 }
+
+// The product of a group's static extents overflows int64: no division is
+// emitted and the callback falls back to the internal shape. The product wraps
+// to a positive 2^33, which a plain `<= 0` check would not catch.
+// DECOMP-LABEL: llvm.func @expand_static_overflow
+// DECOMP-NOT:   llvm.sdiv
+// DECOMP:       llvm.alloca %{{.*}} x !llvm.array<2 x i64>
+func.func @expand_static_overflow(%ctx: !hip.context, %rows: index, %b: index)
+    -> memref<?x8589934592x2147483649x7xf16> {
+  %out = memref.alloc(%rows) : memref<?x7xf16>
+  %ret = memref.expand_shape %out [[0, 1, 2], [3]]
+      output_shape [%b, 8589934592, 2147483649, 7]
+      : memref<?x7xf16> into memref<?x8589934592x2147483649x7xf16>
+  return %ret : memref<?x8589934592x2147483649x7xf16>
+}

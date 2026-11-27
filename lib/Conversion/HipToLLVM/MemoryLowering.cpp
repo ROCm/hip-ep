@@ -6,6 +6,7 @@
 #include "HipToLLVMUtils.h"
 #include "hip/Dialect/Transforms/BufferUtils.h"
 
+#include "llvm/Support/MathExtras.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -390,10 +391,13 @@ struct AllocOutputOpLowering : public ConvertOpToLLVMPattern<AllocOutputOp> {
           // The one dynamic external dim of a group is the internal size
           // divided by the group's static external dims, e.g. internal
           // [B*5, N] expanded to external [B, 5, N] reports B, not B*5.
+          // An overflowing product takes the fallback below, like a zero one.
           int64_t staticProduct = 1;
+          bool productOverflow = false;
           for (int64_t j : llvm::seq<int64_t>(0, cnt))
             if (!ShapedType::isDynamic(abiShape[externalDim + j]))
-              staticProduct *= abiShape[externalDim + j];
+              productOverflow |= llvm::MulOverflow(
+                  staticProduct, abiShape[externalDim + j], staticProduct);
           bool usedInternal = false;
           for (int64_t j : llvm::seq<int64_t>(0, cnt)) {
             int64_t e = externalDim + j;
@@ -402,7 +406,7 @@ struct AllocOutputOpLowering : public ConvertOpToLLVMPattern<AllocOutputOp> {
                   rewriter, loc, i64Type,
                   rewriter.getI64IntegerAttr(abiShape[e])));
             } else {
-              if (usedInternal || staticProduct <= 0) {
+              if (usedInternal || productOverflow || staticProduct <= 0) {
                 ok = false;
                 break;
               }
