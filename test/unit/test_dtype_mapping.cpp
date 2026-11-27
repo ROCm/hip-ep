@@ -35,6 +35,7 @@ enum : int {
   ONNX_INT16 = 5,
   ONNX_INT32 = 6,
   ONNX_FLOAT16 = 10,
+  ONNX_BFLOAT16 = 16,
 };
 
 namespace {
@@ -112,6 +113,34 @@ int main() {
     auto dense = onnxElementTypeToMlirDenseElementType(ONNX_UINT16, builder);
     auto elem = onnxElementTypeToMlirElementType(ONNX_UINT16, builder);
     check(dense == elem, "dense(UINT16) == elem(UINT16) (both ui16)");
+  }
+
+  // --- bf16 is not imported yet ---------------------------------------------
+  // The importer has no bf16 element type, so a bf16 tensor is typed f32 and no
+  // bf16 convolution can reach the runtime from a model. Parts of the
+  // convolution kernels are switched off for bf16 for that reason, since
+  // nothing could test them. This check is the reminder: it fails when bf16
+  // starts being imported, which is when that coverage has to be added.
+  {
+    const bool elemIsF32 =
+        onnxElementTypeToMlirElementType(ONNX_BFLOAT16, builder).isF32();
+    const bool denseIsF32 =
+        onnxElementTypeToMlirDenseElementType(ONNX_BFLOAT16, builder).isF32();
+    if (elemIsF32 && denseIsF32) {
+      llvm::outs() << "[ OK ] elem/dense(BFLOAT16) -> f32 (bf16 is not "
+                      "imported yet)\n";
+    } else {
+      llvm::errs()
+          << "[FAIL] bf16 is now imported as its own type. Convolution has no "
+             "bf16 coverage, and parts of its kernels are switched off for "
+             "bf16 because of that. Before accepting this change: add bf16 "
+             "rows to the numeric convolution tests (scalar tiles and "
+             "split-K), confirm the bf16 kernels are the ones that run (a "
+             "model that still imports as f32 passes vacuously), enable bf16 "
+             "in the kernel's split-K element-type list, then update this "
+             "check.\n";
+      ++g_failures;
+    }
   }
 
   if (g_failures == 0) {
