@@ -508,8 +508,16 @@ if(ENABLE_ROCMLIRTRITON)
     add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wno-error>)
   endif()
 
+  # With LLVM built in this tree (HIPDNN_LLVM_EMBEDDED, the default without an
+  # LLVM prefix) and MSVC 14.44, rocmlirTriton targets reuse LLVM's precompiled
+  # header but compile with a different /std and /experimental:module, which
+  # fails with C2855. Disable PCH for this subtree only; the variable is
+  # directory-scoped, so LLVM and MLIR keep theirs.
+  set(_hipep_pch_before "${CMAKE_DISABLE_PRECOMPILE_HEADERS}")
+  set(CMAKE_DISABLE_PRECOMPILE_HEADERS ON)
   add_subdirectory("${rocmlirtriton_SOURCE_DIR}"
                    "${CMAKE_BINARY_DIR}/rocmlirTriton" EXCLUDE_FROM_ALL)
+  set(CMAKE_DISABLE_PRECOMPILE_HEADERS "${_hipep_pch_before}")
 
   # TritonToHsaco dlopens triton_amd_codegen by bare name. rocmlirTriton copies
   # it into the build lib dir and does not install it (that rule is on the
