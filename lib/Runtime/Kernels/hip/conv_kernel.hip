@@ -2102,10 +2102,23 @@ static SplitPlan planSplitK(const ConvParams &pr, int64_t cus,
   return best;
 }
 
+// The element types the scalar split-K path may run for. A type is added here
+// together with a numeric test that reaches it, not because the shared
+// template happens to compile for it: the path is correct only for the types it
+// has been run on. bf16 is left out because no bf16 convolution can reach the
+// runtime from a model yet, so nothing could exercise it.
+template <typename T>
+struct SplitKValidated : std::false_type {};
+template <>
+struct SplitKValidated<float> : std::true_type {};
+
 template <typename T>
 static void launchSplitK(hipStream_t stream, const void *x, const void *w,
                          const void *bias, void *y, const ConvParams &pr,
                          const SplitPlan &plan, float *ws) {
+  static_assert(SplitKValidated<T>::value,
+                "split-K is enabled per element type; add this one to "
+                "SplitKValidated together with a test that reaches it");
   switch (plan.tile) {
   case 0:
     launchTile<T, 128, 128, 8, 8>(stream, x, w, bias, y, pr, plan.split,
@@ -2217,7 +2230,7 @@ static int launch(hipStream_t stream, const void *x, const void *w,
 
   // Split-K, for the shapes no tile covers on its own. fp16 has its own
   // kernels below and is not handled here.
-  if constexpr (!std::is_same<T, __half>::value) {
+  if constexpr (SplitKValidated<T>::value) {
     int64_t wsBytes = 0;
     const SplitPlan plan = planSplitK(pr, units * cusPerUnit(), &wsBytes);
     if (plan.tile >= 0) {

@@ -46,6 +46,11 @@ It applies only when `M >= 32` and `K >= 2 * kSplitMinTaps`.
   split ends the search with no plan, so the ladder handles that shape.
 - `sliceSplit` caps the count so a slice keeps at least `kSplitMinTaps` taps and
   the partial sums fit in `kSplitMaxWorkspace`.
+- The scalar split path runs for fp32 only. bf16 shares the tile kernels but is
+  not split: no bf16 convolution can reach the runtime from a model yet, because
+  the importer types bf16 as f32, so nothing could test it. A type is allowed by
+  adding it to the kernel's split-K element-type list together with a test that
+  reaches it.
 
 ## WMMA kernels (fp16)
 
