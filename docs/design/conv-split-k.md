@@ -91,10 +91,8 @@ derived from the wave size). Neither is derived from the hardware.
   512-channel 7x7 shape, which preferred 160. Two per CU was kept. The sweep
   fixed the target in blocks, so scaling it with the CU count is an
   extrapolation that has not been measured on any other part.
-- `kSplitMaxWorkspace = 32 MB` was set a priori and never varied. It bounds the
-  session scratch that holds the partial sums for the session's lifetime and the
-  traffic of writing and re-reading `split` fp32 copies of the output. It is a
-  footprint limit rather than a tuned value.
+- `kSplitMaxWorkspace = 32 MB` was set a priori and never varied. It bounds one
+  convolution's request; the session scratch grows by 1.5x, up to 48 MB.
 
 These sweeps were fp32 only. The fp16 kernels use the same constants and were
 only compared with split-K off, and at a few targets on ResNet-50, not swept
@@ -110,6 +108,8 @@ Everything here was measured on gfx1151 only.
   is what they trade off against. The minimum slice length should follow per-CU
   throughput and memory latency, and the workspace cap the last-level cache or
   memory budget.
+- The split epilogue costs 1-2 VGPRs per launch: on 1024-VGPR parts the 32x128
+  tile drops from 8 to 7 waves per SIMD. Not measured.
 - The split planners have no GPU-free test: they live in the kernel source, and
   the numeric tests (`test/numeric/tests/test_conv.py`, `TestConvSplitK`) check
   results, not which plan ran.
