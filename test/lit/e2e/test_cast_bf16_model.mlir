@@ -16,27 +16,31 @@
 // CHECK: llvm.func @wrap_cast
 //
 // Each cast passes (src, dst) as HIPDNN_EP_DATATYPE_* constants emitted right
-// before the call: FLOAT=0, HALF=1, BFLOAT16=2, INT64=4. Anchor on the output
-// allocation of each cast so the constants cannot match an earlier value.
+// before the call: FLOAT=0, HALF=1, BFLOAT16=2, INT64=4. They follow the
+// element count of each cast's output (one mul per dim) after its allocation.
 //
 // f32 -> bf16
 // CHECK: llvm.call @hipdnn_ep_alloc_output
-// CHECK: [[S0:%[0-9]+]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK-COUNT-3: llvm.mul
+// CHECK-NEXT: [[S0:%[0-9]+]] = llvm.mlir.constant(0 : i64) : i64
 // CHECK-NEXT: [[D0:%[0-9]+]] = llvm.mlir.constant(2 : i64) : i64
 // CHECK-NEXT: llvm.call @wrap_cast({{.*}}, [[S0]], [[D0]])
 // bf16 -> f32
 // CHECK: llvm.call @hipdnn_ep_alloc_output
-// CHECK: [[S1:%[0-9]+]] = llvm.mlir.constant(2 : i64) : i64
+// CHECK-COUNT-3: llvm.mul
+// CHECK-NEXT: [[S1:%[0-9]+]] = llvm.mlir.constant(2 : i64) : i64
 // CHECK-NEXT: [[D1:%[0-9]+]] = llvm.mlir.constant(0 : i64) : i64
 // CHECK-NEXT: llvm.call @wrap_cast({{.*}}, [[S1]], [[D1]])
 // i64 -> bf16
 // CHECK: llvm.call @hipdnn_ep_alloc_output
-// CHECK: [[S2:%[0-9]+]] = llvm.mlir.constant(4 : i64) : i64
+// CHECK-COUNT-2: llvm.mul
+// CHECK-NEXT: [[S2:%[0-9]+]] = llvm.mlir.constant(4 : i64) : i64
 // CHECK-NEXT: [[D2:%[0-9]+]] = llvm.mlir.constant(2 : i64) : i64
 // CHECK-NEXT: llvm.call @wrap_cast({{.*}}, [[S2]], [[D2]])
 // bf16 -> f16
 // CHECK: llvm.call @hipdnn_ep_alloc_output
-// CHECK: [[S3:%[0-9]+]] = llvm.mlir.constant(2 : i64) : i64
+// CHECK-COUNT-3: llvm.mul
+// CHECK-NEXT: [[S3:%[0-9]+]] = llvm.mlir.constant(2 : i64) : i64
 // CHECK-NEXT: [[D3:%[0-9]+]] = llvm.mlir.constant(1 : i64) : i64
 // CHECK-NEXT: llvm.call @wrap_cast({{.*}}, [[S3]], [[D3]])
 // CHECK-NOT: llvm.call @wrap_cast

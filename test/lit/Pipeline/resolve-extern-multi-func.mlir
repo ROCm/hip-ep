@@ -28,8 +28,7 @@
 // CHECK:       call @callee
 
 module attributes {hip.constants_file = "model.constants.bin"} {
-  memref.global "private" @weight0 : memref<4x4xf32> {
-    alignment = 64 : i64,
+  memref.global "private" @weight0 : memref<4x4xf32> alignment = 64 {
     hip.external_data = {index = 0 : i64, offset = 0 : i64, size = 64 : i64}
   }
 

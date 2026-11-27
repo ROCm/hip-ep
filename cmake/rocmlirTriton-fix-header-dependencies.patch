@@ -1,8 +1,8 @@
 diff --git a/cmake/triton.cmake b/cmake/triton.cmake
-index 9c9795c..60b7c9d 100644
+index 24364c5..763a178 100644
 --- a/cmake/triton.cmake
 +++ b/cmake/triton.cmake
-@@ -555,11 +555,35 @@ macro(_rocmlir_stub_library_depends)
+@@ -636,11 +636,35 @@ macro(_rocmlir_stub_library_depends)
    _rocmlir_stub_external_depends(${_rsld_DEPENDS} mlir-headers mlir-generic-headers)
  endmacro(_rocmlir_stub_library_depends)
  
@@ -38,7 +38,7 @@ index 9c9795c..60b7c9d 100644
  endfunction(add_rocmlir_dialect_library)
  
  function(add_rocmlir_conversion_library name)
-@@ -567,6 +591,7 @@ function(add_rocmlir_conversion_library name)
+@@ -648,6 +672,7 @@ function(add_rocmlir_conversion_library name)
    set_property(GLOBAL APPEND PROPERTY MLIR_CONVERSION_LIBS ${name})
    _rocmlir_stub_library_depends(${ARGN})
    add_mlir_library(${ARGV} DEPENDS mlir-headers)
@@ -46,7 +46,7 @@ index 9c9795c..60b7c9d 100644
  endfunction(add_rocmlir_conversion_library)
  
  function(add_rocmlir_test_library name)
-@@ -617,8 +642,17 @@ endfunction(add_rocmlir_triton_library)
+@@ -698,8 +723,17 @@ endfunction(add_rocmlir_triton_library)
  # add_mlir_library). Marked SYSTEM so our strict warnings (-Wshadow, -Wundef,
  # ...) don't fire inside Triton headers.
  function(rocmlir_add_triton_includes target)
@@ -69,7 +69,7 @@ index 9c9795c..60b7c9d 100644
 +  endforeach()
  endfunction(rocmlir_add_triton_includes)
 diff --git a/mlir/lib/Dialect/Rock/Pipelines/CMakeLists.txt b/mlir/lib/Dialect/Rock/Pipelines/CMakeLists.txt
-index 16ff81d..6252fee 100644
+index fe2af05..1afb519 100644
 --- a/mlir/lib/Dialect/Rock/Pipelines/CMakeLists.txt
 +++ b/mlir/lib/Dialect/Rock/Pipelines/CMakeLists.txt
 @@ -1,6 +1,10 @@

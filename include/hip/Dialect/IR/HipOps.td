@@ -1092,8 +1092,8 @@ def Hip_QMoEOp : Hip_DpsOp_WithInfer<"qmoe", "Output", [AttrSizedOperandSegments
       "sigmoid_bias": router_probs holds fp32 router logits. With
         s = sigmoid(router_probs), experts are the top-k of
         s + correction_bias (ties to the lower index), and the weights are
-        s / sum_k(s) * routed_scaling_factor (no sum when
-        normalize_routing_weights=0). router_weights must be absent.
+        s / (sum_k(s) + routing_norm_eps) * routed_scaling_factor (no sum
+        when normalize_routing_weights=0). router_weights must be absent.
 
     Uses destination-passing style: output buffer is provided as argument.
 
@@ -1141,7 +1141,8 @@ def Hip_QMoEOp : Hip_DpsOp_WithInfer<"qmoe", "Output", [AttrSizedOperandSegments
     F32Attr:$swiglu_limit,
     StrAttr:$activation_type,
     DefaultValuedStrAttr<StrAttr, "softmax">:$routing_type,
-    DefaultValuedAttr<F32Attr, "1.0f">:$routed_scaling_factor
+    DefaultValuedAttr<F32Attr, "1.0f">:$routed_scaling_factor,
+    DefaultValuedAttr<F32Attr, "0.0f">:$routing_norm_eps
   );
   let hasVerifier = 1;
 

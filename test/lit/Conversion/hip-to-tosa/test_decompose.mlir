@@ -45,10 +45,10 @@
 // RUN:   --verify-diagnostics %s | FileCheck %s
 
 // CHECK-LABEL: func.func @leaky_relu
-// CHECK: %[[ALPHA:.*]] = "tosa.const"{{.*}}tensor<2x8xf16>
-// CHECK: %[[SHIFT:.*]] = "tosa.const"{{.*}}dense<0> : tensor<1xi8>
+// CHECK: %[[ALPHA:.*]] = tosa.const{{.*}}tensor<2x8xf16>
+// CHECK: %[[SHIFT:.*]] = tosa.const{{.*}}dense<0> : tensor<1xi8>
 // CHECK: %[[SCALED:.*]] = tosa.mul %arg1, %[[ALPHA]], %[[SHIFT]]
-// CHECK: tosa.maximum %arg1, %[[SCALED]] {{.*}}nan_mode = IGNORE
+// CHECK: tosa.maximum %arg1, %[[SCALED]] {{.*}}nan_mode<IGNORE>
 // CHECK-NOT: hip.leaky_relu
 func.func @leaky_relu(%ctx: !hip.context, %x: tensor<2x8xf16>,
                       %init: tensor<2x8xf16>) -> tensor<2x8xf16>
@@ -60,7 +60,7 @@ func.func @leaky_relu(%ctx: !hip.context, %x: tensor<2x8xf16>,
 
 // CHECK-LABEL: func.func @leaky_relu_alpha
 // CHECK: tosa.mul
-// CHECK: tosa.maximum {{.*}}nan_mode = IGNORE
+// CHECK: tosa.maximum {{.*}}nan_mode<IGNORE>
 // CHECK-NOT: hip.leaky_relu
 func.func @leaky_relu_alpha(%ctx: !hip.context, %x: tensor<4xf32>,
                            %init: tensor<4xf32>) -> tensor<4xf32>
@@ -75,7 +75,7 @@ func.func @leaky_relu_alpha(%ctx: !hip.context, %x: tensor<4xf32>,
 // ub.poison materialized inside the outlined kernel rather than a block
 // argument.
 // CHECK-LABEL: func.func @leaky_relu_outlined_kernel
-// CHECK: tosa.maximum {{.*}}nan_mode = IGNORE
+// CHECK: tosa.maximum {{.*}}nan_mode<IGNORE>
 // CHECK-NOT: hip.leaky_relu
 func.func @leaky_relu_outlined_kernel(%x: tensor<2x8xf16>,
                                      %init: tensor<2x8xf16>)
@@ -119,10 +119,10 @@ func.func @leaky_relu_alpha_neg(%ctx: !hip.context, %x: tensor<4xf32>,
 }
 
 // CHECK-LABEL: func.func @softmax
-// CHECK: tosa.reduce_max %arg1 {axis = 1 : i32}
+// CHECK: tosa.reduce_max %arg1 axis(1)
 // CHECK: tosa.sub
 // CHECK: tosa.exp
-// CHECK: tosa.reduce_sum {{.*}}{axis = 1 : i32}
+// CHECK: tosa.reduce_sum {{.*}}axis(1)
 // CHECK: tosa.reciprocal
 // CHECK: tosa.mul
 // CHECK-NOT: hip.miopen.softmax
@@ -137,8 +137,8 @@ func.func @softmax(%ctx: !hip.context, %x: tensor<2x8xf16>,
 
 // 3D [B,S,D] softmax is over the last dim (axis = 2).
 // CHECK-LABEL: func.func @softmax_3d
-// CHECK: tosa.reduce_max %arg1 {axis = 2 : i32}
-// CHECK: tosa.reduce_sum {{.*}}{axis = 2 : i32}
+// CHECK: tosa.reduce_max %arg1 axis(2)
+// CHECK: tosa.reduce_sum {{.*}}axis(2)
 // CHECK-NOT: hip.miopen.softmax
 func.func @softmax_3d(%ctx: !hip.context, %x: tensor<2x4x8xf16>,
                       %init: tensor<2x4x8xf16>) -> tensor<2x4x8xf16>
@@ -150,7 +150,7 @@ func.func @softmax_3d(%ctx: !hip.context, %x: tensor<2x4x8xf16>,
 }
 
 // CHECK-LABEL: func.func @softmax_outlined_kernel
-// CHECK: tosa.reduce_max %arg0 {axis = 1 : i32}
+// CHECK: tosa.reduce_max %arg0 axis(1)
 // CHECK-NOT: hip.miopen.softmax
 func.func @softmax_outlined_kernel(%x: tensor<2x8xf16>,
                                    %init: tensor<2x8xf16>)
