@@ -36,6 +36,12 @@ observeSplit(const std::vector<const Tensor *> &nodes,
              const std::vector<bool> &exported, const std::string &name,
              std::unordered_map<const Tensor *, int64_t> *ids = nullptr);
 
+/// What `tensor`'s operation was configured with, read out of its op_params
+/// as GgmlOps.td declares - UnsupportedParameters for an operation the capture
+/// has no semantics for. Throws Error for an enumerator the dialect does not
+/// have.
+NodeParameters parametersOf(const Tensor &tensor);
+
 } // namespace hip::ggml::capture
 
 #endif // HIP_FRONTEND_GGML_CAPTUREGRAPH_H

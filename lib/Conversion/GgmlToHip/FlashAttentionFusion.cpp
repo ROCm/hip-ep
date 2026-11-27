@@ -100,13 +100,13 @@ struct FuseFlashAttentionLayout final
 
   LogicalResult matchAndRewrite(ggml::FlashAttentionExtOp op,
                                 PatternRewriter &rewriter) const override {
-    if (!op.getMask() || op.getSinks() ||
-        op.getScale().convertToDouble() <= 0.0 ||
-        op.getMaxBias().convertToDouble() != 0.0 ||
-        op.getLogitSoftcap().convertToDouble() != 0.0 ||
-        op.getPrecision() != ggml::ComputePrecision::F32) {
-      return rewriter.notifyMatchFailure(
-          op, "requires explicit-mask f32 GGML flash-attention semantics");
+    if (StringRef refusal = flashAttentionRefusal(
+            static_cast<bool>(op.getMask()), static_cast<bool>(op.getSinks()),
+            op.getScale().convertToDouble(), op.getMaxBias().convertToDouble(),
+            op.getLogitSoftcap().convertToDouble(),
+            ggml::stringifyComputePrecision(op.getPrecision()));
+        !refusal.empty()) {
+      return rewriter.notifyMatchFailure(op, refusal);
     }
 
     auto queryPermute = op.getQuery().getDefiningOp<ggml::PermuteOp>();

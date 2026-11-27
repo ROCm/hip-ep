@@ -97,12 +97,12 @@ struct GluToHip final : OpRewritePattern<ggml::GluOp> {
 
   LogicalResult matchAndRewrite(ggml::GluOp op,
                                 PatternRewriter &rewriter) const override {
-    if (op.getGluKind() != ggml::GluKind::Swiglu || !op.getSplit() ||
-        !op.getUp() || op.getSwapped() ||
-        op.getAlpha().convertToDouble() != 0.0 ||
-        op.getLimit().convertToDouble() != 0.0) {
-      return rewriter.notifyMatchFailure(
-          op, "only unswapped two-input GGML SwiGLU is implemented");
+    if (StringRef refusal = gluRefusal(
+            ggml::stringifyGluKind(op.getGluKind()),
+            op.getSplit() && op.getUp(), op.getSwapped(),
+            op.getAlpha().convertToDouble(), op.getLimit().convertToDouble());
+        !refusal.empty()) {
+      return rewriter.notifyMatchFailure(op, refusal);
     }
     if (failed(
             verifyShapePreservingExtents(op, op.getGate(), op.getResult())) ||
@@ -421,18 +421,18 @@ struct RopeToHip final : OpRewritePattern<ggml::RopeOp> {
 
   LogicalResult matchAndRewrite(ggml::RopeOp op,
                                 PatternRewriter &rewriter) const override {
-    const bool hasSections =
-        op.getSectionsAttr() &&
-        llvm::any_of(op.getSectionsAttr(), [](Attribute value) {
-          return cast<IntegerAttr>(value).getInt() != 0;
-        });
-    if ((op.getMode() != ggml::RopeMode::Normal &&
-         op.getMode() != ggml::RopeMode::Neox) ||
-        op.getNPast() != 0 || op.getLegacyContext() != 0 ||
-        op.getNOffs() != 0 || hasSections ||
-        op.getExtensionFactor().convertToFloat() != 0.0f) {
-      return rewriter.notifyMatchFailure(
-          op, "supports only normal/NEOX GGML RoPE without YaRN");
+    SmallVector<int64_t, 4> sections;
+    if (ArrayAttr declared = op.getSectionsAttr())
+      for (Attribute value : declared)
+        sections.push_back(cast<IntegerAttr>(value).getInt());
+    if (StringRef refusal =
+            ropeRefusal(ggml::stringifyRopeMode(op.getMode()),
+                        static_cast<int64_t>(op.getNPast()),
+                        static_cast<int64_t>(op.getLegacyContext()),
+                        static_cast<int64_t>(op.getNOffs()), sections,
+                        op.getExtensionFactor().convertToDouble());
+        !refusal.empty()) {
+      return rewriter.notifyMatchFailure(op, refusal);
     }
     FailureOr<Value> context = getHipContext(op, rewriter);
     if (failed(context)) {
