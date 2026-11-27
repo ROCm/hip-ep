@@ -65,6 +65,7 @@ add_library(HipDialectTransforms STATIC
   QuantizedEpilogue.cpp
   RebiasUnsignedQuantize.cpp
   RelaxMultiDynExpandShape.cpp
+  RocMlirPreFusion.cpp
   RocMlirPrepareQuant.cpp
   ResolveExternConstants.cpp
   ResolveMemRefDims.cpp

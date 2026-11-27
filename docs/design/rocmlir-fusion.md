@@ -17,8 +17,10 @@ fusion for the EP, `hip-rocmlir-compiler`, `rocmlir-pipeline` and the
 `hip-rocmlir-fusion` pipeline of `hip-mlir-opt`:
 
 ```
+func.func(hip-hoist-pointwise-over-views)
 func.func(hip-rocmlir-prepare-quant)
 func.func(hip-fuse-rocmlir-elementwise)
+func.func(hip-rocmlir-pre-fusion)
 func.func(hip-fuse-rocmlir-anchor)
 duplicate-function-elimination
 hip-rocmlir-fusion-report        (only with a report file)
@@ -142,6 +144,40 @@ take a module whole:
   input or result is an integer wider than 32 bits, because the rocMLIR
   loads and stores take at most 32 bits.
 - A module of views alone is not made.
+
+## hip-rocmlir-pre-fusion
+
+The pass holds rewrites that put `main_graph` into a form the anchor fusion
+can take. It runs after the grouping, so a pattern can tell a pointwise reader
+inside a module from one that stays a HIP op, and it applies its patterns to
+the top-level block only, without folding.
+
+A `hip.gather` of one constant in-range index on static floating-point data
+reads a size-1 slice of the gathered axis. The pattern replaces it with a
+`tensor.extract_slice`, plus a `tensor.collapse_shape` that drops the axis for
+a scalar index, which a kernel absorbs as a view. A slice that stays in the
+graph becomes a copy for each HIP reader instead, which costs more than the
+gather once there are two, so the pattern rewrites a gather only when its one
+reader will likely run in a rocMLIR kernel:
+
+- an anchor;
+- a module whose input comes from an anchor or whose result an anchor reads,
+  so that it is likely its prologue or epilogue;
+- a module that the anchor pass makes into a kernel of its own when no plan
+  takes it. The pass applies the anchor pass's `outlinesAlone` test, with
+  `standalone-elementwise` on: two or more ops besides inits, reshapes and
+  slices, each lowering inside a rocMLIR kernel and safe under unsigned types,
+  and no result of several that only transposes a kernel argument;
+- a fusable view whose result in turn has such a reader.
+
+A module takes each input once, however many of its ops read it, so for a
+module reader one op inside the module must read the gather, through views.
+Two readers inside a module that the anchor pass then inlines would each copy
+the slice. A gather with an identical sibling is skipped, because a later CSE would merge
+the two slices into one value with two readers. When the anchor pass still
+declines the reader, the slice costs one copy for its one reader, about what
+the gather cost. Integer data, a runtime index and an out-of-range index keep
+the gather.
 
 ## hip-fuse-rocmlir-anchor
 
@@ -462,6 +498,8 @@ fusion switches.
 - `test/lit/Dialect/hip-fuse-rocmlir*.mlir` check the kernels of the whole
   fusion. `hip-fuse-rocmlir-elementwise.mlir` checks one grouping rule in each
   test, and `hip-fuse-rocmlir-anchor.mlir` checks the planning rules.
+  `hip-rocmlir-pre-fusion.mlir` checks each pre-fusion rule, and that
+  the fusion absorbs the slices it makes.
 - `HIPDNN_EP_ROCMLIR_PRE_FUSION_DUMP=<dir>` writes the IR that the fusion
   reads, with the fusion options on its first line, so that
   `hip-mlir-opt --hip-rocmlir-fusion` replays the fusion without a GPU.
