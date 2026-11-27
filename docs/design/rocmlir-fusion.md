@@ -412,17 +412,55 @@ the A operand of the second gemm through pointwise ops and row-only reshapes
   g <= 64) or a skinny-k MLP bottom (m >= 98304, n >= 512, k <= 13,
   g <= 256).
 
+### Attention
+
+Before the gemm-elementwise-gemm merge, a gemm kernel, the
+`hip.miopen.softmax` that reads its only result, and the gemm kernel that
+reads the softmax as its A operand merge into one kernel, which rocMLIR
+lowers to `rock.attention`. The gates are:
+
+- Q, K and V share one float element type. Each gemm reads a type in
+  `gemm-gemm-accel-types`, or f32 with a score matrix strictly larger than
+  `attention-f32-min-score-bytes`.
+- Both head dims (k of Q·Kᵀ and g of P·V) are static and at most 256.
+  rocMLIR tiles larger head dims, but none are tested, so they keep the
+  three kernels.
+- Lowered to rank-3 `tosa.matmul` the way HipToTosa does (a B with only
+  unit batch dims folds A's batch dims into m), both gemms have the same
+  batch and m and the second reduces over the first's n. A K shared across
+  batches with a batched V, or a reshape before the softmax that regroups
+  the score rows, keeps the three kernels.
+- The scores and the probabilities have no other reader, and the second gemm
+  does not transpose the probabilities.
+- Between the softmax and the second gemm sit only reshapes that regroup the
+  batch dims (rows and columns unchanged) and at most one cast. A cast there
+  must be matched by a cast to the softmax type in the first kernel (f16
+  gemm, cast to f32, f32 softmax, cast to f16, f16 gemm). Those are the
+  chains rocMLIR's attention matcher takes. It rejects others, and a gemm
+  kernel that fails to compile has no fallback.
+
+The f32 cutoff is the L2 size that the HIP runtime reports for device 0,
+used only when device 0 is the target chip (target features such as
+`:xnack-` are ignored). On a chip with a larger last-level cache behind L2,
+scores between the two sizes stay on chip unfused as well, so the L2 size is
+a lower bound and not a tuned threshold.
+A target that accelerates f32 lists it in `gemm-gemm-accel-types` and never
+reaches the cutoff. f16 and bf16 merge at every score size.
+
 ## Options
 
-`arch` and `gemm-gemm-accel-types` describe the target. `standalone-elementwise`
-and `int4-weights` are the fusion switches.
+`arch`, `gemm-gemm-accel-types` and `attention-f32-min-score-bytes` describe
+the target. `standalone-elementwise`, `int4-weights` and `attention` are the
+fusion switches.
 
 | Option | EP value | Effect |
 |---|---|---|
 | `arch=<gfx>` | detected | Stamps `rock.arch` on each kernel. |
-| `gemm-gemm-accel-types=<types>` | detected | The element types for the gemm-gemm gate. |
+| `gemm-gemm-accel-types=<types>` | detected | The element types for the gemm-gemm and attention gates. |
 | `standalone-elementwise=<bool>` | `true`; `false` with `HIPDNN_EP_ROCMLIR_NO_STANDALONE_ELEMENTWISE=1` | Outlines a module that no anchor takes as an elementwise kernel. |
 | `int4-weights=<bool>` | on when rocMLIR autotuning is on | Takes packed-int4 weight dequantizes into the kernel. |
+| `attention=<bool>` | on, off with `HIPDNN_EP_ROCMLIR_NO_ATTENTION=1` | Merges gemm -> softmax -> gemm into one attention kernel. |
+| `attention-f32-min-score-bytes=<n>` | `HIPDNN_EP_ROCMLIR_ATTENTION_F32_MIN_SCORE_BYTES`, else the L2 cache size of device 0 when it is the target arch, else 0 | When `gemm-gemm-accel-types` lacks f32, f32 attention merges only when its score matrix is strictly larger than `n` bytes, and `n = 0` keeps it apart. An f32 listed there merges at any size, like f16. |
 
 ## Tests and tools
 
