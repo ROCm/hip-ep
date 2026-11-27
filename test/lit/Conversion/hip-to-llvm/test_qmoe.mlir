@@ -53,7 +53,7 @@ module {
   // CHECK: llvm.call @wrap_qmoe({{.*}}) :
   // CHECK-SAME: (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
   // CHECK-SAME:  !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
-  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, f32, i64, i64, !llvm.ptr, i64, f32) -> i32
+  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, f32, i64, i64, !llvm.ptr, i64, f32, f32) -> i32
   // Verify 34 parameters:
   // - 17 pointers: state, input, router, router_weights(null), fc1_w, fc1_s, fc1_b,
   //                fc2_w, fc2_s, fc2_b, fc3_w(null), fc3_s(null), fc3_b(null),
@@ -95,7 +95,7 @@ module {
   // CHECK: llvm.call @wrap_qmoe({{.*}}) :
   // CHECK-SAME: (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
   // CHECK-SAME:  !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
-  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, f32, i64, i64, !llvm.ptr, i64, f32) -> i32
+  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, f32, i64, i64, !llvm.ptr, i64, f32, f32) -> i32
   // Optional pointers (fc1_b, fc2_b, fc3_*, zero_points) should be null
 
   // ===== Test 3: unfused relu2: inter_size is fc1 dim 1, not halved =====
@@ -184,13 +184,15 @@ module {
          use_sparse_mixer = 0 : i64,
          activation_alpha = 1.000000e+00 : f32, activation_beta = 0.000000e+00 : f32,
          swiglu_limit = 7.000000e+00 : f32, activation_type = "swiglu",
-         routing_type = "sigmoid_bias", routed_scaling_factor = 3.125000e-01 : f32}
+         routing_type = "sigmoid_bias", routed_scaling_factor = 3.125000e-01 : f32,
+         routing_norm_eps = 1.250000e-01 : f32}
     return
   }
 
   // CHECK-LABEL: llvm.func @test_qmoe_sigmoid_bias
   // CHECK: %[[SCALE:.*]] = llvm.mlir.constant(3.125000e-01 : f32) : f32
+  // CHECK-NEXT: %[[EPS:.*]] = llvm.mlir.constant(1.250000e-01 : f32) : f32
   // CHECK-NEXT: %[[RT:.*]] = llvm.mlir.constant(1 : i64) : i64
-  // CHECK-NEXT: llvm.call @wrap_qmoe({{.*}}, %{{[^,]+}}, %[[RT]], %[[SCALE]]) :
-  // CHECK-SAME: !llvm.ptr, i64, f32) -> i32
+  // CHECK-NEXT: llvm.call @wrap_qmoe({{.*}}, %{{[^,]+}}, %[[RT]], %[[SCALE]], %[[EPS]]) :
+  // CHECK-SAME: !llvm.ptr, i64, f32, f32) -> i32
 }
