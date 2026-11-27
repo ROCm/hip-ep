@@ -264,9 +264,15 @@ struct RuntimeState {
   // hipdnn_ep_runtime_get_provider_option.
   void *provider_options;
 
-  // Device-side error flag used by kernels to report runtime-invalid inputs.
+  // Error flag used by kernels to report runtime-invalid inputs.
   // 0 = no error, non-zero = error code (currently -1).
+  // device_error_flag is what kernels write. When host_error_flag is non-null
+  // the flag lives in host-mapped coherent memory and device_error_flag is its
+  // device alias: the host resets and reads it with plain loads/stores around
+  // the end-of-graph stream sync, so no per-inference memset, copy, or extra
+  // synchronization is queued for it. Otherwise it is device memory.
   int *device_error_flag;
+  int *host_error_flag;
 
   // hipDNN graph execution support.
   // Set by EP via hipdnn_graph_runtime_attach() after inference_init().
