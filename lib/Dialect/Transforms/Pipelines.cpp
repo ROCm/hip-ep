@@ -141,7 +141,11 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   //     the reference cases.
   pm.addPass(mlir::hip::createInferShapesPass());
 
-  // 1b*. HIP-to-HIP pattern rewriting, Such as Q/DQ fusion
+  // 1b*. Fold the Q/DQ around quant-capable ops into quant types, so the
+  //      fusions below see one op for QDQ and float models.
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createFoldQdqToQuantTypesPass());
+
+  // 1b**. HIP-to-HIP pattern rewriting, Such as Q/DQ fusion
   pm.addPass(mlir::hip::createHipFusionTransformPass());
 
   // Apply constant storage policy only after HIP shape inference has consumed
@@ -202,6 +206,11 @@ void mlir::hip::buildOnnxToHipPipelineTail(
   //     `onnx.Reshape` (typical: norm / projection chains).  See
   //     `ResolveTensorDims.cpp`.
   pm.addNestedPass<func::FuncOp>(mlir::hip::createResolveTensorDimsPass());
+
+  // 1d. Quantized element types cannot live in memrefs: record them in each
+  //     op's `quant_types` attribute (read by lowering to pick the kernel) and
+  //     retype the tensors to their storage integers.
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createLegalizeQuantTypesPass());
 
   // Plugin slot: BeforeBufferization. Vendors often want to lower or
   // canonicalize hip.* ops before bufferization fixes the type system

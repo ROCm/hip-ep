@@ -5,21 +5,78 @@
 
 #include "HipToLLVMUtils.h"
 
+#include "hip/Dialect/IR/HipQuantTypes.h"
+
 namespace mlir {
 namespace hip {
 namespace {
 
-// hip.gemm(handle, input_A, input_B, input_C, output, alpha, beta, transA,
-// transB, typeCode)
-struct GemmOpLowering : public ConvertOpToLLVMPattern<GemmOp> {
-  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+// Everything wrap_gemm needs, from hip.gemm or a float hip.matmul with a bias.
+struct GemmSpec {
+  Value a, b, c, y;               // converted operands; c may be null
+  MemRefType aType, bType, cType; // cType null without C
+  float alpha = 1.0f, beta = 1.0f;
+  int64_t transA = 0, transB = 0;
+  // A is [..., M, K] with transA == 0 and rank > 2: its leading dims fold into
+  // the rows, so the kernel sees [prod(leading) * M, K]. Set for hip.matmul.
+  bool foldLeadingDims = false;
+};
+
+static std::optional<GemmSpec> getSpec(GemmOp op, GemmOp::Adaptor adaptor) {
+  if (isQuantizedOp(op))
+    return std::nullopt; // wrap_qgemm (QGemmLowering.cpp)
+  GemmSpec spec;
+  spec.a = adaptor.getInputA();
+  spec.b = adaptor.getInputB();
+  spec.c = adaptor.getInputC();
+  spec.y = adaptor.getOutput();
+  spec.aType = cast<MemRefType>(op.getInputA().getType());
+  spec.bType = cast<MemRefType>(op.getInputB().getType());
+  if (op.getInputC())
+    spec.cType = cast<MemRefType>(op.getInputC().getType());
+  spec.alpha = op.getAlpha().convertToFloat();
+  spec.beta = op.getBeta().convertToFloat();
+  spec.transA = op.getTransA();
+  spec.transB = op.getTransB();
+  return spec;
+}
+
+// A float hip.matmul with a row bias is a gemm over [rows, K] x [K, N] + [N].
+// Its op state is a GemmState for the same reason (MatmulOp's
+// generateOpStateInit).
+static std::optional<GemmSpec> getSpec(MatmulOp op, MatmulOp::Adaptor adaptor) {
+  if (!op.getBias() || isQuantizedOp(op))
+    return std::nullopt;
+  GemmSpec spec;
+  spec.a = adaptor.getA();
+  spec.b = adaptor.getB();
+  spec.c = adaptor.getBias();
+  spec.y = adaptor.getOutput();
+  spec.aType = cast<MemRefType>(op.getA().getType());
+  spec.bType = cast<MemRefType>(op.getB().getType());
+  spec.cType = cast<MemRefType>(op.getBias().getType());
+  spec.transA = op.getTransA();
+  spec.transB = op.getTransB();
+  spec.foldLeadingDims = true;
+  return spec;
+}
+
+// -> wrap_gemm(state, slot, A, B, C, Y, M, N, K, alpha, beta, transA, transB,
+//              typeCode, cDim0, cDim1)
+template <typename OpTy>
+struct GemmLowering : public ConvertOpToLLVMPattern<OpTy> {
+  using ConvertOpToLLVMPattern<OpTy>::ConvertOpToLLVMPattern;
 
   LogicalResult
-  matchAndRewrite(GemmOp op, OpAdaptor adaptor,
+  matchAndRewrite(OpTy op, typename OpTy::Adaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    std::optional<GemmSpec> spec = getSpec(op, adaptor);
+    if (!spec)
+      return rewriter.notifyMatchFailure(op, "not a float gemm");
+
     Location loc = op.getLoc();
-    ModuleOp module = op->getParentOfType<ModuleOp>();
-    Type ptrType = getPtrType();
+    ModuleOp module = op->template getParentOfType<ModuleOp>();
+    Type ptrType = this->getPtrType();
     Type i32Type = rewriter.getI32Type();
     Type i64Type = rewriter.getI64Type();
     Type f32Type = rewriter.getF32Type();
@@ -29,7 +86,8 @@ struct GemmOpLowering : public ConvertOpToLLVMPattern<GemmOp> {
                                       rewriter.getI64IntegerAttr(value));
     };
 
-    auto AType = cast<MemRefType>(op.getInputA().getType());
+    MemRefType AType = spec->aType;
+    MemRefType BType = spec->bType;
     Type elemType = AType.getElementType();
     int64_t typeCode;
     if (elemType.isF16())
@@ -41,64 +99,45 @@ struct GemmOpLowering : public ConvertOpToLLVMPattern<GemmOp> {
     else if (elemType.isBF16())
       typeCode = 3;
     else
-      return failure();
-    Value typeCodeVal = createI64Const(typeCode);
+      return rewriter.notifyMatchFailure(op, "unsupported element type");
 
-    Value statePtr = adaptor.getCtx();
-    Value input_A_ptr =
-        extractContiguousMemRefPtr(adaptor.getInputA(), rewriter, loc);
-    Value input_B_ptr =
-        extractContiguousMemRefPtr(adaptor.getInputB(), rewriter, loc);
-    Value input_C_ptr =
-        extractOptionalMemRefPtr(adaptor.getInputC(), rewriter, loc);
-    Value output_ptr =
-        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
-
-    Value alpha = LLVM::ConstantOp::create(
-        rewriter, loc, f32Type,
-        rewriter.getF32FloatAttr(adaptor.getAlpha().convertToFloat()));
-    Value beta = LLVM::ConstantOp::create(
-        rewriter, loc, f32Type,
-        rewriter.getF32FloatAttr(adaptor.getBeta().convertToFloat()));
-    Value transA = LLVM::ConstantOp::create(
-        rewriter, loc, i64Type,
-        rewriter.getI64IntegerAttr(adaptor.getTransA()));
-    Value transB = LLVM::ConstantOp::create(
-        rewriter, loc, i64Type,
-        rewriter.getI64IntegerAttr(adaptor.getTransB()));
-
-    // A.shape = transA ? [K, M] : [M, K]
-    // B.shape = transB ? [N, K] : [K, N]
-    Value M, K, N;
-    if (adaptor.getTransA()) {
-      K = getMemRefDimSize(AType, 0, adaptor.getInputA(), rewriter, loc);
-      M = getMemRefDimSize(AType, 1, adaptor.getInputA(), rewriter, loc);
+    // A.shape = transA ? [K, M] : [M, K]; B.shape = transB ? [N, K] : [K, N].
+    // A rank > 2 A (matmul with a bias) folds its leading dims into M.
+    int64_t aRank = AType.getRank();
+    if (BType.getRank() != 2 ||
+        (aRank > 2 && (!spec->foldLeadingDims || spec->transA)))
+      return rewriter.notifyMatchFailure(
+          op, "needs a rank-2 B, and transA = 0 for a rank > 2 A");
+    Value M, K;
+    if (aRank > 2) {
+      M = getMemRefDimSize(AType, 0, spec->a, rewriter, loc);
+      for (int64_t i : llvm::seq<int64_t>(1, aRank - 1))
+        M = LLVM::MulOp::create(
+            rewriter, loc, M,
+            getMemRefDimSize(AType, i, spec->a, rewriter, loc));
+      K = getMemRefDimSize(AType, aRank - 1, spec->a, rewriter, loc);
     } else {
-      M = getMemRefDimSize(AType, 0, adaptor.getInputA(), rewriter, loc);
-      K = getMemRefDimSize(AType, 1, adaptor.getInputA(), rewriter, loc);
+      M = getMemRefDimSize(AType, spec->transA ? 1 : 0, spec->a, rewriter, loc);
+      K = getMemRefDimSize(AType, spec->transA ? 0 : 1, spec->a, rewriter, loc);
     }
-    auto BType = cast<MemRefType>(op.getInputB().getType());
-    if (adaptor.getTransB()) {
-      N = getMemRefDimSize(BType, 0, adaptor.getInputB(), rewriter, loc);
-    } else {
-      N = getMemRefDimSize(BType, 1, adaptor.getInputB(), rewriter, loc);
-    }
+    Value N =
+        getMemRefDimSize(BType, spec->transB ? 0 : 1, spec->b, rewriter, loc);
 
-    // Extract C's shape normalized to 2D [cDim0, cDim1] for broadcast support.
-    // Scalar/absent → [0,0], 1D [X] → [1,X], 2D [X,Y] → [X,Y].
+    // C's shape normalized to 2D [cDim0, cDim1] for broadcast support.
+    // Absent -> [0, 0], scalar -> [1, 1], [X] -> [1, X], [X, Y] -> [X, Y].
     Value cDim0, cDim1;
-    if (adaptor.getInputC()) {
-      auto CType = cast<MemRefType>(op.getInputC().getType());
+    if (spec->cType) {
+      MemRefType CType = spec->cType;
       int cRank = CType.getRank();
       if (cRank == 0) {
         cDim0 = createI64Const(1);
         cDim1 = createI64Const(1);
       } else if (cRank == 1) {
         cDim0 = createI64Const(1);
-        cDim1 = getMemRefDimSize(CType, 0, adaptor.getInputC(), rewriter, loc);
+        cDim1 = getMemRefDimSize(CType, 0, spec->c, rewriter, loc);
       } else {
-        cDim0 = getMemRefDimSize(CType, 0, adaptor.getInputC(), rewriter, loc);
-        cDim1 = getMemRefDimSize(CType, 1, adaptor.getInputC(), rewriter, loc);
+        cDim0 = getMemRefDimSize(CType, 0, spec->c, rewriter, loc);
+        cDim1 = getMemRefDimSize(CType, 1, spec->c, rewriter, loc);
       }
     } else {
       cDim0 = createI64Const(0);
@@ -125,19 +164,28 @@ struct GemmOpLowering : public ConvertOpToLLVMPattern<GemmOp> {
     };
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapGemm, paramTypes, i32Type);
-    if (failed(funcOp)) {
+    if (failed(funcOp))
       return failure();
-    }
 
     SmallVector<Value, 16> args = {
-        statePtr,    getOpStateSlotValue(op, rewriter, loc),
-        input_A_ptr, input_B_ptr,
-        input_C_ptr, output_ptr,
-        M,           N,
-        K,           alpha,
-        beta,        transA,
-        transB,      typeCodeVal,
-        cDim0,       cDim1};
+        adaptor.getCtx(),
+        getOpStateSlotValue(op, rewriter, loc),
+        extractContiguousMemRefPtr(spec->a, rewriter, loc),
+        extractContiguousMemRefPtr(spec->b, rewriter, loc),
+        extractOptionalMemRefPtr(spec->c, rewriter, loc),
+        extractContiguousMemRefPtr(spec->y, rewriter, loc),
+        M,
+        N,
+        K,
+        LLVM::ConstantOp::create(rewriter, loc, f32Type,
+                                 rewriter.getF32FloatAttr(spec->alpha)),
+        LLVM::ConstantOp::create(rewriter, loc, f32Type,
+                                 rewriter.getF32FloatAttr(spec->beta)),
+        createI64Const(spec->transA),
+        createI64Const(spec->transB),
+        createI64Const(typeCode),
+        cDim0,
+        cDim1};
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
     return success();
@@ -148,7 +196,7 @@ struct GemmOpLowering : public ConvertOpToLLVMPattern<GemmOp> {
 
 void populateGemmLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns) {
-  patterns.add<GemmOpLowering>(converter);
+  patterns.add<GemmLowering<GemmOp>, GemmLowering<MatmulOp>>(converter);
 }
 
 } // namespace hip

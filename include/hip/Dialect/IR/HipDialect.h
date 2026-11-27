@@ -24,6 +24,13 @@
 #define GET_TYPEDEF_CLASSES
 #include "hip/Dialect/IR/HipTypes.h.inc"
 
+// Generated header for `HipQuantCapableOpInterface`. Must precede
+// HipOps.h.inc; its verifier and default methods are in HipQuantTypes.h,
+// which must come first (separate block so include sorting keeps the order).
+#include "hip/Dialect/IR/HipQuantTypes.h"
+
+#include "hip/Dialect/IR/HipQuantCapableOpInterface.h.inc"
+
 // Generated header for the `HipDpsOp` C++ interface class (TableGen def
 // `HipDpsOpInterface`). Must precede HipOps.h.inc — every Hip_DpsOp's
 // generated declaration references `HipDpsOp::Trait`.

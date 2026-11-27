@@ -10,6 +10,7 @@ include "hip/Dialect/IR/HipDialect.td"
 include "hip/Dialect/IR/HipDpsOpInterface.td"
 include "hip/Dialect/IR/HipOpStateInterface.td"
 include "hip/Dialect/IR/HipElementMoveInterface.td"
+include "hip/Dialect/IR/HipQuantCapableOpInterface.td"
 include "hip/Dialect/IR/HipTypes.td"
 include "mlir/Interfaces/DestinationStyleOpInterface.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
@@ -827,7 +828,8 @@ def Hip_ConvTransposeOp : Hip_DpsOp_AutoReify<
 
 // Matmul reifies shapes from input dimensions in HipReifyResultShapesImpl.cpp.
 // The generated type inference reads the destination type.
-def Hip_MatmulOp : Hip_DpsOp_WithInfer<"matmul", "Output", [OpStateOpInterface]> {
+def Hip_MatmulOp : Hip_DpsOp_WithInfer<"matmul", "Output",
+    [OpStateOpInterface, HipQuantCapableOpInterface]> {
   let summary = "Matrix multiplication (supports batched N-D x N-D)";
   let description = [{
     Performs matrix multiplication: output = A @ B
@@ -853,6 +855,17 @@ def Hip_MatmulOp : Hip_DpsOp_WithInfer<"matmul", "Output", [OpStateOpInterface]>
     unset they default to 0 (standard onnx.MatMul layout: A [...,M,K],
     B [...,K,N]).
 
+    The element types decide the kernel, as for `hip.add`: float tensors run
+    the float kernel, `!quant.uniform` tensors (per-tensor scales, A 8/16-bit,
+    B 8-bit, result 8/16-bit) mean dequantize inputs and quantize the output.
+    After hip-legalize-quant-types the element types of [A, B, (bias), output]
+    are in `quant_types` and the tensors are storage integers.
+
+    The optional `bias` is a rank-1 `[N]` row bias added to every row of the
+    result (`output = A @ B + bias`). It requires a rank-2 B, and transA = 0
+    when A has rank > 2 (the leading dims then fold into the rows). Only
+    quantized types have a kernel for it today.
+
     Example (2D):
     ```mlir
     hip.matmul(%ctx) ins(%A, %B : memref<128x4096xf32, 1>,
@@ -872,29 +885,46 @@ def Hip_MatmulOp : Hip_DpsOp_WithInfer<"matmul", "Output", [OpStateOpInterface]>
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$A,
     Hip_TensorOrMemRef:$B,
+    Optional<Hip_TensorOrMemRef>:$bias,
     Hip_TensorOrMemRef:$output,
     DefaultValuedAttr<I64Attr, "0">:$transA,
-    DefaultValuedAttr<I64Attr, "0">:$transB
+    DefaultValuedAttr<I64Attr, "0">:$transB,
+    OptionalAttr<TypeArrayAttr>:$quant_types
   );
 
+  // Float builders; `quant_types` is only set by hip-legalize-quant-types.
+  let builders = [
+    OpBuilder<(ins "::mlir::TypeRange":$result_tensors, "::mlir::Value":$ctx,
+                   "::mlir::Value":$A, "::mlir::Value":$B,
+                   "::mlir::Value":$output), [{
+      build($_builder, $_state, result_tensors, ctx, A, B, ::mlir::Value(),
+            output, ::mlir::IntegerAttr(), ::mlir::IntegerAttr(),
+            ::mlir::ArrayAttr());
+    }]>,
+    OpBuilder<(ins "::mlir::Value":$ctx, "::mlir::Value":$A,
+                   "::mlir::Value":$B, "::mlir::Value":$output), [{
+      build($_builder, $_state, ctx, A, B, ::mlir::Value(), output,
+            ::mlir::IntegerAttr(), ::mlir::IntegerAttr(),
+            ::mlir::ArrayAttr());
+    }]>
+  ];
+
   let assemblyFormat = [{
-    `(` $ctx `)` `ins` `(` $A `,` $B `:` type($A) `,` type($B) `)`
+    `(` $ctx `)` `ins` `(` $A `,` $B (`,` $bias^)?
+        `:` type($A) `,` type($B) (`,` type($bias)^)? `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
 
-  // OpStateOpInterface: construct this matmul instance's per-session state
-  // (MatmulState), which holds a shared_ptr to the device-wide hipBLASLt algo
-  // table. No compile-time params — the table fills lazily per call. The
-  // construct fn stores the state into op_states[slot] itself.
+  // OpStateOpInterface: construct this matmul instance's per-session state,
+  // which holds a shared_ptr to the device-wide hipBLASLt algo table. No
+  // compile-time params — the table fills lazily per call. A float matmul with
+  // a bias lowers to wrap_gemm and so needs a GemmState instead of a
+  // MatmulState (HipDialect.cpp).
   let extraClassDeclaration = [{
     ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
                                       ::mlir::Location loc,
-                                      ::mlir::Value statePtr, int32_t slot) {
-      return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, slot, "hipdnn_ep_op_state_construct_matmul",
-          {});
-    }
+                                      ::mlir::Value statePtr, int32_t slot);
   }];
 
   let hasVerifier = 1;
@@ -2155,10 +2185,31 @@ def Hip_MulOp : Hip_DpsOp_Broadcast<"mul", /*operandGetters=*/["Lhs", "Rhs"],
   let hasVerifier = 1;
 }
 
+def Hip_StorageCastOp : Hip_Op<"storage_cast", [Pure]> {
+  let summary = "View a tensor as quantized or as its storage integers";
+  let description = [{
+    Bit-preserving cast between a `!quant.uniform` tensor and its hip storage
+    tensor (`uiN` for unsigned, signless `iN` for signed storage). Shapes are
+    identical. `quant.scast` is not used because it rejects `uiN`.
+
+    ```mlir
+    %q = hip.storage_cast %x : tensor<8xui16>
+                            to tensor<8x!quant.uniform<u16:f32, 0.5:3>>
+    ```
+  }];
+
+  let arguments = (ins AnyRankedTensor:$input);
+  let results = (outs AnyRankedTensor:$result);
+  let assemblyFormat = "$input attr-dict `:` type($input) `to` type($result)";
+  let hasVerifier = 1;
+  let hasFolder = 1;
+}
+
 def Hip_AddOp : Hip_DpsOp_Broadcast<"add", /*operandGetters=*/["Lhs", "Rhs"],
                                     /*outsAccessor=*/"Output",
-                                    /*traits=*/[OpStateOpInterface]> {
-  let summary = "Elementwise addition";
+                                    /*traits=*/[OpStateOpInterface,
+                                                HipQuantCapableOpInterface]> {
+  let summary = "Elementwise addition, float or quantized by type";
 
   // OpStateOpInterface: shared OpTensorState (see hip.mul).
   let extraClassDeclaration = [{
@@ -2175,6 +2226,23 @@ def Hip_AddOp : Hip_DpsOp_Broadcast<"add", /*operandGetters=*/["Lhs", "Rhs"],
 
     Uses destination-passing style: output buffer is provided as argument.
 
+    The element types decide the kernel. Float tensors run the float kernel.
+    `!quant.uniform` tensors (all three operands) mean the op dequantizes its
+    inputs and quantizes its output, i.e. the QDQ-integrated kernel:
+
+    ```mlir
+    hip.add(%ctx) ins(%a, %b : tensor<8x!quant.uniform<u16:f32, 0.5:3>>,
+                               tensor<8x!quant.uniform<u16:f32, 0.25:7>>)
+                  outs(%init : tensor<8x!quant.uniform<u16:f32, 1.0:0>>)
+                  -> tensor<8x!quant.uniform<u16:f32, 1.0:0>>
+    ```
+
+    Memrefs cannot hold quantized element types, so hip-legalize-quant-types
+    moves them into `quant_types` ([lhs, rhs, output] element types) and
+    retypes the tensors to their storage integers before bufferization. Every
+    add gets `quant_types`; a float add's entries are its float types
+    (`[f32, f32, f32]`), and lowering picks the kernel from them.
+
     Example:
     ```mlir
     hip.add(%ctx) ins(%lhs, %rhs : memref<1x128x32xf16, 1>,
@@ -2187,8 +2255,23 @@ def Hip_AddOp : Hip_DpsOp_Broadcast<"add", /*operandGetters=*/["Lhs", "Rhs"],
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$lhs,
     Hip_TensorOrMemRef:$rhs,
-    Hip_TensorOrMemRef:$output
+    Hip_TensorOrMemRef:$output,
+    OptionalAttr<TypeArrayAttr>:$quant_types
   );
+
+  // Float builders; `quant_types` is only set by hip-legalize-quant-types.
+  let builders = [
+    OpBuilder<(ins "::mlir::TypeRange":$result_tensors, "::mlir::Value":$ctx,
+                   "::mlir::Value":$lhs, "::mlir::Value":$rhs,
+                   "::mlir::Value":$output), [{
+      build($_builder, $_state, result_tensors, ctx, lhs, rhs, output,
+            ::mlir::ArrayAttr());
+    }]>,
+    OpBuilder<(ins "::mlir::Value":$ctx, "::mlir::Value":$lhs,
+                   "::mlir::Value":$rhs, "::mlir::Value":$output), [{
+      build($_builder, $_state, ctx, lhs, rhs, output, ::mlir::ArrayAttr());
+    }]>
+  ];
 
   // result_tensors inherited from Hip_DpsOp
   let hasCustomAssemblyFormat = 1;
@@ -5160,7 +5243,8 @@ def Hip_SparseAttentionIndexerOp : Hip_DpsOp_AutoReify<"sparse_attention_indexer
   let hasVerifier = 1;
 }
 
-def Hip_GemmOp : Hip_DpsOp_WithInfer<"gemm", "Output", [OpStateOpInterface]> {
+def Hip_GemmOp : Hip_DpsOp_WithInfer<"gemm", "Output",
+    [OpStateOpInterface, HipQuantCapableOpInterface]> {
   let summary = "General matrix multiplication (ONNX Gemm)";
   let description = [{
     Computes Y = alpha * A' * B' + beta * C, where:
@@ -5192,7 +5276,9 @@ def Hip_GemmOp : Hip_DpsOp_WithInfer<"gemm", "Output", [OpStateOpInterface]> {
     DefaultValuedAttr<F32Attr, "1.0">:$alpha,
     DefaultValuedAttr<F32Attr, "1.0">:$beta,
     DefaultValuedAttr<I64Attr, "0">:$transA,
-    DefaultValuedAttr<I64Attr, "0">:$transB
+    DefaultValuedAttr<I64Attr, "0">:$transB,
+    // Element types of [A, B, (C), output]; see hip.matmul.
+    OptionalAttr<TypeArrayAttr>:$quant_types
   );
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(`

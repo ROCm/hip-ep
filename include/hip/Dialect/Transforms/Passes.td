@@ -412,6 +412,49 @@ def DecomposeConvTransposePass
   ];
 }
 
+def FoldQdqToQuantTypesPass
+    : Pass<"hip-fold-qdq-to-quant-types", "mlir::func::FuncOp"> {
+  let summary = "Fold the Q/DQ around quant-capable ops into quant types";
+  let description = [{
+    For any op implementing HipQuantCapableOpInterface (every hip DPS op
+    outside the deny-list), turns
+
+      DQ(inputs) -> op -> Q
+
+    into the same op on `!quant.uniform` tensors, with `hip.storage_cast`s at
+    the edges. The op is retyped in place (its init and result included), so
+    attributes and optional operands such as a bias are kept. Folding is per
+    operand: each per-tensor DQ input folds, a float input stays float, and
+    the result is quantized only if it has a single per-tensor Q user of the
+    same shape. The op may therefore mix quantized and float types (e.g. a
+    weight-only matmul). A DQ input that is not per-tensor (per-column, packed
+    4-bit, runtime scale) leaves the whole op to the Q-specific PDLL fusions
+    of hip-fusion-transform. Kernel availability is not checked here;
+    hip-legalize-quant-types does that.
+  }];
+  let dependentDialects = ["mlir::quant::QuantDialect",
+                           "mlir::tensor::TensorDialect",
+                           "mlir::hip::HipDialect"];
+}
+
+def LegalizeQuantTypesPass
+    : Pass<"hip-legalize-quant-types", "mlir::func::FuncOp"> {
+  let summary = "Move quantized element types into op attributes before "
+                "bufferization";
+  let description = [{
+    Memrefs cannot hold `!quant.uniform` element types. For every quant-capable
+    op (`hip.add`, `hip.matmul`, `hip.gemm`), quantized or not, this pass records
+    the [inputs..., output] element types in the op's `quant_types` attribute,
+    and retypes all quantized tensors to their hip storage integers (`uiN` /
+    signless `iN`). The now-identity `hip.storage_cast`s are removed. Lowering
+    reads `quant_types` to pick the quantized or the float kernel.
+
+    Fails if a quantized op has no kernel for its types (the Q/DQ folds do not
+    check kernels; there is no fallback to DQ -> op -> Q) or if any quantized
+    type remains.
+  }];
+}
+
 def FoldBatchNormPass
     : Pass<"hip-fold-batchnorm", "mlir::func::FuncOp"> {
   let summary = "Fold constant-parameter hip.batch_norm into hip.conv weights";

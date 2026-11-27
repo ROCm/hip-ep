@@ -48,6 +48,13 @@ Constraint IsHipPerAxisQuantizedWeight(dq: Op, rank: Attr, axis: Attr,
                                        packedInt4: Attr);
 Constraint IsHipPerChannelQuantizedWeight(dq: Op, consumer: Op);
 
+// Matmul + bias (MatmulBiasFusion.pdll).
+Constraint HasSameShape(lhs: Value, rhs: Value);
+Constraint IsRowBias(bias: Value, result: Value);
+Constraint CanTakeMatmulBias(matmul: Op);
+Constraint HasOneFloatElementType(a: Value, b: Value, c: Value);
+Rewrite ToRowBias(bias: Value) -> Value;
+
 // Compute-op geometry.
 Constraint IsHipFusableQConvGeometry(conv: Op);
 Constraint IsHipL2EquivalentRmsNorm(rms: Op);
@@ -64,6 +71,7 @@ Constraint CanRequantizeLayoutOp(layout: Op, resultType: Type);
 Rewrite CreateRequantizedLayoutOp(dq: Op, layout: Op, q: Op) -> Value;
 
 #include "QAddFusion.pdll"
+#include "MatmulBiasFusion.pdll"
 #include "QMulFusion.pdll"
 #include "QMatMulFusion.pdll"
 #include "QGemmFusion.pdll"

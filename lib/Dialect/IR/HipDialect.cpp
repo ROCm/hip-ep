@@ -12,6 +12,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/Quant/IR/Quant.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
@@ -20,6 +21,7 @@
 #include "mlir/IR/SymbolTable.h"
 
 #include "HipShapeUtilsInternal.h"
+#include "hip/Dialect/IR/HipQuantTypes.h"
 #include "hip/Dialect/IR/HipShapeUtils.h"
 
 #include <cmath>
@@ -39,6 +41,7 @@ void HipDialect::initialize() {
 #define GET_OP_LIST
 #include "hip/Dialect/IR/HipOps.cpp.inc"
       >();
+  attachQuantCapableInterface(this);
 }
 
 #define GET_TYPEDEF_CLASSES
@@ -946,6 +949,7 @@ void QAddOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 // QMulOp: ins(lhs, rhs), outs(output)
 // Quantized elementwise mul with integrated QDQ scales and zero points
 //===----------------------------------------------------------------------===//
@@ -1329,15 +1333,44 @@ LogicalResult MatmulOp::verify() {
   // First the cross-cutting DPS contract (all-tensor-or-all-memref +
   // result-count parity); failures here also rule out bogus operand types,
   // so the matmul shape check below can rely on detail::getShapeOf().
-  if (failed(verifyDpsComputeOp(*this, {getA(), getB(), getOutput()},
-                                /*numInits=*/1)))
+  SmallVector<Value> operands = {getA(), getB()};
+  if (getBias())
+    operands.push_back(getBias());
+  operands.push_back(getOutput());
+  if (failed(verifyDpsComputeOp(*this, operands, /*numInits=*/1)))
     return failure();
+
+  if (getBias()) {
+    auto aType = cast<ShapedType>(getA().getType());
+    auto bType = cast<ShapedType>(getB().getType());
+    auto biasType = cast<ShapedType>(getBias().getType());
+    if (bType.getRank() != 2)
+      return emitOpError("bias requires a rank-2 B");
+    if (aType.getRank() > 2 && getTransA() != 0)
+      return emitOpError("bias with a rank > 2 A requires transA = 0");
+    if (biasType.getRank() != 1)
+      return emitOpError("bias must be rank 1");
+    int64_t n = bType.getDimSize(getTransB() != 0 ? 0 : 1);
+    if (!ShapedType::isDynamic(n) && !biasType.isDynamicDim(0) &&
+        biasType.getDimSize(0) != n)
+      return emitOpError("bias length ")
+             << biasType.getDimSize(0) << " does not match N = " << n;
+  }
 
   return mlir::hip::verifyHipOpShape(*this, [&] {
     return mlir::hip::inferMatmulShape(
         detail::getShapeOf(getA()), detail::getShapeOf(getB()),
         [&]() { return this->emitOpError(); }, getTransA(), getTransB());
   });
+}
+
+Value MatmulOp::generateOpStateInit(OpBuilder &builder, Location loc,
+                                    Value statePtr, int32_t slot) {
+  // Must match the kernel the lowering picks: wrap_gemm reads a GemmState.
+  StringRef ctor = getBias() && !isQuantizedOp(*this)
+                       ? "hipdnn_ep_op_state_construct_gemm"
+                       : "hipdnn_ep_op_state_construct_matmul";
+  return emitOpStateConstruct(builder, loc, statePtr, slot, ctor, {});
 }
 
 // `MatmulOp::reifyResultShapes` lives in

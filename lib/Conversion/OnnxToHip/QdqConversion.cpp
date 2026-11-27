@@ -12,7 +12,9 @@
 // QLinearGlobalAveragePool / QLinearAveragePool / QLinearLeakyRelu are
 // decomposed here into
 // native DequantizeLinear + compute + QuantizeLinear, before PDLL fusion.
-// Per-tensor Add and Mul then fuse to hip.qadd / hip.qmul.
+// Per-tensor Add then folds into a quant-typed hip.add
+// (hip-fold-qdq-to-quant-types; hip.qadd when hip-fusion-transform runs alone),
+// Mul into hip.qmul.
 
 #include "OnnxToHipUtils.h"
 

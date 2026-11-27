@@ -29,8 +29,11 @@
 #pragma once
 
 #include "hip/Dialect/IR/HipDialect.h"
+#include "hip/Dialect/IR/HipQuantTypes.h"
 
+#include "../HipQdqUtils.h"
 #include "gelu_fusion.hpp"
+#include "gemm_to_matmul.hpp"
 #include "linear_attention_group_fold.hpp"
 #include "patch_embed_conv_to_gemm.hpp"
 #include "scaled_masked_softmax_fusion.hpp"
@@ -40,6 +43,7 @@
 #include "mlir/Dialect/PDL/IR/PDL.h"
 #include "mlir/Dialect/PDL/IR/PDLOps.h"
 #include "mlir/Dialect/PDLInterp/IR/PDLInterp.h"
+#include "mlir/Dialect/Quant/IR/QuantTypes.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -60,87 +64,6 @@
 
 namespace hip {
 namespace fusion_transform {
-
-//===----------------------------------------------------------------------===//
-// IR readers
-//===----------------------------------------------------------------------===//
-
-/// value is const op and return value as DenseElementsAttr, if not return {}
-inline mlir::DenseElementsAttr tryHipConstantPayload(mlir::Value value) {
-  if (!value)
-    return {};
-  auto constOp =
-      mlir::dyn_cast_or_null<mlir::hip::ConstantOp>(value.getDefiningOp());
-  if (!constOp)
-    return {};
-  return mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(
-      constOp->getAttr("value"));
-}
-
-/// value is a splat float constant and return it as float, if not return
-/// nullopt
-inline std::optional<float> tryHipSplatScale(mlir::Value value) {
-  mlir::DenseElementsAttr payload = tryHipConstantPayload(value);
-  // A non-splat scale is per-axis and has no single scalar equivalent.
-  if (!payload || !payload.isSplat())
-    return std::nullopt;
-  // getSplatValue<FloatAttr> asserts on a non-float payload, so the element
-  // type is what guards the read rather than a dyn_cast on its result.
-  if (!mlir::isa<mlir::FloatType>(payload.getElementType()))
-    return std::nullopt;
-  return static_cast<float>(
-      payload.getSplatValue<mlir::FloatAttr>().getValueAsDouble());
-}
-
-inline mlir::Value getQdqZeroPoint(mlir::Operation *op) {
-  // Read through the ODS accessor, not an operand index: the zero point is
-  // optional, and an absent one shifts the DPS init operand into its slot.
-  if (auto quantOp = mlir::dyn_cast_or_null<mlir::hip::QuantizeLinearOp>(op))
-    return quantOp.getZeroPoint();
-  if (auto dequantOp =
-          mlir::dyn_cast_or_null<mlir::hip::DequantizeLinearOp>(op))
-    return dequantOp.getZeroPoint();
-  return {};
-}
-
-inline mlir::IntegerType getQdqQuantizedElementType(mlir::Operation *op) {
-  mlir::Type type;
-  if (auto quantOp = mlir::dyn_cast_or_null<mlir::hip::QuantizeLinearOp>(op))
-    type = quantOp.getOutput().getType();
-  else if (auto dequantOp =
-               mlir::dyn_cast_or_null<mlir::hip::DequantizeLinearOp>(op))
-    type = dequantOp.getInput().getType();
-  auto shaped = mlir::dyn_cast_or_null<mlir::ShapedType>(type);
-  if (!shaped)
-    return {};
-  return mlir::dyn_cast<mlir::IntegerType>(shaped.getElementType());
-}
-
-/// op is a Q/DQ whose zero point is a splat constant and return it as int64,
-/// an absent operand returns absentValue, anything else nullopt
-inline std::optional<int64_t> tryHipQdqZeropoint(mlir::Operation *op,
-                                                 int64_t absentValue) {
-  if (!op)
-    return std::nullopt;
-  mlir::Value zeroPoint = getQdqZeroPoint(op);
-  // ONNX makes the operand optional and defines its absence as zero.
-  if (!zeroPoint)
-    return absentValue;
-  mlir::DenseElementsAttr payload = tryHipConstantPayload(zeroPoint);
-  if (!payload || !payload.isSplat())
-    return std::nullopt;
-  if (!mlir::isa<mlir::IntegerType>(payload.getElementType()))
-    return std::nullopt;
-  // The payload's own element type carries no signedness for the signless
-  // integers the importer produces, so the stored type of the quantized side
-  // is what decides how the raw bits are read.
-  auto intType = getQdqQuantizedElementType(op);
-  if (!intType)
-    return std::nullopt;
-  llvm::APInt raw = payload.getSplatValue<llvm::APInt>();
-  return intType.isUnsigned() ? static_cast<int64_t>(raw.getZExtValue())
-                              : raw.getSExtValue();
-}
 
 /// op's `name` attribute as a signed int64, absentValue when it is missing,
 /// nullopt when it is present but not a 64-bit integer
@@ -291,6 +214,75 @@ hasSameHipQdqElementType(mlir::PatternRewriter &, mlir::PDLResultList &,
   // The quantized elementwise kernels take one data type for both operands
   // and the output, so a mixed chain such as a uint16 activation plus an int8
   // constant would read the narrower operand at the wider width.
+  return mlir::success();
+}
+
+/// lhs and rhs are ranked tensors of the same shape
+inline mlir::LogicalResult hasSameShape(mlir::PatternRewriter &,
+                                        mlir::PDLResultList &,
+                                        llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 2)
+    return mlir::failure();
+  auto lhs = mlir::dyn_cast<mlir::RankedTensorType>(
+      args[0].cast<mlir::Value>().getType());
+  auto rhs = mlir::dyn_cast<mlir::RankedTensorType>(
+      args[1].cast<mlir::Value>().getType());
+  return mlir::success(lhs && rhs && lhs.getShape() == rhs.getShape());
+}
+
+/// bias broadcasts over every row of an [..., N] result: static, N along its
+/// last dim and 1 everywhere else
+inline mlir::LogicalResult isRowBias(mlir::PatternRewriter &,
+                                     mlir::PDLResultList &,
+                                     llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 2)
+    return mlir::failure();
+  auto bias = mlir::dyn_cast<mlir::RankedTensorType>(
+      args[0].cast<mlir::Value>().getType());
+  auto result = mlir::dyn_cast<mlir::RankedTensorType>(
+      args[1].cast<mlir::Value>().getType());
+  if (!bias || !result || result.getRank() == 0)
+    return mlir::failure();
+  int64_t n = result.getShape().back();
+  return mlir::success(bias.hasStaticShape() && bias.getRank() >= 1 &&
+                       bias.getRank() <= result.getRank() &&
+                       bias.getShape().back() == n &&
+                       llvm::all_of(bias.getShape().drop_back(),
+                                    [](int64_t dim) { return dim == 1; }));
+}
+
+/// matmul meets hip.matmul's bias rules: rank-2 B, rank >= 2 A, and transA = 0
+/// when A has rank > 2
+inline mlir::LogicalResult
+canTakeMatmulBias(mlir::PatternRewriter &, mlir::PDLResultList &,
+                  llvm::ArrayRef<mlir::PDLValue> args) {
+  if (args.size() != 1)
+    return mlir::failure();
+  auto matmul = mlir::dyn_cast_or_null<mlir::hip::MatmulOp>(
+      args[0].cast<mlir::Operation *>());
+  if (!matmul)
+    return mlir::failure();
+  auto a = mlir::dyn_cast<mlir::RankedTensorType>(matmul.getA().getType());
+  auto b = mlir::dyn_cast<mlir::RankedTensorType>(matmul.getB().getType());
+  return mlir::success(a && b && b.getRank() == 2 && a.getRank() >= 2 &&
+                       (a.getRank() == 2 || matmul.getTransA() == 0));
+}
+
+/// the non-quantized values share one element type; quantized ones may differ
+/// (each carries its own scale), so mixed float/quantized chains also fuse
+inline mlir::LogicalResult
+hasOneFloatElementType(mlir::PatternRewriter &, mlir::PDLResultList &,
+                       llvm::ArrayRef<mlir::PDLValue> args) {
+  mlir::Type floatType;
+  for (const mlir::PDLValue &arg : args) {
+    mlir::Type type =
+        mlir::getElementTypeOrSelf(arg.cast<mlir::Value>().getType());
+    if (mlir::hip::isQuantized(type))
+      continue;
+    if (floatType && type != floatType)
+      return mlir::failure();
+    floatType = type;
+  }
   return mlir::success();
 }
 
@@ -623,24 +615,6 @@ hasHipIntAttrEqual(mlir::PatternRewriter &, mlir::PDLResultList &,
 // Rewrite helpers
 //===----------------------------------------------------------------------===//
 
-/// a tensor.empty of resultType whose dynamic dims are read off shapeSource
-/// a tensor.empty of initType, sizing each dynamic dim from shapeSource
-inline mlir::Value buildInitValue(mlir::PatternRewriter &rewriter,
-                                  mlir::RankedTensorType initType,
-                                  mlir::Value shapeSource) {
-  mlir::Location loc = shapeSource.getLoc();
-
-  llvm::SmallVector<mlir::Value> dynSizes;
-  for (int64_t dim : llvm::seq<int64_t>(initType.getRank()))
-    if (initType.isDynamicDim(dim))
-      dynSizes.push_back(
-          mlir::tensor::DimOp::create(rewriter, loc, shapeSource, dim));
-
-  return mlir::tensor::EmptyOp::create(rewriter, loc, initType.getShape(),
-                                       initType.getElementType(), dynSizes)
-      .getResult();
-}
-
 inline mlir::LogicalResult buildInit(mlir::PatternRewriter &rewriter,
                                      mlir::PDLResultList &results,
                                      llvm::ArrayRef<mlir::PDLValue> args) {
@@ -651,6 +625,23 @@ inline mlir::LogicalResult buildInit(mlir::PatternRewriter &rewriter,
       rewriter,
       mlir::cast<mlir::RankedTensorType>(args[0].dyn_cast<mlir::Type>()),
       args[1].dyn_cast<mlir::Value>()));
+  return mlir::success();
+}
+
+/// bias as the rank-1 [N] row hip.matmul takes: unchanged, or [1, ..., 1, N]
+/// collapsed
+inline mlir::LogicalResult toRowBias(mlir::PatternRewriter &rewriter,
+                                     mlir::PDLResultList &results,
+                                     llvm::ArrayRef<mlir::PDLValue> args) {
+  // Guarded by IsRowBias, so the cast holds.
+  mlir::Value bias = args[0].cast<mlir::Value>();
+  auto type = mlir::cast<mlir::RankedTensorType>(bias.getType());
+  if (type.getRank() > 1)
+    bias = mlir::tensor::CollapseShapeOp::create(
+        rewriter, bias.getLoc(), bias,
+        llvm::SmallVector<mlir::ReassociationIndices>{
+            llvm::to_vector(llvm::seq<int64_t>(0, type.getRank()))});
+  results.push_back(bias);
   return mlir::success();
 }
 
@@ -822,6 +813,13 @@ inline void registerNativeHelpers(mlir::PDLPatternModule &pdlPatterns) {
                                          isHipQdqUnsignedQuantized);
   pdlPatterns.registerConstraintFunction("HasSameHipQdqElementType",
                                          hasSameHipQdqElementType);
+  pdlPatterns.registerConstraintFunction("HasSameShape", hasSameShape);
+  pdlPatterns.registerConstraintFunction("IsRowBias", isRowBias);
+  pdlPatterns.registerConstraintFunction("CanTakeMatmulBias",
+                                         canTakeMatmulBias);
+  pdlPatterns.registerConstraintFunction("HasOneFloatElementType",
+                                         hasOneFloatElementType);
+  pdlPatterns.registerRewriteFunction("ToRowBias", toRowBias);
   pdlPatterns.registerConstraintFunction("IsHipFusableQConvGeometry",
                                          isHipFusableQConvGeometry);
   pdlPatterns.registerConstraintFunction("IsHipPerAxisQuantizedWeight",
@@ -864,6 +862,11 @@ constexpr unsigned kPatchEmbedConvToGemmBenefit = 5;
 constexpr unsigned kSwigluFusionBenefit = 2;
 constexpr unsigned kGeluFusionBenefit = 2;
 
+/// The only pattern rooted at `hip.gemm`. The per-channel and packed 4-bit
+/// QGemm patterns it must not pre-empt are excluded by its own check, not by
+/// benefit (they root at `hip.quantize_linear`).
+constexpr unsigned kGemmToMatmulBenefit = 1;
+
 /// The only pattern rooted at `hip.linear_attention`.
 constexpr unsigned kLinearAttentionGroupFoldBenefit = 1;
 
@@ -885,6 +888,8 @@ inline mlir::LogicalResult run(mlir::ModuleOp module,
       patterns, mlir::PatternBenefit(kPatchEmbedConvToGemmBenefit));
   populateSwigluFusionPattern(patterns,
                               mlir::PatternBenefit(kSwigluFusionBenefit));
+  populateGemmToMatmulPattern(patterns,
+                              mlir::PatternBenefit(kGemmToMatmulBenefit));
   populateGeluFusionPattern(patterns, mlir::PatternBenefit(kGeluFusionBenefit));
   populateLinearAttentionGroupFoldPattern(
       patterns, mlir::PatternBenefit(kLinearAttentionGroupFoldBenefit));

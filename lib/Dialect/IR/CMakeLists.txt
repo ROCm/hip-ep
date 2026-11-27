@@ -11,6 +11,7 @@ add_library(HipDialectIR STATIC
   HipDpsOpInterface.cpp
   HipElementMoveInterface.cpp
   HipOpStateInterface.cpp
+  HipQuantTypes.cpp
   RuntimeAccessOpInterface.cpp
   HipReadbackCanonicalize.cpp
   HipReifyResultShapesImpl.cpp
@@ -27,6 +28,7 @@ add_dependencies(HipDialectIR
   HipTypesIncGen
   HipDpsOpInterfaceIncGen
   HipOpStateInterfaceIncGen
+  HipQuantCapableOpInterfaceIncGen
   RuntimeAccessOpInterfaceIncGen
   HipElementMoveInterfaceIncGen
   HipOpsIncGen
@@ -49,6 +51,7 @@ target_link_libraries(HipDialectIR PUBLIC
   MLIRInferTypeOpInterface
   MLIRTensorDialect
   MLIRMemRefDialect
+  MLIRQuantDialect
   # OpStateOpInterface's emitOpStateConstruct helper emits LLVM-dialect calls
   # (the per-op state constructor calls woven into the op-state init function).
   MLIRLLVMDialect

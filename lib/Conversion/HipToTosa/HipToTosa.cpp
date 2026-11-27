@@ -631,6 +631,9 @@ struct MatMulConverter final : public OpConversionPattern<hip::MatmulOp> {
     // Memref mode (post-bufferization) has no SSA result to replace.
     if (op.getNumResults() != 1)
       return rewriter.notifyMatchFailure(op, "expected tensor mode");
+    // tosa.matmul has no bias; dropping it would change the result.
+    if (op.getBias())
+      return rewriter.notifyMatchFailure(op, "matmul with a bias");
 
     auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
     if (!resultType || !resultType.hasStaticShape())

@@ -90,6 +90,24 @@ set_target_properties(test-dtype-mapping PROPERTIES
   FOLDER "mlir/Test/Dialect/Hipsr"
 )
 
+# HipQuantCapableOpInterface queries (GPU-free). C++ API, unreachable from LIT.
+add_executable(test-quant-capable-interface test_quant_capable_interface.cpp)
+target_compile_features(test-quant-capable-interface PRIVATE cxx_std_17)
+target_include_directories(test-quant-capable-interface PRIVATE
+  ${MLIR_INCLUDE_DIRS}
+  ${LLVM_INCLUDE_DIRS}
+)
+target_link_libraries(test-quant-capable-interface PRIVATE
+  HipDialectIR
+  MLIRParser
+  MLIRFuncDialect
+  MLIRTensorDialect
+  MLIRQuantDialect
+)
+add_test(NAME QuantCapableInterfaceUnit
+  COMMAND test-quant-capable-interface
+)
+
 # GPU-free numeric reference for fused QDQ LpNormalization (L2 == RMS/sqrt(N)).
 add_executable(test-qlpnormalization-ref test_qlpnormalization_ref.cpp)
 

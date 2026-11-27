@@ -1,0 +1,196 @@
+<!--
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+-->
+# Quantization as element types
+
+A hip op is quantized when its tensors have `!quant.uniform` element types
+(upstream MLIR `quant` dialect). The same op with float tensors is the float
+op. So there is one `hip.add` for QDQ and float models, and a fusion written
+against `hip.add` applies to both. The types, not the op name, select the
+kernel and decide whether the kernel dequantizes/quantizes.
+
+Status: every hip DPS op is quant-capable (`HipQuantCapableOpInterface`) except
+a deny-list (see "Quant-capable ops"). Only `hip.add`, `hip.matmul` and
+`hip.gemm` have quantized kernels so far. `hip.mul` and `hip.sigmoid` stay on
+their Q-specific ops and PDLL fusions, as do the cases below that types cannot
+carry.
+
+The Q-specific PDLL fusions in `hip-fusion-transform` are unchanged from `main`,
+including `HipQAdd` and the per-tensor `HipQMatMul` / `HipQGemm`. In the
+pipeline `hip-fold-qdq-to-quant-types` runs first and folds per-tensor add,
+matmul and gemm into quant types, so those patterns only fire when
+`hip-fusion-transform` runs alone.
+
+## IR
+
+```mlir
+// Float model
+%s = hip.add(%ctx) ins(%a, %b : tensor<8xf32>, tensor<8xf32>)
+                   outs(%e : tensor<8xf32>) -> tensor<8xf32>
+
+// QDQ model, after hip-fusion-transform
+%qa = hip.storage_cast %a : tensor<8xui16> to tensor<8x!quant.uniform<u16:f32, 0.25:32768>>
+%qb = hip.storage_cast %b : tensor<8xui16> to tensor<8x!quant.uniform<u16:f32, 0.5:32768>>
+%s  = hip.add(%ctx) ins(%qa, %qb : ...) outs(%e : tensor<8x!quant.uniform<u16:f32, 0.125:32768>>)
+%r  = hip.storage_cast %s : tensor<8x!quant.uniform<u16:f32, 0.125:32768>> to tensor<8xui16>
+```
+
+- `hip.storage_cast` is a bit-preserving view between a quantized tensor and
+  its hip storage tensor (`uiN` for unsigned, signless `iN` for signed). It
+  exists because `quant.scast` rejects `uiN`. A cast pair that restores the
+  original type folds, so consecutive quantized ops connect directly.
+- An op may mix quantized and float tensors, e.g. a weight-only matmul
+  (`f16 × !quant.uniform<i8:…> → f16`); each tensor's type says how to read
+  it.
+- After legalization, every `hip.add` carries `quant_types`: the quantized
+  types for a QDQ add, its own float or integer types for any other
+  (`[f32, f32, f32]`). Lowering asks only whether those entries are quantized,
+  so a `ui16` quantized add is never mistaken for an integer add.
+
+## Flow
+
+| Step | Where | What |
+|---|---|---|
+| Fold Q/DQ into types | `hip-fold-qdq-to-quant-types` (`FoldQdqToQuantTypes.cpp`), run just before `hip-fusion-transform` | Per operand: each DQ input with a per-tensor type (splat constant scale, readable zero point, integer storage, not packed) folds into the input's type, and a single same-shaped per-tensor Q folds into the result type. Float inputs and a result without a Q stay float, so ops may mix quantized and float types. A DQ input that is not per-tensor leaves the op to the Q-specific fusions. Kernels are not checked here. |
+| Quant-type-agnostic fusions | `hip-fusion-transform`, PDLL in `fusion_pattern/` (`MatmulBiasFusion.pdll`) and native `gemm_to_matmul.cpp` | Read element types only, so float and quant-typed chains share them. See below. |
+| Legalize | `hip-legalize-quant-types`, before bufferization | Memrefs cannot hold quant types: the element types of every quant-capable op (float or quantized) move into its `quant_types` attribute, quantized tensors become storage integers, casts disappear. |
+| Lower | `convert-hip-to-llvm` | quantized `quant_types` → `wrap_qelementwise` (scales/zero points from the types); otherwise `wrap_elementwise`. |
+
+## Matmul and gemm
+
+Same fold, same attribute: `hip.matmul` and `hip.gemm` are quantized by their
+element types, and `quant_types` holds [A, B, (C), output] after legalization.
+`hip.gemm` keeps `alpha`, `beta`, `transA` and `transB` as attributes. Lowering
+calls the existing `wrap_qmatmul` / `wrap_qgemm` with the same arguments the
+attribute forms (`hip.qmatmul`, `hip.qgemm`) produce, so the kernels are
+unchanged.
+
+What stays on `hip.qmatmul` / `hip.qgemm` (QMatMulFusion.pdll,
+QGemmFusion.pdll), because it is not expressible as a per-tensor type:
+
+- per-column weights: their scales and zero points are file-backed constants,
+  not type parameters;
+- packed 4-bit weights: two values per byte, not one per element.
+
+Matmul + bias Add is not fused into a gemm yet.
+
+## Quant-capable ops
+
+Ops are quant-capable through `HipQuantCapableOpInterface`
+(`include/hip/Dialect/IR/HipQuantCapableOpInterface.td`). The interface is
+front end only: it says which tensors carry quantization and answers queries,
+never whether a kernel exists.
+
+- `hip.add`, `hip.matmul` and `hip.gemm` declare it in ODS.
+- Every other hip DPS op gets it when the dialect loads
+  (`attachQuantCapableInterface` in `HipQuantTypes.cpp`), except the
+  deny-list `kNotQuantCapable` there: Q/DQ and already-quantized ops,
+  `hip.mul` / `hip.sigmoid` (still on their Q kernels), layout ops (run on
+  storage ints by `QdqRoundTrip`), `hip.cast` and graph containers. Excluding
+  an op is an entry in that list.
+- `getQuantOperands()` lists the tensors that carry the quantization, in
+  `quant_types` order (data inputs, optional ones only when present, then the
+  output): the DPS inputs and inits. Integer operands (indices) are listed
+  but never quantized.
+- The interface verifier allows mixed quantized and float operands and,
+  after legalization, checks that `quant_types` matches the storage types. It
+  runs only on the ops that declare the interface;
+  `hip-legalize-quant-types` runs the same check on the others.
+
+### Asking an op about its quantization
+
+Every implementing op can be asked, quantized or not. The queries are
+default-implemented in the interface, so an op gets them for free:
+
+| Method | Float add | Quantized add |
+|---|---|---|
+| `isQuantized()` | `false` | `true` |
+| `getOperandQuantTypes()` | `[f32, f32, f32]` | `[!quant.uniform<…>, …]` |
+| `getInputQuantType(i)` / `getResultQuantType()` | `f32` | `!quant.uniform<…>` |
+| `getUniformQuantType(i)` (scale, zero point) | null | the per-tensor type |
+
+The answer does not depend on the stage: it is read from the tensor element
+types before `hip-legalize-quant-types` and from `quant_types` after.
+
+Call the methods on `cast<HipQuantCapableOpInterface>(op)`, or directly on an
+op that declares the interface (`AddOp`, `MatmulOp`, `GemmOp`). For any
+`Operation *`, use `hip::isQuantizedOp(op)` / `hip::getOperandQuantTypes(op)`
+(`HipQuantTypes.h`), which also answer for ops without the interface.
+
+## Kernel capability
+
+Kernel support is backend knowledge, kept out of the ops: a table in
+`lib/Conversion/HipToLLVM/QuantKernels.cpp`, queried through
+`hip::hasQuantKernel(op, inputTypes, resultType)`
+(`include/hip/Conversion/HipToLLVM/QuantKernels.h`). Only
+`hip-legalize-quant-types` asks it; the folds and fusions do not (see "Known
+gaps"). Adding a quantized kernel means adding a table entry.
+
+| Op | Kernel | Types |
+|---|---|---|
+| `hip.add` | `wrap_qelementwise` | per-tensor, one storage type for lhs, rhs and output (i8/ui8/i16/ui16/i32) |
+| `hip.matmul` | `wrap_qmatmul`, `wrap_qgemm` (bias) | per-tensor; A and result 8/16-bit, B 8-bit (only A is split into byte planes), optional bias 8/16/32-bit |
+| `hip.gemm` | `wrap_qgemm` | as matmul, with C as the bias; `alpha`, `beta`, `transA`, `transB` stay attributes |
+
+Lowering reads the scales and zero points from `quant_types` and calls the
+same kernels as the Q-specific ops, so the kernel contract is unchanged.
+
+## Gemm (`gemm_to_matmul.cpp`)
+
+A `hip.gemm` that is a plain matmul plus a row bias (alpha = 1; no C, or
+beta = 1 with a `[N]` / `[1, N]` C) becomes `hip.matmul` (with its bias), so
+fusions and quant types are written against one op. Other gemms stay
+`hip.gemm` and keep their own Q/DQ folds. A weight with per-channel or packed
+4-bit Q/DQ also keeps `hip.gemm`, since only `QGemmFusion.pdll` handles those.
+The rewrite is type-agnostic, so its order against the Q/DQ folds does not
+matter (the generic fold covers the converted form).
+
+## Matmul + bias (`MatmulBiasFusion.pdll`)
+
+`hip.matmul` followed by a row-bias `hip.add` becomes one `hip.matmul` with an
+optional `bias` operand (rank-1 `[N]`; either add operand order; a `[1, N]`
+bias is collapsed to `[N]`):
+
+```mlir
+%y = hip.matmul(%ctx) ins(%a, %w, %bias : tensor<1x196x512xT>, tensor<512x1536xT>, tensor<1536xT>)
+                      outs(%init : tensor<1x196x1536xT>) : tensor<1x196x1536xT>
+```
+
+The op keeps A's shape; its leading dims fold into the rows at lowering (a
+view, as for a batched matmul), so there is no reshape in the IR. That needs a
+rank-2 weight and `transA = 0` for rank > 2 A, which the op verifier enforces.
+Dynamic extents are fine.
+
+The pattern checks structure only, not kernels: float and quant-typed chains
+fuse alike. A float chain must use one element type throughout. Lowering: a
+quantized matmul with a bias calls `wrap_qgemm`, a float one `wrap_gemm`
+(hipBLASLt bias epilogue, with a `GemmState` op state).
+
+- **Intermediate quantization is dropped.** A QDQ model has a Q/DQ between the
+  matmul and the bias add; the fused kernel accumulates, adds the bias and
+  quantizes once. The result is not bit-identical to the unfused chain.
+- The Q/DQ must first fold into types, and the matmul and add must agree on the
+  intermediate quant type, i.e. no requantization between them.
+- Not covered: `transA` with rank > 2, and an add whose Q/DQ do not fold (e.g.
+  an int32 bias against a 16-bit matmul result).
+
+## Known gaps
+
+**The Q/DQ folds do not check kernels (temporary).** A fold fires whenever
+every Q/DQ has a per-tensor quant type, so that later fusions are not blocked
+by a kernel that only the unfused op would need. Example: an int32-bias
+MatMul + Add, whose add (u16 + i32 -> u16) has no elementwise kernel but is
+fused into `hip.matmul(a, w, bias)`, which has one.
+
+The kernel question is asked once, in `hip-legalize-quant-types`, and a typed op
+without a kernel is a compile error there (no fallback to DQ -> op -> Q). Known
+cases that hit it today:
+
+- An A16W16 matmul (`u16 x u16 -> u16`), e.g. attention between two 16-bit
+  activations: the quantized matmul kernel takes 8-bit B only, so it does not
+  compile until an A16W16 quantized matmul kernel exists.
+- A mixed-width add that is not fused away (e.g. u16 + i8 -> u16).
+- A matmul with a 16-bit weight.
+
+Revisit once the missing kernels exist or the fallback policy is decided.

@@ -5,6 +5,7 @@
 
 add_library(HipToLLVM STATIC
   HipToLLVM.cpp
+  QuantKernels.cpp
   HostScalarAnalysis.cpp
   RuntimeAccessInterface.cpp
   MemoryLowering.cpp

@@ -18,6 +18,8 @@ def Hip_Dialect : Dialect {
   }];
   let cppNamespace = "::mlir::hip";
   let useDefaultTypePrinterParser = 1;
+  // Element types of quantized tensors are upstream `!quant.uniform`.
+  let dependentDialects = ["::mlir::quant::QuantDialect"];
 
   // Most op formats print inherent attributes through attr-dict. LLVM marks
   // this opt-out deprecated, so those formats need explicit bindings or

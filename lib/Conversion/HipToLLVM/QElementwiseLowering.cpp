@@ -5,12 +5,14 @@
 
 #include "HipToLLVMUtils.h"
 
+#include "hip/Dialect/IR/HipQuantTypes.h"
+
 namespace mlir {
 namespace hip {
 namespace {
 
 // Shared lowering for quantized elementwise ops:
-//   hip.qadd, hip.qmul / (future) qsub, qdiv
+//   hip.qadd, hip.qmul, hip.add with `quant_types` / (future) qsub, qdiv
 //     -> wrap_qelementwise(..., kind, ..., M_a, lhs_zp, M_b, rhs_zp, output_zp)
 //
 // The coefficient slots carry a kind-dependent folding of the scales:
@@ -20,6 +22,34 @@ namespace {
 //   mul: M_a = s_a * s_b / s_out, M_b unused
 //        OUT = round(M_a * (A - z_a) * (B - z_b)) + z_out
 
+struct QParams {
+  float lhsScale, rhsScale, outputScale;
+  int64_t lhsZp, rhsZp, outputZp;
+};
+
+// Scales and zero points from hip.qadd / hip.qmul attributes.
+template <typename OpTy> std::optional<QParams> getQParams(OpTy op) {
+  return QParams{op.getLhsScale().convertToFloat(),
+                 op.getRhsScale().convertToFloat(),
+                 op.getOutputScale().convertToFloat(),
+                 static_cast<int64_t>(op.getLhsZp()),
+                 static_cast<int64_t>(op.getRhsZp()),
+                 static_cast<int64_t>(op.getOutputZp())};
+}
+
+// Scales and zero points from a quantized op's `quant_types`.
+template <> std::optional<QParams> getQParams(AddOp op) {
+  auto types = getQuantElementTypes(op);
+  if (types.size() != 3)
+    return std::nullopt;
+  return QParams{static_cast<float>(types[0].getScale()),
+                 static_cast<float>(types[1].getScale()),
+                 static_cast<float>(types[2].getScale()),
+                 types[0].getZeroPoint(),
+                 types[1].getZeroPoint(),
+                 types[2].getZeroPoint()};
+}
+
 template <typename OpTy, HipdnnQElementwiseKind Kind>
 struct QElementwiseLowering : public ConvertOpToLLVMPattern<OpTy> {
   using ConvertOpToLLVMPattern<OpTy>::ConvertOpToLLVMPattern;
@@ -27,6 +57,10 @@ struct QElementwiseLowering : public ConvertOpToLLVMPattern<OpTy> {
   LogicalResult
   matchAndRewrite(OpTy op, typename OpTy::Adaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    std::optional<QParams> params = getQParams(op);
+    if (!params)
+      return rewriter.notifyMatchFailure(op, "not quantized");
+
     Location loc = op.getLoc();
     ModuleOp module = op->template getParentOfType<ModuleOp>();
     Type ptrType = this->getPtrType();
@@ -89,11 +123,11 @@ struct QElementwiseLowering : public ConvertOpToLLVMPattern<OpTy> {
     if (failed(funcOp))
       return failure();
 
-    float outputScale = op.getOutputScale().convertToFloat();
+    float outputScale = params->outputScale;
     if (outputScale == 0.0f)
       return rewriter.notifyMatchFailure(op, "output_scale must be non-zero");
-    float lhsScale = op.getLhsScale().convertToFloat();
-    float rhsScale = op.getRhsScale().convertToFloat();
+    float lhsScale = params->lhsScale;
+    float rhsScale = params->rhsScale;
     float mA, mB;
     if constexpr (Kind == HipdnnQElementwiseKind::kQElementwiseMul) {
       mA = lhsScale * rhsScale / outputScale;
@@ -117,10 +151,10 @@ struct QElementwiseLowering : public ConvertOpToLLVMPattern<OpTy> {
         createI64Const(outputType.getRank()),
         createI64Const(dataType),
         createF32Const(mA),
-        createI64Const(op.getLhsZp()),
+        createI64Const(params->lhsZp),
         createF32Const(mB),
-        createI64Const(op.getRhsZp()),
-        createI64Const(op.getOutputZp())};
+        createI64Const(params->rhsZp),
+        createI64Const(params->outputZp)};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
@@ -130,6 +164,13 @@ struct QElementwiseLowering : public ConvertOpToLLVMPattern<OpTy> {
 
 struct QAddOpLowering
     : public QElementwiseLowering<QAddOp,
+                                  HipdnnQElementwiseKind::kQElementwiseAdd> {
+  using QElementwiseLowering::QElementwiseLowering;
+};
+
+// hip.add whose `quant_types` mark it quantized.
+struct QuantizedAddOpLowering
+    : public QElementwiseLowering<AddOp,
                                   HipdnnQElementwiseKind::kQElementwiseAdd> {
   using QElementwiseLowering::QElementwiseLowering;
 };
@@ -144,7 +185,8 @@ struct QMulOpLowering
 
 void populateQElementwiseLoweringPatterns(const LLVMTypeConverter &converter,
                                           RewritePatternSet &patterns) {
-  patterns.add<QAddOpLowering, QMulOpLowering>(converter);
+  patterns.add<QAddOpLowering, QMulOpLowering, QuantizedAddOpLowering>(
+      converter);
 }
 
 } // namespace hip
