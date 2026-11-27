@@ -241,11 +241,12 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
       align_up_64(num_tokens * k * inter_size * sizeof(int8_t));
   size_t sz_a_scale_mid =
       align_up_64(num_tokens * k * k_blocks_fc2 * sizeof(float));
-  // W2A8 decode: int8 sums per 64-element chunk of the same activations.
+  // W2A8 decode: int8 sums per 64-element chunk of the same activations, or
+  // per 32 elements with 32-element groups; sized for the finer one.
   size_t sz_a_sum_in =
-      align_up_64(num_tokens * (hidden_size / 64) * sizeof(int32_t));
+      align_up_64(num_tokens * (hidden_size / 32) * sizeof(int32_t));
   size_t sz_a_sum_mid =
-      align_up_64(num_tokens * k * (inter_size / 64) * sizeof(int32_t));
+      align_up_64(num_tokens * k * (inter_size / 32) * sizeof(int32_t));
   // Grouped prefill only: the row-tile lists (3 int32 per tile) and their
   // device-side lengths.
   size_t tile_list_off[HIP_QMOE_MAX_ROW_TILE_CLASSES] = {};
@@ -361,8 +362,10 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     const bool dp4a_u2 =
         expert_weight_bits == 2 && hipdnn_ep_matmul_dp4a_enabled() &&
         hipdnn_ep_qmoe_dp4a_u2_enabled() && elem_size == 2 &&
-        block_size >= 64 && block_size <= 512 &&
-        hidden_size % block_size == 0 && inter_size % block_size == 0;
+        block_size >= 32 && block_size <= 512 &&
+        (block_size & (block_size - 1)) == 0 && hidden_size % block_size == 0 &&
+        inter_size % block_size == 0 && hidden_size % 64 == 0 &&
+        inter_size % 64 == 0;
     if (dp4a_u2) {
       OP_ROCTX_MARK("hip_ep.op.qmoe.decode.dp4a_u2");
       HIP_CHECK(hip_qmoe_decode_fused_dp4a_u2(

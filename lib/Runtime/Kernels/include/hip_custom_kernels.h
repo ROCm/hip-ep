@@ -3517,9 +3517,10 @@ HIP_KERNEL_API int hip_qmoe_decode_fused_dp4a(
 
 // W2A8 dp4a decode for 2-bit experts (fp16, packed 2-bit zero points or
 // none). Same buffers as hip_qmoe_decode_fused_dp4a plus a_sum_in
-// ([num_tokens, hidden/64] int32) and a_sum_mid ([num_tokens*k, inter/64]
-// int32). Returns -1 without launching unless block_size is a power of two in
-// [64, 512] dividing hidden and inter.
+// ([num_tokens, hidden/S] int32) and a_sum_mid ([num_tokens*k, inter/S]
+// int32), S = 32 when block_size is 32 and 64 otherwise. Returns -1 without
+// launching unless block_size is a power of two in [32, 512] dividing hidden
+// and inter, and hidden and inter are multiples of 64.
 HIP_KERNEL_API int hip_qmoe_decode_fused_dp4a_u2(
     void* stream, const void* input, const void* expert_indices,
     const void* expert_weights, const void* fc1_weights, const void* fc1_scales,

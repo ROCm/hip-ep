@@ -2896,28 +2896,31 @@ extern "C" int hip_qmoe_decode_fused_dp4a(
 // A weight row is shared by LPR lanes, each taking every LPR-th 64-element
 // chunk (16 packed bytes), and a 32-lane group holds 32/LPR rows. fc2 rows are
 // only inter/4 bytes (320 at Step's 1280), which one-row-per-block layouts
-// leave mostly idle.
+// leave mostly idle. 32-element groups split each chunk into two halves with
+// their own scales and zero points (SUB = 32).
 // ===========================================================================
 
 // int8 activations in the 2-bit weight order: inside every 16 elements,
 // element e sits at (e & 3) * 4 + (e >> 2), so the four bytes that
 // (w >> 2s) & 0x03030303 extracts from one packed word line up with one int.
-// a_sum[c] is the sum of the quantized values of 64-element chunk c (the zero
-// point correction is per chunk, not per group, because a lane's dot covers
-// one chunk). grid = (n_blk groups, rows); block_size % 64 == 0, <= 512.
+// a_sum[c] is the sum of the quantized values of the c-th (1 << sum_shift)
+// elements, 64 or 32 (the zero point correction is per chunk or half chunk,
+// not per group, because a lane's dot covers one chunk). grid = (n_blk groups,
+// rows); block_size a power of two in [32, 512], sum_shift <= log2(block_size).
 template <int BS, typename TIn>
 __global__ void __launch_bounds__(BS) qmoe_quant_act_u2_kernel(
     const TIn* __restrict__ A, int8_t* __restrict__ a_qb,
     float* __restrict__ a_scale, int32_t* __restrict__ a_sum, int row_len,
-    int block_size, int n_blk) {
+    int block_size, int n_blk, int sum_shift) {
   const int grp = blockIdx.x;
   const int row = blockIdx.y;
   const int tid = threadIdx.x;
   const int g0 = grp * block_size;
+  const int n_sum = block_size >> sum_shift;
   const TIn* a = A + static_cast<size_t>(row) * row_len;
   __shared__ float red[BS / 32];
   __shared__ int csum[8];
-  if (tid < block_size / 64) csum[tid] = 0;
+  if (tid < n_sum) csum[tid] = 0;
 
   float m = 0.0f;
   for (int k = g0 + tid; k < g0 + block_size; k += BS)
@@ -2938,11 +2941,11 @@ __global__ void __launch_bounds__(BS) qmoe_quant_act_u2_kernel(
     const int v =
         max(-127, min(127, __float2int_rn(static_cast<float>(a[k]) * inv)));
     q[(k & ~15) | ((k & 3) << 2) | ((k >> 2) & 3)] = static_cast<int8_t>(v);
-    atomicAdd(&csum[(k - g0) >> 6], v);
+    atomicAdd(&csum[(k - g0) >> sum_shift], v);
   }
   __syncthreads();
-  if (tid < block_size / 64)
-    a_sum[static_cast<size_t>(row) * (row_len / 64) + grp * (block_size / 64) +
+  if (tid < n_sum)
+    a_sum[static_cast<size_t>(row) * (row_len >> sum_shift) + grp * n_sum +
           tid] = csum[tid];
 }
 
@@ -2954,26 +2957,45 @@ __device__ __forceinline__ int qmoe_dot16_u2(int4 a, unsigned w, int d) {
   return d;
 }
 
+__device__ __forceinline__ int qmoe_zp_u2(const uint8_t* __restrict__ zrow,
+                                          int g) {
+  return zrow ? (zrow[g >> 2] >> ((g & 3) * 2)) & 3 : 2;
+}
+
 // Dot of one packed 2-bit row with the quantized activation, summed over the
-// row's LPR lanes (every lane of the row ends with the total).
-template <int LPR>
+// row's LPR lanes (every lane of the row ends with the total). SUB is the
+// a_sum granularity: 64 when a chunk sits inside one group, 32 when the
+// groups are 32 elements and a chunk straddles two.
+template <int LPR, int SUB>
 __device__ __forceinline__ float qmoe_row_dot_u2(
     const uint8_t* __restrict__ wrow, const __half* __restrict__ srow,
     const uint8_t* __restrict__ zrow, const int8_t* __restrict__ aq,
     const float* __restrict__ as, const int32_t* __restrict__ asum, int nch,
     int bs_shift, int sub) {
+  static_assert(SUB == 64 || SUB == 32, "a_sum covers a chunk or half of one");
   float acc = 0.0f;
 #pragma unroll 4
   for (int c = sub; c < nch; c += LPR) {
     const uint4 w = reinterpret_cast<const uint4*>(wrow)[c];
     const int4* ap = reinterpret_cast<const int4*>(aq + c * 64);
-    int dot = qmoe_dot16_u2(ap[0], w.x, 0);
-    dot = qmoe_dot16_u2(ap[1], w.y, dot);
-    dot = qmoe_dot16_u2(ap[2], w.z, dot);
-    dot = qmoe_dot16_u2(ap[3], w.w, dot);
-    const int g = (c * 64) >> bs_shift;
-    const int zv = zrow ? (zrow[g >> 2] >> ((g & 3) * 2)) & 3 : 2;
-    acc += as[g] * __half2float(srow[g]) * static_cast<float>(dot - asum[c] * zv);
+    if constexpr (SUB == 64) {
+      int dot = qmoe_dot16_u2(ap[0], w.x, 0);
+      dot = qmoe_dot16_u2(ap[1], w.y, dot);
+      dot = qmoe_dot16_u2(ap[2], w.z, dot);
+      dot = qmoe_dot16_u2(ap[3], w.w, dot);
+      const int g = (c * 64) >> bs_shift;
+      acc += as[g] * __half2float(srow[g]) *
+             static_cast<float>(dot - asum[c] * qmoe_zp_u2(zrow, g));
+    } else {
+      const int lo = qmoe_dot16_u2(ap[1], w.y, qmoe_dot16_u2(ap[0], w.x, 0));
+      const int hi = qmoe_dot16_u2(ap[3], w.w, qmoe_dot16_u2(ap[2], w.z, 0));
+      const int g0 = (c * 64) >> bs_shift;
+      const int g1 = (c * 64 + 32) >> bs_shift;
+      acc += as[g0] * __half2float(srow[g0]) *
+             static_cast<float>(lo - asum[2 * c] * qmoe_zp_u2(zrow, g0));
+      acc += as[g1] * __half2float(srow[g1]) *
+             static_cast<float>(hi - asum[2 * c + 1] * qmoe_zp_u2(zrow, g1));
+    }
   }
 #pragma unroll
   for (int off = LPR / 2; off > 0; off >>= 1) acc += __shfl_xor(acc, off);
@@ -2982,7 +3004,7 @@ __device__ __forceinline__ float qmoe_row_dot_u2(
 
 // FC1 + SwiGLU. Gate/linear rows 2i/2i+1 land in one 32-lane group (LPR <=
 // 16), so the pair meets through one shuffle. slot = token * k_per_tok + j.
-template <int LPR, int WAVES>
+template <int LPR, int WAVES, int SUB>
 __global__ void __launch_bounds__(WAVES * 32) qmoe_decode_fc1_dp4a_u2_kernel(
     const int8_t* __restrict__ a_qb, const float* __restrict__ a_scale,
     const int32_t* __restrict__ a_sum, const int32_t* __restrict__ expert_indices,
@@ -3000,12 +3022,12 @@ __global__ void __launch_bounds__(WAVES * 32) qmoe_decode_fc1_dp4a_u2_kernel(
   const int sub = lane & (LPR - 1);
   const int row = (blockIdx.x * WAVES + (threadIdx.x >> 5)) * RPG + lane / LPR;
   const size_t er = static_cast<size_t>(E) * fusion_inter + min(row, fusion_inter - 1);
-  const float v = qmoe_row_dot_u2<LPR>(
+  const float v = qmoe_row_dot_u2<LPR, SUB>(
       fc1_w + er * (hidden / 4), fc1_s + er * n_blk_in,
       fc1_zp ? fc1_zp + er * ((n_blk_in + 3) / 4) : nullptr,
       a_qb + static_cast<size_t>(tok) * hidden,
       a_scale + static_cast<size_t>(tok) * n_blk_in,
-      a_sum + static_cast<size_t>(tok) * (hidden / 64), hidden / 64, bs_shift,
+      a_sum + static_cast<size_t>(tok) * (hidden / SUB), hidden / 64, bs_shift,
       sub);
   const float lin = __shfl_down(v, LPR);
   if (sub == 0 && (row & 1) == 0 && row + 1 < fusion_inter) {
@@ -3022,7 +3044,7 @@ __global__ void __launch_bounds__(WAVES * 32) qmoe_decode_fc1_dp4a_u2_kernel(
 }
 
 // FC2 + routing-weighted write to slot_buf (the reduce kernel then sums).
-template <int LPR, int WAVES>
+template <int LPR, int WAVES, int SUB>
 __global__ void __launch_bounds__(WAVES * 32) qmoe_decode_fc2_dp4a_u2_kernel(
     const int8_t* __restrict__ a_qb, const float* __restrict__ a_scale,
     const int32_t* __restrict__ a_sum, const int32_t* __restrict__ expert_indices,
@@ -3037,12 +3059,12 @@ __global__ void __launch_bounds__(WAVES * 32) qmoe_decode_fc2_dp4a_u2_kernel(
   const int sub = lane & (LPR - 1);
   const int row = (blockIdx.x * WAVES + (threadIdx.x >> 5)) * RPG + lane / LPR;
   const size_t er = static_cast<size_t>(E) * hidden + min(row, hidden - 1);
-  float v = qmoe_row_dot_u2<LPR>(
+  float v = qmoe_row_dot_u2<LPR, SUB>(
       fc2_w + er * (inter / 4), fc2_s + er * n_blk_mid,
       fc2_zp ? fc2_zp + er * ((n_blk_mid + 3) / 4) : nullptr,
       a_qb + static_cast<size_t>(slot) * inter,
       a_scale + static_cast<size_t>(slot) * n_blk_mid,
-      a_sum + static_cast<size_t>(slot) * (inter / 64), inter / 64, bs_shift,
+      a_sum + static_cast<size_t>(slot) * (inter / SUB), inter / 64, bs_shift,
       sub);
   if (sub == 0 && row < hidden) {
     if (fc2_b) v += __half2float(fc2_b[er]);
@@ -3051,42 +3073,34 @@ __global__ void __launch_bounds__(WAVES * 32) qmoe_decode_fc2_dp4a_u2_kernel(
   }
 }
 
-extern "C" int hip_qmoe_decode_fused_dp4a_u2(
-    void* stream, const void* input, const void* expert_indices,
+template <int SUB>
+static void qmoe_decode_dp4a_u2_launch(
+    hipStream_t s, const void* input, const void* expert_indices,
     const void* expert_weights, const void* fc1_weights, const void* fc1_scales,
     const void* fc1_zero_points, const void* fc1_bias, const void* fc2_weights,
     const void* fc2_scales, const void* fc2_zero_points, const void* fc2_bias,
     void* slot_buf, void* act_out, void* output, void* a_qb_in,
     void* a_scale_in, void* a_sum_in, void* a_qb_mid, void* a_scale_mid,
-    void* a_sum_mid, int64_t hidden_size, int64_t inter_size, int64_t k,
-    int64_t block_size, float swiglu_alpha, float swiglu_beta,
-    float swiglu_limit, int64_t num_tokens) {
-  if (num_tokens < 1 || k < 1 || block_size < 64 || block_size > 512 ||
-      (block_size & (block_size - 1)) != 0 || hidden_size % block_size != 0 ||
-      inter_size % block_size != 0)
-    return -1;
+    void* a_sum_mid, int hidden, int inter, int k, int bs, float swiglu_alpha,
+    float swiglu_beta, float swiglu_limit, int T) {
   constexpr int kFc1Lpr = 16, kFc2Lpr = 4, kWaves = 4;
-  hipStream_t s = static_cast<hipStream_t>(stream);
-  const int hidden = static_cast<int>(hidden_size);
-  const int inter = static_cast<int>(inter_size);
+  constexpr int kSumShift = SUB == 32 ? 5 : 6;
   const int fusion_inter = 2 * inter;
-  const int bs = static_cast<int>(block_size);
   const int bs_shift = __builtin_ctz(static_cast<unsigned>(bs));
   const int n_blk_in = hidden / bs;
   const int n_blk_mid = inter / bs;
-  const int T = static_cast<int>(num_tokens);
-  const int slots = T * static_cast<int>(k);
-  (void)hipGetLastError();
+  const int slots = T * k;
 
   hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_quant_act_u2_kernel<64, __half>),
                      dim3(n_blk_in, T), dim3(64), 0, s,
                      static_cast<const __half*>(input),
                      static_cast<int8_t*>(a_qb_in), static_cast<float*>(a_scale_in),
-                     static_cast<int32_t*>(a_sum_in), hidden, bs, n_blk_in);
+                     static_cast<int32_t*>(a_sum_in), hidden, bs, n_blk_in,
+                     kSumShift);
   {
     constexpr int rows = 32 / kFc1Lpr * kWaves;
     hipLaunchKernelGGL(
-        HIP_KERNEL_NAME(qmoe_decode_fc1_dp4a_u2_kernel<kFc1Lpr, kWaves>),
+        HIP_KERNEL_NAME(qmoe_decode_fc1_dp4a_u2_kernel<kFc1Lpr, kWaves, SUB>),
         dim3((fusion_inter + rows - 1) / rows, slots), dim3(kWaves * 32), 0, s,
         static_cast<const int8_t*>(a_qb_in),
         static_cast<const float*>(a_scale_in),
@@ -3097,18 +3111,19 @@ extern "C" int hip_qmoe_decode_fused_dp4a_u2(
         static_cast<const uint8_t*>(fc1_zero_points),
         static_cast<const __half*>(fc1_bias), static_cast<float*>(act_out),
         hidden, fusion_inter, n_blk_in, bs_shift, swiglu_alpha, swiglu_beta,
-        swiglu_limit, static_cast<int>(k));
+        swiglu_limit, k);
   }
   hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_quant_act_u2_kernel<64, float>),
                      dim3(n_blk_mid, slots), dim3(64), 0, s,
                      static_cast<const float*>(act_out),
                      static_cast<int8_t*>(a_qb_mid),
                      static_cast<float*>(a_scale_mid),
-                     static_cast<int32_t*>(a_sum_mid), inter, bs, n_blk_mid);
+                     static_cast<int32_t*>(a_sum_mid), inter, bs, n_blk_mid,
+                     kSumShift);
   {
     constexpr int rows = 32 / kFc2Lpr * kWaves;
     hipLaunchKernelGGL(
-        HIP_KERNEL_NAME(qmoe_decode_fc2_dp4a_u2_kernel<kFc2Lpr, kWaves>),
+        HIP_KERNEL_NAME(qmoe_decode_fc2_dp4a_u2_kernel<kFc2Lpr, kWaves, SUB>),
         dim3((hidden + rows - 1) / rows, slots), dim3(kWaves * 32), 0, s,
         static_cast<const int8_t*>(a_qb_mid),
         static_cast<const float*>(a_scale_mid),
@@ -3124,7 +3139,37 @@ extern "C" int hip_qmoe_decode_fused_dp4a_u2(
   hipLaunchKernelGGL(qmoe_decode_reduce_kernel,
                      dim3((hidden + kBlock - 1) / kBlock, T), dim3(kBlock), 0, s,
                      static_cast<const float*>(slot_buf),
-                     static_cast<__half*>(output), hidden, static_cast<int>(k));
+                     static_cast<__half*>(output), hidden, k);
+}
+
+extern "C" int hip_qmoe_decode_fused_dp4a_u2(
+    void* stream, const void* input, const void* expert_indices,
+    const void* expert_weights, const void* fc1_weights, const void* fc1_scales,
+    const void* fc1_zero_points, const void* fc1_bias, const void* fc2_weights,
+    const void* fc2_scales, const void* fc2_zero_points, const void* fc2_bias,
+    void* slot_buf, void* act_out, void* output, void* a_qb_in,
+    void* a_scale_in, void* a_sum_in, void* a_qb_mid, void* a_scale_mid,
+    void* a_sum_mid, int64_t hidden_size, int64_t inter_size, int64_t k,
+    int64_t block_size, float swiglu_alpha, float swiglu_beta,
+    float swiglu_limit, int64_t num_tokens) {
+  // The row dot walks 64-element chunks, so the rows must be whole chunks
+  // even when the groups are 32 elements.
+  if (num_tokens < 1 || k < 1 || block_size < 32 || block_size > 512 ||
+      (block_size & (block_size - 1)) != 0 || hidden_size % block_size != 0 ||
+      inter_size % block_size != 0 || hidden_size % 64 != 0 ||
+      inter_size % 64 != 0)
+    return -1;
+  hipStream_t s = static_cast<hipStream_t>(stream);
+  (void)hipGetLastError();
+  const auto launch = block_size == 32 ? qmoe_decode_dp4a_u2_launch<32>
+                                       : qmoe_decode_dp4a_u2_launch<64>;
+  launch(s, input, expert_indices, expert_weights, fc1_weights, fc1_scales,
+         fc1_zero_points, fc1_bias, fc2_weights, fc2_scales, fc2_zero_points,
+         fc2_bias, slot_buf, act_out, output, a_qb_in, a_scale_in, a_sum_in,
+         a_qb_mid, a_scale_mid, a_sum_mid, static_cast<int>(hidden_size),
+         static_cast<int>(inter_size), static_cast<int>(k),
+         static_cast<int>(block_size), swiglu_alpha, swiglu_beta, swiglu_limit,
+         static_cast<int>(num_tokens));
   hipError_t e = hipGetLastError();
   if (e != hipSuccess) {
     fprintf(stderr, "[custom_kernels] hip_qmoe_decode_fused_dp4a_u2 failed: %s\n",
