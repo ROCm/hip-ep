@@ -6,6 +6,8 @@ name: pre-commit
 
 on:
   pull_request:
+  # Re-check the queue's merged result, which can differ from the PR head.
+  merge_group:
   push:
     branches: [main, "release/**", "gpuep/releases/**"]
 
