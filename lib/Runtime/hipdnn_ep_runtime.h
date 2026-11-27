@@ -902,6 +902,23 @@ int wrap_rocmlir(RuntimeState *state, const char *kernel_binary,
                  char *func_name, int64_t block_size, int64_t grid_size,
                  void *kernargs, size_t size);
 
+// Winograd F(2x2, 3x3) conv dispatch (hip.winograd_conv). The compiler embeds
+// one code object per conv shape and epilogue; this entry builds the filter
+// store from `weights` once per op state, then launches the conv kernel and
+// its `<func_name>_fixup` (the edge outputs) with (input, store, bias if
+// non-null, output).
+//   kernel_binary : embedded code object (ELF)
+//   func_name     : NUL-terminated kernel symbol
+//   block_size    : threads per block
+//   grid_size     : blocks per grid
+//   K, C          : output and input channels
+//   full_transform: 1 if the kernel reads the raw filter g, 0 for T = G g
+int wrap_winograd_conv(RuntimeState *state, int32_t op_state_slot,
+                       const char *kernel_binary, char *func_name,
+                       int64_t block_size, int64_t grid_size, const void *input,
+                       const void *weights, const void *bias, void *output,
+                       int64_t K, int64_t C, int64_t full_transform);
+
 // Fills `count` elements of `element_bytes` (1, 2 or 4) at `buffer` with the
 // low bits of `pattern`, on the state's stream. The generated IR calls it
 // before wrap_rocmlir for each kernel argument that rocMLIR marks

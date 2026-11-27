@@ -113,6 +113,7 @@ set(_kernel_sources
     hip/gather_block_quantized_kernel.hip
     hip/qdq_kernel.hip
     hip/softmax_kernel.hip
+    hip/winograd_weight_kernel.hip
     hip/scaled_masked_softmax_kernel.hip
     hip/nonzero_kernel.hip
     hip/strided_copy_kernel.hip

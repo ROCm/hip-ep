@@ -12,7 +12,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 
 | Operation | Backend or lowering |
 |---|---|
-| Conv | Custom HIP kernel. Rank-3 (NCL) is rewritten to a unit-height 2D conv; rank-4 (NCHW) and rank-5 (NCDHW) lower directly. With `HIPDNN_EP_ROCMLIR=1`, a 2D conv of a per-tensor dequantized 8-bit input and dequantized i8 weights with a zero weight zero point runs as a rocMLIR i8 conv scaled by `x_scale * w_scale`, with the bias, activation, and quantize after it in the same kernel |
+| Conv | Custom HIP kernel. Rank-3 (NCL) is rewritten to a unit-height 2D conv; rank-4 (NCHW) and rank-5 (NCDHW) lower directly. With `HIPDNN_EP_ROCMLIR=1` and `HIPDNN_EP_WINOGRAD=1` on gfx1151 or gfx12, a gated fp16 3x3 stride-1 pad-1 conv runs as a fused Winograd F(2x2, 3x3) kernel built for its shape ([winograd-conv.md](design/winograd-conv.md)). With `HIPDNN_EP_ROCMLIR=1`, a 2D conv of a per-tensor dequantized 8-bit input and dequantized i8 weights with a zero weight zero point runs as a rocMLIR i8 conv scaled by `x_scale * w_scale`, with the bias, activation, and quantize after it in the same kernel |
 | NhwcConv (`com.microsoft`) | Rank-4 NHWC activations and `[M, kH, kW, C/group]` weights are transposed into `hip.conv` and the result is transposed back. Static weights are permuted while lowering |
 | ConvTranspose | Custom HIP kernel |
 | MatMul | hipBLASLt |

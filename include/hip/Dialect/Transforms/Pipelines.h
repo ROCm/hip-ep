@@ -166,10 +166,12 @@ void buildHipdnnPipeline(OpPassManager &pm,
 /// A non-empty reportPath
 /// appends the --hip-rocmlir-fusion-report records to that file. Every caller
 /// builds the fusion through this function so that the pass order and the
-/// options stay the same across tools.
+/// options stay the same across tools. With `winograd`, hip-winograd-conv runs
+/// first and takes the convs that it gates in before the anchor fusion.
 void addRocMlirFusionPasses(OpPassManager &pm,
                             const FuseRocMlirAnchorPassOptions &fuseOptions,
-                            llvm::StringRef reportPath = "");
+                            llvm::StringRef reportPath = "",
+                            bool winograd = false);
 
 struct RocMlirFusionPipelineOptions
     : PassPipelineOptions<RocMlirFusionPipelineOptions> {

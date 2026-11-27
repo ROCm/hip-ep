@@ -435,6 +435,28 @@ def DecomposeConvTransposePass
   ];
 }
 
+def WinogradConvPass : Pass<"hip-winograd-conv", "mlir::func::FuncOp"> {
+  let summary = "Run eligible fp16 3x3 convs as fused Winograd F(2x2, 3x3) kernels";
+  let description = [{
+    Rewrites a `hip.conv` into a `hip.winograd_conv` when it is fp16, NCHW,
+    rank 4 with static shapes, a 3x3 filter that is a model constant, stride
+    1, dilation 1, padding 1 on every side and group 1, and when the shape
+    gate says the Winograd kernel is faster. The gate is MIGraphX's NCHW fp16
+    heuristic without the band of large channel counts at small spatial
+    sizes, where the tuned rocMLIR conv wins. A conv that reads an upsample,
+    transpose, reshape or slice is left alone: a rocMLIR conv reads those as
+    views.
+
+    A `hip.leaky_relu`, or a `hip.max` with a zero constant (ReLU), that is the
+    only user of the conv result moves into the op as its `activation`.
+
+    The compiler builds the kernel later, so the op leaves this pass without
+    a binary. It runs first in the rocMLIR fusion passes when
+    `HIPDNN_EP_WINOGRAD=1`.
+  }];
+  let dependentDialects = ["mlir::hip::HipDialect"];
+}
+
 def FoldBatchNormPass
     : Pass<"hip-fold-batchnorm", "mlir::func::FuncOp"> {
   let summary = "Fold constant-parameter hip.batch_norm into hip.conv weights";

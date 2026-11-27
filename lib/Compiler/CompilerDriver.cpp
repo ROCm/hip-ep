@@ -17,6 +17,7 @@
 #ifdef ENABLE_ROCMLIRTRITON
 #include "hip/Compiler/RocMlirAutotune.h"
 #include "hip/Compiler/RocMlirKernelCompiler.h"
+#include "hip/Compiler/WinogradKernel.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Func/Transforms/Passes.h"
 #include <optional>
@@ -129,6 +130,14 @@ OnnxDialectKind onnxDialectKind() {
   return hipsrPipelineRequested() ? OnnxDialectKind::Modeled
                                   : OnnxDialectKind::Stub;
 }
+
+#ifdef ENABLE_ROCMLIRTRITON
+// The Winograd kernels exist for gfx1151 and the gfx12 family only.
+bool winogradRequested(llvm::StringRef arch) {
+  return hip_env_is_on("HIPDNN_EP_WINOGRAD") &&
+         mlir::hip::winogradKernelSupportsArch(arch);
+}
+#endif
 } // namespace
 
 std::string rocMlirArtifactTarget() {
@@ -163,6 +172,10 @@ std::string rocMlirArtifactTarget() {
                   mlir::hip::resolveRocMlirArch()))
         target += "-f32=" + std::to_string(f32MinBytes);
     }
+    // Winograd changes which convs run as rocMLIR kernels, so it is a
+    // different artifact.
+    if (!target.empty() && winogradRequested(mlir::hip::resolveRocMlirArch()))
+      target += "+winograd";
     return target;
   }
 #endif
@@ -509,10 +522,23 @@ bool CompilerDriver::runMLIRPasses(
       mlir::PassManager fusePm(module.getContext());
       // HIPDNN_EP_ROCMLIR_FUSION_REPORT=<file> appends one JSON line per
       // kernel, to compare the kernels of two fusion pipelines.
+      // HIPDNN_EP_WINOGRAD=1 runs the gated fp16 3x3 convs as Winograd
+      // F(2x2, 3x3) kernels built for this model; see
+      // docs/design/winograd-conv.md.
+      const bool winograd = winogradRequested(fuseOpts.arch);
       mlir::hip::addRocMlirFusionPasses(
-          fusePm, fuseOpts, hip_get_env("HIPDNN_EP_ROCMLIR_FUSION_REPORT"));
+          fusePm, fuseOpts, hip_get_env("HIPDNN_EP_ROCMLIR_FUSION_REPORT"),
+          winograd);
       if (mlir::failed(fusePm.run(module))) {
         error_message = "rocMLIR fusion passes failed";
+        return false;
+      }
+      if (winograd &&
+          mlir::failed(mlir::hip::compileWinogradKernels(
+              module, fuseOpts.arch,
+              hip_env_is_on("HIPDNN_EP_ROCMLIR_VERBOSE") ? &llvm::errs()
+                                                         : nullptr))) {
+        error_message = "Winograd kernel build failed";
         return false;
       }
     }

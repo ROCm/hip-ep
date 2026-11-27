@@ -112,6 +112,8 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     ConvOp::attachInterface<HipDstBufferizableModel<ConvOp>>(*ctx);
     ConvTransposeOp::attachInterface<HipDstBufferizableModel<ConvTransposeOp>>(
         *ctx);
+    WinogradConvOp::attachInterface<HipDstBufferizableModel<WinogradConvOp>>(
+        *ctx);
     MatmulOp::attachInterface<HipDstBufferizableModel<MatmulOp>>(*ctx);
     RocMlirOp::attachInterface<HipDstBufferizableModel<RocMlirOp>>(*ctx);
     RmsNormOp::attachInterface<HipDstBufferizableModel<RmsNormOp>>(*ctx);
