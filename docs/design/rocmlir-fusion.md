@@ -17,6 +17,7 @@ fusion for the EP, `hip-rocmlir-compiler`, `rocmlir-pipeline` and the
 `hip-rocmlir-fusion` pipeline of `hip-mlir-opt`:
 
 ```
+func.func(hip-decompose-bool-cast)
 func.func(hip-rocmlir-prepare-quant)
 func.func(hip-fuse-rocmlir-elementwise)
 func.func(hip-fuse-rocmlir-anchor)
@@ -26,6 +27,9 @@ hip-rocmlir-fusion-report        (only with a report file)
 
 The passes change only `main_graph`. `hip-decompose-conv-transpose` runs
 before the fusion, because rocMLIR has no transposed-convolution anchor.
+`hip-decompose-bool-cast` runs first in it, because the fused kernel lowers a
+cast to bool as a by-value TOSA cast (0.5 becomes 0) and the ONNX-to-HIP tail
+runs only after the fusion in the EP.
 
 The fusion has two steps. The first step groups the pointwise ops into
 `hip.rocmlir_elementwise` modules without any anchor. The second step plans
