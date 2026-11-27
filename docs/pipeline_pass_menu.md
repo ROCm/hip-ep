@@ -157,7 +157,7 @@ the selected perfConfig string are printed only with `--verbose`.
 | `outline-onnx-to-hipdnn` | module | Outline subgraphs targeted at hipDNN graph compilation. |
 | `convert-onnx-to-hip` | module | Pattern-match ONNX ops by name → HIP dialect; lower both constant sweeps to policy-neutral `hip.constant`; legalize GatherBlockQuantized (INT4 packing, unsigned, quantize_axis). Pre-lowering folds run first on ONNX IR, among them the `onnx.Attention` mask fold (sliding window and key-padding bias, `AttentionWindowFold.cpp`) and the sigmoid + correction-bias QMoE routing fold (`QMoEConversion.cpp`). |
 | `hip-fold-batchnorm` | func.func | Fold an inference `hip.batch_norm` with constant parameters into the filter and bias of the `hip.conv` producing it, directly or through a `hip.add` of two convs (the shift goes into one bias). Every intermediate result must have the batch norm as its only consumer. Reads inline and file-backed constants only; a batch norm over memory-address-backed weights is left in place. |
-| `hip-decompose-bool-cast` | func.func | Rewrite a tensor-form `hip.cast` to bool (an i1 result, or `to = 9` on the ui8 storage the ONNX importer uses for BOOL) from a non-i1 type as `hip.not(hip.equal(x, 0))`: ONNX Cast and torch `to(bool)` mean x != 0, and the cast kernels convert by value. A bf16 source is widened to f32 first; a reshaping cast builds the mask in the input shape and keeps a 0/1 cast; f64 is left unchanged, and `convert-hip-to-llvm` rejects it when the result is i1. Emits a `hip.constant` zero, so it runs before `hip-externalize-constants`. |
+| `hip-decompose-bool-cast` | func.func | Rewrite a tensor-form `hip.cast` to bool (an i1 result, or `to = 9` on the ui8 storage the ONNX importer uses for BOOL) from a non-i1 type as `hip.not(hip.equal(x, 0))`: ONNX Cast and torch `to(bool)` mean x != 0, and the cast kernels convert by value. A bf16 source is widened to f32 first; a reshaping cast builds the mask in the input shape and keeps a 0/1 cast; a static cast of rank above 4 is flattened to rank 1 around the rewrite (`hip.equal` takes at most four dimensions) and a dynamic one is left alone; f64 is left unchanged, and `convert-hip-to-llvm` rejects a cast to bool from any non-i1 type it leaves. Also runs first in the rocMLIR fusion passes, so a fused float -> bool cast is not lowered as a by-value TOSA cast. Emits a `hip.constant` zero, so it runs before `hip-externalize-constants`. |
 | `hip-externalize-constants` | module | Validate explicit serialization order, append unordered carriers deterministically, plan/serialize, then replace `hip.constant` using the existing inline/full/streaming/hybrid metadata contract. Direct threshold default: 0. |
 | `hip-fold-constant-extracts` | func.func | Resolve constant-index `tensor.extract` of vectors assembled with `tensor.insert_slice` (ONNX shape vectors) to the `from_elements` operand or integer constant element they read. |
 | `hip-infer-shapes` | module | Refine `?` dims on HIP DPS result types via `ReifyRankedShapedTypeOpInterface`. |
@@ -210,6 +210,7 @@ on those modules. The registered pipeline runs
 
 ```
 func.func(hip-decompose-conv-transpose)
+func.func(hip-decompose-bool-cast)
 func.func(hip-hoist-pointwise-over-views)
 func.func(hip-rocmlir-prepare-quant)
 func.func(hip-fuse-rocmlir-elementwise)

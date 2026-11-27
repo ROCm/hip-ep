@@ -251,6 +251,13 @@ inline constexpr int64_t kGlobalPoolAverage = 0;
 inline constexpr int64_t kGlobalPoolMax = 1;
 inline constexpr int64_t kGlobalPoolLp = 2;
 
+// Bytes one element occupies in a runtime buffer. The runtime stores a
+// sub-byte element (i1 masks) as one whole byte, so the copy kernels that take
+// an element size move it like ui8.
+inline int64_t getElementSizeBytes(Type elemType) {
+  return (elemType.getIntOrFloatBitWidth() + 7) / 8;
+}
+
 // Maps MLIR element type to the runtime data type identifier shared through
 // hip/datatype_abi.h. Returns HIPDNN_EP_DATATYPE_UNSUPPORTED for types the
 // runtime cannot name.

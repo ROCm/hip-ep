@@ -21,6 +21,12 @@
 // 10. onnx_ui8    - ui8 -> ui8 with to = 9 is normalised too (5 -> 1)
 // 11. onnx_uint8  - i64 -> ui8 with to = 3 is a by-value cast, survives
 // 12. onnx_reshape - ui8 reshaping cast with to = 9 keeps a UINT8 (to = 2) cast
+// 13. memref_form  - memref-form cast is not matched
+// 14. f16, i16     - sources hip.equal supports directly
+// 15. i1_to_ui8    - i1 source with a ui8 result and to = 9 survives
+// 16. reshape_dyn  - reshaping cast with a dynamic dim
+// 17. rank5        - static rank 5 is flattened around the rewrite
+// 18. rank5_dyn    - dynamic rank 5 survives
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --pass-pipeline='builtin.module(func.func(hip-decompose-bool-cast))' | FileCheck %s
@@ -151,5 +157,83 @@ module {
     %e = tensor.empty() : tensor<ui8>
     %y = hip.cast(%ctx) ins(%x : tensor<1xi64>) outs(%e : tensor<ui8>) {to = 9 : i64} : tensor<ui8>
     return %y : tensor<ui8>
+  }
+
+  // CHECK-LABEL: func.func @memref_form
+  // CHECK: hip.cast
+  // CHECK-NOT: hip.equal
+  func.func @memref_form(%ctx: !hip.context, %x: memref<4xi64, 1>, %o: memref<4xi1, 1>) {
+    hip.cast(%ctx) ins(%x : memref<4xi64, 1>) outs(%o : memref<4xi1, 1>) {to = 9 : i64}
+    return
+  }
+
+  // CHECK-LABEL: func.func @f16
+  // CHECK: hip.constant {value = dense<0.000000e+00> : tensor<f16>} : tensor<f16>
+  // CHECK: hip.equal({{.*}}) ins(%{{.*}}, %{{.*}} : tensor<4xf16>, tensor<f16>)
+  // CHECK: hip.not
+  // CHECK-NOT: hip.cast
+  func.func @f16(%ctx: !hip.context, %x: tensor<4xf16>) -> tensor<4xi1> {
+    %e = tensor.empty() : tensor<4xi1>
+    %y = hip.cast(%ctx) ins(%x : tensor<4xf16>) outs(%e : tensor<4xi1>) {to = 9 : i64} : tensor<4xi1>
+    return %y : tensor<4xi1>
+  }
+
+  // CHECK-LABEL: func.func @i16
+  // CHECK: hip.constant {value = dense<0> : tensor<i16>} : tensor<i16>
+  // CHECK: hip.equal({{.*}}) ins(%{{.*}}, %{{.*}} : tensor<4xi16>, tensor<i16>)
+  // CHECK: hip.not
+  // CHECK-NOT: hip.cast
+  func.func @i16(%ctx: !hip.context, %x: tensor<4xi16>) -> tensor<4xi1> {
+    %e = tensor.empty() : tensor<4xi1>
+    %y = hip.cast(%ctx) ins(%x : tensor<4xi16>) outs(%e : tensor<4xi1>) {to = 9 : i64} : tensor<4xi1>
+    return %y : tensor<4xi1>
+  }
+
+  // An i1 source is already a 0/1 byte, even with a ui8 result and to = 9.
+  // CHECK-LABEL: func.func @i1_to_ui8
+  // CHECK: hip.cast({{.*}}) ins(%{{.*}} : tensor<4xi1>) outs(%{{.*}} : tensor<4xui8>) {to = 9 : i64}
+  // CHECK-NOT: hip.equal
+  func.func @i1_to_ui8(%ctx: !hip.context, %x: tensor<4xi1>) -> tensor<4xui8> {
+    %e = tensor.empty() : tensor<4xui8>
+    %y = hip.cast(%ctx) ins(%x : tensor<4xi1>) outs(%e : tensor<4xui8>) {to = 9 : i64} : tensor<4xui8>
+    return %y : tensor<4xui8>
+  }
+
+  // The mask is built in the dynamic input shape, then reshaped by a 0/1 cast.
+  // CHECK-LABEL: func.func @reshape_dyn
+  // CHECK-SAME: %[[X:arg[0-9]+]]: tensor<?x1xi64>, %[[N:arg[0-9]+]]: index
+  // CHECK: %[[D:.*]] = tensor.dim %[[X]], %{{.*}} : tensor<?x1xi64>
+  // CHECK: %[[E0:.*]] = tensor.empty(%[[D]]) : tensor<?x1xi1>
+  // CHECK: %[[EQ:.*]] = hip.equal({{.*}}) ins(%[[X]], %{{.*}} : tensor<?x1xi64>, tensor<i64>) outs(%[[E0]] : tensor<?x1xi1>)
+  // CHECK: %[[NOT:.*]] = hip.not({{.*}}) ins(%[[EQ]] : tensor<?x1xi1>) outs(%{{.*}} : tensor<?x1xi1>)
+  // CHECK: hip.cast({{.*}}) ins(%[[NOT]] : tensor<?x1xi1>) outs(%{{.*}} : tensor<?xi1>) {to = 9 : i64}
+  func.func @reshape_dyn(%ctx: !hip.context, %x: tensor<?x1xi64>, %n: index) -> tensor<?xi1> {
+    %e = tensor.empty(%n) : tensor<?xi1>
+    %y = hip.cast(%ctx) ins(%x : tensor<?x1xi64>) outs(%e : tensor<?xi1>) {to = 9 : i64} : tensor<?xi1>
+    return %y : tensor<?xi1>
+  }
+
+  // hip.equal takes at most four dimensions, so a rank-5 cast is flattened.
+  // CHECK-LABEL: func.func @rank5
+  // CHECK: %[[FLAT:.*]] = tensor.collapse_shape %{{.*}} {{\[\[0, 1, 2, 3, 4\]\]}} : tensor<2x3x1x2x2xi64> into tensor<24xi64>
+  // CHECK: %[[EQ:.*]] = hip.equal({{.*}}) ins(%[[FLAT]], %{{.*}} : tensor<24xi64>, tensor<i64>) outs(%{{.*}} : tensor<24xui8>)
+  // CHECK: %[[NOT:.*]] = hip.not({{.*}}) ins(%[[EQ]] : tensor<24xui8>) outs(%{{.*}} : tensor<24xui8>)
+  // CHECK: tensor.expand_shape %[[NOT]] {{\[\[0, 1, 2, 3, 4\]\]}} {{.*}} : tensor<24xui8> into tensor<2x3x1x2x2xui8>
+  // CHECK-NOT: hip.cast
+  func.func @rank5(%ctx: !hip.context, %x: tensor<2x3x1x2x2xi64>) -> tensor<2x3x1x2x2xui8> {
+    %e = tensor.empty() : tensor<2x3x1x2x2xui8>
+    %y = hip.cast(%ctx) ins(%x : tensor<2x3x1x2x2xi64>) outs(%e : tensor<2x3x1x2x2xui8>) {to = 9 : i64} : tensor<2x3x1x2x2xui8>
+    return %y : tensor<2x3x1x2x2xui8>
+  }
+
+  // A dynamic rank-5 cast cannot be flattened and survives for the lowering to
+  // reject.
+  // CHECK-LABEL: func.func @rank5_dyn
+  // CHECK: hip.cast
+  // CHECK-NOT: hip.equal
+  func.func @rank5_dyn(%ctx: !hip.context, %x: tensor<?x3x1x2x2xi64>, %n: index) -> tensor<?x3x1x2x2xui8> {
+    %e = tensor.empty(%n) : tensor<?x3x1x2x2xui8>
+    %y = hip.cast(%ctx) ins(%x : tensor<?x3x1x2x2xi64>) outs(%e : tensor<?x3x1x2x2xui8>) {to = 9 : i64} : tensor<?x3x1x2x2xui8>
+    return %y : tensor<?x3x1x2x2xui8>
   }
 }

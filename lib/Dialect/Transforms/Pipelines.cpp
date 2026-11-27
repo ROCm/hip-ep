@@ -575,6 +575,9 @@ void mlir::hip::buildRocMlirPipeline(
 void mlir::hip::addRocMlirFusionPasses(
     OpPassManager &pm, const FuseRocMlirAnchorPassOptions &fuseOptions,
     llvm::StringRef reportPath) {
+  // A fused float -> bool cast would otherwise lower to a by-value TOSA cast
+  // (0.5 -> 0); rewrite it as x != 0 before the elementwise grouping.
+  pm.addNestedPass<func::FuncOp>(createDecomposeBoolCastPass());
   pm.addNestedPass<func::FuncOp>(createHoistPointwiseOverViewsPass());
   pm.addNestedPass<func::FuncOp>(createRocMlirPrepareQuantPass());
   pm.addNestedPass<func::FuncOp>(createFuseRocMlirElementwisePass());

@@ -69,11 +69,14 @@ struct CastOpLowering : public ConvertOpToLLVMPattern<CastOp> {
     // The kernels convert by value, so f32 2.5, i64 5 or a ui8 5 would land in
     // the mask unchanged and later Where/And/Not would misread it. Only an i1
     // source is already a 0/1 byte; hip-decompose-bool-cast rewrites the
-    // others as x != 0, and what it leaves (f64) fails here.
-    if (outputType.getElementType().isInteger(1) &&
-        !inputType.getElementType().isInteger(1))
+    // others as x != 0. A cast to bool is an i1 result (torch) or `to = 9`
+    // (ONNX BOOL, stored as ui8), so what the pass leaves (f64, or a dynamic
+    // shape of rank > 4) fails here and falls back instead of writing a bad or
+    // no mask.
+    bool toBool = outputType.getElementType().isInteger(1) || op.getTo() == 9;
+    if (toBool && !inputType.getElementType().isInteger(1))
       return rewriter.notifyMatchFailure(
-          op, "hip.cast to i1 needs a != 0 normalisation kernel");
+          op, "hip.cast to bool needs a != 0 normalisation kernel");
 
     Value srcDataTypeVal = createI64Const(srcDataType);
     Value dstDataTypeVal = createI64Const(dstDataType);

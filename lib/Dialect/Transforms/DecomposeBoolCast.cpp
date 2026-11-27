@@ -81,10 +81,32 @@ struct DecomposeBoolCast : public OpRewritePattern<CastOp> {
     if (!toBool || inputType.getElementType().isInteger(1))
       return rewriter.notifyMatchFailure(op, "not a non-bool to bool cast");
 
+    // hip.equal and hip.not take at most four dimensions. A static higher-rank
+    // cast is flattened to rank 1 around the rewrite; a dynamic one is left
+    // for hip-to-llvm to reject, which beats a mask that holds 5 instead of 1.
+    bool packed = std::max(inputType.getRank(), outputType.getRank()) > 4;
+    if (packed && (!inputType.hasStaticShape() ||
+                   !outputType.hasStaticShape() || inputType.getRank() == 0))
+      return rewriter.notifyMatchFailure(op, "unpackable shape of rank > 4");
+
+    Type element = inputType.getElementType();
+    if (!isEqualElementType(element) && !element.isBF16())
+      return rewriter.notifyMatchFailure(op, "no hip.equal for this type");
+
     Location loc = op.getLoc();
     Value ctx = op.getCtx();
     Value input = op.getInput();
-    Type element = inputType.getElementType();
+    if (packed) {
+      auto flatType = RankedTensorType::get({inputType.getNumElements()},
+                                            inputType.getElementType());
+      ReassociationIndices all;
+      for (int64_t dim : llvm::seq<int64_t>(inputType.getRank()))
+        all.push_back(dim);
+      input = tensor::CollapseShapeOp::create(rewriter, loc, flatType, input,
+                                              ArrayRef{all});
+    }
+    // The shape source for the mask and its init, before any bf16 widening.
+    Value shaped = input;
     if (element.isBF16()) {
       element = rewriter.getF32Type();
       Value init = emptyLike(rewriter, loc, input, element);
@@ -92,8 +114,6 @@ struct DecomposeBoolCast : public OpRewritePattern<CastOp> {
                              rewriter.getI64IntegerAttr(kOnnxFloat))
                   ->getResult(0);
     }
-    if (!isEqualElementType(element))
-      return rewriter.notifyMatchFailure(op, "no hip.equal for this type");
 
     auto zeroType = RankedTensorType::get({}, element);
     Value zero = ConstantOp::create(
@@ -102,16 +122,33 @@ struct DecomposeBoolCast : public OpRewritePattern<CastOp> {
     // hip.equal broadcasts, so a tensor<1xT> input would keep its shape; the
     // mask is built in the input shape and reshaped by a 0/1 cast below.
     bool reshapes = inputType.getShape() != outputType.getShape();
-    Value equalInit = emptyLike(rewriter, loc, op.getInput(), outputElement);
+    Value equalInit = emptyLike(rewriter, loc, shaped, outputElement);
     Value isZero = EqualOp::create(rewriter, loc, ctx, input, zero, equalInit)
                        ->getResult(0);
-    if (!reshapes) {
+    if (!reshapes && !packed) {
       rewriter.replaceOpWithNewOp<NotOp>(op, ctx, isZero, op.getOutput());
       return success();
     }
-    Value notInit = emptyLike(rewriter, loc, op.getInput(), outputElement);
+    Value notInit = emptyLike(rewriter, loc, shaped, outputElement);
     Value mask =
         NotOp::create(rewriter, loc, ctx, isZero, notInit)->getResult(0);
+    if (packed) {
+      // A packed cast has the same element count in and out, so the flat mask
+      // expands straight to the result shape.
+      if (outputType.getRank() == 1) {
+        rewriter.replaceOp(op, mask);
+        return success();
+      }
+      ReassociationIndices all;
+      for (int64_t dim : llvm::seq<int64_t>(outputType.getRank()))
+        all.push_back(dim);
+      SmallVector<OpFoldResult> sizes;
+      for (int64_t dim : outputType.getShape())
+        sizes.push_back(rewriter.getIndexAttr(dim));
+      rewriter.replaceOpWithNewOp<tensor::ExpandShapeOp>(op, outputType, mask,
+                                                         ArrayRef{all}, sizes);
+      return success();
+    }
     // The mask is already 0/1. An i1 source is never rewritten again; a ui8
     // one would be if it kept `to = BOOL`, so it is cast as UINT8.
     int64_t to = outputElement.isInteger(1) ? kOnnxBool : kOnnxUint8;

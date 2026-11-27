@@ -29,3 +29,44 @@ func.func @cast_ui8_to_i1(
                  outs(%output : memref<8xi1, 1>) {to = 9 : i64}
   return
 }
+
+// -----
+
+// CHECK: failed to legalize operation 'hip.cast'
+// CHECK-SAME: memref<8xf32, 1>, memref<8xi1, 1>
+func.func @cast_f32_to_i1(
+    %ctx: !hip.context,
+    %input: memref<8xf32, 1>,
+    %output: memref<8xi1, 1>) {
+  hip.cast(%ctx) ins(%input : memref<8xf32, 1>)
+                 outs(%output : memref<8xi1, 1>) {to = 9 : i64}
+  return
+}
+
+// -----
+
+// CHECK: failed to legalize operation 'hip.cast'
+// CHECK-SAME: memref<8xf64, 1>, memref<8xi1, 1>
+func.func @cast_f64_to_i1(
+    %ctx: !hip.context,
+    %input: memref<8xf64, 1>,
+    %output: memref<8xi1, 1>) {
+  hip.cast(%ctx) ins(%input : memref<8xf64, 1>)
+                 outs(%output : memref<8xi1, 1>) {to = 9 : i64}
+  return
+}
+
+// -----
+
+// ONNX BOOL is a ui8 result with `to = 9`; the pass leaves f64, and the
+// runtime has no f64 -> ui8 kernel, so the cast must not reach it.
+// CHECK: failed to legalize operation 'hip.cast'
+// CHECK-SAME: memref<8xf64, 1>, memref<8xui8, 1>
+func.func @cast_f64_to_ui8_bool(
+    %ctx: !hip.context,
+    %input: memref<8xf64, 1>,
+    %output: memref<8xui8, 1>) {
+  hip.cast(%ctx) ins(%input : memref<8xf64, 1>)
+                 outs(%output : memref<8xui8, 1>) {to = 9 : i64}
+  return
+}

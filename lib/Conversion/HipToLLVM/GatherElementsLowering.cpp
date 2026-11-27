@@ -84,13 +84,9 @@ struct GatherElementsOpLowering
     Value axisVal = createI64Const(axisAttr);
     Value rankVal = createI64Const(rank);
 
-    unsigned elementSizeBytes =
-        dataType.getElementType().getIntOrFloatBitWidth() / 8;
+    unsigned elementSizeBytes = getElementSizeBytes(dataType.getElementType());
     unsigned indicesElemBytes =
-        indicesType.getElementType().getIntOrFloatBitWidth() / 8;
-    if (elementSizeBytes == 0 || indicesElemBytes == 0)
-      return rewriter.notifyMatchFailure(
-          op, "sub-byte (i1) element type is unsupported for gather_elements");
+        getElementSizeBytes(indicesType.getElementType());
     Value elemSizeVal = createI64Const(elementSizeBytes);
     Value indicesElemSizeVal = createI64Const(indicesElemBytes);
 

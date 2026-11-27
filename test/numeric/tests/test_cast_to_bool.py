@@ -93,17 +93,18 @@ _CASES = {
 }
 
 
-def _cast_where(elem_type):
+def _cast_where(elem_type, shape=(_N,)):
+    shape = list(shape)
     nodes = [
         helper.make_node("Cast", ["x"], ["mask"], to=TensorProto.BOOL),
         helper.make_node("Where", ["mask", "a", "b"], ["y"]),
     ]
     inputs = [
-        helper.make_tensor_value_info("x", elem_type, [_N]),
-        helper.make_tensor_value_info("a", TensorProto.FLOAT, [_N]),
-        helper.make_tensor_value_info("b", TensorProto.FLOAT, [_N]),
+        helper.make_tensor_value_info("x", elem_type, shape),
+        helper.make_tensor_value_info("a", TensorProto.FLOAT, shape),
+        helper.make_tensor_value_info("b", TensorProto.FLOAT, shape),
     ]
-    outputs = [helper.make_tensor_value_info("y", TensorProto.FLOAT, [_N])]
+    outputs = [helper.make_tensor_value_info("y", TensorProto.FLOAT, shape)]
     return make_model_from_nodes(nodes, inputs, outputs, opset=13)
 
 
@@ -115,5 +116,18 @@ class TestCastToBool:
         b = -a
         actual, expected = model_runner.run_sample(
             _cast_where(elem_type), [x, a, b], name=f"cast_to_bool_{name}"
+        )
+        compare_outputs(actual, expected, atol=0, rtol=0)
+
+    def test_cast_where_rank5(self, model_runner):
+        # hip.equal takes at most four dimensions; the pass flattens a static
+        # rank-5 cast around the rewrite.
+        _, x = _CASES["int64"]
+        shape = (2, 2, 1, 2, 2)
+        a = np.arange(1, _N + 1, dtype=np.float32).reshape(shape)
+        actual, expected = model_runner.run_sample(
+            _cast_where(TensorProto.INT64, shape),
+            [x.reshape(shape), a, -a],
+            name="cast_to_bool_rank5",
         )
         compare_outputs(actual, expected, atol=0, rtol=0)

@@ -92,13 +92,9 @@ struct ScatterElementsOpLowering
     if (axisAttr < 0)
       axisAttr += rank;
 
-    unsigned elementSizeBytes =
-        dataType.getElementType().getIntOrFloatBitWidth() / 8;
+    unsigned elementSizeBytes = getElementSizeBytes(dataType.getElementType());
     unsigned indicesElemBytes =
-        indicesType.getElementType().getIntOrFloatBitWidth() / 8;
-    if (elementSizeBytes == 0 || indicesElemBytes == 0)
-      return rewriter.notifyMatchFailure(
-          op, "sub-byte (i1) element type is unsupported for scatter_elements");
+        getElementSizeBytes(indicesType.getElementType());
 
     SmallVector<Type, 12> paramTypes = {
         ptrType, ptrType, ptrType,

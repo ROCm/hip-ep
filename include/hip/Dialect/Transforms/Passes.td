@@ -437,10 +437,15 @@ def DecomposeBoolCastPass
     NaN is not equal to zero and so becomes true, as in both frontends. A
     bf16 source is widened to f32 first because `hip.equal` has no bf16
     kernel. A cast that also reshapes (tensor<1xT> to tensor<U>) builds the
-    mask in the input shape and keeps a 0/1 cast for the reshape. f64 has no
-    `hip.equal` kernel and is left unchanged; the lowering rejects it when the
-    result is i1. Emits `hip.constant`, so it must run before
-    `hip-externalize-constants`.
+    mask in the input shape and keeps a 0/1 cast for the reshape. `hip.equal`
+    takes at most four dimensions, so a static cast of rank above 4 is
+    flattened to rank 1 around the rewrite; a dynamic one is left unchanged.
+    f64 has no `hip.equal` kernel and is left unchanged too; the lowering
+    rejects any cast to bool from a non-i1 type that this pass leaves, so the
+    op falls back instead of writing a wrong mask. The pass runs in the
+    ONNX-to-HIP tail and ahead of the rocMLIR fusion passes, so a fused float
+    to bool cast is not lowered as a by-value TOSA cast. Emits `hip.constant`,
+    so it must run before `hip-externalize-constants`.
   }];
   let dependentDialects = [
     "mlir::tensor::TensorDialect"

@@ -89,4 +89,34 @@ module {
 
     return
   }
+
+  // Test 5: an i1 source is already a 0/1 byte, so i1 -> i1 and i1 -> ui8 with
+  // `to = 9` (ONNX BOOL) are plain UINT8 -> UINT8 copies.
+  func.func @cast_i1_to_i1(
+      %ctx: !hip.context,
+      %input: memref<8xi1, 1>,
+      %output: memref<8xi1, 1>) {
+    // CHECK-LABEL: llvm.func @cast_i1_to_i1
+
+    hip.cast(%ctx) ins(%input : memref<8xi1, 1>)
+                   outs(%output : memref<8xi1, 1>) {to = 9 : i64}
+
+    // CHECK: llvm.call @wrap_cast({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
+
+    return
+  }
+
+  func.func @cast_i1_to_ui8_bool(
+      %ctx: !hip.context,
+      %input: memref<8xi1, 1>,
+      %output: memref<8xui8, 1>) {
+    // CHECK-LABEL: llvm.func @cast_i1_to_ui8_bool
+
+    hip.cast(%ctx) ins(%input : memref<8xi1, 1>)
+                   outs(%output : memref<8xui8, 1>) {to = 9 : i64}
+
+    // CHECK: llvm.call @wrap_cast({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
+
+    return
+  }
 }
