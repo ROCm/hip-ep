@@ -187,6 +187,69 @@ static void intervalChecks() {
   CHECK(!mna::stats().table_loaded, "wrong-ABI interval table accepted");
 }
 
+static bool acceptGemv(void *, const mna::GemvAnswer &) { return true; }
+
+static void u2Checks() {
+  fbs::MatmulNbitsAutotuneLutT doc;
+  doc.schema_version = 5;
+  doc.gpu_arch = "gfx1151";
+  doc.kernel_abi = "matmul_nbits-v1";
+  doc.configs.emplace_back(fbs::MatmulNbitsConfigKind::Gemv, 0, 0, 0, 0, 0, 0,
+                           0, 64, 1);
+  doc.configs.emplace_back(fbs::MatmulNbitsConfigKind::Wmma, 4, 4, 2, 2, 2, 8,
+                           1, 0, 0);
+  doc.configs.emplace_back(fbs::MatmulNbitsConfigKind::Gemv, 0, 0, 0, 0, 0, 0,
+                           0, 128, 4);
+  for (auto bits : {fbs::MatmulNbitsBits::B2, fbs::MatmulNbitsBits::B4})
+    doc.points.emplace_back(
+        fbs::MatmulNbitsPhase::Decode, bits, fbs::MatmulNbitsGroupSize::G32,
+        fbs::MatmulNbitsZeroPoint::Asymmetric, fbs::MatmulNbitsRowStride::Any,
+        bits == fbs::MatmulNbitsBits::B2 ? 0 : 2, 8, 5120, 17920);
+  doc.points.emplace_back(
+      fbs::MatmulNbitsPhase::Prefill, fbs::MatmulNbitsBits::B2,
+      fbs::MatmulNbitsGroupSize::G32, fbs::MatmulNbitsZeroPoint::Symmetric,
+      fbs::MatmulNbitsRowStride::Arrival, 1, 16, 5120, 17920);
+  doc.m_intervals.emplace_back(
+      fbs::MatmulNbitsPhase::Decode, fbs::MatmulNbitsBits::B2,
+      fbs::MatmulNbitsGroupSize::G32, fbs::MatmulNbitsZeroPoint::Asymmetric,
+      fbs::MatmulNbitsRowStride::Any, 0, 0, 1, 17920, 5120);
+  loadFixture(doc);
+  CHECK(mna::stats().points == 3 && mna::stats().invalid_points == 0,
+        "B2/B4 fixture points rejected");
+  CHECK(mna::stats().intervals == 1 && mna::stats().invalid_intervals == 0,
+        "B2 fixture interval rejected");
+  mna::Request q;
+  q.phase = mna::Phase::Decode;
+  q.bits = 2;
+  q.m = 8;
+  q.n = 5120;
+  q.k = 17920;
+  q.group_size = 32;
+  q.has_zp = true;
+  auto answer = mna::resolve(q, acceptAll, acceptGemv, nullptr);
+  CHECK(answer.source == mna::Source::Exact && answer.gemv.threads == 64,
+        "B2 M8 decode did not select its own exact geometry");
+  q.bits = 4;
+  answer = mna::resolve(q, acceptAll, acceptGemv, nullptr);
+  CHECK(answer.source == mna::Source::Exact && answer.gemv.threads == 128,
+        "B2 population changed B4 categorical lookup");
+  q.bits = 2;
+  q.m = 1;
+  CHECK(mna::resolve(q, acceptAll, acceptGemv, nullptr).source ==
+            mna::Source::Interval,
+        "B2 decode interval was not queried");
+  q.phase = mna::Phase::Prefill;
+  q.m = 16;
+  q.has_zp = false;
+  answer = mna::resolve(q, acceptAll, acceptGemv, nullptr);
+  CHECK(answer.source == mna::Source::Exact && answer.wmma.bm == 64,
+        "B2 arrival prefill did not select WMMA geometry");
+  q.has_zp = true;
+  CHECK(mna::resolve(q, acceptAll, acceptGemv, nullptr).source ==
+            mna::Source::None,
+        "B2 zero-point category crossed to a symmetric donor");
+}
+
 int main() {
   const auto *lut = fbs::GetMatmulNbitsAutotuneLut(kMatmulNbitsLutBlobs[0]);
   std::map<int, int> ext_variant; // configs index -> variant
@@ -252,7 +315,8 @@ int main() {
               groupSize(candidate->group_size()) != gs ||
               (candidate->zero_point() ==
                fbs::MatmulNbitsZeroPoint::Asymmetric) != zp ||
-              candidate->row_stride() != stride || candidate->n() != n ||
+              candidate->row_stride() != stride ||
+              candidate->n() != static_cast<uint32_t>(n) ||
               candidate->k() != k || m <= candidate->m_lo() ||
               m > candidate->m_hi())
             continue;
@@ -305,5 +369,7 @@ int main() {
               keys.size(), exact, interval_hits, failures);
   intervalChecks();
   std::printf("interval/compatibility checks: %d failure(s)\n", failures);
+  u2Checks();
+  std::printf("B2 lookup/isolation checks: %d failure(s)\n", failures);
   return failures ? 1 : 0;
 }

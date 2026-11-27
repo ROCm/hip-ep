@@ -249,7 +249,7 @@ synthetic validated old-config-winner evidence, and imported with full parsed
 JSON equality. It also checks filtering/sampling/skips, report decisions,
 geometry resolution and default deduplication.
 
-The FP16 W4 MatMulNBits and FP16 KV GQA decode/prefill leaves support an
+The FP16 W4 and both u2 MatMulNBits leaves, and FP16 KV GQA decode/prefill leaves, support an
 optional launcher handshake, `HIPDNN_UT_GPU_ADMISSION=<private-prefix>`.
 After CPU input/reference preparation, case N writes `<prefix>.N.request`
 and waits for `.grant` before device allocation/work. After device cleanup

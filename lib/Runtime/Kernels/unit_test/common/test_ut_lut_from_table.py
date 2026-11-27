@@ -244,6 +244,75 @@ int main() {
                 worker.terminate()
                 worker.wait()
 
+    def test_b2_append_preserves_b4(self):
+        doc = table.read_table(AUTOTUNE / 'matmul_nbits/lut/gfx1151.json')
+        before = copy.deepcopy(doc)
+        config = next(i for i, c in enumerate(doc['configs']) if c['kind'] == 'Gemv')
+        for m in (1, 8):
+            p = dict(phase='Decode', bits='B2', group_size='G32', zero_point='Asymmetric',
+                     row_stride='Any', m=m, n=9872, k=43008, config=config)
+            source = dict(doc, points=[p])
+            point = table.inventory('matmul_nbits', source)[0][0]
+            result = table.update_points('matmul_nbits', doc, [synthetic(point, singleton=True)])
+            self.assertEqual(result['skipped'], [])
+        for key, value in before.items():
+            self.assertEqual(doc[key][:len(value)] if key in ('points', 'configs') else doc[key], value)
+        self.assertEqual(len(doc['points']), len(before['points']) + 2)
+        self.assertEqual([p['bits'] for p in doc['points'][-2:]], ['B2', 'B2'])
+
+    def test_actual_u2_lut_catalog_validation(self):
+        # Compile the production catalog/bridge itself with the resolver seam
+        # stubbed; no HIP kernel or GPU is needed to check geometry legality.
+        kernel = (HERE.parents[1] / 'hip/matmul_nbits_kernel.hip').read_text()
+        catalog = kernel[kernel.index('struct WmmaConfigU2 {'):kernel.index('template <typename ZPT = unsigned char>\nstatic void launchWmmaConfigU2(')]
+        context = kernel[kernel.index('struct MatmulNbitsWmmaLutCtx {'):kernel.index('static int wmmaConfigFromGeometry(')]
+        source = self.root / 'u2_bridge.cpp'
+        source.write_text('''
+#include "matmul_nbits_autotune.h"
+#include <cassert>
+#include <initializer_list>
+namespace matmul_lut = hipdnn_ep::matmul_nbits_autotune;
+constexpr int kBlockDim = 16;
+static int dequantMaxGridY() { return 65536; }
+static bool enabled = true;
+static bool matmulNbitsLutLookupEnabled() { return enabled; }
+#define MATMUL_NBITS_AUTOTUNE_LOG(...) ((void)0)
+static matmul_lut::Request last;
+namespace hipdnn_ep { namespace matmul_nbits_autotune {
+Result resolve(const Request& req, WmmaValidator validate, GemvValidator, void* ctx) {
+  last = req;
+  Result r; r.wmma = {128,128,2,2,2,8,true,false,0};
+  if (validate(ctx, r.wmma)) r.source = Source::Exact;
+  return r;
+}
+}}
+''' + context + catalog + '''
+int main() {
+  for (int id=0; id<kNumWmmaU2Configs; ++id) {
+    const auto& c=kWmmaU2Configs[id];
+    matmul_lut::WmmaAnswer g{c.bm,c.bn,c.swizzle_n,c.wt_m,c.wt_n,c.wt_m==4?6:8,c.fused,false,0};
+    MatmulNbitsWmmaLutCtx ctx{128,5120,17920,32,0};
+    assert(wmmaU2ConfigFromGeometry(g,ctx)==id);
+    g.ext=true; assert(wmmaU2ConfigFromGeometry(g,ctx)<0); g.ext=false;
+    g.variant=1; assert(wmmaU2ConfigFromGeometry(g,ctx)<0); g.variant=0;
+    ++g.bk; assert(wmmaU2ConfigFromGeometry(g,ctx)<0); --g.bk;
+    ctx.b_row_bytes=128; assert(wmmaU2ConfigFromGeometry(g,ctx)<0); ctx.b_row_bytes=0;
+    ctx.n=128256; assert((wmmaU2ConfigFromGeometry(g,ctx)>=0)==c.fused);
+    for (int small_n : {1,16,31}) {
+      ctx.n=small_n; assert((wmmaU2ConfigFromGeometry(g,ctx)>=0)==(id==12));
+    }
+  }
+  assert(matmulNbitsLutWmmaConfigU2(128,5120,17920,32,true)==12);
+  assert(last.bits==2 && last.phase==matmul_lut::Phase::Prefill && last.b_row_bytes==0 && last.has_zp);
+  assert(matmulNbitsLutWmmaConfigU2(8,5120,17920,32,false)<0);
+  enabled=false; assert(matmulNbitsLutWmmaConfigU2(128,5120,17920,32,true)<0);
+}
+''')
+        binary = self.root / 'u2_bridge'
+        subprocess.run([os.environ.get('CXX', 'c++'), '-std=c++17', '-Wall', '-Wextra', '-Werror',
+                        '-I', str(AUTOTUNE / 'matmul_nbits'), str(source), '-o', str(binary)], check=True)
+        subprocess.run([str(binary)], check=True)
+
 
 if __name__ == '__main__':
     unittest.main()

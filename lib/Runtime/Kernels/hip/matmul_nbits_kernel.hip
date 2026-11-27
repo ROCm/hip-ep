@@ -2007,11 +2007,11 @@ static bool matmulNbitsGemvValidator(void*, const matmul_lut::GemvAnswer& g) {
  * point whose payload is Gemv (pointConsistent enforces that at load), so a
  * Wmma answer on this path would be a malformed table and is rejected. */
 static int matmulNbitsLutGemvConfig(matmul_lut::Phase phase, int M, int N, int K, int gs,
-                           bool has_zp) {
+                           bool has_zp, int bits = 4) {
     if (!matmulNbitsLutLookupEnabled()) return -1;   // online mode: sweep, skip the LUT
     matmul_lut::Request req;
     req.phase = phase;
-    req.bits = 4;
+    req.bits = bits;
     req.m = M;
     req.n = N;
     req.k = K;
@@ -4332,8 +4332,13 @@ static int getOrTuneGemvConfigU2(
     if (it != gemv_u2_cache.end())
         return it->second;
 
-    int best = tuneGemvConfigU2<ZPT>(stream, A, B, sc, zp, bi, out,
-                                     M, N, K, batch, bs);
+    // The table has no batch dimension. Its B2 decode entries describe the
+    // single-batch production route; retain online tuning for other batches.
+    int best = batch == 1 ? matmulNbitsLutGemvConfig(
+        matmul_lut::Phase::Decode, M, N, K, bs, has_zp, 2) : -1;
+    if (best < 0)
+        best = tuneGemvConfigU2<ZPT>(stream, A, B, sc, zp, bi, out,
+                                   M, N, K, batch, bs);
     gemv_u2_cache[key] = best;
 
     MATMUL_NBITS_AUTOTUNE_LOG(
@@ -8251,6 +8256,53 @@ static constexpr WmmaConfigU2 kWmmaU2Configs[] = {
 static constexpr int kNumWmmaU2Configs =
     static_cast<int>(sizeof(kWmmaU2Configs) / sizeof(kWmmaU2Configs[0]));
 
+// B2 must validate against its own catalog: a W4 geometry with the same tile
+// size may have different pipeline fields or no corresponding B2 launch.
+static int wmmaU2ConfigFromGeometry(const matmul_lut::WmmaAnswer& g,
+                                   const MatmulNbitsWmmaLutCtx& ctx) {
+    if (ctx.b_row_bytes != 0 || ctx.m < kBlockDim || ctx.k % 32 != 0 ||
+        ctx.gs < 32 || ctx.gs % 32 != 0 || g.ext || g.variant != 0)
+        return -1;
+    for (int cid = 0; cid < kNumWmmaU2Configs; ++cid) {
+        const auto& c = kWmmaU2Configs[cid];
+        if (c.bm != g.bm || c.bn != g.bn || c.swizzle_n != g.swizzle_n ||
+            c.wt_m != g.wt_m || c.wt_n != g.wt_n || c.fused != g.fused ||
+            (c.wt_m == 4 ? 6 : 8) != g.bk)
+            continue;
+        // With N<32 the existing tuner has no BN-eligible candidates and
+        // returns its retained safe default (12). It still bounds N in the
+        // kernel; represent that exact fallback rather than inventing a tile.
+        const bool small_n_default = ctx.n > 0 && ctx.n < 32 && cid == 12;
+        if ((c.bn > ctx.n * 2 && !small_n_default) ||
+            (!c.fused && ctx.n > dequantMaxGridY()))
+            return -1;
+        return cid;
+    }
+    return -1;
+}
+
+static bool matmulNbitsWmmaU2Validator(void* ctx, const matmul_lut::WmmaAnswer& g) {
+    return wmmaU2ConfigFromGeometry(g, *static_cast<MatmulNbitsWmmaLutCtx*>(ctx)) >= 0;
+}
+
+static int matmulNbitsLutWmmaConfigU2(int M, int N, int K, int gs, bool has_zp) {
+    if (!matmulNbitsLutLookupEnabled()) return -1;
+    matmul_lut::Request req;
+    req.phase = matmul_lut::Phase::Prefill;
+    req.bits = 2;
+    req.m = M; req.n = N; req.k = K;
+    req.group_size = gs; req.has_zp = has_zp;
+    MatmulNbitsWmmaLutCtx ctx{M, N, K, gs, 0};
+    const auto r = matmul_lut::resolve(req, matmulNbitsWmmaU2Validator, nullptr, &ctx);
+    if (r.source == matmul_lut::Source::None) return -1;
+    const int cid = wmmaU2ConfigFromGeometry(r.wmma, ctx);
+    if (cid >= 0)
+        MATMUL_NBITS_AUTOTUNE_LOG(
+            "[custom_kernels] LUT hit (src=%d d=%.3f) B2 M=%d N=%d K=%d gs=%d -> config[%d]\n",
+            static_cast<int>(r.source), r.distance, M, N, K, gs, cid);
+    return cid;
+}
+
 template <typename ZPT = unsigned char>
 static void launchWmmaConfigU2(
     int config_id, hipStream_t stream,
@@ -8505,8 +8557,10 @@ static int getOrTuneWmmaConfigU2(
     if (it != wmma_u2_cache.end())
         return it->second;
 
-    int best = tuneWmmaConfigU2<ZPT>(stream, M, N, K, A, lda, B,
-                                     scales, zeros, gs, ngk, C, ldc, has_zp);
+    int best = matmulNbitsLutWmmaConfigU2(M, N, K, gs, has_zp);
+    if (best < 0)
+        best = tuneWmmaConfigU2<ZPT>(stream, M, N, K, A, lda, B,
+                                   scales, zeros, gs, ngk, C, ldc, has_zp);
     wmma_u2_cache[key] = best;
 
     MATMUL_NBITS_AUTOTUNE_LOG(

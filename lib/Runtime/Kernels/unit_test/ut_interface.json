@@ -104,11 +104,15 @@
         "params": [
           {"name": "shape", "positional": true, "format": "MxKxN", "make": "SIZE", "make_default": "128x2880x5120", "required": true, "description": "M activation rows, K reduction, N output columns."},
           {"name": "group_size", "flag": "--group-size", "make": "GS", "type": "int", "exe_default": 128, "make_default": 128, "description": "Quantization block size along K."},
-          {"name": "no_zero_points", "flag": "--no-zeros", "make": "NO_ZEROS", "type": "bool", "exe_default": false, "make_default": "", "description": "Omit zero points (make: NO_ZEROS=1)."}
+          {"name": "no_zero_points", "flag": "--no-zeros", "make": "NO_ZEROS", "type": "bool", "exe_default": false, "make_default": "", "description": "Omit zero points (make: NO_ZEROS=1)."},
+          {"name": "zp_format", "flag": "--zp-format", "make": "ZP_FORMAT", "type": "enum", "exe_default": "raw", "make_default": "raw", "choices": ["raw", "packed", "fp16"], "description": "Raw uint8, packed 2-bit or fractional fp16 zero points."}
         ]
       },
       "examples": [
         {"name": "decode", "values": {"shape": "1x2880x5120", "group_size": 32}}
+      ],
+      "diagnostic_flags": [
+        {"flag": "--cases", "description": "Run ordinary actual lookup for a native workload CSV; candidate config fields are ignored."}
       ],
       "gaps": []
     },
@@ -229,11 +233,15 @@
         "params": [
           {"name": "shape", "positional": true, "format": "MxKxN", "make": "SIZE", "make_default": "128x2880x5120", "required": true, "description": "M activation rows, K reduction, N output columns."},
           {"name": "group_size", "flag": "--group-size", "make": "GS", "type": "int", "exe_default": 128, "make_default": 128, "description": "Quantization block size along K."},
-          {"name": "no_zero_points", "flag": "--no-zeros", "make": "NO_ZEROS", "type": "bool", "exe_default": false, "make_default": "", "description": "Omit zero points (make: NO_ZEROS=1)."}
+          {"name": "no_zero_points", "flag": "--no-zeros", "make": "NO_ZEROS", "type": "bool", "exe_default": false, "make_default": "", "description": "Omit zero points (make: NO_ZEROS=1)."},
+          {"name": "zp_format", "flag": "--zp-format", "make": "ZP_FORMAT", "type": "enum", "exe_default": "raw", "make_default": "raw", "choices": ["raw", "packed", "fp16"], "description": "Raw uint8, packed 2-bit or fractional fp16 zero points."}
         ]
       },
       "examples": [
         {"name": "decode", "values": {"shape": "1x2880x5120", "group_size": 32}}
+      ],
+      "diagnostic_flags": [
+        {"flag": "--cases", "description": "Run ordinary actual lookup for a native workload CSV; candidate config fields are ignored."}
       ],
       "gaps": []
     },

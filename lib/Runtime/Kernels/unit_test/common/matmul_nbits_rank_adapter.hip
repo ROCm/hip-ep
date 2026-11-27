@@ -101,7 +101,11 @@ extern "C" int hipdnn_ut_nbits_config(const UtNbitsShape* shape, int id, UtNbits
         config.bk = config.wt_m == 4 ? 6 : 8;
       };
       if (s.bits == 2) copy(kWmmaU2Configs[id]); else copy(kWmmaU3Configs[id]);
-      if (config.bn > s.n * 2 || (!config.fused && s.n > dequantMaxGridY())) return -2;
+      // The B2 production tuner returns config 12 when N<32 leaves no
+      // BN-eligible candidate. Expose only that existing singleton fallback.
+      const bool small_n_u2_default = s.bits == 2 && s.n < 32 && id == 12;
+      if ((config.bn > s.n * 2 && !small_n_u2_default) ||
+          (!config.fused && s.n > dequantMaxGridY())) return -2;
     }
   }
   *out = config;
