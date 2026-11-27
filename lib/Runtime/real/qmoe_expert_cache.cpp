@@ -25,6 +25,8 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+
+#include <psapi.h>
 #endif
 
 namespace {
@@ -34,6 +36,8 @@ constexpr int kSegments = 6;
 // rejects more than this many experts.
 constexpr int64_t kMaxPoolSlots = 1024;
 constexpr size_t kAlign = 256;
+constexpr size_t kSector = 4096;
+constexpr int kDirectQueueDepth = 32;
 
 size_t alignUp(size_t v) { return (v + kAlign - 1) & ~(kAlign - 1); }
 
@@ -78,6 +82,7 @@ struct Pool {
 
 struct PhaseStats {
   uint64_t calls = 0, hits = 0, misses = 0;
+  double t_wait = 0, t_lookup = 0, t_read = 0, t_h2d = 0;
 };
 
 struct Cache {
@@ -98,9 +103,17 @@ struct Cache {
   size_t staging_cap = 0;
   std::vector<std::pair<int32_t, int32_t>> misses; // (slot, expert)
 
+  // HIPDNN_EP_QMOE_EXPERT_IO=direct: misses bypass the page cache and are read
+  // with unbuffered overlapped I/O instead of from the mapped views.
+  bool direct = false;
+#ifdef _WIN32
+  std::vector<std::pair<std::wstring, HANDLE>> files;
+  std::vector<std::array<HANDLE, kSegments>> node_files;
+  HANDLE io_events[kDirectQueueDepth] = {};
+#endif
+
   bool stats = false;
   PhaseStats decode, prefill;
-  double t_d2h = 0, t_lookup = 0, t_read = 0, t_h2d = 0;
 };
 
 struct PrepareCtx {
@@ -115,28 +128,20 @@ void destroyCache(RuntimeState *state) {
     return;
   }
   if (c->stats) {
-    auto rate = [](const PhaseStats &p) {
+    auto print = [&](const char *name, const PhaseStats &p) {
       const uint64_t n = p.hits + p.misses;
-      return n ? static_cast<double>(p.hits) / static_cast<double>(n) : 0.0;
+      fprintf(stderr,
+              "[QMoE offload] %s calls=%llu hits=%llu misses=%llu "
+              "hit_rate=%.4f miss_bytes=%llu wait=%.3fs lookup=%.3fs "
+              "read=%.3fs h2d_enqueue=%.3fs\n",
+              name, (unsigned long long)p.calls, (unsigned long long)p.hits,
+              (unsigned long long)p.misses,
+              n ? static_cast<double>(p.hits) / static_cast<double>(n) : 0.0,
+              (unsigned long long)(p.misses * c->expert_bytes), p.t_wait,
+              p.t_lookup, p.t_read, p.t_h2d);
     };
-    fprintf(stderr,
-            "[QMoE offload] decode calls=%llu hits=%llu misses=%llu "
-            "hit_rate=%.4f miss_bytes=%llu\n",
-            (unsigned long long)c->decode.calls,
-            (unsigned long long)c->decode.hits,
-            (unsigned long long)c->decode.misses, rate(c->decode),
-            (unsigned long long)(c->decode.misses * c->expert_bytes));
-    fprintf(stderr,
-            "[QMoE offload] prefill calls=%llu hits=%llu misses=%llu "
-            "hit_rate=%.4f miss_bytes=%llu\n",
-            (unsigned long long)c->prefill.calls,
-            (unsigned long long)c->prefill.hits,
-            (unsigned long long)c->prefill.misses, rate(c->prefill),
-            (unsigned long long)(c->prefill.misses * c->expert_bytes));
-    fprintf(stderr,
-            "[QMoE offload] time d2h+sync=%.3fs lookup=%.3fs read=%.3fs "
-            "h2d_enqueue=%.3fs\n",
-            c->t_d2h, c->t_lookup, c->t_read, c->t_h2d);
+    print("decode", c->decode);
+    print("prefill", c->prefill);
   }
   for (Pool &p : c->pools) {
     if (p.base) {
@@ -149,6 +154,16 @@ void destroyCache(RuntimeState *state) {
   if (c->staging) {
     (void)hipHostFree(c->staging);
   }
+#ifdef _WIN32
+  for (auto &[path, h] : c->files) {
+    CloseHandle(h);
+  }
+  for (HANDLE e : c->io_events) {
+    if (e) {
+      CloseHandle(e);
+    }
+  }
+#endif
   delete c;
   state->qmoe_expert_cache = nullptr;
   state->qmoe_expert_cache_destroy = nullptr;
@@ -254,19 +269,77 @@ Cache *createCache(RuntimeState *state, const int64_t constants[kSegments],
     }
   }
 
+  const std::string io = hipdnn_ep::env_string("HIPDNN_EP_QMOE_EXPERT_IO");
+  if (io == "direct") {
+#ifdef _WIN32
+    c->direct = true;
+    c->node_files.resize(num_nodes);
+    for (HANDLE &e : c->io_events) {
+      e = CreateEventA(nullptr, TRUE, FALSE, nullptr);
+      if (!e) {
+        fprintf(stderr, "[QMoE offload] CreateEvent failed\n");
+        state->qmoe_expert_cache = c;
+        destroyCache(state);
+        return nullptr;
+      }
+    }
+#else
+    fprintf(stderr, "[QMoE offload] HIPDNN_EP_QMOE_EXPERT_IO=direct needs "
+                    "Windows\n");
+    state->qmoe_expert_cache = c;
+    destroyCache(state);
+    return nullptr;
+#endif
+  } else if (!io.empty() && io != "mmap") {
+    fprintf(stderr, "[QMoE offload] unknown HIPDNN_EP_QMOE_EXPERT_IO=%s\n",
+            io.c_str());
+    state->qmoe_expert_cache = c;
+    destroyCache(state);
+    return nullptr;
+  }
+
   c->stats = hipdnn_ep::env_enabled("HIPDNN_EP_QMOE_EXPERT_STATS");
   if (c->stats) {
     fprintf(stderr,
             "[QMoE offload] nodes=%lld experts=%lld expert_bytes=%lld "
-            "slots=%lld of %lld pools=%lld io=mmap\n",
+            "slots=%lld of %lld pools=%lld io=%s\n",
             (long long)num_nodes, (long long)num_experts,
             (long long)c->expert_bytes, (long long)total, (long long)all,
-            (long long)n_pools);
+            (long long)n_pools, c->direct ? "direct" : "mmap");
   }
   state->qmoe_expert_cache = c;
   state->qmoe_expert_cache_destroy = destroyCache;
   return c;
 }
+
+#ifdef _WIN32
+HANDLE openDirect(Cache *c, void *view) {
+  wchar_t device[MAX_PATH];
+  const DWORD n =
+      GetMappedFileNameW(GetCurrentProcess(), view, device, MAX_PATH);
+  if (n == 0) {
+    fprintf(stderr, "[QMoE offload] GetMappedFileName failed (%lu)\n",
+            GetLastError());
+    return nullptr;
+  }
+  const std::wstring path = L"\\\\?\\GLOBALROOT" + std::wstring(device, n);
+  for (const auto &[p, h] : c->files) {
+    if (p == path) {
+      return h;
+    }
+  }
+  HANDLE h = CreateFileW(
+      path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+      FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED, nullptr);
+  if (h == INVALID_HANDLE_VALUE) {
+    fprintf(stderr, "[QMoE offload] unbuffered open failed (%lu)\n",
+            GetLastError());
+    return nullptr;
+  }
+  c->files.push_back({path, h});
+  return h;
+}
+#endif
 
 int registerNode(RuntimeState *state, Cache *c, int64_t node,
                  const int64_t constants[kSegments]) {
@@ -291,6 +364,15 @@ int registerNode(RuntimeState *state, Cache *c, int64_t node,
       return -1;
     }
     c->node_constants[node][j] = idx;
+#ifdef _WIN32
+    if (c->direct) {
+      HANDLE h = openDirect(c, state->disk_constants[idx].view);
+      if (!h) {
+        return -1;
+      }
+      c->node_files[node][j] = h;
+    }
+#endif
   }
   c->node_registered[node] = true;
   return 0;
@@ -320,6 +402,160 @@ void prefetch(RuntimeState *state, Cache *c, int64_t node) {
 #endif
 }
 
+#ifdef _WIN32
+// Unbuffered reads need sector-aligned offsets, sizes, and buffers, so each
+// segment is read as the enclosing sector range and uploaded from its skew.
+int loadDirect(RuntimeState *state, Cache *c, int64_t node, Pool &pool,
+               hipStream_t stream, PhaseStats &phase) {
+  struct Piece {
+    HANDLE file;
+    uint64_t offset;
+    DWORD bytes;
+    size_t staging;
+    size_t skew;
+    char *dst;
+    size_t len;
+  };
+  std::vector<Piece> pieces;
+  size_t need = 0;
+  for (const auto &[slot, expert] : c->misses) {
+    for (int j = 0; j < kSegments; ++j) {
+      const size_t sb = static_cast<size_t>(c->seg_bytes[j]);
+      if (sb == 0) {
+        continue;
+      }
+      const DiskConstant &dc =
+          state->disk_constants[c->node_constants[node][j]];
+      const uint64_t off =
+          static_cast<uint64_t>(dc.data -
+                                static_cast<const uint8_t *>(dc.view)) +
+          static_cast<uint64_t>(expert) * sb;
+      const uint64_t lo = off & ~static_cast<uint64_t>(kSector - 1);
+      const size_t bytes = static_cast<size_t>(
+          (off + sb - lo + kSector - 1) & ~static_cast<uint64_t>(kSector - 1));
+      pieces.push_back({c->node_files[node][j], lo, static_cast<DWORD>(bytes),
+                        need, static_cast<size_t>(off - lo),
+                        pool.seg[j] + static_cast<size_t>(slot) * sb, sb});
+      need += bytes;
+    }
+  }
+  if (growPinned(reinterpret_cast<void **>(&c->staging), &c->staging_cap,
+                 need) != 0 ||
+      reinterpret_cast<uintptr_t>(c->staging) % kSector != 0) {
+    fprintf(stderr,
+            "[QMoE offload] sector-aligned staging of %zu bytes "
+            "failed\n",
+            need);
+    return -1;
+  }
+
+  auto t = std::chrono::steady_clock::now();
+  OVERLAPPED ov[kDirectQueueDepth];
+  bool ok = true;
+  for (size_t i = 0; ok && i < pieces.size(); i += kDirectQueueDepth) {
+    const size_t n = std::min<size_t>(kDirectQueueDepth, pieces.size() - i);
+    size_t issued = 0;
+    for (; issued < n; ++issued) {
+      const Piece &p = pieces[i + issued];
+      ov[issued] = {};
+      ov[issued].Offset = static_cast<DWORD>(p.offset);
+      ov[issued].OffsetHigh = static_cast<DWORD>(p.offset >> 32);
+      ov[issued].hEvent = c->io_events[issued];
+      if (!ReadFile(p.file, c->staging + p.staging, p.bytes, nullptr,
+                    &ov[issued]) &&
+          GetLastError() != ERROR_IO_PENDING) {
+        ok = false;
+        break;
+      }
+    }
+    for (size_t q = 0; q < issued; ++q) {
+      const Piece &p = pieces[i + q];
+      DWORD got = 0;
+      if (!GetOverlappedResult(p.file, &ov[q], &got, TRUE) ||
+          got < p.skew + p.len) {
+        ok = false;
+      }
+    }
+  }
+  phase.t_read += secondsSince(t);
+  if (!ok) {
+    fprintf(stderr, "[QMoE offload] unbuffered expert read failed (%lu)\n",
+            GetLastError());
+    return -1;
+  }
+
+  t = std::chrono::steady_clock::now();
+  for (const Piece &p : pieces) {
+    if (hipMemcpyAsync(p.dst, c->staging + p.staging + p.skew, p.len,
+                       hipMemcpyHostToDevice, stream) != hipSuccess) {
+      fprintf(stderr, "[QMoE offload] expert upload failed\n");
+      return -1;
+    }
+  }
+  phase.t_h2d += secondsSince(t);
+  return 0;
+}
+#else
+int loadDirect(RuntimeState *, Cache *, int64_t, Pool &, hipStream_t,
+               PhaseStats &) {
+  return -1;
+}
+#endif
+
+int loadMmap(RuntimeState *state, Cache *c, int64_t node, Pool &pool,
+             hipStream_t stream, PhaseStats &phase) {
+  const size_t nm = c->misses.size();
+  auto t = std::chrono::steady_clock::now();
+  size_t seg_off[kSegments] = {};
+  size_t need = 0;
+  for (int j = 0; j < kSegments; ++j) {
+    seg_off[j] = need;
+    need += alignUp(nm * static_cast<size_t>(c->seg_bytes[j]));
+  }
+  if (growPinned(reinterpret_cast<void **>(&c->staging), &c->staging_cap,
+                 need) != 0) {
+    fprintf(stderr, "[QMoE offload] staging alloc of %zu bytes failed\n", need);
+    return -1;
+  }
+  prefetch(state, c, node);
+  for (int j = 0; j < kSegments; ++j) {
+    const size_t sb = static_cast<size_t>(c->seg_bytes[j]);
+    if (sb == 0) {
+      continue;
+    }
+    const uint8_t *src = state->disk_constants[c->node_constants[node][j]].data;
+    for (size_t m = 0; m < nm; ++m) {
+      memcpy(c->staging + seg_off[j] + m * sb,
+             src + static_cast<size_t>(c->misses[m].second) * sb, sb);
+    }
+  }
+  phase.t_read += secondsSince(t);
+
+  t = std::chrono::steady_clock::now();
+  for (size_t m = 0; m < nm;) {
+    size_t run = 1;
+    while (m + run < nm && c->misses[m + run].first ==
+                               c->misses[m].first + static_cast<int32_t>(run)) {
+      ++run;
+    }
+    for (int j = 0; j < kSegments; ++j) {
+      const size_t sb = static_cast<size_t>(c->seg_bytes[j]);
+      if (sb == 0) {
+        continue;
+      }
+      if (hipMemcpyAsync(pool.seg[j] +
+                             static_cast<size_t>(c->misses[m].first) * sb,
+                         c->staging + seg_off[j] + m * sb, run * sb,
+                         hipMemcpyHostToDevice, stream) != hipSuccess) {
+        fprintf(stderr, "[QMoE offload] expert upload failed\n");
+        return -1;
+      }
+    }
+    m += run;
+  }
+  phase.t_h2d += secondsSince(t);
+  return 0;
+}
 int prepare(void *ctx_ptr, void *d_expert_indices, int64_t num_tokens,
             int64_t k, const void *pools_out[6]) {
   auto *ctx = static_cast<PrepareCtx *>(ctx_ptr);
@@ -330,6 +566,7 @@ int prepare(void *ctx_ptr, void *d_expert_indices, int64_t num_tokens,
   hipStream_t stream = state->stream;
   const int64_t routes = num_tokens * k;
   const size_t idx_bytes = static_cast<size_t>(routes) * sizeof(int32_t);
+  PhaseStats &phase = num_tokens == 1 ? c->decode : c->prefill;
 
   auto t = std::chrono::steady_clock::now();
   if (growPinned(reinterpret_cast<void **>(&c->host_idx), &c->host_idx_cap,
@@ -340,11 +577,10 @@ int prepare(void *ctx_ptr, void *d_expert_indices, int64_t num_tokens,
     fprintf(stderr, "[QMoE offload] expert index readback failed\n");
     return -1;
   }
-  c->t_d2h += secondsSince(t);
+  phase.t_wait += secondsSince(t);
 
   t = std::chrono::steady_clock::now();
   const uint64_t call = ++c->call;
-  PhaseStats &phase = num_tokens == 1 ? c->decode : c->prefill;
   ++phase.calls;
   c->misses.clear();
   const int64_t E = c->num_experts;
@@ -381,62 +617,14 @@ int prepare(void *ctx_ptr, void *d_expert_indices, int64_t num_tokens,
     pool.pushFront(s);
     c->host_idx[r] = s;
   }
-  c->t_lookup += secondsSince(t);
+  phase.t_lookup += secondsSince(t);
 
-  const size_t nm = c->misses.size();
-  if (nm > 0) {
-    t = std::chrono::steady_clock::now();
-    size_t seg_off[kSegments] = {};
-    size_t need = 0;
-    for (int j = 0; j < kSegments; ++j) {
-      seg_off[j] = need;
-      need += alignUp(nm * static_cast<size_t>(c->seg_bytes[j]));
-    }
-    if (growPinned(reinterpret_cast<void **>(&c->staging), &c->staging_cap,
-                   need) != 0) {
-      fprintf(stderr, "[QMoE offload] staging alloc of %zu bytes failed\n",
-              need);
+  if (!c->misses.empty()) {
+    const int rc = c->direct ? loadDirect(state, c, node, pool, stream, phase)
+                             : loadMmap(state, c, node, pool, stream, phase);
+    if (rc != 0) {
       return -1;
     }
-    prefetch(state, c, node);
-    for (int j = 0; j < kSegments; ++j) {
-      const size_t sb = static_cast<size_t>(c->seg_bytes[j]);
-      if (sb == 0) {
-        continue;
-      }
-      const uint8_t *src =
-          state->disk_constants[c->node_constants[node][j]].data;
-      for (size_t m = 0; m < nm; ++m) {
-        memcpy(c->staging + seg_off[j] + m * sb,
-               src + static_cast<size_t>(c->misses[m].second) * sb, sb);
-      }
-    }
-    c->t_read += secondsSince(t);
-
-    t = std::chrono::steady_clock::now();
-    for (size_t m = 0; m < nm;) {
-      size_t run = 1;
-      while (m + run < nm &&
-             c->misses[m + run].first ==
-                 c->misses[m].first + static_cast<int32_t>(run)) {
-        ++run;
-      }
-      for (int j = 0; j < kSegments; ++j) {
-        const size_t sb = static_cast<size_t>(c->seg_bytes[j]);
-        if (sb == 0) {
-          continue;
-        }
-        if (hipMemcpyAsync(pool.seg[j] +
-                               static_cast<size_t>(c->misses[m].first) * sb,
-                           c->staging + seg_off[j] + m * sb, run * sb,
-                           hipMemcpyHostToDevice, stream) != hipSuccess) {
-          fprintf(stderr, "[QMoE offload] expert upload failed\n");
-          return -1;
-        }
-      }
-      m += run;
-    }
-    c->t_h2d += secondsSince(t);
   }
 
   if (hipMemcpyAsync(d_expert_indices, c->host_idx, idx_bytes,
