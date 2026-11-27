@@ -248,6 +248,10 @@ def _post_norm_model(streams, gate, mix, branches, dtype, activate):
         # 2 * sigmoid(x / 4), branch gate, no stream mix.
         (["batch", "seq", 32], ["batch", "seq", 4], None, 4, np.float16, True),
         ([2, 3, 20], [2, 3, 4], None, 4, np.float32, True),
+        # Decode shape (one 1024-thread block per branch) and a prefill-sized
+        # call (more (row, branch) pairs than the wide kernel takes).
+        ([1, 1, 10240], [1, 1, 4], None, 4, np.float16, True),
+        ([1, 64, 10240], [1, 64, 4], None, 4, np.float16, True),
         # Gate already applied, plus stream mix.
         (
             ["batch", "seq", 32],

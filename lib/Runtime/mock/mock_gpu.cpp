@@ -1835,27 +1835,27 @@ int wrap_engram_gate(RuntimeState *state, void *key, void *query, void *value,
   return 0;
 }
 
-int wrap_hyper_connection_pre_mix(RuntimeState *state, void *streams,
-                                  void *pre_mix, void *output,
-                                  int64_t stream_num_elements, int64_t branches,
-                                  int64_t hidden, int64_t feature_gate,
-                                  int64_t gate_sigmoid,
-                                  int64_t element_size_bytes,
-                                  float reduction_scale) {
+int wrap_hyper_connection_pre_mix(
+    RuntimeState *state, void *streams, void *pre_mix, void *output,
+    int64_t stream_num_elements, int64_t branches, int64_t hidden,
+    int64_t feature_gate, int64_t gate_sigmoid, int64_t element_size_bytes,
+    float reduction_scale, void *a_quant, void *a_scale) {
   (void)gate_sigmoid;
   (void)streams;
   (void)pre_mix;
   (void)output;
+  (void)a_scale;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_hyper_connection_pre_mix\n");
     return -1;
   }
   MOCK_PRINT("[MOCK] wrap_hyper_connection_pre_mix(elements=%lld, "
              "branches=%lld, hidden=%lld, feature_gate=%lld, "
-             "element_size=%lld, scale=%f)\n",
+             "element_size=%lld, scale=%f, quant=%s)\n",
              (long long)stream_num_elements, (long long)branches,
              (long long)hidden, (long long)feature_gate,
-             (long long)element_size_bytes, (double)reduction_scale);
+             (long long)element_size_bytes, (double)reduction_scale,
+             a_quant ? "yes" : "no");
   return 0;
 }
 
@@ -1888,13 +1888,14 @@ int wrap_hyper_connection_post_mix_norm(
     void *stream_mix, void *norm_scale, void *residual, void *normed,
     int64_t stream_num_elements, int64_t branches, int64_t hidden,
     int64_t feature_gate, int64_t gate_activation, int64_t element_size_bytes,
-    float epsilon) {
+    float epsilon, void *a_quant, void *a_scale) {
   (void)streams;
   (void)block_output;
   (void)gate;
   (void)norm_scale;
   (void)residual;
   (void)normed;
+  (void)a_scale;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_hyper_connection_post_mix_norm\n");
     return -1;
@@ -1902,20 +1903,21 @@ int wrap_hyper_connection_post_mix_norm(
   MOCK_PRINT("[MOCK] wrap_hyper_connection_post_mix_norm(elements=%lld, "
              "branches=%lld, hidden=%lld, feature_gate=%lld, "
              "gate_activation=%lld, stream_mix=%s, element_size=%lld, "
-             "epsilon=%f)\n",
+             "epsilon=%f, quant=%s)\n",
              (long long)stream_num_elements, (long long)branches,
              (long long)hidden, (long long)feature_gate,
              (long long)gate_activation, stream_mix ? "yes" : "no",
-             (long long)element_size_bytes, (double)epsilon);
+             (long long)element_size_bytes, (double)epsilon,
+             a_quant ? "yes" : "no");
   return 0;
 }
 
-int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
-                                    void *skip, void *gamma, void *bias,
-                                    void *output, void *input_skip_bias_sum,
-                                    int64_t input_num_elements,
-                                    int64_t gamma_num_elements,
-                                    int64_t element_size_bytes, float epsilon) {
+int wrap_skip_simplified_layer_norm(
+    RuntimeState *state, void *input, void *skip, void *gamma, void *bias,
+    void *output, void *input_skip_bias_sum, int64_t input_num_elements,
+    int64_t gamma_num_elements, int64_t element_size_bytes, float epsilon,
+    void *a_quant, void *a_scale, int64_t quant_block_size) {
+  (void)a_scale;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_skip_simplified_layer_norm\n");
     return -1;
@@ -1923,10 +1925,12 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
 
   MOCK_PRINT("[MOCK] wrap_skip_simplified_layer_norm(input_num_elements=%lld, "
              "gamma_num_elements=%lld, element_size=%lld, epsilon=%f, "
-             "bias=%s, input_skip_bias_sum=%s)\n",
+             "bias=%s, input_skip_bias_sum=%s, quant=%s, "
+             "quant_block_size=%lld)\n",
              (long long)input_num_elements, (long long)gamma_num_elements,
              (long long)element_size_bytes, (double)epsilon,
-             bias ? "yes" : "no", input_skip_bias_sum ? "yes" : "no");
+             bias ? "yes" : "no", input_skip_bias_sum ? "yes" : "no",
+             a_quant ? "yes" : "no", (long long)quant_block_size);
 
   return 0;
 }
@@ -1994,6 +1998,52 @@ int wrap_dequant_bnb4(RuntimeState *state, void *packed, void *absmax,
              "quant_type=%lld)\n",
              (long long)n, (long long)k, (long long)block_size,
              (long long)quant_type);
+  return 0;
+}
+
+int wrap_matmul_nbits_group(
+    RuntimeState *state, int op_state_slot, const void *A, int64_t nseg,
+    const void *B0, const void *B1, const void *B2, const void *B3,
+    const void *scales0, const void *scales1, const void *scales2,
+    const void *scales3, const void *zero_points0, const void *zero_points1,
+    const void *zero_points2, const void *zero_points3, void *out0, void *out1,
+    void *out2, void *out3, int64_t N0, int64_t N1, int64_t N2, int64_t N3,
+    int64_t M, int64_t K, int64_t batch_count, int64_t bits, int64_t block_size,
+    int64_t elem_size, int64_t scale_elem_size, int64_t epilogue,
+    const void *a_quant, const void *a_scale) {
+  (void)op_state_slot;
+  (void)zero_points1;
+  (void)zero_points2;
+  (void)zero_points3;
+  (void)a_quant;
+  (void)a_scale;
+  (void)A;
+  (void)B0;
+  (void)B1;
+  (void)B2;
+  (void)B3;
+  (void)scales0;
+  (void)scales1;
+  (void)scales2;
+  (void)scales3;
+  (void)out0;
+  (void)out1;
+  (void)out2;
+  (void)out3;
+  (void)scale_elem_size;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_matmul_nbits_group\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_matmul_nbits_group(nseg=%lld, N=%lld+%lld+%lld+%lld, "
+             "M=%lld, K=%lld, batch=%lld, bits=%lld, block_size=%lld, "
+             "elem_size=%lld, epilogue=%lld, zero_points=%s)\n",
+             (long long)nseg, (long long)N0, (long long)N1, (long long)N2,
+             (long long)N3, (long long)M, (long long)K, (long long)batch_count,
+             (long long)bits, (long long)block_size, (long long)elem_size,
+             (long long)epilogue, zero_points0 ? "yes" : "null");
+
   return 0;
 }
 

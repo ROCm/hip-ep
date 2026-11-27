@@ -198,12 +198,14 @@ struct HyperConnectionPreMixToHip : public mlir::RewritePattern {
         createEmptyTensor(rewriter, loc, resultType, op->getOperand(0));
     auto hipOp = mlir::hip::HyperConnectionPreMixOp::create(
         rewriter, loc, *ctxOrFailure, op->getOperand(0), gate, init,
+        /*quant_outputs=*/mlir::ValueRange{},
         rewriter.getI64IntegerAttr(params.branches),
         rewriter.getI64IntegerAttr(params.hidden),
         rewriter.getI64IntegerAttr(params.flattened ? 1 : 0),
         layoutAttr(rewriter, gateLayout),
         rewriter.getF32FloatAttr(reductionScale),
-        rewriter.getI64IntegerAttr(gateSigmoid));
+        rewriter.getI64IntegerAttr(gateSigmoid),
+        /*quant_block_size=*/rewriter.getI64IntegerAttr(0));
     rewriter.replaceOp(op, hipOp->getResult(0));
     if (sigmoidOp)
       rewriter.eraseOp(sigmoidOp);
@@ -420,12 +422,14 @@ mlir::LogicalResult fusePostMixNorm(mlir::Operation *op,
       rewriter, loc, mlir::TypeRange{streamsType, normType}, *ctxOrFailure,
       op->getOperand(0), op->getOperand(1), gate, scale, streamMix,
       mlir::ValueRange{residualInit, normInit},
+      /*quant_outputs=*/mlir::ValueRange{},
       rewriter.getI64IntegerAttr(params.branches),
       rewriter.getI64IntegerAttr(params.hidden),
       rewriter.getI64IntegerAttr(params.flattened ? 1 : 0),
       layoutAttr(rewriter, gateLayout),
       rewriter.getI64IntegerAttr(gateActivation),
-      rewriter.getF32FloatAttr(epsilon));
+      rewriter.getF32FloatAttr(epsilon),
+      /*quant_block_size=*/rewriter.getI64IntegerAttr(0));
   rewriter.replaceOp(norm, hipOp->getResult(1));
   rewriter.replaceOp(op, hipOp->getResult(0));
   if (gateActivation) {
