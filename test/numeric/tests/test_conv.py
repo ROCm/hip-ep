@@ -148,22 +148,21 @@ class TestConv:
 
 
 class TestConvScalarTiles:
-    """fp32 shapes that run on the scalar tiles (fp16 takes the matrix cores)
-    with a grid far short of the device, plus the narrow-Cout fallback.
+    """fp32 shapes that run on the scalar tiles with a grid far short of the
+    device, plus the narrow-Cout fallback. fp16 is not covered here: it takes
+    the matrix cores, never the scalar tiles.
 
     Rows below 32 output channels per group used to fall back to the
     one-thread-per-output direct kernel; they now run on a 64x64 tile with dead
     rows, which must be zero-filled on load and skipped on store. The two rows
     at 32 and 40 channels make the block-count rule pick the 32x32 and the
-    32x128 tile on gfx1151 (the pick depends on the device's unit count, the
-    result must not). The reduction K = in_c / group * k * k is deliberately
-    not a multiple of the 16-tap slice in most rows, so the last slice is
-    partial and exercises the masked filter loads and the invalid-K sentinel
-    next to leading padding; K = 27 and 9 are shorter than two slices. The
-    narrow rows are large enough (>= 1M multiply-accumulates) to leave the
-    direct kernel behind."""
+    32x128 tile on any device with two or more units. The reduction
+    K = in_c / group * k * k is deliberately not a multiple of the 16-tap slice
+    in most rows, so the last slice is partial and exercises the masked filter
+    loads and the invalid-K sentinel next to leading padding; K = 27 and 9 are
+    shorter than two slices. The narrow rows are large enough (>= 1M
+    multiply-accumulates) to leave the direct kernel behind."""
 
-    @pytest.mark.parametrize("dtype", [TensorProto.FLOAT, TensorProto.FLOAT16])
     @pytest.mark.parametrize(
         "n,in_c,hw,out_c,k,group",
         [
@@ -176,12 +175,18 @@ class TestConvScalarTiles:
             (1, 1, 8, 40, 3, 1),  # 32x128 tile, K = 9 (< one slice)
         ],
     )
-    def test_conv_scalar_tiles(self, model_runner, dtype, n, in_c, hw, out_c, k, group):
+    def test_conv_scalar_tiles(self, model_runner, n, in_c, hw, out_c, k, group):
         model = _make_conv_model(
-            in_c, out_c, group, k=k, spatial=hw, seed=11, dtype=dtype, n=n
+            in_c,
+            out_c,
+            group,
+            k=k,
+            spatial=hw,
+            seed=11,
+            dtype=TensorProto.FLOAT,
+            n=n,
         )
         rng = np.random.default_rng(9)
-        x = rng.uniform(-1.0, 1.0, [n, in_c, hw, hw]).astype(_np_dtype(dtype))
+        x = rng.uniform(-1.0, 1.0, [n, in_c, hw, hw]).astype(np.float32)
         actual, expected = model_runner.run_sample(model, [x])
-        tol = 1e-3 if dtype == TensorProto.FLOAT else 2e-2
-        compare_outputs(actual, expected, atol=tol, rtol=tol, cos_threshold=0.9999)
+        compare_outputs(actual, expected, atol=1e-3, rtol=1e-3, cos_threshold=0.9999)
