@@ -190,3 +190,51 @@ class TestConvScalarTiles:
         x = rng.uniform(-1.0, 1.0, [n, in_c, hw, hw]).astype(np.float32)
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1e-3, rtol=1e-3, cos_threshold=0.9999)
+
+
+class TestConv1x1Gemm:
+    """fp16 1x1 convolutions with at least 128 input channels per group run as a
+    GEMM with their own kernel. The accepted shapes cover each global-load width
+    it uses (output plane a multiple of 8, of 4, or neither), a reduction that is
+    not a multiple of its 64-tap step, ragged output channels, groups, batch and
+    a missing bias. The last four rows sit just outside what it accepts (K below
+    128, K not a multiple of 8, stride 2, padding 1) and run on the general
+    kernel; they check that the neighbouring shapes are still computed
+    correctly."""
+
+    @pytest.mark.parametrize(
+        "n,in_c,h,w,out_c,k,stride,pad,group,bias",
+        [
+            (1, 256, 16, 16, 64, 1, 1, 0, 1, True),  # plane 256: 16-byte loads
+            (2, 192, 12, 12, 70, 1, 1, 0, 1, True),  # K = 192 = 3 steps, ragged M
+            (1, 200, 8, 16, 130, 1, 1, 0, 1, True),  # K = 200, not a multiple of 64
+            (1, 256, 10, 14, 128, 1, 1, 0, 1, True),  # plane 140: 8-byte loads
+            (1, 512, 7, 7, 2048, 1, 1, 0, 1, True),  # plane 49: 2-byte loads
+            (1, 256, 9, 9, 40, 1, 1, 0, 1, True),  # plane 81, ragged M
+            (2, 256, 16, 8, 192, 1, 1, 0, 2, True),  # grouped
+            (1, 128, 24, 24, 192, 1, 1, 0, 1, False),  # K at the minimum, no bias
+            (1, 64, 16, 16, 128, 1, 1, 0, 1, True),  # K = 64 < 128: general kernel
+            (1, 132, 16, 16, 64, 1, 1, 0, 1, True),  # K = 132, not a multiple of 8
+            (1, 256, 16, 16, 64, 1, 2, 0, 1, True),  # stride 2
+            (1, 256, 14, 14, 64, 1, 1, 1, 1, True),  # padding 1
+        ],
+    )
+    def test_conv_1x1(
+        self, model_runner, n, in_c, h, w, out_c, k, stride, pad, group, bias
+    ):
+        model = _make_conv_model(
+            in_c,
+            out_c,
+            group,
+            k=k,
+            spatial=(h, w),
+            seed=11,
+            n=n,
+            stride=stride,
+            pad=pad,
+            bias=bias,
+        )
+        rng = np.random.default_rng(3)
+        x = rng.uniform(-1.0, 1.0, [n, in_c, h, w]).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=2e-2, rtol=2e-2, cos_threshold=0.9999)

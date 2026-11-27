@@ -1146,6 +1146,194 @@ conv_window_kernel(const __half *__restrict__ x, const __half *__restrict__ w,
 }
 
 // ---------------------------------------------------------------------------
+// 1x1 convolution as a GEMM (fp16)
+// ---------------------------------------------------------------------------
+//
+// A unit-stride, unpadded 1x1 convolution in NCHW is, per image, the matrix
+// product Y[M = Cout][N = H*W] = W[M][K = Cin] * X[K][N]; X is already the B
+// matrix, so there is no im2col to build and a GEMM-style kernel fits: a 64x64
+// output tile, four waves of 2x2 WMMA fragments, K walked 64 taps at a time
+// (one barrier per step), and the next step's global loads in flight in
+// registers while the matrix cores work on this one, then written to the other
+// half of a double-buffered LDS tile.
+//
+// A is [M][K] with K contiguous, which is the layout a fragment wants, so it is
+// copied as 16-byte vectors. B is [K][N] with N contiguous, and a fragment
+// wants K contiguous for one column, so B is transposed on the way in: each
+// thread loads VECB adjacent columns from two consecutive K rows and packs the
+// pairs (k, k+1) into one 32-bit LDS word per column. VECB is 8, 4 or 1 as the
+// row length N is a multiple of 8, 4 or neither. Rows past M, columns past N
+// and taps past K are zero-filled.
+template <int BM, int BN, int BK, int WAVES_M, int WAVES_N, int VECB>
+__global__ __launch_bounds__(WAVES_M *WAVES_N * 32) void conv1x1_wmma_kernel(
+    const __half *__restrict__ x, const __half *__restrict__ w,
+    const __half *__restrict__ bias, __half *__restrict__ y, ConvParams pr) {
+  constexpr int kThreads = WAVES_M * WAVES_N * 32;
+  constexpr int WM = BM / (WAVES_M * kWmma);
+  constexpr int WN = BN / (WAVES_N * kWmma);
+  // Row pitch in halves: 16-byte aligned for the fragment reads, and off the
+  // LDS bank period so the lanes of a fragment read land on distinct banks.
+  constexpr int LDK = BK + 8;
+  constexpr int kVecA = 8; // halves per 16-byte load of A
+  constexpr int kALoads = BM * BK / kVecA / kThreads;
+  constexpr int kBItems = (BK / 2) * (BN / VECB) / kThreads;
+  static_assert(BM * BK / kVecA % kThreads == 0, "A tiling");
+  static_assert((BK / 2) * (BN / VECB) % kThreads == 0, "B tiling");
+  static_assert(BK % kWmma == 0, "BK is a whole number of WMMA steps");
+
+  __shared__ __align__(16) _Float16 As[2][BM * LDK];
+  __shared__ __align__(16) _Float16 Bs[2][BN * LDK];
+
+  const int tid = threadIdx.x;
+  const int wave = tid / 32;
+  const int lane16 = tid % kWmma;
+  const int pair = (tid % 32) / kWmma;
+  const int waveM = wave / WAVES_N;
+  const int waveN = wave % WAVES_N;
+
+  const int64_t n0 = static_cast<int64_t>(blockIdx.x) * BN;
+  const int64_t m0 = static_cast<int64_t>(blockIdx.y) * BM;
+  int64_t nbatch, g;
+  blockBases(pr, blockIdx.z, nbatch, g);
+  const int64_t K = pr.CinPerGroup, M = pr.MPerGroup, N = pr.Nout;
+  const _Float16 *xb = reinterpret_cast<const _Float16 *>(x) +
+                       (nbatch * pr.Cin + g * K) * pr.inPlane;
+  const _Float16 *wb = reinterpret_cast<const _Float16 *>(w) + g * M * K;
+
+  typedef unsigned int u32x4 __attribute__((ext_vector_type(4)));
+  typedef unsigned int u32x2 __attribute__((ext_vector_type(2)));
+  u32x4 aReg[kALoads];
+  u32x4 bRegLo[kBItems], bRegHi[kBItems]; // two consecutive K rows of B
+
+  const int aKv = (tid % (BK / kVecA)) * kVecA;
+  const int aRow0 = tid / (BK / kVecA);
+  constexpr int aRowStep = kThreads / (BK / kVecA);
+  const int bNv = tid % (BN / VECB);
+  const int bKp0 = tid / (BN / VECB);
+  constexpr int bKpStep = kThreads / (BN / VECB);
+
+  const auto loadChunk = [&](int64_t kBase) {
+#pragma unroll
+    for (int i = 0; i < kALoads; ++i) {
+      const int64_t row = m0 + aRow0 + i * aRowStep;
+      const int64_t k = kBase + aKv;
+      u32x4 v = {0u, 0u, 0u, 0u};
+      if (row < M && k < K)
+        v = *reinterpret_cast<const u32x4 *>(wb + row * K + k);
+      aReg[i] = v;
+    }
+#pragma unroll
+    for (int i = 0; i < kBItems; ++i) {
+      const int64_t k = kBase + 2 * (bKp0 + i * bKpStep);
+      const int64_t n = n0 + bNv * VECB;
+      u32x4 v0 = {0u, 0u, 0u, 0u}, v1 = {0u, 0u, 0u, 0u};
+      if (n < N) {
+        const _Float16 *p0 = xb + k * pr.inPlane + n;
+        const _Float16 *p1 = p0 + pr.inPlane;
+        if constexpr (VECB == 8) {
+          if (k < K) v0 = *reinterpret_cast<const u32x4 *>(p0);
+          if (k + 1 < K) v1 = *reinterpret_cast<const u32x4 *>(p1);
+        } else if constexpr (VECB == 4) {
+          if (k < K) {
+            const u32x2 t = *reinterpret_cast<const u32x2 *>(p0);
+            v0[0] = t[0];
+            v0[1] = t[1];
+          }
+          if (k + 1 < K) {
+            const u32x2 t = *reinterpret_cast<const u32x2 *>(p1);
+            v1[0] = t[0];
+            v1[1] = t[1];
+          }
+        } else {
+          if (k < K) v0[0] = *reinterpret_cast<const unsigned short *>(p0);
+          if (k + 1 < K) v1[0] = *reinterpret_cast<const unsigned short *>(p1);
+        }
+      }
+      bRegLo[i] = v0;
+      bRegHi[i] = v1;
+    }
+  };
+  const auto storeChunk = [&](int buf) {
+#pragma unroll
+    for (int i = 0; i < kALoads; ++i)
+      *reinterpret_cast<u32x4 *>(
+          &As[buf][(aRow0 + i * aRowStep) * LDK + aKv]) = aReg[i];
+#pragma unroll
+    for (int i = 0; i < kBItems; ++i) {
+      const int kp = bKp0 + i * bKpStep;
+#pragma unroll
+      for (int j = 0; j < VECB; ++j) {
+        // Column j of the vector is half j % 2 of word j / 2 in each row.
+        const unsigned lo = (bRegLo[i][j >> 1] >> ((j & 1) * 16)) & 0xffffu;
+        const unsigned hi = (bRegHi[i][j >> 1] >> ((j & 1) * 16)) & 0xffffu;
+        *reinterpret_cast<unsigned *>(
+            &Bs[buf][(bNv * VECB + j) * LDK + 2 * kp]) = lo | (hi << 16);
+      }
+    }
+  };
+
+  float8 acc[WM][WN];
+#pragma unroll
+  for (int i = 0; i < WM; ++i)
+#pragma unroll
+    for (int j = 0; j < WN; ++j) acc[i][j] = (float8)0.0f;
+
+  const int64_t nChunks = (K + BK - 1) / BK;
+  loadChunk(0);
+  storeChunk(0);
+  __syncthreads();
+
+  for (int64_t c = 0; c < nChunks; ++c) {
+    const int buf = static_cast<int>(c & 1);
+    if (c + 1 < nChunks) loadChunk((c + 1) * BK);
+#pragma unroll
+    for (int ks = 0; ks < BK / kWmma; ++ks) {
+      half16 aFrag[WM], bFrag[WN];
+#pragma unroll
+      for (int i = 0; i < WM; ++i)
+        aFrag[i] = loadWmmaFrag(
+            &As[buf][(waveM * WM * kWmma + i * kWmma + lane16) * LDK +
+                     ks * kWmma],
+            pair);
+#pragma unroll
+      for (int j = 0; j < WN; ++j)
+        bFrag[j] = loadWmmaFrag(
+            &Bs[buf][(waveN * WN * kWmma + j * kWmma + lane16) * LDK +
+                     ks * kWmma],
+            pair);
+#pragma unroll
+      for (int i = 0; i < WM; ++i)
+#pragma unroll
+        for (int j = 0; j < WN; ++j)
+          acc[i][j] =
+              HIPDNN_WMMA_F32_16X16X16_F16(aFrag[i], bFrag[j], acc[i][j]);
+    }
+    // The next chunk goes to the half nobody is reading; one barrier both
+    // publishes it and retires this chunk's reads.
+    if (c + 1 < nChunks) storeChunk(buf ^ 1);
+    __syncthreads();
+  }
+
+  const int64_t yBase = (nbatch * pr.Cout + g * M) * N;
+#pragma unroll
+  for (int i = 0; i < WM; ++i) {
+#pragma unroll
+    for (int j = 0; j < WN; ++j) {
+      const int64_t o = n0 + waveN * WN * kWmma + j * kWmma + lane16;
+      if (o >= N) continue;
+#pragma unroll
+      for (int e = 0; e < 8; ++e) {
+        const int64_t m = m0 + waveM * WM * kWmma + i * kWmma +
+                          hipdnn_wmma_acc_row(pair, e);
+        if (m >= M) continue;
+        const float bv = bias ? to_float<__half>(bias[g * M + m]) : 0.0f;
+        y[yBase + m * N + o] = from_float<__half>(acc[i][j][e] + bv);
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Direct kernel — one thread per output element
 // ---------------------------------------------------------------------------
 
@@ -1450,6 +1638,12 @@ static bool tileFits(const ConvParams &pr, int64_t bm, int64_t bn,
   return pr.MPerGroup >= bm && tileCovers(pr, bm, bn, units);
 }
 
+// The WMMA kernels use the gfx11 and gfx12 matrix instructions, which are
+// wave32; on any other target they compile to a trap (HIPDNN_HAS_WMMA). Every
+// dispatch to one of them has to check this, so that fp16 falls to the scalar
+// rungs, which are templated on the element type.
+static bool wmmaSupported() { return hipdnn_device_has_wmma(); }
+
 // fp16 gets first refusal on the matrix cores; everything else, and every fp16
 // shape too small for a WMMA tile, falls through to the scalar ladder.
 template <typename T>
@@ -1463,6 +1657,7 @@ template <>
 bool launchWmmaIfProfitable<__half>(hipStream_t stream, const void *x,
                                     const void *w, const void *bias, void *y,
                                     const ConvParams &pr, int64_t units) {
+  if (!wmmaSupported()) return false;
   // Every coverage test below is in CUs. The rungs were originally calibrated
   // against deviceUnitCount()'s WGPs, which asked each tile for half the grid
   // the test was written to demand, and the effect was not that tiles were
@@ -1597,6 +1792,50 @@ bool launchWmmaIfProfitable<__half>(hipStream_t stream, const void *x,
   return true;
 }
 
+// Whether a convolution is the plain GEMM conv1x1_wmma_kernel computes: unit
+// stride, no padding, so the output grid is the input grid and X is the B
+// matrix as it lies. A is read with 16-byte loads and B with up to 16-byte ones,
+// so the reduction must be a multiple of 8 and both tensors 16-byte aligned.
+//
+// It also wants a reduction deep enough to use its 64-tap step: with K = 64 the
+// pipeline never gets going (one chunk, nothing to overlap) and with 32 half of
+// it is padding, and the general kernel is as fast or faster there.
+constexpr int64_t kConv1x1MinK = 128;
+
+static bool conv1x1Eligible(const ConvParams &pr, const void *x,
+                            const void *w) {
+  return pr.kvol == 1 && pr.s0 == 1 && pr.s1 == 1 && pr.s2 == 1 && pr.p0 == 0 &&
+         pr.p1 == 0 && pr.p2 == 0 && pr.Nout == pr.inPlane &&
+         pr.CinPerGroup % 8 == 0 && pr.CinPerGroup >= kConv1x1MinK &&
+         ((reinterpret_cast<uintptr_t>(x) | reinterpret_cast<uintptr_t>(w)) &
+          15) == 0;
+}
+
+template <int VECB>
+static void launchConv1x1Vec(hipStream_t stream, const void *x, const void *w,
+                             const void *bias, void *y, const ConvParams &pr) {
+  constexpr int kBM = 64, kBN = 64, kBKDepth = 64, kWavesM = 2, kWavesN = 2;
+  logPick("1x1", pr);
+  dim3 grid(static_cast<unsigned>((pr.Nout + kBN - 1) / kBN),
+            static_cast<unsigned>((pr.MPerGroup + kBM - 1) / kBM),
+            static_cast<unsigned>(pr.N * pr.group));
+  hipLaunchKernelGGL(
+      (conv1x1_wmma_kernel<kBM, kBN, kBKDepth, kWavesM, kWavesN, VECB>), grid,
+      dim3(kWavesM * kWavesN * 32), 0, stream, static_cast<const __half *>(x),
+      static_cast<const __half *>(w), static_cast<const __half *>(bias),
+      static_cast<__half *>(y), pr);
+}
+
+static void launchConv1x1(hipStream_t stream, const void *x, const void *w,
+                          const void *bias, void *y, const ConvParams &pr) {
+  if (pr.Nout % 8 == 0)
+    launchConv1x1Vec<8>(stream, x, w, bias, y, pr);
+  else if (pr.Nout % 4 == 0)
+    launchConv1x1Vec<4>(stream, x, w, bias, y, pr);
+  else
+    launchConv1x1Vec<1>(stream, x, w, bias, y, pr);
+}
+
 // Whether a convolution too narrow for every scalar tile is big enough for a
 // tile to beat conv_direct. Below about a million multiply-accumulates the
 // whole problem is a few microseconds and launch overhead decides, so the
@@ -1626,6 +1865,18 @@ static int launch(hipStream_t stream, const void *x, const void *w,
               hipGetErrorString(derr));
     }
     return static_cast<int>(derr);
+  }
+
+  if constexpr (std::is_same<T, __half>::value) {
+    // A WMMA kernel like the ladder's, so it needs the same device check.
+    if (wmmaSupported() && conv1x1Eligible(pr, x, w)) {
+      launchConv1x1(stream, x, w, bias, y, pr);
+      const hipError_t cerr = hipGetLastError();
+      if (cerr != hipSuccess)
+        fprintf(stderr, "[custom_kernels] hip_conv 1x1 launch failed: %s\n",
+                hipGetErrorString(cerr));
+      return static_cast<int>(cerr);
+    }
   }
 
   // Two passes over the ladder. The first asks a tile shape to cover the
