@@ -33,6 +33,7 @@ static_assert(alignof(hip_q8_1_block_t) == HIP_Q8_1_BLOCK_ALIGNMENT);
 std::atomic<int> deviceSupport[kMaximumCachedDevices]{};
 
 bool currentDeviceSupportsMmq() {
+#if HIP_KQUANT_MMQ_DEVICE_ENABLED
   int device = -1;
   if (hipGetDevice(&device) != hipSuccess || device < 0 ||
       device >= kMaximumCachedDevices)
@@ -51,6 +52,10 @@ bool currentDeviceSupportsMmq() {
       (properties.gcnArchName[7] == '\0' || properties.gcnArchName[7] == ':');
   deviceSupport[device].store(supported ? 1 : -1, std::memory_order_release);
   return supported;
+#else
+  // This slice has no MMQ device code (kquant_mmq_device.h).
+  return false;
+#endif
 }
 
 /// Whether MMQ runs a weight format.

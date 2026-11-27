@@ -40,10 +40,12 @@
 #include <cstdint>
 #include <type_traits>
 
-// Device code is generated for RDNA 3.5 only, whose WMMA layout and tile
-// configurations it uses; the launcher runs it on gfx1151 only.
-#if defined(__gfx1150__) || defined(__gfx1151__) || defined(__gfx1152__) ||    \
-    defined(__gfx1153__)
+// The tiles use RDNA 3.5's WMMA layout and tile configurations, and the
+// launcher runs them on gfx1151 only. Device code is generated in the slices
+// CMake builds with HIP_KQUANT_MMQ_DEVICE_ENABLED (gfx1151 and gfx11-generic,
+// the two a gfx1151 loads), and the launcher checks the same flag: the target
+// macros cannot decide it, as gfx11-generic defines none of RDNA 3.5's.
+#if defined(__HIP_DEVICE_COMPILE__) && HIP_KQUANT_MMQ_DEVICE_ENABLED
 #define HIP_KQUANT_MMQ_DEVICE 1
 #endif
 
