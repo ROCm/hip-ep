@@ -31,10 +31,12 @@
 // Four launch shapes, picked by width in `launch_softmax` at the bottom:
 //   wave     one wavefront per row, the row in registers, 16-byte accesses,
 //            no LDS and no barrier. cols == wave * {1,2,4} vectors per lane.
-//   regcache one block per row, one element per thread. cols <= threads.
+//   masked   one wavefront per row of any width up to wave * kMaskedMaxPerLane,
+//            lanes past `cols` masked. Same shuffle-only reductions.
 //   block    one block per row, up to kBlockMaxElems elements per thread in
-//            registers, vector accesses. cols <= 256 * kBlockMaxElems. The
-//            row is read once and written once.
+//            registers, vector accesses. 256 threads up to kRowCols columns,
+//            1024 threads up to kWideRowCols. The row is read once and
+//            written once.
 //   general  one block per row, three strided passes over memory. Any cols.
 // This is the usual three-tier row-softmax design (warp per row, block per
 // row with the row cached, uncached fallback), as in OneFlow's softmax.cuh
@@ -65,10 +67,28 @@
 // Wavefronts per block for the wave-per-row kernels: one row each.
 static constexpr int kWavesPerBlock = 8;
 
-// Largest per-thread element count of the block kernel, and its block size.
-// 32 fp32 values per thread stay well clear of a register spill.
+// Masked wave kernel: up to kMaxWaveElems values per lane, for rows of at most
+// kMaskedMaxPerLane * wave columns. Wider rows go to a block per row. A wavefront
+// per row packs eight rows into one block with no LDS and no barrier, which
+// wins by 25-45% on rows of up to 64 columns and ties at 96. Beyond that a
+// block with 8- or 16-byte vector loads is 5-20% faster than the masked
+// kernel's element-sized loads, so the limit is three values per lane
+// (measured on gfx1151, fp16 and fp32, 65536 rows).
+static constexpr int kMaxWaveElems = 4;
+static constexpr int kMaskedMaxPerLane = 3;
+
+// Largest per-thread element count of the block kernel. 32 fp32 values per
+// thread stay well clear of a register spill at either block size.
 static constexpr int kBlockMaxElems = 32;
+
+// Block per row: up to 256 threads for rows up to kRowCols, 1024 threads up to
+// kWideRowCols. The block reductions fold one wave of per-wave partials, so a
+// block may hold at most one wave's worth of waves: 1024 threads is 32 waves on
+// a 32-lane wave and 16 on a 64-lane wave, within the limit on both.
 static constexpr int kMaxThreads = 256;
+static constexpr int kWideRowThreads = 1024;
+static constexpr int kRowCols = kMaxThreads * kBlockMaxElems;
+static constexpr int kWideRowCols = kWideRowThreads * kBlockMaxElems;
 
 namespace {
 
@@ -162,37 +182,8 @@ __device__ __host__ inline int softmax_smem_floats(int num_waves) {
 // The general kernel below re-reads the row from memory in each of its three
 // passes because the value it needs is not kept anywhere. When a thread owns a
 // fixed slice of the row, that value fits in a register and the row only has
-// to be read once and written once. The three variants below exploit that;
-// they differ in how a row is divided among threads.
-
-// One element per thread, block per row. Valid when `cols <= blockDim.x`, so
-// the general kernel's strided loop would run exactly one iteration anyway.
-// Reductions still cross the whole block, so the barriers remain.
-template <typename T>
-__global__ void softmax_row_2d_regcache_kernel(const T* in, T* out, int rows,
-                                               int cols) {
-  const int row = blockIdx.x;
-  if (row >= rows)
-    return;
-  const T* in_row = in + (size_t)row * cols;
-  T* out_row = out + (size_t)row * cols;
-
-  const int tid = threadIdx.x;
-  const int num_waves = blockDim.x / HIPDNN_WAVE_SIZE;
-  const bool active = tid < cols;
-
-  extern __shared__ float smem[];
-
-  const float x = active ? SoftmaxIO<T>::load(in_row[tid]) : -INFINITY;
-  const float row_max =
-      block_reduce_max_f(x, smem, tid, num_waves, num_waves);
-  const float e = active ? exp2f((x - row_max) * LOG2E) : 0.0f;
-  const float inv =
-      1.0f / block_reduce_sum_f(e, smem, tid, num_waves, num_waves + 1);
-
-  if (active)
-    out_row[tid] = SoftmaxIO<T>::store(e * inv);
-}
+// to be read once and written once. The variants below exploit that; they
+// differ in how a row is divided among threads.
 
 // One wavefront per row, `ELEMS` elements per lane held in registers. Valid
 // when `cols == wave * ELEMS` and ELEMS is a multiple of the 16-byte vector
@@ -258,10 +249,61 @@ __global__ void softmax_row_2d_wave_kernel(const T* in, T* out, int rows,
   }
 }
 
+// One wavefront per row of any width up to `wave * ELEMS`, several rows per
+// block. Element `lane + i * wave` lives in lane `lane`, so every load stays
+// coalesced across the wave; lanes past `cols` are masked. Both reductions are
+// shuffles, so a short row never pays for LDS or a barrier.
+//
+// Rows per block come from `blockDim.x / HIPDNN_WAVE_SIZE`, never from the
+// launcher's constant. The host sizes the block from the device's wave size
+// and the device code divides by the same value, so the two agree on any
+// wave size. A row index taken from a fixed rows-per-block would stride past
+// the rows a narrower block covers and leave them unwritten.
+template <typename T, int ELEMS>
+__global__ __launch_bounds__(kWavesPerBlock *HIPDNN_WAVE_SIZE) void
+softmax_row_2d_masked_wave_kernel(const T* in, T* out, int rows, int cols) {
+  const int lane = threadIdx.x % HIPDNN_WAVE_SIZE;
+  const int row = blockIdx.x * (int)(blockDim.x / HIPDNN_WAVE_SIZE) +
+                  threadIdx.x / HIPDNN_WAVE_SIZE;
+  if (row >= rows)
+    return;
+  const T* in_row = in + (size_t)row * cols;
+  T* out_row = out + (size_t)row * cols;
+
+  float x[ELEMS];
+  float local_max = -INFINITY;
+#pragma unroll
+  for (int i = 0; i < ELEMS; ++i) {
+    const int j = lane + i * HIPDNN_WAVE_SIZE;
+    x[i] = (j < cols) ? SoftmaxIO<T>::load(in_row[j]) : -INFINITY;
+    local_max = fmaxf(local_max, x[i]);
+  }
+  const float row_max = warp_reduce_max_f(local_max);
+
+  float local_sum = 0.0f;
+#pragma unroll
+  for (int i = 0; i < ELEMS; ++i) {
+    const int j = lane + i * HIPDNN_WAVE_SIZE;
+    x[i] = (j < cols) ? exp2f((x[i] - row_max) * LOG2E) : 0.0f;
+    local_sum += x[i];
+  }
+  const float inv = 1.0f / warp_reduce_sum_f(local_sum);
+
+#pragma unroll
+  for (int i = 0; i < ELEMS; ++i) {
+    const int j = lane + i * HIPDNN_WAVE_SIZE;
+    if (j < cols)
+      out_row[j] = SoftmaxIO<T>::store(x[i] * inv);
+  }
+}
+
 // One block per row, up to `ELEMS` elements per thread held in fp32
 // registers, moved in `VEC`-element vectors. Valid when
 // `blockDim.x * ELEMS >= cols`, `cols % VEC == 0` and both buffers are
 // aligned to the vector width; the launcher picks the widest such VEC.
+// `MAXT` is the largest block the launcher uses with this instantiation: it
+// sets `__launch_bounds__`, so the 1024-thread tier compiles to a register
+// budget that fits.
 //
 // This is the long-row counterpart of the wave kernel: a row too wide for one
 // wavefront is still read once and written once, where the general kernel
@@ -272,8 +314,8 @@ __global__ void softmax_row_2d_wave_kernel(const T* in, T* out, int rows,
 //
 // A thread writes back exactly the vectors it read, after both reductions,
 // so the source-aliases-destination case needs no extra barrier.
-template <typename T, int ELEMS, int VEC>
-__global__ void __launch_bounds__(kMaxThreads)
+template <typename T, int MAXT, int ELEMS, int VEC>
+__global__ void __launch_bounds__(MAXT)
     softmax_row_2d_block_kernel(const T* in, T* out, int rows, int cols) {
   static_assert(ELEMS % VEC == 0, "ELEMS must fill whole vectors");
   constexpr int kVecs = ELEMS / VEC;
@@ -395,28 +437,61 @@ int launch_wave(hipStream_t stream, const T* in, T* out, int rows, int cols,
   return hipGetLastError();
 }
 
-template <typename T, int ELEMS, int VEC>
+// Smallest power of two >= n, for picking a register-array bucket.
+int softmax_pow2_ceil(int n) {
+  int p = 1;
+  while (p < n)
+    p *= 2;
+  return p;
+}
+
+// Masked wave: the smallest power-of-two number of elements per lane that
+// covers the row. The block holds kWavesPerBlock wavefronts of the device's
+// wave size, and the grid covers `rows` at that many rows per block.
+template <typename T>
+int launch_masked_wave(hipStream_t stream, const T* in, T* out, int rows,
+                       int cols, int wave) {
+  const int grid = 1 + (rows - 1) / kWavesPerBlock;
+  const int block = kWavesPerBlock * wave;
+  switch (softmax_pow2_ceil((cols + wave - 1) / wave)) {
+  case 1:
+    softmax_row_2d_masked_wave_kernel<T, 1>
+        <<<grid, block, 0, stream>>>(in, out, rows, cols);
+    break;
+  case 2:
+    softmax_row_2d_masked_wave_kernel<T, 2>
+        <<<grid, block, 0, stream>>>(in, out, rows, cols);
+    break;
+  default:
+    softmax_row_2d_masked_wave_kernel<T, kMaxWaveElems>
+        <<<grid, block, 0, stream>>>(in, out, rows, cols);
+    break;
+  }
+  return hipGetLastError();
+}
+
+template <typename T, int MAXT, int ELEMS, int VEC>
 int launch_block(hipStream_t stream, const T* in, T* out, int rows, int cols,
                  int threads, int wave) {
-  softmax_row_2d_block_kernel<T, ELEMS, VEC>
+  softmax_row_2d_block_kernel<T, MAXT, ELEMS, VEC>
       <<<rows, threads, smem_bytes_for(threads, wave), stream>>>(in, out, rows,
                                                                  cols);
   return hipGetLastError();
 }
 
-template <typename T, int ELEMS>
+template <typename T, int MAXT, int ELEMS>
 int launch_block_vec(hipStream_t stream, const T* in, T* out, int rows,
                      int cols, int threads, int wave, int vec_bytes) {
   switch (vec_bytes) {
   case 16:
-    return launch_block<T, ELEMS, 16 / sizeof(T)>(stream, in, out, rows, cols,
-                                                  threads, wave);
+    return launch_block<T, MAXT, ELEMS, 16 / sizeof(T)>(stream, in, out, rows,
+                                                        cols, threads, wave);
   case 8:
-    return launch_block<T, ELEMS, 8 / sizeof(T)>(stream, in, out, rows, cols,
-                                                 threads, wave);
+    return launch_block<T, MAXT, ELEMS, 8 / sizeof(T)>(stream, in, out, rows,
+                                                       cols, threads, wave);
   default:
-    return launch_block<T, ELEMS, 1>(stream, in, out, rows, cols, threads,
-                                     wave);
+    return launch_block<T, MAXT, ELEMS, 1>(stream, in, out, rows, cols,
+                                           threads, wave);
   }
 }
 
@@ -467,39 +542,41 @@ int launch_softmax(void* stream_ptr, const void* input, void* output, int rows,
       return launch_wave<T, kVecElems * 4>(stream, in, out, rows, cols, wave);
   }
 
-  // One element per thread: the smallest power-of-two block of at least one
-  // wave that covers the row.
-  int threads = wave;
-  while (threads < cols && threads < kMaxThreads)
-    threads *= 2;
-  if (cols <= threads) {
-    softmax_row_2d_regcache_kernel<T>
-        <<<rows, threads, smem_bytes_for(threads, wave), stream>>>(in, out,
-                                                                   rows, cols);
-    return hipGetLastError();
-  }
+  // One wavefront per row for a row of at most kMaskedMaxPerLane values per lane,
+  // with the lanes past `cols` masked.
+  if (cols <= wave * kMaskedMaxPerLane)
+    return launch_masked_wave<T>(stream, in, out, rows, cols, wave);
 
   // Row in registers: the fewest elements per thread, then the smallest block,
-  // that covers the row.
-  if (cols <= kMaxThreads * kBlockMaxElems) {
+  // that covers the row. A row wider than kRowCols takes the 1024-thread
+  // block.
+  if (cols <= kWideRowCols) {
     const int vec_bytes =
         pick_vec_bytes(in, out, cols, static_cast<int>(sizeof(T)));
-    for (int elems : {8, 16, kBlockMaxElems}) {
-      for (int t = wave; t <= kMaxThreads; t *= 2) {
-        if (t * elems < cols)
-          continue;
-        switch (elems) {
-        case 8:
-          return launch_block_vec<T, 8>(stream, in, out, rows, cols, t, wave,
-                                        vec_bytes);
-        case 16:
-          return launch_block_vec<T, 16>(stream, in, out, rows, cols, t, wave,
-                                         vec_bytes);
-        default:
-          return launch_block_vec<T, kBlockMaxElems>(stream, in, out, rows,
-                                                     cols, t, wave, vec_bytes);
+    if (cols <= kRowCols) {
+      for (int elems : {8, 16, kBlockMaxElems}) {
+        for (int t = wave; t <= kMaxThreads; t *= 2) {
+          if (t * elems < cols)
+            continue;
+          switch (elems) {
+          case 8:
+            return launch_block_vec<T, kMaxThreads, 8>(
+                stream, in, out, rows, cols, t, wave, vec_bytes);
+          case 16:
+            return launch_block_vec<T, kMaxThreads, 16>(
+                stream, in, out, rows, cols, t, wave, vec_bytes);
+          default:
+            return launch_block_vec<T, kMaxThreads, kBlockMaxElems>(
+                stream, in, out, rows, cols, t, wave, vec_bytes);
+          }
         }
       }
+    } else if (cols <= kWideRowThreads * 16) {
+      return launch_block_vec<T, kWideRowThreads, 16>(
+          stream, in, out, rows, cols, kWideRowThreads, wave, vec_bytes);
+    } else {
+      return launch_block_vec<T, kWideRowThreads, kBlockMaxElems>(
+          stream, in, out, rows, cols, kWideRowThreads, wave, vec_bytes);
     }
   }
 

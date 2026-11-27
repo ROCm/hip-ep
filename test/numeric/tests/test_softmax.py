@@ -5,12 +5,12 @@
 
 """Numeric tests for standalone ONNX Softmax -> hip.miopen.softmax.
 
-The runtime picks one of four kernels from the row width (wave per row,
-one element per thread, row cached in registers, three-pass fallback), so the
-widths below sit on each side of every dispatch boundary: 256 (one element per
-thread), 2048/4096/8192 (registers at 8/16/32 values per thread), 8193 (the
-fallback), plus widths whose byte size selects 16-byte, 8-byte or scalar
-accesses (4096, 1500, 2049).
+The runtime picks one of four kernels from the row width: a wavefront per row
+(exact vector widths, or masked for any width up to three values per lane), a
+256-thread block per row with the row in registers up to 8192, a 1024-thread
+block up to 32768, and the three-pass fallback past that. The widths below sit
+on each side of every dispatch boundary, plus widths whose byte size selects
+16-byte, 8-byte or scalar accesses (4096, 1500, 2049).
 
 Reference strategy: a numpy fp64 softmax of the exact input values, not ORT
 CPU, because ORT CPU accumulates fp16 softmax in fp16 and has no bf16 Softmax.
@@ -33,7 +33,36 @@ TOLERANCE = {
     ml_dtypes.bfloat16: (8e-3, 2e-2),
 }
 
-BOUNDARY_COLS = [1, 7, 256, 257, 1000, 1500, 2048, 2049, 4096, 8192, 8193]
+BOUNDARY_COLS = [
+    1,
+    7,
+    20,
+    32,
+    33,
+    77,
+    128,
+    197,
+    256,
+    257,
+    512,
+    513,
+    577,
+    1000,
+    1024,
+    1025,
+    1500,
+    2048,
+    2049,
+    4096,
+    8192,
+    8193,
+    14400,
+    16384,
+    16385,
+    32768,
+    32769,
+    40000,
+]
 
 
 def _make_softmax_model(shape, dtype, axis=None):
@@ -86,12 +115,53 @@ class TestSoftmax:
         x = _random_input([5, cols], dtype, seed=cols)
         _run_and_compare(model_runner, x)
 
-    @pytest.mark.parametrize("cols", [8193, 30000])
+    @pytest.mark.parametrize(
+        "shape,dtype",
+        [
+            ([4096, 49], np.float32),
+            ([2048, 197], np.float16),
+            ([256, 4096], np.float32),
+            ([64, 14400], np.float16),
+        ],
+    )
+    def test_many_rows(self, model_runner, shape, dtype):
+        x = _random_input(shape, dtype, seed=shape[-1])
+        _run_and_compare(model_runner, x)
+
+    # The masked wavefront kernel packs several rows into one block, and the
+    # block size comes from the device's wave size. A kernel that took its
+    # rows per block from a different wave size than the launcher used would
+    # leave some rows of a block unwritten, so these row counts sit on and
+    # off every multiple of 8 and of 4, with widths below one wave, within it
+    # and past it. Each row is compared, so an unwritten row fails the test.
+    @pytest.mark.parametrize("dtype", [np.float16, np.float32])
+    @pytest.mark.parametrize(
+        "rows,cols",
+        [
+            (8, 77),
+            (9, 77),
+            (16, 77),
+            (4, 77),
+            (5, 33),
+            (7, 197),
+            (17, 300),
+            (33, 512),
+            (8, 513),
+            (13, 1024),
+        ],
+    )
+    def test_every_row_written(self, model_runner, dtype, rows, cols):
+        x = _random_input([rows, cols], dtype, seed=rows * 1000 + cols)
+        _run_and_compare(model_runner, x)
+
+    # 8193 and 30000 stay on the block kernel (cutoff 32768). 32769 and 40000
+    # are past it, so they take the three-pass fallback. Both paths keep the
+    # exponents in fp32; the bound below is what checks that.
+    @pytest.mark.parametrize("cols", [8193, 30000, 32769, 40000])
     def test_fp16_fallback_rounds_once(self, model_runner, cols):
-        # The three-pass fallback keeps its exponents in fp32, so each fp16
-        # output is the exact softmax rounded once: within half an fp16 step,
-        # 2^-11 relative, or 2^-25 among the subnormals. A stored fp16
-        # exponent would round twice and miss this bound on many elements.
+        # Each fp16 output is the exact softmax rounded once: within half an
+        # fp16 step, 2^-11 relative, or 2^-25 among the subnormals. A stored
+        # fp16 exponent would round twice and miss this bound on many elements.
         x = _random_input([5, cols], np.float16, seed=cols)
         model = _make_softmax_model(list(x.shape), np.float16, -1)
         actual = model_runner.backend.run(_persist(model_runner, model), [x])
