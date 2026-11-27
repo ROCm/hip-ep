@@ -83,7 +83,7 @@ Whatever it does not compile, ggml-hip runs
 | `hipep_backend_open(device, cache_dir)` | a context per HIP device; the cache: `cache_dir`, else `HIPEP_BACKEND_CACHE`, else `~/.cache/hipep` |
 | `hipep_backend_supports(ctx, node)` | whether it compiles an operation, its sources and what it views |
 | `hipep_backend_find(ctx, split)` | code compiled already, here or in the cache, for the split's sizes or with dynamic shapes that fit it; null otherwise |
-| `hipep_backend_compile(ctx, split, wait)` | the split compiled on this thread (`wait`) or in the background; a split refused is not tried again |
+| `hipep_backend_compile(ctx, split, wait)` | the split compiled on this thread (`wait`) or in the background; a split the compiler refused is not tried again, here or in a later process; one whose code could not be made or loaded (the disk, the device's memory) not in this process |
 | `hipep_backend_run(code, data, NULL)` | the code on the split's tensors' memory, `data[i]` tensor `i`'s |
 | `hipep_backend_close(ctx)` | waits for a compile under way |
 | `hipep_backend_last_error(ctx)` | why the last call on this thread returned nothing |
@@ -115,8 +115,12 @@ what it views, depth first), then the node -, and the library checks it;
    with: a split no code fits is compiled with the symbols derived at its
    sizes, where a size of one is no symbol (a decode step's code is for one
    token). A split that could be compiled neither with dynamic shapes nor
-   with its own (`d<dynamic signature>.failed`) refuses its structure: a
-   split of it at another size runs on ggml-hip without a compile. A view
+   with its own refuses its structure: a split of it at another size runs
+   on ggml-hip without a compile. The cache keeps only what the compiler
+   refused (`<signature>.failed`, `d<dynamic signature>.failed`,
+   `d<dynamic signature>.refused.json`), for the library that refused it; a
+   split whose code could not be made or loaded otherwise - the disk, memory,
+   the device - is refused in this process alone. A view
    of storage the split does not compute (a cache's window another backend
    attends over) is not handed out: ggml points it at that storage. A split
    whose last nodes have no

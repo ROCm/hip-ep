@@ -117,7 +117,9 @@ hipep_backend_find(hipep_backend_ctx *ctx,
 
 /* Compiles the split. With `wait`, on this thread: its code, or null when it
    cannot be compiled. Without, in the background: null now, the code from
-   `find` once it is ready. A split it could not compile is not tried again. */
+   `find` once it is ready. A split the compiler refused is not tried again,
+   in this process or a later one; one whose code could not be made or loaded
+   otherwise, not in this process. */
 HIPEP_BACKEND_API hipep_backend_code *
 hipep_backend_compile(hipep_backend_ctx *ctx,
                       const hipep_backend_split_desc *split, int wait);

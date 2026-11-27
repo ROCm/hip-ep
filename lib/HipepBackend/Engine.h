@@ -14,6 +14,12 @@
 // does not fit has its symbols derived again: other symbols compile the
 // dynamic-shape code's next generation; the same ones, none, or refused ones
 // compile the split with static shapes, as it is.
+//
+// Failures. A split the compiler refuses (a hip::ggml::Error: a statement
+// about the split, Error.h) it would refuse again: the cache keeps the
+// refusal, for every process of this library. A split whose code could not be
+// made or loaded otherwise - the cache's disk, memory, the device - has no
+// code in this process alone: the next one tries again.
 
 #ifndef HIPEP_BACKEND_ENGINE_H
 #define HIPEP_BACKEND_ENGINE_H
@@ -108,12 +114,14 @@ private:
                                   const std::string &signature,
                                   const Graph &graph);
   void process(Job job);
+  /// `refused`: no `code` because the compiler refused the split, which the
+  /// cache then keeps.
   void finish(const Job &job, std::shared_ptr<Compiled> code,
-              const std::string &error);
+              const std::string &error, bool refused);
   void worker();
   std::shared_ptr<Compiled>
   build(const Job &job, const hip::ggml::capture::SplitCapture &capture,
-        std::string &error);
+        std::string &error, bool &refused);
   std::shared_ptr<Compiled> load(const std::string &directory,
                                  std::string &error);
   /// Waits for the compile under way and stops compiling.
@@ -130,6 +138,7 @@ private:
   bool stopping_ = false;
   std::thread thread_;
   int64_t compiles_ = 0;
+  int64_t refusals_ = 0;
   int64_t failures_ = 0;
   double compileSeconds_ = 0;
 };
