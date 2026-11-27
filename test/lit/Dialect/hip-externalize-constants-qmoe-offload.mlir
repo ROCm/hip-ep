@@ -1,8 +1,8 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// RUN: env HIPDNN_EP_QMOE_EXPERT_OFFLOAD=1 hip-mlir-opt --hip-externalize-constants='externalize-min-num-elements=1 skip-constant-data=true' %s | FileCheck %s
-// RUN: env -u HIPDNN_EP_QMOE_EXPERT_OFFLOAD hip-mlir-opt --hip-externalize-constants='externalize-min-num-elements=1 skip-constant-data=true' %s | FileCheck %s --check-prefix=OFF
+// RUN: env -u HIPDNN_EP_QMOE_EXPERT_OFFLOAD hip-mlir-opt --hip-externalize-constants='externalize-min-num-elements=1 skip-constant-data=true' %s | FileCheck %s
+// RUN: env HIPDNN_EP_QMOE_EXPERT_OFFLOAD=0 hip-mlir-opt --hip-externalize-constants='externalize-min-num-elements=1 skip-constant-data=true' %s | FileCheck %s --check-prefix=OFF
 
 // CHECK: module attributes
 // CHECK-SAME: hipdnn.constant_source_kinds = array<i32: 4, 4, 4, 4, 4, 4, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2>

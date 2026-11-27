@@ -1904,9 +1904,12 @@ int wrap_qmoe(
     float routed_scaling_factor, float routing_norm_eps);
 
 // wrap_qmoe whose fc1/fc2 weights, scales, and bias are disk-resident
-// constant indices (-1 for an absent bias). Experts are served from a slot
-// cache shared by the num_nodes offloaded QMoE calls; `node` is this call's
-// position among them. HIPDNN_EP_QMOE_EXPERT_CACHE_MB caps the cache size.
+// constant indices (-1 for an absent bias); `node` is this call's position
+// among the num_nodes offloaded QMoE calls. When all of their experts fit in
+// free device memory less HIPDNN_EP_QMOE_EXPERT_RESERVE_MB (default 1024),
+// each node uploads its tables once; otherwise experts are served from a slot
+// cache of that size. HIPDNN_EP_QMOE_EXPERT_CACHE_MB sets the cache size and
+// HIPDNN_EP_QMOE_EXPERT_OFFLOAD=1 forces the cache.
 int wrap_qmoe_offload(RuntimeState *state, const void *input,
                       const void *router_probs, const void *router_weights,
                       int64_t fc1_weights, int64_t fc1_scales, int64_t fc1_bias,

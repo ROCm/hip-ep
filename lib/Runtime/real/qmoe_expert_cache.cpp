@@ -97,6 +97,12 @@ struct Cache {
   std::vector<int32_t> key_slot;
   uint64_t call = 0;
 
+  // All experts fit: each node uploads its whole tables once and runs
+  // without the slot hook, so there is no per-call readback.
+  bool resident = false;
+  std::vector<void *> node_base;
+  std::vector<std::array<char *, kSegments>> node_seg;
+
   int32_t *host_idx = nullptr;
   size_t host_idx_cap = 0;
   uint8_t *staging = nullptr;
@@ -146,6 +152,11 @@ void destroyCache(RuntimeState *state) {
   for (Pool &p : c->pools) {
     if (p.base) {
       (void)hipdnn_ep_state_device_free(state, p.base);
+    }
+  }
+  for (void *base : c->node_base) {
+    if (base) {
+      (void)hipdnn_ep_state_device_free(state, base);
     }
   }
   if (c->host_idx) {
@@ -211,15 +222,44 @@ Cache *createCache(RuntimeState *state, const int64_t constants[kSegments],
   }
 
   const int64_t all = num_nodes * num_experts;
-  int64_t total = all;
+  int64_t budget = 0;
+  size_t free_bytes = 0;
   const std::string mb =
       hipdnn_ep::env_string("HIPDNN_EP_QMOE_EXPERT_CACHE_MB");
   if (!mb.empty()) {
-    const int64_t bytes = static_cast<int64_t>(atoll(mb.c_str())) << 20;
-    total = std::min(all, bytes / c->expert_bytes);
+    budget = static_cast<int64_t>(atoll(mb.c_str())) << 20;
+  } else {
+    size_t total_bytes = 0;
+    if (hipMemGetInfo(&free_bytes, &total_bytes) != hipSuccess) {
+      fprintf(stderr, "[QMoE offload] hipMemGetInfo failed\n");
+      delete c;
+      return nullptr;
+    }
+    const std::string reserve =
+        hipdnn_ep::env_string("HIPDNN_EP_QMOE_EXPERT_RESERVE_MB");
+    budget =
+        static_cast<int64_t>(free_bytes) -
+        (static_cast<int64_t>(reserve.empty() ? 1024 : atoll(reserve.c_str()))
+         << 20);
+    c->resident =
+        hipdnn_ep::env_string("HIPDNN_EP_QMOE_EXPERT_OFFLOAD") != "1" &&
+        all * c->expert_bytes <= budget;
   }
-  const int64_t n_pools = (total + kMaxPoolSlots - 1) / kMaxPoolSlots;
-  if (n_pools <= 0 || n_pools > num_nodes || total / n_pools < num_experts) {
+  const int64_t total =
+      c->resident
+          ? all
+          : std::min(all, std::max<int64_t>(budget, 0) / c->expert_bytes);
+
+  c->node_constants.resize(num_nodes);
+  c->node_registered.assign(num_nodes, false);
+  if (c->resident) {
+    c->node_base.assign(num_nodes, nullptr);
+    c->node_seg.resize(num_nodes);
+  }
+  const int64_t n_pools =
+      c->resident ? 0 : (total + kMaxPoolSlots - 1) / kMaxPoolSlots;
+  if (!c->resident &&
+      (n_pools <= 0 || n_pools > num_nodes || total / n_pools < num_experts)) {
     fprintf(stderr,
             "[QMoE offload] %lld slots cannot give each pool at least %lld "
             "slots\n",
@@ -227,11 +267,10 @@ Cache *createCache(RuntimeState *state, const int64_t constants[kSegments],
     delete c;
     return nullptr;
   }
-
-  c->node_constants.resize(num_nodes);
-  c->node_registered.assign(num_nodes, false);
   c->node_pool.resize(num_nodes);
-  c->key_slot.assign(all, -1);
+  if (!c->resident) {
+    c->key_slot.assign(all, -1);
+  }
   c->pools.resize(n_pools);
   int64_t node = 0;
   for (int64_t p = 0; p < n_pools; ++p) {
@@ -301,11 +340,13 @@ Cache *createCache(RuntimeState *state, const int64_t constants[kSegments],
   c->stats = hipdnn_ep::env_enabled("HIPDNN_EP_QMOE_EXPERT_STATS");
   if (c->stats) {
     fprintf(stderr,
-            "[QMoE offload] nodes=%lld experts=%lld expert_bytes=%lld "
-            "slots=%lld of %lld pools=%lld io=%s\n",
-            (long long)num_nodes, (long long)num_experts,
-            (long long)c->expert_bytes, (long long)total, (long long)all,
-            (long long)n_pools, c->direct ? "direct" : "mmap");
+            "[QMoE offload] mode=%s nodes=%lld experts=%lld "
+            "expert_bytes=%lld slots=%lld of %lld pools=%lld io=%s "
+            "free_bytes=%zu\n",
+            c->resident ? "resident" : "cache", (long long)num_nodes,
+            (long long)num_experts, (long long)c->expert_bytes,
+            (long long)total, (long long)all, (long long)n_pools,
+            c->direct ? "direct" : "mmap", free_bytes);
   }
   state->qmoe_expert_cache = c;
   state->qmoe_expert_cache_destroy = destroyCache;
@@ -373,6 +414,38 @@ int registerNode(RuntimeState *state, Cache *c, int64_t node,
       c->node_files[node][j] = h;
     }
 #endif
+  }
+  if (c->resident) {
+    size_t bytes = 0;
+    for (int j = 0; j < kSegments; ++j) {
+      bytes += alignUp(static_cast<size_t>(c->num_experts * c->seg_bytes[j]));
+    }
+    if (hipdnn_ep_state_device_alloc(state, &c->node_base[node], bytes) !=
+        hipSuccess) {
+      c->node_base[node] = nullptr;
+      fprintf(stderr, "[QMoE offload] expert alloc of %zu bytes failed\n",
+              bytes);
+      return -1;
+    }
+    char *cursor = static_cast<char *>(c->node_base[node]);
+    for (int j = 0; j < kSegments; ++j) {
+      const size_t table =
+          static_cast<size_t>(c->num_experts * c->seg_bytes[j]);
+      c->node_seg[node][j] = nullptr;
+      if (table > 0) {
+        c->node_seg[node][j] = cursor;
+        const DiskConstant &dc =
+            state->disk_constants[c->node_constants[node][j]];
+        if (hipMemcpy(cursor, dc.data, table, hipMemcpyHostToDevice) !=
+            hipSuccess) {
+          fprintf(stderr, "[QMoE offload] expert upload failed\n");
+          (void)hipdnn_ep_state_device_free(state, c->node_base[node]);
+          c->node_base[node] = nullptr;
+          return -1;
+        }
+      }
+      cursor += alignUp(table);
+    }
   }
   c->node_registered[node] = true;
   return 0;
@@ -676,6 +749,17 @@ int wrap_qmoe_offload(RuntimeState *state, const void *input,
             "layout\n",
             (long long)node);
     return -1;
+  }
+  if (c->resident) {
+    const auto &seg = c->node_seg[node];
+    return hipdnn_ep_qmoe_run(
+        state, input, router_probs, router_weights, seg[0], seg[1], seg[2],
+        seg[3], seg[4], seg[5], fc3_weights, fc3_scales, fc3_bias,
+        fc1_zero_points, fc2_zero_points, fc3_zero_points, output, num_tokens,
+        hidden_size, inter_size, num_experts, k, expert_weight_bits, block_size,
+        swiglu_fusion, activation_type, activation_alpha, activation_beta,
+        swiglu_limit, normalize_routing_weights, elem_size, correction_bias,
+        routing_type, routed_scaling_factor, routing_norm_eps, nullptr);
   }
   PrepareCtx ctx{state, c, node};
   const QMoEExpertHook hook{c->pools[c->node_pool[node]].slots, prepare, &ctx};

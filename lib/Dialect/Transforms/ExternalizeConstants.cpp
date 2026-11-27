@@ -431,7 +431,7 @@ private:
   // A QMoE offloads all of its expert operands or none of them.
   void collectOffloadedQMoEExperts() {
     if (!skipData || minElements <= 0 ||
-        hip_get_env("HIPDNN_EP_QMOE_EXPERT_OFFLOAD") != "1") {
+        hip_get_env("HIPDNN_EP_QMOE_EXPERT_OFFLOAD") == "0") {
       return;
     }
     module.walk([&](hip::QMoEOp qmoe) {

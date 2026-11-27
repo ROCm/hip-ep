@@ -1050,11 +1050,11 @@ def ExternalizeConstantsPass
     `hip.external_data`, takes no range in the GPU constants layout, and is
     recorded with source kind `DiskFile`.
 
-    With `skip-constant-data` and `HIPDNN_EP_QMOE_EXPERT_OFFLOAD=1`, the same
-    applies to the fc1 / fc2 weights, scales, and bias of a `hip.qmoe` that has
-    no zero points, when each of them is a file-backed carrier used only by
-    that `hip.qmoe` as expert data. A `hip.qmoe` gets all of them disk-resident
-    or none.
+    With `skip-constant-data`, unless `HIPDNN_EP_QMOE_EXPERT_OFFLOAD=0`, the
+    same applies to the fc1 / fc2 weights, scales, and bias of a `hip.qmoe`
+    that has no zero points, when each of them is a file-backed carrier used
+    only by that `hip.qmoe` as expert data. A `hip.qmoe` gets all of them
+    disk-resident or none.
 
     This pass preserves full-sidecar, streaming, and hybrid skip-data behavior.
     It must run after all constant producers and shape inference, and before
