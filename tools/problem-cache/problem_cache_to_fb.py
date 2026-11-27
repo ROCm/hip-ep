@@ -7,7 +7,8 @@
 
 """Compile a rocMLIR LUT JSON file to a FlatBuffer.
 
-The JSON is the document ``hip-rocmlir-compiler --dump-problem-cache`` writes.
+The JSON is the document ``hip-rocmlir-compiler --enable-problem-cache-rw``
+writes.
 It has the same shape as the MatMulNBits and GQA LUTs: ``schema_version``,
 ``gpu_arch``, ``kernel_abi``, distance weights, then ``configs``, ``points``,
 and ``fallbacks``. ``flatc --binary --strict-json`` turns it into a ``.fb``.
@@ -232,7 +233,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "json",
         type=Path,
-        help="LUT JSON from hip-rocmlir-compiler --dump-problem-cache",
+        help="LUT JSON from hip-rocmlir-compiler --enable-problem-cache-rw",
     )
     parser.add_argument("-o", "--output", type=Path, required=True, help=".fb to write")
     parser.add_argument(
