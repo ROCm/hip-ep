@@ -114,6 +114,13 @@ Ops with no hipBLASLt equivalent. Implemented as pure C++ kernels.
 | `hip.silu` | `(%ctx) ins(%input : ...) outs(%output : ...)` | SiLU activation: `x * sigmoid(x)` | Stub |
 | `hip.gqa` | `(%ctx, %layer, %start_pos, %seq_len) ins(%q, %k, %v : ...) outs(%kv_cache, %output : ...)` | Grouped query attention with KV cache | Stub |
 
+A tensor-form `hip.transpose` that only moves dimensions that are statically 1
+keeps the memory layout, so canonicalization
+(`lib/Dialect/IR/HipTransposeUnitDimCanonicalize.cpp`) replaces it with a
+`tensor.collapse_shape` to the non-unit dimensions followed by a
+`tensor.expand_shape` to the result type, or with the input itself when the
+types already match. Dynamic dimensions count as non-unit.
+
 ---
 
 ## Region Ops (Structural)

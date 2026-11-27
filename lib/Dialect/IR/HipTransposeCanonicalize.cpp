@@ -33,6 +33,7 @@
 // expressible, and the guards below fail closed.
 //===----------------------------------------------------------------------===//
 
+#include "HipTransposeUtilsInternal.h"
 #include "hip/Dialect/IR/HipDialect.h"
 
 #include "mlir/IR/PatternMatch.h"
@@ -46,17 +47,8 @@ using namespace mlir::hip;
 
 namespace {
 
-/// The `perm` attribute as integers. Fails on anything the verifier would have
-/// rejected, so a malformed op is left alone rather than folded on a guess.
-bool getPermutation(TransposeOp transpose, SmallVectorImpl<int64_t> &perm) {
-  for (Attribute entry : transpose.getPerm()) {
-    auto value = dyn_cast<IntegerAttr>(entry);
-    if (!value)
-      return false;
-    perm.push_back(value.getInt());
-  }
-  return !perm.empty();
-}
+using hip::detail::getPermutation;
+using hip::detail::permutesIntoResultType;
 
 bool isIdentity(ArrayRef<int64_t> perm) {
   return llvm::all_of(llvm::seq<int64_t>(0, perm.size()),
@@ -84,28 +76,6 @@ bool composePermutations(ArrayRef<int64_t> firstPerm,
     composed.push_back(firstPerm[index]);
   }
   return true;
-}
-
-/// Whether permuting `source` by `perm` gives `result`'s shape and element
-/// type. A valid permutation value can still disagree with the declared tensor
-/// types, so reject that rewrite. A dimension dynamic on either side cannot be
-/// compared and is accepted.
-bool permutesIntoResultType(Value source, Value result,
-                            ArrayRef<int64_t> perm) {
-  auto sourceType = dyn_cast<RankedTensorType>(source.getType());
-  auto resultType = dyn_cast<RankedTensorType>(result.getType());
-  if (!sourceType || !resultType ||
-      sourceType.getElementType() != resultType.getElementType() ||
-      sourceType.getRank() != resultType.getRank() ||
-      static_cast<int64_t>(perm.size()) != resultType.getRank())
-    return false;
-  return llvm::all_of(llvm::seq<int64_t>(0, resultType.getRank()),
-                      [&](int64_t i) {
-                        int64_t from = sourceType.getDimSize(perm[i]);
-                        int64_t to = resultType.getDimSize(i);
-                        return ShapedType::isDynamic(from) ||
-                               ShapedType::isDynamic(to) || from == to;
-                      });
 }
 
 /// The Transpose that runs before `second`, only if it feeds `second` its data
@@ -205,4 +175,5 @@ struct FoldIdentityTranspose : public OpRewritePattern<TransposeOp> {
 void TransposeOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
                                               MLIRContext *context) {
   patterns.add<FoldTransposeChain, FoldIdentityTranspose>(context);
+  hip::detail::populateUnitDimTransposePatterns(patterns);
 }
