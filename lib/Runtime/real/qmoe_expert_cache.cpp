@@ -152,12 +152,12 @@ void destroyCache(RuntimeState *state) {
   }
   for (Pool &p : c->pools) {
     if (p.base) {
-      (void)hipdnn_ep_state_device_free(state, p.base);
+      (void)hipFree(p.base);
     }
   }
   for (void *base : c->node_base) {
     if (base) {
-      (void)hipdnn_ep_state_device_free(state, base);
+      (void)hipFree(base);
     }
   }
   if (c->host_idx) {
@@ -246,27 +246,37 @@ Cache *createCache(RuntimeState *state, const int64_t constants[kSegments],
         hipdnn_ep::env_string("HIPDNN_EP_QMOE_EXPERT_OFFLOAD") != "1" &&
         all * c->expert_bytes <= budget;
   }
-  const int64_t total =
+  int64_t total =
       c->resident
           ? all
           : std::min(all, std::max<int64_t>(budget, 0) / c->expert_bytes);
+  int64_t n_pools =
+      c->resident ? 0 : (total + kMaxPoolSlots - 1) / kMaxPoolSlots;
+  if (!c->resident &&
+      (n_pools <= 0 || n_pools > num_nodes || total / n_pools < num_experts)) {
+    if (!mb.empty() ||
+        hipdnn_ep::env_string("HIPDNN_EP_QMOE_EXPERT_OFFLOAD") == "1") {
+      fprintf(stderr,
+              "[QMoE offload] %lld slots cannot give each pool at least %lld "
+              "slots\n",
+              (long long)total, (long long)num_experts);
+      delete c;
+      return nullptr;
+    }
+    fprintf(stderr,
+            "[QMoE offload] %lld slots are too few for the expert cache; "
+            "keeping all experts on the device\n",
+            (long long)total);
+    c->resident = true;
+    total = all;
+    n_pools = 0;
+  }
 
   c->node_constants.resize(num_nodes);
   c->node_registered.assign(num_nodes, false);
   if (c->resident) {
     c->node_base.assign(num_nodes, nullptr);
     c->node_seg.resize(num_nodes);
-  }
-  const int64_t n_pools =
-      c->resident ? 0 : (total + kMaxPoolSlots - 1) / kMaxPoolSlots;
-  if (!c->resident &&
-      (n_pools <= 0 || n_pools > num_nodes || total / n_pools < num_experts)) {
-    fprintf(stderr,
-            "[QMoE offload] %lld slots cannot give each pool at least %lld "
-            "slots\n",
-            (long long)total, (long long)num_experts);
-    delete c;
-    return nullptr;
   }
   c->node_pool.resize(num_nodes);
   if (!c->resident) {
@@ -286,7 +296,7 @@ Cache *createCache(RuntimeState *state, const int64_t constants[kSegments],
     for (int j = 0; j < kSegments; ++j) {
       bytes += alignUp(static_cast<size_t>(pool.slots * c->seg_bytes[j]));
     }
-    if (hipdnn_ep_state_device_alloc(state, &pool.base, bytes) != hipSuccess) {
+    if (hipMalloc(&pool.base, bytes) != hipSuccess) {
       fprintf(stderr, "[QMoE offload] pool alloc of %zu bytes failed\n", bytes);
       pool.base = nullptr;
       state->qmoe_expert_cache = c;
@@ -421,8 +431,7 @@ int registerNode(RuntimeState *state, Cache *c, int64_t node,
     for (int j = 0; j < kSegments; ++j) {
       bytes += alignUp(static_cast<size_t>(c->num_experts * c->seg_bytes[j]));
     }
-    if (hipdnn_ep_state_device_alloc(state, &c->node_base[node], bytes) !=
-        hipSuccess) {
+    if (hipMalloc(&c->node_base[node], bytes) != hipSuccess) {
       c->node_base[node] = nullptr;
       fprintf(stderr, "[QMoE offload] expert alloc of %zu bytes failed\n",
               bytes);
@@ -440,7 +449,7 @@ int registerNode(RuntimeState *state, Cache *c, int64_t node,
         if (hipMemcpy(cursor, dc.data, table, hipMemcpyHostToDevice) !=
             hipSuccess) {
           fprintf(stderr, "[QMoE offload] expert upload failed\n");
-          (void)hipdnn_ep_state_device_free(state, c->node_base[node]);
+          (void)hipFree(c->node_base[node]);
           c->node_base[node] = nullptr;
           return -1;
         }

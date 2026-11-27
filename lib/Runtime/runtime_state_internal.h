@@ -382,7 +382,7 @@ struct RuntimeState {
 
   // QMoE expert slot cache (real/qmoe_expert_cache.cpp), created by the first
   // wrap_qmoe_offload. Cleanup calls the destroy hook it installs, before the
-  // transient arena and the disk-resident views go away.
+  // disk-resident views go away.
   void *qmoe_expert_cache;
   void (*qmoe_expert_cache_destroy)(RuntimeState *state);
 };

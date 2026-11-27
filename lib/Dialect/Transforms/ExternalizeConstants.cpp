@@ -428,17 +428,23 @@ private:
            kMinDiskResidentGatherElements;
   }
 
-  // A QMoE offloads all of its expert operands or none of them.
+  // A QMoE offloads all of its expert operands or none of them, and the
+  // offloaded QMoEs share one expert layout because the runtime serves them
+  // from one slot cache.
   void collectOffloadedQMoEExperts() {
     if (!skipData || minElements <= 0 ||
         hip_get_env("HIPDNN_EP_QMOE_EXPERT_OFFLOAD") == "0") {
       return;
     }
+    SmallVector<Type, 6> layout;
+    SmallVector<Operation *> carriers;
+    bool uniform = true;
     module.walk([&](hip::QMoEOp qmoe) {
       if (qmoe.getFc1ZeroPoints() || qmoe.getFc2ZeroPoints()) {
         return;
       }
-      SmallVector<Operation *, 6> carriers;
+      SmallVector<Type, 6> types;
+      SmallVector<Operation *, 6> own;
       for (OpOperand &operand : qmoe->getOpOperands()) {
         if (!qmoe.isExpertOperand(operand)) {
           continue;
@@ -453,10 +459,19 @@ private:
             return;
           }
         }
-        carriers.push_back(carrier);
+        types.push_back(carrier.getType());
+        own.push_back(carrier);
       }
-      offloadedQMoEExperts.insert(carriers.begin(), carriers.end());
+      if (layout.empty()) {
+        layout = types;
+      } else if (layout != types) {
+        uniform = false;
+      }
+      carriers.append(own.begin(), own.end());
     });
+    if (uniform) {
+      offloadedQMoEExperts.insert(carriers.begin(), carriers.end());
+    }
   }
 
   LogicalResult planInlineSource(ConstantPlan &plan) {
