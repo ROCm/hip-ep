@@ -100,32 +100,53 @@ Value definingCompute(Value v, llvm::SmallVectorImpl<Operation *> &pack,
 }
 
 /// True when every reshape in \p ops is a pack of an x-shaped value: its
-/// unpacked side has x's extents, with 1 allowed on the reduced last axis.
-/// Reshapes keep row-major order, so a packed elementwise op then computes
-/// what the unpacked op would. A reshape to any other shape could move
-/// elements across rows ([1, 2, 2] -> [1, 4] -> [1, 1, 4] reduces both rows
-/// together).
-bool reshapesArePacks(llvm::ArrayRef<Operation *> ops,
-                      mlir::RankedTensorType xType) {
-  auto unpacked = [&](mlir::Type type) {
-    auto t = mlir::dyn_cast<mlir::RankedTensorType>(type);
+/// unpacked side has x's extents, with 1 allowed on the reduced last axis,
+/// and each dynamic extent is proven to be x's. Reshapes keep row-major
+/// order, so a packed elementwise op then computes what the unpacked op
+/// would. A reshape to any other shape could move elements across rows
+/// ([1, 2, 2] -> [1, 4] -> [1, 1, 4] reduces both rows together). The
+/// reshapes around one packed op must also group the axes the same way:
+/// [1, 2, 2] x and its [1, 2, 1] mean collapsed to [2, 2] and [1, 2] would
+/// subtract the row means by column. Each op may pick its own grouping.
+bool reshapesArePacks(llvm::ArrayRef<Operation *> ops, Value x) {
+  auto xType = mlir::cast<mlir::RankedTensorType>(x.getType());
+  int64_t last = xType.getRank() - 1;
+  auto unpacked = [&](Value v) {
+    auto t = mlir::dyn_cast<mlir::RankedTensorType>(v.getType());
     if (!t || t.getRank() != xType.getRank())
       return false;
-    int64_t last = t.getRank() - 1;
-    for (int64_t i = 0; i < last; ++i)
+    for (int64_t i = 0; i < last; ++i) {
       if (t.getDimSize(i) != xType.getDimSize(i))
         return false;
+      if (xType.isDynamicDim(i) && !sameRuntimeExtent(v, i, x, i))
+        return false;
+    }
     return t.getDimSize(last) == xType.getDimSize(last) ||
            t.getDimSize(last) == 1;
+  };
+  llvm::DenseMap<Operation *, llvm::SmallVector<mlir::ReassociationIndices>>
+      packedOpGroups;
+  auto alignedAt = [&](Operation *packed,
+                       llvm::SmallVector<mlir::ReassociationIndices> groups) {
+    if (!packed)
+      return false;
+    auto [it, inserted] = packedOpGroups.try_emplace(packed, groups);
+    return inserted || it->second == groups;
   };
   for (Operation *op : ops) {
     if (auto collapse =
             mlir::dyn_cast_or_null<mlir::tensor::CollapseShapeOp>(op)) {
-      if (!unpacked(collapse.getSrcType()))
+      if (!unpacked(collapse.getSrc()))
         return false;
+      for (Operation *user : collapse.getResult().getUsers())
+        if (!mlir::isa<mlir::tensor::DimOp>(user) &&
+            !alignedAt(user, collapse.getReassociationIndices()))
+          return false;
     } else if (auto expand =
                    mlir::dyn_cast_or_null<mlir::tensor::ExpandShapeOp>(op)) {
-      if (!unpacked(expand.getResultType()))
+      if (!unpacked(expand.getResult()) ||
+          !alignedAt(expand.getSrc().getDefiningOp(),
+                     expand.getReassociationIndices()))
         return false;
     }
   }
@@ -218,6 +239,28 @@ bool isPerChannel(Value v, int64_t dim) {
   auto type = mlir::dyn_cast<mlir::RankedTensorType>(v.getType());
   return type && type.getRank() == 1 && !type.isDynamicDim(0) &&
          type.getDimSize(0) == dim;
+}
+
+/// Whether \p v and every view it is reshaped from hold \p dim on the last
+/// axis and 1 on the others, as the pack's right-aligned [1, ..., 1, H] does.
+/// A view that moves H to another axis ([2] -> [2, 1] for a [2, 2] norm)
+/// scales rows, not the channels the fused kernel scales.
+bool isChannelView(Value v, int64_t dim) {
+  while (true) {
+    auto type = mlir::dyn_cast<mlir::RankedTensorType>(v.getType());
+    if (!type || type.getRank() < 1 ||
+        type.getDimSize(type.getRank() - 1) != dim)
+      return false;
+    for (int64_t i = 0; i + 1 < type.getRank(); ++i)
+      if (type.getDimSize(i) != 1)
+        return false;
+    if (auto collapse = v.getDefiningOp<mlir::tensor::CollapseShapeOp>())
+      v = collapse.getSrc();
+    else if (auto expand = v.getDefiningOp<mlir::tensor::ExpandShapeOp>())
+      v = expand.getSrc();
+    else
+      return true;
+  }
 }
 
 Value matchStd(Value v, llvm::SmallVectorImpl<Operation *> &chain,
@@ -419,6 +462,14 @@ mlir::LogicalResult fuseLayerNorm(Operation *root, Value rawD, Value rawA,
   // The root may be the packed rank-4 op. The value consumers see is the
   // expand after the optional affine tail, and that is what must match x.
   auto [produced, n] = producedOf(root);
+  // The pack restores, which the chain does not hold: the last one decides
+  // the shape consumers see.
+  llvm::SmallVector<Operation *> restores;
+  auto keepRestore = [&](Operation *op) {
+    if (mlir::isa<mlir::tensor::ExpandShapeOp>(op))
+      restores.push_back(op);
+  };
+  keepRestore(produced);
 
   Value gamma, beta;
   Operation *last = produced;
@@ -442,9 +493,11 @@ mlir::LogicalResult fuseLayerNorm(Operation *root, Value rawD, Value rawA,
       if (gRaw && sameContext(mul, ctx)) {
         Value g = definingCompute(gRaw, affineViews, seen);
         auto [mulProduced, mulN] = producedOf(mul);
-        if (isPerChannel(g, dim) && mulN.getType() == xType) {
+        if (isPerChannel(g, dim) && isChannelView(gRaw, dim) &&
+            mulN.getType() == xType) {
           gamma = g;
           last = mulProduced;
+          keepRestore(mulProduced);
           n = mulN;
           keep(chain, seen, mul);
         }
@@ -458,9 +511,11 @@ mlir::LogicalResult fuseLayerNorm(Operation *root, Value rawD, Value rawA,
         if (bRaw && sameContext(add, ctx)) {
           Value b = definingCompute(bRaw, affineViews, seen);
           auto [addProduced, addN] = producedOf(add);
-          if (isPerChannel(b, dim) && addN.getType() == xType) {
+          if (isPerChannel(b, dim) && isChannelView(bRaw, dim) &&
+              addN.getType() == xType) {
             beta = b;
             last = addProduced;
+            keepRestore(addProduced);
             keep(chain, seen, add);
           }
         }
@@ -472,7 +527,8 @@ mlir::LogicalResult fuseLayerNorm(Operation *root, Value rawD, Value rawA,
     keep(chain, seen, root);
   if (n.getType() != xType)
     return rewriter.notifyMatchFailure(root, "norm result type");
-  if (!reshapesArePacks(chain, xType))
+  restores.append(chain.begin(), chain.end());
+  if (!reshapesArePacks(restores, x))
     return rewriter.notifyMatchFailure(root, "reshape regroups rows");
   chain.append(affineViews.begin(), affineViews.end());
 

@@ -1614,6 +1614,15 @@ LogicalResult SkipLayerNormOp::verify() {
     if (cast<ShapedType>(v.getType()).getElementType() != elemType)
       return emitOpError("expected all operands to have element type ")
              << elemType;
+  // The kernel writes each output with the input's element count.
+  if (inputType.hasRank()) {
+    for (Value out : getOutputs()) {
+      auto type = cast<ShapedType>(out.getType());
+      if (!type.hasRank() ||
+          failed(verifyCompatibleShape(inputType.getShape(), type.getShape())))
+        return emitOpError("expected the outputs to have the input shape");
+    }
+  }
   if (inputType.getRank() >= 1) {
     int64_t hidden = inputType.getDimSize(inputType.getRank() - 1);
     for (Value v : {getGamma(), getBeta(), getBias()}) {

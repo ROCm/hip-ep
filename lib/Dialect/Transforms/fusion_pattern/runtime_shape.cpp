@@ -223,6 +223,15 @@ llvm::SmallVector<Extent> traceExtents(mlir::Value value, int64_t dim) {
 
 } // namespace
 
+bool sameRuntimeExtent(mlir::Value lhs, int64_t lhsDim, mlir::Value rhs,
+                       int64_t rhsDim) {
+  for (const auto &l : traceExtents(lhs, lhsDim))
+    for (const auto &r : traceExtents(rhs, rhsDim))
+      if (l == r)
+        return true;
+  return false;
+}
+
 // True when each dynamic axis has a common, proven runtime extent. Static
 // axes are settled by type equality; equal type spelling alone proves no
 // equality between independent dynamic arguments.

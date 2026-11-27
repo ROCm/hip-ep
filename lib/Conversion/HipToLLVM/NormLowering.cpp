@@ -407,9 +407,8 @@ struct SkipLayerNormOpLowering
         f32Type, // epsilon
         i32Type  // round_sum
     };
-    FailureOr<LLVM::LLVMFuncOp> funcOp =
-        LLVM::lookupOrCreateFn(rewriter, module, kWrapSkipLayerNorm, paramTypes,
-                               i32Type);
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapSkipLayerNorm, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 

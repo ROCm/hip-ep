@@ -25,5 +25,10 @@ namespace fusion_transform {
 /// axis traces to a common, proven runtime extent.
 bool sameRuntimeShape(mlir::Value lhs, mlir::Value rhs);
 
+/// True when axis `lhsDim` of `lhs` and axis `rhsDim` of `rhs` trace to a
+/// common, proven runtime extent (or the same static size).
+bool sameRuntimeExtent(mlir::Value lhs, int64_t lhsDim, mlir::Value rhs,
+                       int64_t rhsDim);
+
 } // namespace fusion_transform
 } // namespace hip

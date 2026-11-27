@@ -897,8 +897,8 @@ SkipLayerNormToHip::matchAndRewrite(mlir::Operation *op,
     if (!op->getResult(i).use_empty())
       return rewriter.notifyMatchFailure(
           op, "mean / inv_std_var outputs are not supported");
-  bool withSum = numResults > 3 &&
-                 !mlir::isa<mlir::NoneType>(op->getResult(3).getType());
+  bool withSum =
+      numResults > 3 && !mlir::isa<mlir::NoneType>(op->getResult(3).getType());
 
   if (canUseSkipLayerNorm(input, skip, gamma, beta, inputBias,
                           op->getResult(0).getType())) {
