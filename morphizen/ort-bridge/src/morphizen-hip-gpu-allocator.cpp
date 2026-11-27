@@ -123,11 +123,15 @@ void ReleaseToDriver(const std::vector<void *> &buffers, int device_id,
   }
 }
 
-hipError_t DriverAlloc(void **ptr, size_t size, bool device_only) {
-  return device_only
-             ? hipMalloc(ptr, size)
-             : hipHostMalloc(ptr, size,
-                             hipHostMallocMapped | hipHostMallocCoherent);
+hipError_t DriverAlloc(void **ptr, size_t size, bool device_only,
+                       bool noncoherent = false) {
+  if (device_only) {
+    return hipMalloc(ptr, size);
+  }
+  return hipHostMalloc(
+      ptr, size,
+      hipHostMallocMapped |
+          (noncoherent ? hipHostMallocNonCoherent : hipHostMallocCoherent));
 }
 
 // MORPHIZEN_DEFAULT_HIPMALLOC=0: DEFAULT tensors get host-mapped memory instead
@@ -143,6 +147,30 @@ bool DefaultMemoryIsHostMapped() noexcept {
 
 bool UseDeviceOnly(const OrtMemoryInfo *memory_info) noexcept {
   if (memory_info == nullptr || DefaultMemoryIsHostMapped()) {
+    return false;
+  }
+  try {
+    return Ort::ConstMemoryInfo(memory_info).GetDeviceMemoryType() ==
+           OrtDeviceMemoryType_DEFAULT;
+  } catch (const Ort::Exception &) {
+    return false;
+  }
+}
+
+// MORPHIZEN_DEFAULT_HIPMALLOC_NONCOHERENT=1, with host-mapped DEFAULT memory:
+// map those buffers non-coherent, so kernels re-reading them (a first
+// convolution re-reads the model input many times) hit the GPU caches instead
+// of going to system memory on every access. HIP makes non-coherent host
+// memory consistent at kernel boundaries and synchronization, and the host
+// touches DEFAULT buffers only between inferences of this synchronous EP.
+// HOST_ACCESSIBLE buffers stay coherent: the host may use them while the GPU
+// does.
+bool UseNonCoherentDefault(const OrtMemoryInfo *memory_info) noexcept {
+  if (memory_info == nullptr || !DefaultMemoryIsHostMapped()) {
+    return false;
+  }
+  const char *env = std::getenv("MORPHIZEN_DEFAULT_HIPMALLOC_NONCOHERENT");
+  if (env == nullptr || std::strcmp(env, "1") != 0) {
     return false;
   }
   try {
@@ -189,7 +217,8 @@ bool IsHostPointer(const void *ptr) noexcept {
 HipGpuAllocator::HipGpuAllocator(const OrtMemoryInfo *memory_info,
                                  const OrtApi & /*api*/)
     : memory_info_{memory_info}, device_id_{TryGetDeviceId(memory_info)},
-      device_only_{UseDeviceOnly(memory_info)} {
+      device_only_{UseDeviceOnly(memory_info)},
+      noncoherent_{UseNonCoherentDefault(memory_info)} {
   version = NegotiatedOrtApiVersion();
   Alloc = AllocImpl;
   Free = FreeImpl;
@@ -205,7 +234,8 @@ HipGpuAllocator::HipGpuAllocator(const OrtMemoryInfo *memory_info,
     std::call_once(warmed, [this] {
       ScopedDevice _(device_id_);
       void *p = nullptr;
-      if (DriverAlloc(&p, 4096, /*device_only=*/false) == hipSuccess) {
+      if (DriverAlloc(&p, 4096, /*device_only=*/false, noncoherent_) ==
+          hipSuccess) {
         (void)hipHostFree(p);
       } else {
         (void)hipGetLastError();
@@ -361,7 +391,8 @@ void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
   // through CopyTensors. HOST_ACCESSIBLE memory must stay host-mapped since
   // OGA's PinnedMemory aliases p_cpu_ = p_device_.
   void *ptr = nullptr;
-  hipError_t err = DriverAlloc(&ptr, alloc_size, self->device_only_);
+  hipError_t err =
+      DriverAlloc(&ptr, alloc_size, self->device_only_, self->noncoherent_);
   if (err != hipSuccess) {
     // The large pool may be sitting on pinned pages this allocation could use,
     // and failing while holding reclaimable memory would be worse than not
@@ -373,7 +404,8 @@ void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
     }
     if (!drained.empty()) {
       ReleaseToDriver(drained, self->device_id_, self->device_only_);
-      err = DriverAlloc(&ptr, alloc_size, self->device_only_);
+      err =
+          DriverAlloc(&ptr, alloc_size, self->device_only_, self->noncoherent_);
     }
   }
   if (err != hipSuccess) {
