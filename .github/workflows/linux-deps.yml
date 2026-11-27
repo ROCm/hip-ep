@@ -4,12 +4,21 @@
 ##
 name: Linux Deps
 
-# Prebuilds the heavy dependencies and returns their cache keys. Each job also
-# uploads that tree as a workflow artifact. Callers restore the cache and, on a
-# miss, download the artifact: a later save can evict an entry before the build
-# job runs, and a lookup-only hit does not leave a copy in this run. The
-# artifact is a tar.gz because upload-artifact drops file modes and symlinks,
-# which the LLVM tools and the ORT/OGA shared-library links depend on.
+# Prebuilds the heavy dependencies and returns their cache keys. A cache hit is
+# only probed (lookup-only): nothing is downloaded, packed or uploaded, so a
+# warm run costs a few seconds per job. On a miss the job builds the tree,
+# saves the cache, and also uploads the tree as a workflow artifact so the
+# callers' restore still works if the entry is evicted before the build job
+# runs. Callers restore the cache and, on a miss, download the artifact. A
+# caller whose restore misses after this workflow hit has no artifact either;
+# it fails and the run needs a re-run, which rebuilds the evicted entry. The
+# artifact is a tar.zst because upload-artifact drops file modes and symlinks,
+# which the LLVM tools and the ORT/OGA shared-library links depend on. zstd -T0
+# packs in parallel, where gzip is single-threaded on a multi-GB prefix.
+#
+# ONNX Runtime and OGA build in one job: OGA links against the ORT prefix, so
+# a shared job hands it over on disk instead of a cache save, restore and
+# artifact round trip, and a warm run needs one runner for both probes.
 #
 # Linux Build and Linux RMT Build both call this workflow. Each job's
 # concurrency group is per ref and commit, so the two callers of one event
@@ -33,10 +42,10 @@ on:
         value: ${{ jobs.llvm.outputs.cache_key }}
       ort_cache_key:
         description: Cache key holding the ONNX Runtime install prefix.
-        value: ${{ jobs.ort.outputs.cache_key }}
+        value: ${{ jobs.ort-oga.outputs.ort_cache_key }}
       oga_cache_key:
         description: Cache key holding the OGA artifact set.
-        value: ${{ jobs.oga.outputs.cache_key }}
+        value: ${{ jobs.ort-oga.outputs.oga_cache_key }}
 
 permissions:
   contents: read
@@ -57,11 +66,19 @@ env:
   # pull/<n>.diff and applied on top of v<OGA_VERSION>. Part of the OGA cache
   # key. Remove a PR once it lands in the pinned OGA release.
   OGA_PR_PATCHES: "2875"
-  SCCACHE_CACHE_SIZE: "200M"
 
 jobs:
   llvm:
     runs-on: ubuntu-latest
+    # A cold LLVM build takes hours; the timeout stays below the 6 h default so
+    # a hung link does not burn the full budget.
+    timeout-minutes: 300
+    env:
+      # sccache only pays off on a miss, and the default size evicts constantly
+      # while LLVM (thousands of objects) compiles. Starting value: tune it
+      # from the sccache stats step below.
+      SCCACHE_CACHE_SIZE: "2G"
+      SCCACHE_IDLE_TIMEOUT: "0"
     concurrency:
       group: deps-linux-llvm${{ inputs.llvm_extra_targets && format('-{0}', inputs.llvm_extra_targets) || '' }}-${{ github.ref }}-${{ github.sha }}
       cancel-in-progress: false
@@ -110,14 +127,15 @@ jobs:
           echo "components=$COMPONENTS" >> "$GITHUB_OUTPUT"
           echo "value=linux-llvm${TAG:+-$TAG}-dist-${LLVM_COMMIT}" >> "$GITHUB_OUTPUT"
 
-      # Restore rather than lookup-only so a hit leaves llvm-install on disk
-      # for the upload below.
+      # Lookup-only: a hit downloads nothing. The build job restores the cache
+      # itself; this job only builds, saves and uploads on a miss.
       - name: Probe llvm-install
         id: cache-llvm
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/llvm-install
           key: ${{ steps.key.outputs.value }}
+          lookup-only: true
 
       # ubuntu-latest ships ~14 GB usable SSD; the from-source LLVM build needs
       # much more. Keep swap. Deleting it makes the LLVM link OOM the runner,
@@ -163,7 +181,7 @@ jobs:
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/sccache-dir
-          key: sccache-linux-deps-llvm-${{ env.SCCACHE_KEY_DATE }}
+          key: sccache-linux-deps-llvm-${{ env.SCCACHE_KEY_DATE }}-${{ github.run_id }}
           restore-keys: |
             sccache-linux-deps-llvm-
 
@@ -211,6 +229,19 @@ jobs:
           du -sh "${{ runner.workspace }}"/llvm-install/{bin,include,lib}
           rm -rf "$SRC" "${{ runner.workspace }}/build-llvm"
 
+      # Reports the hit rate so the cache size above and the value of keeping
+      # sccache in this job can be judged from real numbers.
+      - name: sccache stats
+        if: always() && steps.cache-llvm.outputs.cache-hit != 'true'
+        continue-on-error: true
+        run: |
+          {
+            echo "### sccache (llvm)"
+            echo '```'
+            sccache --show-stats
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Save llvm-install
         if: steps.cache-llvm.outputs.cache-hit != 'true'
         continue-on-error: true
@@ -219,17 +250,20 @@ jobs:
           path: ${{ runner.workspace }}/llvm-install
           key: ${{ steps.key.outputs.value }}
 
+      # Only on a miss: a hit leaves a cache entry that the build job restores.
       - name: Pack llvm-install
+        if: steps.cache-llvm.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          tar -C "${{ runner.workspace }}/llvm-install" -czf "${{ runner.temp }}/llvm-install.tar.gz" .
-          du -sh "${{ runner.temp }}/llvm-install.tar.gz"
+          tar -C "${{ runner.workspace }}/llvm-install" -I 'zstd -T0' -cf "${{ runner.temp }}/llvm-install.tar.zst" .
+          du -sh "${{ runner.temp }}/llvm-install.tar.zst"
 
       - name: Upload llvm-install
+        if: steps.cache-llvm.outputs.cache-hit != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.key.outputs.value }}
-          path: ${{ runner.temp }}/llvm-install.tar.gz
+          path: ${{ runner.temp }}/llvm-install.tar.zst
           if-no-files-found: error
           compression-level: 0
           retention-days: 1
@@ -240,33 +274,70 @@ jobs:
         uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/sccache-dir
-          key: sccache-linux-deps-llvm-${{ env.SCCACHE_KEY_DATE }}
+          key: sccache-linux-deps-llvm-${{ env.SCCACHE_KEY_DATE }}-${{ github.run_id }}
 
-  ort:
+  # ONNX Runtime and OGA share a job: OGA builds against the ORT prefix, so the
+  # prefix reaches it on disk. The probes below are lookup-only, so a warm run
+  # (both entries present) skips every build step and finishes in seconds.
+  ort-oga:
     runs-on: ubuntu-latest
+    # A cold ORT build takes 50-90 min and OGA follows it; stay below the 6 h
+    # default so a hang does not burn the full budget.
+    timeout-minutes: 300
+    env:
+      # Starting value: tune it from the sccache stats step below.
+      SCCACHE_CACHE_SIZE: "1G"
+      SCCACHE_IDLE_TIMEOUT: "0"
     concurrency:
-      group: deps-linux-ort-${{ github.ref }}-${{ github.sha }}
+      group: deps-linux-ort-oga-${{ github.ref }}-${{ github.sha }}
       cancel-in-progress: false
 
     outputs:
-      cache_key: ${{ steps.key.outputs.value }}
+      ort_cache_key: ${{ steps.key.outputs.ort }}
+      oga_cache_key: ${{ steps.key.outputs.oga }}
 
     steps:
-      - name: Compute cache key
+      - name: Compute cache keys
         id: key
-        run: echo "value=linux-ort-${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}-whl" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "ort=linux-ort-${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}-whl" >> "$GITHUB_OUTPUT"
+          echo "oga=linux-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
 
-      # Restore rather than lookup-only so a hit leaves ort-install on disk
-      # for the upload below.
+      # Lookup-only: a hit downloads nothing. The build job restores the caches
+      # itself; this job only builds, saves and uploads on a miss.
       - name: Probe ort-install
         id: cache-ort
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/ort-install
-          key: ${{ steps.key.outputs.value }}
+          key: ${{ steps.key.outputs.ort }}
+          lookup-only: true
+
+      - name: Probe oga-artifacts
+        id: cache-oga
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/oga-artifacts
+          key: ${{ steps.key.outputs.oga }}
+          lookup-only: true
+
+      # One decision point so the steps below stay readable. OGA never needs an
+      # ORT build of its own: when ORT is cached, it is restored for OGA only.
+      - name: Decide work
+        id: need
+        run: |
+          ort=false; oga=false
+          [ "${{ steps.cache-ort.outputs.cache-hit }}" = "true" ] || ort=true
+          [ "${{ steps.cache-oga.outputs.cache-hit }}" = "true" ] || oga=true
+          any=false
+          { [ "$ort" = true ] || [ "$oga" = true ]; } && any=true
+          echo "ort=$ort" >> "$GITHUB_OUTPUT"
+          echo "oga=$oga" >> "$GITHUB_OUTPUT"
+          echo "any=$any" >> "$GITHUB_OUTPUT"
+          echo "build ort=$ort oga=$oga"
 
       - name: Free disk space
-        if: steps.cache-ort.outputs.cache-hit != 'true'
+        if: steps.need.outputs.any == 'true'
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
         with:
           tool-cache: false
@@ -277,15 +348,16 @@ jobs:
           large-packages: false
           swap-storage: false
 
-      # Pin the Python the whole job uses (the ORT wheel is built against it).
+      # Pin the Python the whole job uses (the ORT and OGA wheels are built
+      # against it).
       - name: Setup Python 3.14
-        if: steps.cache-ort.outputs.cache-hit != 'true'
+        if: steps.need.outputs.any == 'true'
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.14"
 
       - name: Install build toolchain
-        if: steps.cache-ort.outputs.cache-hit != 'true'
+        if: steps.need.outputs.any == 'true'
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -294,32 +366,41 @@ jobs:
           python3 -m pip install --upgrade pip
           # numpy/wheel/setuptools/packaging are needed at ORT configure time:
           # --build_wheel makes onnxruntime_python.cmake run find_package(Python
-          # ... NumPy), which fails the generate step if numpy is absent.
-          python3 -m pip install cmake ninja numpy wheel setuptools packaging
+          # ... NumPy), which fails the generate step if numpy is absent, and
+          # they are required again when the OGA wheel is configured. requests:
+          # OGA build.py's util.dependency_resolver imports it at module load
+          # (the pinned Python 3.14 has no preinstalled requests).
+          python3 -m pip install cmake ninja numpy wheel setuptools packaging requests
           cmake --version
           ninja --version
 
       - name: Prepare sccache local cache
-        if: steps.cache-ort.outputs.cache-hit != 'true'
+        if: steps.need.outputs.any == 'true'
         run: |
           echo "SCCACHE_DIR=${{ runner.workspace }}/sccache-dir" >> $GITHUB_ENV
           echo "SCCACHE_KEY_DATE=$(date -u +'%Y%m%d')" >> $GITHUB_ENV
 
+      # The older per-job ORT prefix is a fallback so the first run after the
+      # job merge still starts warm.
       - name: Restore sccache directory
-        if: steps.cache-ort.outputs.cache-hit != 'true'
+        if: steps.need.outputs.any == 'true'
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/sccache-dir
-          key: sccache-linux-deps-ort-${{ env.SCCACHE_KEY_DATE }}
+          key: sccache-linux-deps-ortoga-${{ env.SCCACHE_KEY_DATE }}-${{ github.run_id }}
           restore-keys: |
+            sccache-linux-deps-ortoga-
             sccache-linux-deps-ort-
 
       - name: Setup sccache
-        if: steps.cache-ort.outputs.cache-hit != 'true'
+        if: steps.need.outputs.any == 'true'
         uses: mozilla-actions/sccache-action@v0.0.9
 
+      # -----------------------------------------------------------------------
+      # ONNX Runtime
+      # -----------------------------------------------------------------------
       - name: Checkout ONNX Runtime v${{ env.ONNXRUNTIME_VERSION }}
-        if: steps.cache-ort.outputs.cache-hit != 'true'
+        if: steps.need.outputs.ort == 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: Microsoft/onnxruntime
@@ -334,7 +415,7 @@ jobs:
       # patches apply directly (the PR list is in the ort-install cache key, so
       # editing it forces a rebuild). Empty list => nothing to apply.
       - name: Apply ONNX Runtime PR patches
-        if: steps.cache-ort.outputs.cache-hit != 'true'
+        if: steps.need.outputs.ort == 'true'
         working-directory: source-onnxruntime
         env:
           ORT_PRS: ${{ env.ONNXRUNTIME_PR_PATCHES }}
@@ -357,7 +438,7 @@ jobs:
           done
 
       - name: Build ONNX Runtime
-        if: steps.cache-ort.outputs.cache-hit != 'true'
+        if: steps.need.outputs.ort == 'true'
         working-directory: source-onnxruntime
         run: |
           set -euo pipefail
@@ -376,7 +457,7 @@ jobs:
               CMAKE_CXX_COMPILER_LAUNCHER=sccache
 
       - name: Install ORT into ort-install
-        if: steps.cache-ort.outputs.cache-hit != 'true'
+        if: steps.need.outputs.ort == 'true'
         run: |
           set -euo pipefail
           # ORT's Linux build.sh writes to <build_dir>/Release.
@@ -401,140 +482,52 @@ jobs:
           mkdir -p "${{ runner.workspace }}/ort-install/wheels"
           cp "$ORT_WHEEL" "${{ runner.workspace }}/ort-install/wheels/"
           echo "Cached ORT wheel: $(basename "$ORT_WHEEL")"
+          # The prefix is complete. Drop the build and source trees so the OGA
+          # build below has the disk the ORT build used.
+          rm -rf "${{ runner.workspace }}/build-onnxruntime" "$GITHUB_WORKSPACE/source-onnxruntime"
 
+      # Saved before OGA starts so a later OGA failure cannot lose the ORT
+      # prefix.
       - name: Save ort-install
-        if: steps.cache-ort.outputs.cache-hit != 'true'
+        if: steps.need.outputs.ort == 'true'
         continue-on-error: true
         uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/ort-install
-          key: ${{ steps.key.outputs.value }}
+          key: ${{ steps.key.outputs.ort }}
 
+      # Only on a miss: a hit leaves a cache entry that the build job restores.
       - name: Pack ort-install
+        if: steps.need.outputs.ort == 'true'
         run: |
           set -euo pipefail
-          tar -C "${{ runner.workspace }}/ort-install" -czf "${{ runner.temp }}/ort-install.tar.gz" .
-          du -sh "${{ runner.temp }}/ort-install.tar.gz"
+          tar -C "${{ runner.workspace }}/ort-install" -I 'zstd -T0' -cf "${{ runner.temp }}/ort-install.tar.zst" .
+          du -sh "${{ runner.temp }}/ort-install.tar.zst"
 
       - name: Upload ort-install
+        if: steps.need.outputs.ort == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.key.outputs.value }}
-          path: ${{ runner.temp }}/ort-install.tar.gz
+          name: ${{ steps.key.outputs.ort }}
+          path: ${{ runner.temp }}/ort-install.tar.zst
           if-no-files-found: error
           compression-level: 0
           retention-days: 1
 
-      - name: Save sccache directory
-        if: always() && steps.cache-ort.outputs.cache-hit != 'true' && github.ref_name == 'main'
-        continue-on-error: true
-        uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
-        with:
-          path: ${{ runner.workspace }}/sccache-dir
-          key: sccache-linux-deps-ort-${{ env.SCCACHE_KEY_DATE }}
-
-  oga:
-    needs: ort
-    runs-on: ubuntu-latest
-    concurrency:
-      group: deps-linux-oga-${{ github.ref }}-${{ github.sha }}
-      cancel-in-progress: false
-
-    outputs:
-      cache_key: ${{ steps.key.outputs.value }}
-
-    steps:
-      - name: Compute cache key
-        id: key
-        run: echo "value=linux-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}" >> "$GITHUB_OUTPUT"
-
-      # Same as llvm and ort: materialize a cache hit so the upload below
-      # always publishes this run's copy. A later eviction must not strand the
-      # build.
-      - name: Probe oga-artifacts
-        id: cache-oga
-        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
-        with:
-          path: ${{ runner.workspace }}/oga-artifacts
-          key: ${{ steps.key.outputs.value }}
-
-      - name: Restore ort-install
-        id: restore-ort
-        if: steps.cache-oga.outputs.cache-hit != 'true'
+      # -----------------------------------------------------------------------
+      # OGA
+      # -----------------------------------------------------------------------
+      # ORT was built above, or is cached and needed only as OGA's input.
+      - name: Restore ort-install for OGA
+        if: steps.need.outputs.oga == 'true' && steps.need.outputs.ort != 'true'
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/ort-install
-          key: ${{ needs.ort.outputs.cache_key }}
-
-      - name: Download ort-install
-        if: steps.cache-oga.outputs.cache-hit != 'true' && steps.restore-ort.outputs.cache-hit != 'true'
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs.ort.outputs.cache_key }}
-          path: ${{ runner.temp }}/ort-artifact
-
-      - name: Extract ort-install
-        if: steps.cache-oga.outputs.cache-hit != 'true' && steps.restore-ort.outputs.cache-hit != 'true'
-        run: |
-          set -euo pipefail
-          mkdir -p "${{ runner.workspace }}/ort-install"
-          tar -xzf "${{ runner.temp }}/ort-artifact/ort-install.tar.gz" -C "${{ runner.workspace }}/ort-install"
-
-      - name: Free disk space
-        if: steps.cache-oga.outputs.cache-hit != 'true'
-        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
-        with:
-          tool-cache: false
-          docker-images: true
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: false
-          swap-storage: false
-
-      - name: Setup Python 3.14
-        if: steps.cache-oga.outputs.cache-hit != 'true'
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
-        with:
-          python-version: "3.14"
-
-      - name: Install build toolchain
-        if: steps.cache-oga.outputs.cache-hit != 'true'
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential ninja-build git ca-certificates curl
-          python3 -m pip install --upgrade pip
-          # requests: OGA build.py's util.dependency_resolver imports it at
-          # module load (the pinned Python 3.14 has no preinstalled requests).
-          # numpy/wheel/setuptools/packaging are required when the OGA wheel is
-          # configured.
-          python3 -m pip install cmake ninja numpy wheel setuptools packaging requests
-          cmake --version
-          ninja --version
-
-      - name: Prepare sccache local cache
-        if: steps.cache-oga.outputs.cache-hit != 'true'
-        run: |
-          echo "SCCACHE_DIR=${{ runner.workspace }}/sccache-dir" >> $GITHUB_ENV
-          echo "SCCACHE_KEY_DATE=$(date -u +'%Y%m%d')" >> $GITHUB_ENV
-
-      - name: Restore sccache directory
-        if: steps.cache-oga.outputs.cache-hit != 'true'
-        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
-        with:
-          path: ${{ runner.workspace }}/sccache-dir
-          key: sccache-linux-deps-oga-${{ env.SCCACHE_KEY_DATE }}
-          restore-keys: |
-            sccache-linux-deps-oga-
-
-      - name: Setup sccache
-        if: steps.cache-oga.outputs.cache-hit != 'true'
-        uses: mozilla-actions/sccache-action@v0.0.9
+          key: ${{ steps.key.outputs.ort }}
+          fail-on-cache-miss: true
 
       - name: Checkout OGA
-        if: steps.cache-oga.outputs.cache-hit != 'true'
+        if: steps.need.outputs.oga == 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: microsoft/onnxruntime-genai
@@ -547,7 +540,7 @@ jobs:
           show-progress: false
 
       - name: Apply OGA PR patches
-        if: steps.cache-oga.outputs.cache-hit != 'true'
+        if: steps.need.outputs.oga == 'true'
         working-directory: onnxruntime-genai
         env:
           OGA_PRS: ${{ env.OGA_PR_PATCHES }}
@@ -585,7 +578,7 @@ jobs:
           done
 
       - name: Build OGA
-        if: steps.cache-oga.outputs.cache-hit != 'true'
+        if: steps.need.outputs.oga == 'true'
         run: |
           set -euo pipefail
           ART="${{ runner.workspace }}/oga-artifacts"
@@ -630,33 +623,48 @@ jobs:
           cp "$OGA_WHEEL" "$ART/"
           echo "Cached OGA wheel: $(basename "$OGA_WHEEL")"
 
+      # Reports the hit rate so the cache size above and the value of keeping
+      # sccache in this job can be judged from real numbers.
+      - name: sccache stats
+        if: always() && steps.need.outputs.any == 'true'
+        continue-on-error: true
+        run: |
+          {
+            echo "### sccache (ort-oga)"
+            echo '```'
+            sccache --show-stats
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Save oga-artifacts
-        if: steps.cache-oga.outputs.cache-hit != 'true'
+        if: steps.need.outputs.oga == 'true'
         continue-on-error: true
         uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/oga-artifacts
-          key: ${{ steps.key.outputs.value }}
+          key: ${{ steps.key.outputs.oga }}
 
       - name: Pack oga-artifacts
+        if: steps.need.outputs.oga == 'true'
         run: |
           set -euo pipefail
-          tar -C "${{ runner.workspace }}/oga-artifacts" -czf "${{ runner.temp }}/oga-artifacts.tar.gz" .
-          du -sh "${{ runner.temp }}/oga-artifacts.tar.gz"
+          tar -C "${{ runner.workspace }}/oga-artifacts" -I 'zstd -T0' -cf "${{ runner.temp }}/oga-artifacts.tar.zst" .
+          du -sh "${{ runner.temp }}/oga-artifacts.tar.zst"
 
       - name: Upload oga-artifacts
+        if: steps.need.outputs.oga == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.key.outputs.value }}
-          path: ${{ runner.temp }}/oga-artifacts.tar.gz
+          name: ${{ steps.key.outputs.oga }}
+          path: ${{ runner.temp }}/oga-artifacts.tar.zst
           if-no-files-found: error
           compression-level: 0
           retention-days: 1
 
       - name: Save sccache directory
-        if: always() && steps.cache-oga.outputs.cache-hit != 'true' && github.ref_name == 'main'
+        if: always() && steps.need.outputs.any == 'true' && github.ref_name == 'main'
         continue-on-error: true
         uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/sccache-dir
-          key: sccache-linux-deps-oga-${{ env.SCCACHE_KEY_DATE }}
+          key: sccache-linux-deps-ortoga-${{ env.SCCACHE_KEY_DATE }}-${{ github.run_id }}

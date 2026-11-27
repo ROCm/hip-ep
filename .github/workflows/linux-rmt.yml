@@ -31,6 +31,7 @@ env:
   # explicitly (build.py auto-detects from /sys on a real GPU host).
   HIP_ARCHITECTURES: gfx11-generic
   SCCACHE_CACHE_SIZE: "200M"
+  SCCACHE_IDLE_TIMEOUT: "0"
 
 jobs:
   build_required:
@@ -54,6 +55,7 @@ jobs:
   build-linux-rmt:
     needs: prebuild
     runs-on: ubuntu-latest
+    timeout-minutes: 300
     continue-on-error: true
     steps:
       - name: Checkout
@@ -118,7 +120,7 @@ jobs:
         uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/sccache-dir
-          key: sccache-linux-rmt-${{ env.SCCACHE_KEY_DATE }}
+          key: sccache-linux-rmt-${{ env.SCCACHE_KEY_DATE }}-${{ github.run_id }}
           restore-keys: |
             sccache-linux-rmt-
 
@@ -128,9 +130,11 @@ jobs:
       # -----------------------------------------------------------------------
       # LLVM/MLIR/LLD/Clang (X86 and AMDGPU) -> llvm-install, ONNX Runtime ->
       # ort-install and the OGA artifact set, all prebuilt by linux-deps.yml (the
-      # recipes and pins live there). Caches are the fast path. The prebuild
-      # always uploads this run's copy as a tar.gz artifact, so download-artifact
-      # still works after a later cache eviction.
+      # recipes and pins live there). Caches are the fast path. When the prebuild
+      # had to build an entry it also uploads a tar.zst artifact, so
+      # download-artifact still works after a later cache eviction. A prebuild
+      # cache hit uploads nothing: if the entry is evicted before this restore,
+      # re-run the workflow to rebuild it.
       # -----------------------------------------------------------------------
       - name: Restore llvm-install
         id: restore-llvm
@@ -151,7 +155,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "${{ runner.workspace }}/llvm-install"
-          tar -xzf "${{ runner.temp }}/llvm-artifact/llvm-install.tar.gz" -C "${{ runner.workspace }}/llvm-install"
+          tar -I zstd -xf "${{ runner.temp }}/llvm-artifact/llvm-install.tar.zst" -C "${{ runner.workspace }}/llvm-install"
 
       - name: Restore ort-install
         id: restore-ort
@@ -172,7 +176,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "${{ runner.workspace }}/ort-install"
-          tar -xzf "${{ runner.temp }}/ort-artifact/ort-install.tar.gz" -C "${{ runner.workspace }}/ort-install"
+          tar -I zstd -xf "${{ runner.temp }}/ort-artifact/ort-install.tar.zst" -C "${{ runner.workspace }}/ort-install"
 
       - name: Restore oga-artifacts
         id: restore-oga
@@ -193,7 +197,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "${{ runner.workspace }}/oga-artifacts"
-          tar -xzf "${{ runner.temp }}/oga-artifact/oga-artifacts.tar.gz" -C "${{ runner.workspace }}/oga-artifacts"
+          tar -I zstd -xf "${{ runner.temp }}/oga-artifact/oga-artifacts.tar.zst" -C "${{ runner.workspace }}/oga-artifacts"
 
       # TheRock is auto-downloaded fresh by cmake/deps.cmake during the configure
       # (not cached).
@@ -212,6 +216,29 @@ jobs:
             --hip_arch "${{ env.HIP_ARCHITECTURES }}" \
             --cmake_prefix_path "${{ runner.workspace }}/llvm-install;${{ runner.workspace }}/ort-install" \
             --cmake_extra_defines ENABLE_ROCMLIRTRITON=ON
+
+      # Build-step sccache report. It runs right after the build so the numbers
+      # cover it; SCCACHE_IDLE_TIMEOUT=0 keeps the server (and its counters)
+      # alive across the tests that run inside build.py.
+      # Cache entries are immutable and each main push saves a new one, so the
+      # save below is skipped when the build wrote almost nothing; otherwise
+      # near-duplicate entries fill the repository cache quota that the
+      # LLVM/ORT prefixes share.
+      - name: sccache stats
+        id: sccache-stats
+        if: always()
+        continue-on-error: true
+        run: |
+          {
+            echo "### sccache (${{ github.workflow }})"
+            echo '```'
+            sccache --show-stats
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          writes=$(sccache --show-stats --stats-format=json | jq -r '.stats.cache_writes // empty') || writes=""
+          if [ -n "$writes" ] && [ "$writes" -lt 50 ]; then
+            echo "save=false" >> "$GITHUB_OUTPUT"
+          fi
 
       # Require DF_1_NODELETE and the plugin entry points. No GPU: constructors
       # must not touch a device.
@@ -412,7 +439,7 @@ jobs:
           retention-days: ${{ (github.ref == 'refs/heads/main' || contains(github.ref, 'release')) && 90 || 3 }}
 
       - name: Save sccache directory
-        if: always() && github.ref_name == 'main'
+        if: always() && github.ref_name == 'main' && steps.sccache-stats.outputs.save != 'false'
         continue-on-error: true
         uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
