@@ -837,6 +837,14 @@ void populateErfGeluFusionPatterns(RewritePatternSet &patterns,
 void populateGroupNormDecompositionFusionPatterns(RewritePatternSet &patterns,
                                                   MLIRContext *ctx);
 
+/// Pre-lowering pattern set: fold the exported RMSNorm primitive chain
+/// (Pow/Mul square -> ReduceMean -> Add(eps) -> Sqrt -> Div/Reciprocal ->
+/// Mul -> scale Mul, with optional fp32 Casts) into `onnx.RMSNormalization`,
+/// which NormConversion already lowers to `hip.rms_norm`. LayerNorm's
+/// centered Pow(Sub(...)) form is rejected. See RmsNormFusion.cpp.
+void populateRmsNormFusionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
+
 /// Pre-lowering pattern set: decompose vision/projector ops that have no
 /// direct MorphiZen converter into supported primitives —
 /// AveragePool(kernel==stride) → Reshape/Transpose/ReduceMean, Pow(x, c) →
