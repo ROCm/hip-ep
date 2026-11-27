@@ -32,6 +32,17 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
                                       rewriter.getI64IntegerAttr(value));
     };
 
+    // The runtime takes one data_type (HIPDNN_EP_DATATYPE_*) for A, B and the
+    // output; MatmulOp::verify guarantees they share it. Pass the type, not
+    // its byte size: f16 and bf16 are both 2 bytes. Checked before any IR is
+    // created.
+    auto AType = cast<MemRefType>(op.getA().getType());
+    auto BType = cast<MemRefType>(op.getB().getType());
+    Type elemType = AType.getElementType();
+    int64_t dataType = getHipdnnDataType(elemType);
+    if (dataType < 0)
+      return rewriter.notifyMatchFailure(op, "unsupported element type");
+
     // Extract pointers
     Value statePtr = adaptor.getCtx();
     Value APtr = extractContiguousMemRefPtr(adaptor.getA(), rewriter, loc);
@@ -40,8 +51,6 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
         extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
     // Get memref types and shapes
-    auto AType = cast<MemRefType>(op.getA().getType());
-    auto BType = cast<MemRefType>(op.getB().getType());
     int64_t ARank = AType.getRank();
     int64_t BRank = BType.getRank();
     int64_t transA = op.getTransA();
@@ -75,9 +84,7 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
       }
     }
 
-    // Compute element size in bytes
-    unsigned elemBits = AType.getElementType().getIntOrFloatBitWidth();
-    Value elemSize = createI64Const(elemBits / 8);
+    Value dataTypeVal = createI64Const(dataType);
 
     // b_batch_stride: the per-batch stride (in elements) for hipBLASLt's
     // STRIDED_BATCH_OFFSET on layA when batch_count > 1. Two distinct B
@@ -144,7 +151,7 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
     // integer kernel instead, or the bits are interpreted as floats. The
     // kernel still needs B's batch stride: 0 reuses one matrix, K*N steps
     // to the next. Omitting it made a rank-2 B look batch-contiguous.
-    if (AType.getElementType().isInteger(32)) {
+    if (elemType.isInteger(32)) {
       if (transA || transB)
         return op.emitError("hip.matmul of i32 does not support transpose");
       SmallVector<Type, 9> i32Params = {ptrType, ptrType, ptrType,
@@ -165,7 +172,7 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
     // int wrap_hipblasLtMatmul(RuntimeState* state,
     //                          const void* A, const void* B, void* output,
     //                          int64_t M, int64_t N, int64_t K,
-    //                          int64_t batch_count, int64_t elem_size,
+    //                          int64_t batch_count, int64_t data_type,
     //                          int64_t b_batch_stride, int64_t transA,
     //                          int64_t transB, int op_state_slot)
     SmallVector<Type, 13> paramTypes = {
@@ -178,7 +185,7 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
         i64Type, // N
         i64Type, // K
         i64Type, // batch_count
-        i64Type, // elem_size
+        i64Type, // data_type
         i64Type, // b_batch_stride
         i64Type, // transA
         i64Type  // transB
@@ -198,7 +205,7 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
                                    N,
                                    K,
                                    batchCount,
-                                   elemSize,
+                                   dataTypeVal,
                                    bBatchStride,
                                    createI64Const(transA),
                                    createI64Const(transB)};

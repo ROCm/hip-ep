@@ -147,6 +147,17 @@ struct MatMulLowering : ConvertOpToLLVMPattern<MatMulOp> {
           op, "operands must be memrefs (run bufferization first)");
     }
 
+    Type elemType = aType.getElementType();
+    if (elemType != bType.getElementType() ||
+        elemType != outputType.getElementType()) {
+      return rewriter.notifyMatchFailure(op, "mixed element types");
+    }
+
+    if (!elemType.isF32() && !elemType.isF16() && !elemType.isBF16()) {
+      return rewriter.notifyMatchFailure(op, "unsupported element type");
+    }
+    int64_t dataType = getHipdnnDataType(elemType);
+
     Type i64Type = rewriter.getI64Type();
     auto createI64Const = [&](int64_t value) {
       return LLVM::ConstantOp::create(rewriter, loc, i64Type,
@@ -204,7 +215,6 @@ struct MatMulLowering : ConvertOpToLLVMPattern<MatMulOp> {
       }
     }
 
-    int64_t elementSize = aType.getElementType().getIntOrFloatBitWidth() / 8;
     using MatMulCall =
         RuntimeFunc<i32, hostPtr, slotIndex, devicePtr, devicePtr, devicePtr,
                     i64, i64, i64, i64, i64, i64, i64, i64>;
@@ -215,7 +225,7 @@ struct MatMulLowering : ConvertOpToLLVMPattern<MatMulOp> {
     }
     if (failed(matMulFunc->call(
             adaptor.getCtx(), SlotIndex{op.getOperation()}, adaptor.getA(),
-            adaptor.getB(), adaptor.getInit(), m, n, k, batchCount, elementSize,
+            adaptor.getB(), adaptor.getInit(), m, n, k, batchCount, dataType,
             bBatchStride, static_cast<int64_t>(0), static_cast<int64_t>(0)))) {
       return failure();
     }

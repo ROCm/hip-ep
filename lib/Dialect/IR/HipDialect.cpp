@@ -1333,6 +1333,11 @@ LogicalResult MatmulOp::verify() {
                                 /*numInits=*/1)))
     return failure();
 
+  Type elemType = getElementTypeOrSelf(getA());
+  if (getElementTypeOrSelf(getB()) != elemType ||
+      getElementTypeOrSelf(getOutput()) != elemType)
+    return emitOpError("does not support mixed element types");
+
   return mlir::hip::verifyHipOpShape(*this, [&] {
     return mlir::hip::inferMatmulShape(
         detail::getShapeOf(getA()), detail::getShapeOf(getB()),

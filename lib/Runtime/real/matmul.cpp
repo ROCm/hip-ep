@@ -23,7 +23,7 @@
 //===----------------------------------------------------------------------===//
 // Per-shape descriptor cache with multi-algorithm auto-tune.
 //
-// On the first call for each unique (M, N, K, batch, elem_size) shape we
+// On the first call for each unique (M, N, K, batch, data_type) shape we
 // create descriptors, request up to MAX_ALGO_CANDIDATES algorithms from the
 // heuristic, and store them. On the first actual matmul call (when real GPU
 // pointers are available), we benchmark each candidate and cache the winner.
@@ -43,11 +43,30 @@ static bool autotune_enabled() {
   return enabled;
 }
 
+// HIPDNN_EP_DATATYPE_* -> hipBLASLt data type. Returns false for types
+// wrap_hipblasLtMatmul does not support.
+static bool matmul_hipdnn_to_hip_data_type(int64_t hipdnn_type,
+                                           hipDataType &dt) {
+  switch (hipdnn_type) {
+  case HIPDNN_EP_DATATYPE_FLOAT:
+    dt = HIP_R_32F;
+    return true;
+  case HIPDNN_EP_DATATYPE_HALF:
+    dt = HIP_R_16F;
+    return true;
+  case HIPDNN_EP_DATATYPE_BFLOAT16:
+    dt = HIP_R_16BF;
+    return true;
+  default:
+    return false;
+  }
+}
+
 struct MatmulCacheKey {
-  int64_t M, N, K, batch_count, elem_size, b_batch_stride, transA, transB;
+  int64_t M, N, K, batch_count, data_type, b_batch_stride, transA, transB;
   bool operator==(const MatmulCacheKey &o) const {
     return M == o.M && N == o.N && K == o.K && batch_count == o.batch_count &&
-           elem_size == o.elem_size && b_batch_stride == o.b_batch_stride &&
+           data_type == o.data_type && b_batch_stride == o.b_batch_stride &&
            transA == o.transA && transB == o.transB;
   }
 };
@@ -59,7 +78,7 @@ struct MatmulCacheKeyHash {
     hash_combine_val(h, k.N);
     hash_combine_val(h, k.K);
     hash_combine_val(h, k.batch_count);
-    hash_combine_val(h, k.elem_size);
+    hash_combine_val(h, k.data_type);
     hash_combine_val(h, k.b_batch_stride);
     hash_combine_val(h, k.transA);
     hash_combine_val(h, k.transB);
@@ -68,7 +87,7 @@ struct MatmulCacheKeyHash {
 };
 
 /// Cached hipBLASLt descriptors + multi-algorithm auto-tune state for a
-/// single (M, N, K, batch, elem_size) shape. Descriptors are created in
+/// single (M, N, K, batch, data_type) shape. Descriptors are created in
 /// queryOrCreateMatmul() and owned by the MatmulAlgoTable, which frees them
 /// when the last session sharing it is destroyed.
 struct MatmulCacheEntry {
@@ -151,7 +170,9 @@ static MatmulCacheEntry *queryOrCreateMatmul(MatmulAlgoTable &table,
   if (it != table.map.end())
     return it->second.get();
 
-  hipDataType dt = (key.elem_size == 2) ? HIP_R_16F : HIP_R_32F;
+  hipDataType dt;
+  if (!matmul_hipdnn_to_hip_data_type(key.data_type, dt))
+    return nullptr;
   int64_t M = key.M, N = key.N, K = key.K;
   int64_t transA = key.transA;
   int64_t transB = key.transB;
@@ -446,12 +467,12 @@ static void autotuneMatmul(hipblasLtHandle_t handle, hipStream_t stream,
 //   B_ptr = A (column-major view is A^T: K rows, M cols, ld = K)
 //   C_ptr = output (column-major view is C^T: N rows, M cols, ld = N)
 //
-// Both fp16 and fp32 use HIPBLAS_COMPUTE_32F for accumulation precision.
+// fp32, fp16 and bf16 all use HIPBLAS_COMPUTE_32F for accumulation precision.
 //===----------------------------------------------------------------------===//
 
 int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
                          const void *B, void *output, int64_t M, int64_t N,
-                         int64_t K, int64_t batch_count, int64_t elem_size,
+                         int64_t K, int64_t batch_count, int64_t data_type,
                          int64_t b_batch_stride, int64_t transA,
                          int64_t transB) {
   OP_PROFILE(
@@ -478,9 +499,10 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
     return -1;
   }
 
-  if (elem_size != 2 && elem_size != 4) {
-    fprintf(stderr, "wrap_hipblasLtMatmul: unsupported elem_size %lld\n",
-            (long long)elem_size);
+  hipDataType dt;
+  if (!matmul_hipdnn_to_hip_data_type(data_type, dt)) {
+    fprintf(stderr, "wrap_hipblasLtMatmul: unsupported data_type %s (%lld)\n",
+            hipdnn_ep_datatype_name(data_type), (long long)data_type);
     return -1;
   }
 
@@ -489,9 +511,10 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
   // about as much as the whole GEMV here. Within these bounds the GEMV is also
   // faster on the GPU; from N=1024 hipBLASLt's kernels match it, and K above
   // 8192 is unmeasured. With M=1 the activation is K contiguous elements
-  // whatever transA says.
-  if (elem_size == 2 && M == 1 && batch_count == 1 && !transB && N > 0 &&
-      N <= 512 && K > 0 && K <= 8192 && N % 8 == 0 &&
+  // whatever transA says. The kernel is fp16 only: bf16 is also 2 bytes, so
+  // gate on the dtype, not the element size.
+  if (data_type == HIPDNN_EP_DATATYPE_HALF && M == 1 && batch_count == 1 &&
+      !transB && N > 0 && N <= 512 && K > 0 && K <= 8192 && N % 8 == 0 &&
       reinterpret_cast<uintptr_t>(B) % 16 == 0) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: GEMV N=%lld K=%lld\n",
                       (long long)N, (long long)K);
@@ -499,13 +522,14 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
     return hip_gemv_f16_kn(stream, A, B, output, K, N) == 0 ? 0 : -1;
   }
 
-  const char *type_name = (elem_size == 2) ? "f16" : "f32";
+  const char *type_name = hipdnn_ep_datatype_name(data_type);
+  int64_t elem_size = hipdnn_ep_datatype_size(data_type);
   RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: M=%lld, N=%lld, K=%lld, "
                     "batch=%lld, b_batch_stride=%lld, transA=%lld, "
-                    "transB=%lld, elem_size=%lld (%s), total_bytes=%lld\n",
+                    "transB=%lld, data_type=%lld (%s), total_bytes=%lld\n",
                     (long long)M, (long long)N, (long long)K,
                     (long long)batch_count, (long long)b_batch_stride,
-                    (long long)transA, (long long)transB, (long long)elem_size,
+                    (long long)transA, (long long)transB, (long long)data_type,
                     type_name, (long long)(batch_count * M * N * elem_size));
 
   MatmulState *ms = MatmulState::get_op_state(state, op_state_slot);
@@ -515,7 +539,7 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
     return -1;
   }
 
-  MatmulCacheKey key{M,      N,     K, batch_count, elem_size, b_batch_stride,
+  MatmulCacheKey key{M,      N,     K, batch_count, data_type, b_batch_stride,
                      transA, transB};
   MatmulCacheEntry *cached = queryOrCreateMatmul(*ms->table, handle, key);
   if (!cached) {
