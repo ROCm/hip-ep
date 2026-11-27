@@ -1495,6 +1495,12 @@ int wrap_swiglu_clamped(RuntimeState *state, void *gate, void *up, void *output,
                         int64_t num_elements, int64_t data_type, float alpha,
                         float beta, float limit);
 
+// GEGLU over [rows, 2 * half_cols] -> [rows, half_cols]:
+// output[r, j] = input[r, j] * gelu_erf(input[r, half_cols + j]).
+// data_type: HIPDNN_EP_DATATYPE_* (FLOAT, HALF).
+int wrap_geglu(RuntimeState *state, void *input, void *output, int64_t rows,
+               int64_t half_cols, int64_t data_type);
+
 // Window-pool wrapper (uses custom HIP kernel).
 // Generic ONNX MaxPool / AveragePool / LpPool over (N, C, D_1[, D_2[, D_3]])
 // input with row-major output layout.  `pool_mode` (HIPDNN_EP_POOL_*) selects
