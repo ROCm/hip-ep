@@ -128,3 +128,64 @@ module {
   // CHECK: hip.if(%[[CTX]], {{.*}})
   // CHECK-NOT: onnx.If
 }
+
+// -----
+
+// Dynamic output: the then branch grows the cache, the else branch starts
+// one, so the size differs per branch. The o_init is sized by a
+// hip.if_result_dim placeholder over the hip.if captures.
+module {
+  func.func @main_graph_dynamic(%cond: tensor<i1>, %x: tensor<?x4xf32>,
+                                %past: tensor<?x4xf32>) -> tensor<?x4xf32> {
+    %res = "onnx.If"(%cond) ({
+    ^bb0():
+      %cat = "onnx.Concat"(%past, %x) {axis = 0 : si64}
+          : (tensor<?x4xf32>, tensor<?x4xf32>) -> tensor<?x4xf32>
+      "onnx.Yield"(%cat) : (tensor<?x4xf32>) -> ()
+    }, {
+    ^bb0():
+      %r = "onnx.Relu"(%x) : (tensor<?x4xf32>) -> tensor<?x4xf32>
+      "onnx.Yield"(%r) : (tensor<?x4xf32>) -> ()
+    }) : (tensor<i1>) -> tensor<?x4xf32>
+    return %res : tensor<?x4xf32>
+  }
+
+  // CHECK-LABEL: func.func @main_graph_dynamic
+  // CHECK: %[[D0:.*]] = hip.if_result_dim(%{{[^)]*}})
+  // CHECK-SAME: captures(%{{.*}} : tensor<?x4xf32>, tensor<?x4xf32>)
+  // CHECK-SAME: then @main_graph_dynamic_if_then_n0 else @main_graph_dynamic_if_else_n1
+  // CHECK: %[[INIT:.*]] = tensor.empty(%[[D0]]) : tensor<?x4xf32>
+  // CHECK: hip.if(%{{[^)]*}}, %{{[^)]*}})
+  // CHECK-SAME: outs(%[[INIT]] : tensor<?x4xf32>)
+}
+
+// -----
+
+// A small outer constant (the LayerNorm Pow exponent in merged decoders) is
+// copied into each branch rather than captured, so converters that need a
+// constant operand still see one. The large one stays a capture.
+module {
+  func.func @main_graph_sink(%cond: tensor<i1>, %x: tensor<4xf32>) -> tensor<4xf32> {
+    %two = "onnx.Constant"() {value = dense<2.0> : tensor<f32>} : () -> tensor<f32>
+    %w = "onnx.Constant"() {value = dense<1.0> : tensor<128xf32>} : () -> tensor<128xf32>
+    %res = "onnx.If"(%cond) ({
+    ^bb0():
+      %p = "onnx.Pow"(%x, %two) : (tensor<4xf32>, tensor<f32>) -> tensor<4xf32>
+      "onnx.Yield"(%p) : (tensor<4xf32>) -> ()
+    }, {
+    ^bb0():
+      %s = "onnx.ReduceSum"(%w) {keepdims = 1 : si64} : (tensor<128xf32>) -> tensor<1xf32>
+      %a = "onnx.Add"(%x, %s) : (tensor<4xf32>, tensor<1xf32>) -> tensor<4xf32>
+      "onnx.Yield"(%a) : (tensor<4xf32>) -> ()
+    }) : (tensor<i1>) -> tensor<4xf32>
+    return %res : tensor<4xf32>
+  }
+
+  // CHECK-LABEL: func.func @main_graph_sink
+  // CHECK: hip.if(%{{[^)]*}}, %{{[^)]*}})
+  // CHECK-SAME: captures(%{{[^:]*}} : tensor<4xf32>, tensor<128xf32>)
+  // CHECK-LABEL: func.func private @main_graph_sink_if_then_n0
+  // CHECK-SAME: (%{{[^,]*}}, %[[X:[^:]*]]: tensor<4xf32>, %{{[^:]*}}: tensor<128xf32>)
+  // CHECK: %[[TWO:.*]] = "onnx.Constant"() {value = dense<2.000000e+00> : tensor<f32>}
+  // CHECK: "onnx.Pow"(%[[X]], %[[TWO]])
+}

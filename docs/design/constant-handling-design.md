@@ -222,7 +222,9 @@ inline values and file-backed ranges and declines memory-address carriers.
 conversion all use it, so they fold only weights at or below the importer's
 inline threshold (raise `XLNX_ABI_2_0_CLONE_EXTERNAL_DATA_THRESHOLD` to bring
 all initializers inline). A fold emits its result as a new inline carrier, so
-only the rewritten weights are copied.
+only the rewritten weights are copied. `hip-resolve-if-result-dims` also reads
+shape tensors through it, so an If branch whose Reshape target or Gather index
+is an external initializer is still sized on the host.
 
 For externalized constants, the pass writes raw bytes to the configured
 constants file via `fs`, and emits the existing module attributes:
