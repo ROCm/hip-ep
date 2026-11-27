@@ -152,3 +152,46 @@ func.func @no_wait_outside_loop(%ctx: !hip.context, %x: memref<1xi64>)
       outs(%a : memref<1xi64>)
   return %v : i64
 }
+
+// -----
+
+// A loop-local slot only read by an async copy is still in use by the queued
+// copy when the next iteration stores into it. Wait before reusing it.
+// CHECK-LABEL: func.func @loop_local_copy_source
+// CHECK: scf.for
+// CHECK: hip.stream_wait(%{{.*}})
+// CHECK: %[[A:.*]] = memref.view {{.*}} to memref<1xi64>
+// CHECK: memref.store %{{.*}}, %[[A]]
+// CHECK: memref.copy %[[A]]
+func.func @loop_local_copy_source(%ctx: !hip.context, %dst: memref<1xi64>) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c4 = arith.constant 4 : index
+  scf.for %i = %c0 to %c4 step %c1 {
+    %n = arith.index_cast %i : index to i64
+    %a = memref.alloc() : memref<1xi64>
+    memref.store %n, %a[%c0] : memref<1xi64>
+    memref.copy %a, %dst : memref<1xi64> to memref<1xi64>
+  }
+  return
+}
+
+// -----
+
+// A readback waits on the function's context only. A buffer written by a
+// HIP op on another context stays a device allocation.
+// CHECK-LABEL: func.func @kernel_on_other_context
+// CHECK-NOT: hip.get_host_scratch
+// CHECK: memref.alloc
+// CHECK: hip.add
+// CHECK: memref.load
+// CHECK-NOT: hip.readback_scalar
+func.func @kernel_on_other_context(%ctx: !hip.context, %other: !hip.context,
+    %x: memref<1xi64>) -> i64 {
+  %c0 = arith.constant 0 : index
+  %a = memref.alloc() : memref<1xi64>
+  hip.add(%other) ins(%x, %x : memref<1xi64>, memref<1xi64>)
+      outs(%a : memref<1xi64>)
+  %v = memref.load %a[%c0] : memref<1xi64>
+  return %v : i64
+}
