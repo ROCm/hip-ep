@@ -133,6 +133,7 @@ jobs:
         with:
           path: ${{ runner.workspace }}/sccache-dir
           key: sccache-standard-linux-${{ env.SCCACHE_KEY_DATE }}
+          # Keep this prefix distinct from RMT because restore-keys uses prefix matching.
           restore-keys: |
             sccache-standard-linux-
 
