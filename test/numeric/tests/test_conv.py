@@ -79,6 +79,50 @@ def _make_conv_model(
     return make_model_from_nodes([node], [inp], [out], initializers=inits)
 
 
+def _make_conv_chain_model(
+    channels: "list[int]",
+    spatial: int,
+    seed: int = 7,
+    dtype: int = TensorProto.FLOAT,
+):
+    """Build a chain of 3x3, stride 1, same-padded Convs with bias initializers.
+
+    One Conv per consecutive pair in `channels`, on a square [1, c, spatial,
+    spatial] input. Weights are scaled by 1 / sqrt(fan-in) so the activations
+    stay near 1 through the chain and the comparison tolerance means the same
+    for every layer.
+    """
+    np_dtype = _np_dtype(dtype)
+    rng = np.random.default_rng(seed)
+    inp = helper.make_tensor_value_info(
+        "input", dtype, [1, channels[0], spatial, spatial]
+    )
+    out = helper.make_tensor_value_info(
+        "output", dtype, [1, channels[-1], spatial, spatial]
+    )
+    nodes, inits = [], []
+    prev = "input"
+    pairs = list(zip(channels, channels[1:]))
+    for i, (in_c, out_c) in enumerate(pairs):
+        scale = 1.0 / np.sqrt(in_c * 9)
+        wt = rng.uniform(-1.0, 1.0, [out_c, in_c, 3, 3]) * scale
+        bs = rng.uniform(-0.1, 0.1, [out_c])
+        inits.append(numpy_helper.from_array(wt.astype(np_dtype), name=f"w{i}"))
+        inits.append(numpy_helper.from_array(bs.astype(np_dtype), name=f"b{i}"))
+        last = i == len(pairs) - 1
+        nodes.append(
+            helper.make_node(
+                "Conv",
+                [prev, f"w{i}", f"b{i}"],
+                ["output" if last else f"y{i}"],
+                kernel_shape=[3, 3],
+                pads=[1, 1, 1, 1],
+            )
+        )
+        prev = f"y{i}"
+    return make_model_from_nodes(nodes, [inp], [out], initializers=inits)
+
+
 class TestConv:
     @pytest.mark.parametrize(
         "in_c,out_c,group",
@@ -155,10 +199,13 @@ class TestConvSplitK:
 
     Every row has to split, or it only repeats the unsplit kernels' tests. They
     do on the 40-CU gfx1151 (checked from the plan arithmetic and from the
-    kernels launched) and, for most rows, on smaller and larger devices too. The
-    1x1 rows use a reduction that is not a multiple of 8, which keeps fp16 off
-    its dedicated 1x1 kernel (that one never splits); the rows without a bias
-    cover the reduce kernel's null-bias path in fp32 and fp16."""
+    kernels launched). The split target scales with the CU count, so on a device
+    with fewer CUs some cases stop splitting. By the plan arithmetic, of the
+    fourteen cases five stop on 12 CUs and two on 8 or 16, and none on 40 or 96.
+    On each of those devices at least one row without a bias still splits in
+    each dtype, so the reduce kernel's null-bias path stays covered.
+    The 1x1 rows use a reduction that is not a multiple of 8, which keeps fp16 off
+    its dedicated 1x1 kernel (that one never splits)."""
 
     @pytest.mark.parametrize("dtype", [TensorProto.FLOAT, TensorProto.FLOAT16])
     @pytest.mark.parametrize(
@@ -193,6 +240,28 @@ class TestConvSplitK:
         actual, expected = model_runner.run_sample(model, [x])
         tol = 1e-3 if dtype == TensorProto.FLOAT else 2e-2
         compare_outputs(actual, expected, atol=tol, rtol=tol, cos_threshold=0.9999)
+
+    @pytest.mark.parametrize("dtype", [TensorProto.FLOAT, TensorProto.FLOAT16])
+    def test_conv_splitk_shared_scratch(self, model_runner, dtype):
+        """Four split convolutions in one model share the session's workspace.
+
+        The workspace is one buffer per session stream, grown when a convolution
+        needs more than it holds and reused as it is otherwise. Over the channel
+        counts 128, 128, 256, 512, 128 the workspace each convolution needs
+        rises for the first three and falls for the last (on 40 CUs 294, 392 and
+        1176 KiB then 980 KiB in fp32, 392, 784 and 1176 KiB then 784 KiB in fp16),
+        so the buffer is allocated for the first, regrown for the second and
+        third, and reused by the fourth. A stale pointer, a
+        buffer that is too small, or partial sums left over from the previous
+        convolution would corrupt a later layer, and a single-convolution model
+        cannot reach any of that."""
+        channels = [128, 128, 256, 512, 128]
+        model = _make_conv_chain_model(channels, 14, seed=11, dtype=dtype)
+        rng = np.random.default_rng(5)
+        x = rng.uniform(-1.0, 1.0, [1, channels[0], 14, 14]).astype(_np_dtype(dtype))
+        actual, expected = model_runner.run_sample(model, [x])
+        tol = 2e-3 if dtype == TensorProto.FLOAT else 3e-2
+        compare_outputs(actual, expected, atol=tol, rtol=tol, cos_threshold=0.999)
 
 
 class TestConvScalarTiles:
