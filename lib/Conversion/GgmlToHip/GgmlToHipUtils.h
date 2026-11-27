@@ -14,6 +14,7 @@
 #ifndef HIP_CONVERSION_GGMLTOHIP_GGMLTOHIPUTILS_H
 #define HIP_CONVERSION_GGMLTOHIP_GGMLTOHIPUTILS_H
 
+#include "hip/Conversion/GgmlToHip/GgmlToHipLegality.h"
 #include "hip/Conversion/GgmlToHip/Passes.h"
 #include "hip/Dialect/Ggml/IR/GgmlLayout.h"
 #include "hip/Dialect/Ggml/IR/GgmlOps.h"
@@ -69,13 +70,16 @@ inline std::optional<int64_t> getHipCastElementTypeCode(Type type) {
   return std::nullopt;
 }
 
-/// The weight formats the native kernels read where llama.cpp loaded them.
+/// The weight formats the native kernels read where llama.cpp loaded them
+/// (isNativeMatmulWeight).
 inline std::optional<GgmlKQuantFormatInfo>
 getGgmlKQuantFormatInfo(StringRef encoding) {
   auto kQuant = [](kquant::Format format) {
     return GgmlKQuantFormatInfo{format, kquant::kBlockElements,
                                 kquant::getBlockBytes(format)};
   };
+  if (!isNativeMatmulWeight(encoding))
+    return std::nullopt;
   if (encoding == "q4_K")
     return kQuant(kquant::Format::Q4K);
   if (encoding == "q5_K")

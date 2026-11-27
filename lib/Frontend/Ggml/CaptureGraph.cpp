@@ -104,15 +104,6 @@ template <typename Element> Extents extentsOf(const Element *values) {
 // numbers, and the correspondence is declared beside each dialect value.
 #include "hip/Dialect/Ggml/IR/GgmlEnumNames.inc"
 
-NodeParameters typedParameters(const Tensor &tensor) {
-  const auto i32 = [&](int index) {
-    return static_cast<int64_t>(opParamI32(tensor, index));
-  };
-  const auto f32 = [&](int index) { return opParamF32(tensor, index); };
-#include "hip/Dialect/Ggml/IR/GgmlDecode.inc"
-  return UnsupportedParameters{};
-}
-
 std::string
 classifyExternal(const Tensor &tensor,
                  const std::unordered_set<const Tensor *> &stateRoots) {
@@ -126,6 +117,15 @@ classifyExternal(const Tensor &tensor,
 }
 
 } // namespace
+
+NodeParameters parametersOf(const Tensor &tensor) {
+  const auto i32 = [&](int index) {
+    return static_cast<int64_t>(opParamI32(tensor, index));
+  };
+  const auto f32 = [&](int index) { return opParamF32(tensor, index); };
+#include "hip/Dialect/Ggml/IR/GgmlDecode.inc"
+  return UnsupportedParameters{};
+}
 
 CapturedGraph observeSplit(const std::vector<const Tensor *> &nodes,
                            const std::vector<bool> &exported,
@@ -226,7 +226,7 @@ CapturedGraph observeSplit(const std::vector<const Tensor *> &nodes,
     node.id = graph.ids.at(tensor);
     node.name = tensor->name;
     node.operation = tensor->op;
-    node.parameters = typedParameters(*tensor);
+    node.parameters = parametersOf(*tensor);
     if (destinationSlot)
       node.writeSlot = *destinationSlot;
     if (std::holds_alternative<UnsupportedParameters>(node.parameters))

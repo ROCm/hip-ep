@@ -97,8 +97,10 @@ static bool isEligibleNativeKQuantConsumer(Operation *user, Value activation,
                                            int64_t k) {
   auto candidate = dyn_cast<ggml::MulMatOp>(user);
   return candidate && candidate.getInput() == activation &&
-         candidate.getPrecision() == ggml::ComputePrecision::Default &&
-         candidate.getHint() == 0 &&
+         mulMatRefusal(
+             ggml::stringifyComputePrecision(candidate.getPrecision()),
+             static_cast<int64_t>(candidate.getHint()))
+             .empty() &&
          isEligibleNativeKQuantWeight(candidate.getWeight(), k);
 }
 
@@ -185,10 +187,11 @@ struct MulMatToHip final : OpRewritePattern<ggml::MulMatOp> {
 
   LogicalResult matchAndRewrite(ggml::MulMatOp op,
                                 PatternRewriter &rewriter) const override {
-    if (op.getPrecision() != ggml::ComputePrecision::Default ||
-        op.getHint() != 0) {
-      return op.emitOpError(
-          "HIP lowering supports only default precision and hint");
+    if (StringRef refusal =
+            mulMatRefusal(ggml::stringifyComputePrecision(op.getPrecision()),
+                          static_cast<int64_t>(op.getHint()));
+        !refusal.empty()) {
+      return op.emitOpError(refusal);
     }
     FailureOr<Value> context = getHipContext(op, rewriter);
     if (failed(context)) {

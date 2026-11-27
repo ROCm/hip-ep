@@ -3,10 +3,11 @@
  * Licensed under the MIT License.
  */
 
-// Ops - which operations the library compiles: those the compiler lowers, of
-// dense types (but the packed weight a MUL_MAT multiplies by), that write no
-// tensor outside the split but a cache's rows (SET_ROWS: the cache is a state
-// of the split, updated in place).
+// Ops - which operations the library compiles: those the compiler lowers,
+// configured as it lowers them (GgmlToHipLegality.h), of dense types (but the
+// packed K-quant weight a MUL_MAT multiplies by), that write no tensor outside
+// the split but a cache's rows (SET_ROWS: the cache is a state of the split,
+// updated in place).
 
 #ifndef HIPEP_BACKEND_OPS_H
 #define HIPEP_BACKEND_OPS_H

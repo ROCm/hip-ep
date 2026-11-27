@@ -67,11 +67,15 @@ split by ggml-hip alone.
 This first version takes what a Llama-style dense decoder needs with
 `-fa on` (it is checked on Llama 3.2 3B Q4_K_S): weights Q4_K, Q5_K or Q6_K,
 F16 KV caches, and the operations `lib/HipepBackend/Ops.cpp` lists - `ADD`,
-`MUL`, `RMS_NORM`, `MUL_MAT`, `ROPE`, `GLU` (SwiGLU), `GET_ROWS` (F32),
+`MUL`, `RMS_NORM`, `MUL_MAT`, `ROPE` (normal or NEOX, without YaRN), `GLU`
+(SwiGLU of a gate and an up), `GET_ROWS` (F32),
 `SET_ROWS` (F32 rows into an F16 cache), `FLASH_ATTN_EXT` (masked, head
 widths 40 to 128 and 256, on llama.cpp's tile kernel) and the views
 (`VIEW`, `RESHAPE`, `PERMUTE`, `TRANSPOSE`). Several sequences are taken
 over one KV cache (`-kvu`); a cache of a stream per sequence is refused.
+An operation is taken configured as `convert-ggml-to-hip` lowers it: by
+the predicates its patterns ask too
+(`include/hip/Conversion/GgmlToHip/GgmlToHipLegality.h`).
 Whatever it does not compile, ggml-hip runs
 (`HIPEP_BACKEND_OPS` narrows what it compiles, as a model it takes in part).
 

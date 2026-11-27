@@ -7,6 +7,9 @@
 
 #include "Graph.h"
 
+#include "hip/Conversion/GgmlToHip/GgmlToHipLegality.h"
+#include "hip/Frontend/Ggml/CaptureGraph.h"
+#include "hip/Frontend/Ggml/Error.h"
 #include "hip/Frontend/Ggml/GgmlTensor.h"
 
 #include <cstdlib>
@@ -14,6 +17,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <variant>
 
 namespace hipep_backend {
 namespace {
@@ -21,12 +25,6 @@ namespace {
 bool isDenseType(int32_t type) {
   const std::string name = hip::ggml::typeName(type).value_or("");
   return name == "f32" || name == "f16" || name == "i32" || name == "i64";
-}
-
-/// A weight the native K-quant kernels multiply by as llama.cpp stored it.
-bool isKQuantType(int32_t type) {
-  const std::string name = hip::ggml::typeName(type).value_or("");
-  return name == "q4_K" || name == "q5_K" || name == "q6_K";
 }
 
 bool isView(const std::string &op) {
@@ -54,6 +52,45 @@ const std::set<std::string> &supportedOps() {
   return ops;
 }
 
+/// Whether convert-ggml-to-hip lowers the node as it is configured: its
+/// op_params, read as the compile reads them, and which optional operands it
+/// was given.
+bool lowersConfiguration(const hipep_backend_split_desc &desc,
+                         const hipep_backend_tensor_desc &node) {
+  hip::ggml::Tensor tensor;
+  tensor.op = node.op;
+  std::memcpy(tensor.opParams, node.op_params, sizeof(tensor.opParams));
+  tensor.viewOffs = static_cast<size_t>(node.view_offs);
+  capture::NodeParameters parameters;
+  try {
+    parameters = capture::parametersOf(tensor);
+  } catch (const hip::ggml::Error &) {
+    return false;
+  }
+  const auto given = [&](int slot) {
+    return node.src[slot] >= 0 &&
+           static_cast<size_t>(node.src[slot]) < desc.n_tensors;
+  };
+  if (const auto *glu = std::get_if<capture::GluParameters>(&parameters))
+    return mlir::hip::gluRefusal(glu->kind, given(1), glu->swapped, glu->alpha,
+                                 glu->limit)
+        .empty();
+  if (const auto *rope = std::get_if<capture::RopeParameters>(&parameters))
+    return mlir::hip::ropeRefusal(rope->mode, rope->pastTokenCount,
+                                  rope->legacyContext, rope->offsetCount,
+                                  rope->sections, rope->extensionFactor)
+        .empty();
+  if (const auto *product = std::get_if<capture::MatmulParameters>(&parameters))
+    return mlir::hip::mulMatRefusal(product->precision, product->hint).empty();
+  if (const auto *attention =
+          std::get_if<capture::FlashAttentionParameters>(&parameters))
+    return mlir::hip::flashAttentionRefusal(
+               given(3), given(4), attention->scale, attention->maxBias,
+               attention->logitSoftcap, attention->precision)
+        .empty();
+  return !std::holds_alternative<capture::UnsupportedParameters>(parameters);
+}
+
 } // namespace
 
 bool supports(const hipep_backend_split_desc &desc) {
@@ -76,14 +113,17 @@ bool supports(const hipep_backend_split_desc &desc) {
     const int32_t s = node.src[i];
     if (s < 0 || static_cast<size_t>(s) >= desc.n_tensors)
       continue;
-    // A packed weight MUL_MAT multiplies by: the native kernels read its
-    // blocks where llama.cpp loaded them.
+    // A product is by a packed weight: the native kernels read its blocks
+    // where llama.cpp loaded them.
     const int32_t type = tensorAt(desc, static_cast<size_t>(s)).type;
-    if (!isDenseType(type) &&
-        !(i == 0 && op == "MUL_MAT" && isKQuantType(type)))
+    const bool lowered = i == 0 && op == "MUL_MAT"
+                             ? mlir::hip::isNativeMatmulWeight(
+                                   hip::ggml::typeName(type).value_or(""))
+                             : isDenseType(type);
+    if (!lowered)
       return false;
   }
-  return true;
+  return lowersConfiguration(desc, node);
 }
 
 } // namespace hipep_backend

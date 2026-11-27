@@ -181,6 +181,18 @@ struct Context {
     r->src[0] = q, r->src[1] = k, r->src[2] = v, r->src[3] = mask;
     return r;
   }
+  /// ggml_glu_split, or ggml_glu (`b` null: `a` halved).
+  Tensor *glu(const Tensor *a, const Tensor *b, int32_t kind, bool swapped) {
+    Tensor *r =
+        b != nullptr
+            ? like(a)
+            : tensor(a->type, {a->ne[0] / 2, a->ne[1], a->ne[2], a->ne[3]});
+    r->opParams[0] = kind;
+    r->opParams[1] = swapped ? 1 : 0;
+    r->op = "GLU";
+    r->src[0] = a, r->src[1] = b;
+    return r;
+  }
 
   /// ggml_build_forward_expand's nodes: what `roots` compute, sources first.
   static std::vector<const Tensor *>
@@ -609,11 +621,71 @@ void testSupportedOps() {
   };
   check(supported(c.mulMat(a, b)), "a product by a packed weight");
   check(!supported(c.mulMat(b, a)), "no product of a packed activation");
+  Tensor *dense = c.tensor(kF16, {256, 8});
+  check(!supported(c.mulMat(dense, b)),
+        "no product by a dense weight (the native kernels read K-quants)");
   check(supported(c.add(b, b)), "a sum");
   Tensor *h = c.tensor(kBF16, {256, 4});
   check(!supported(c.add(h, h)), "no bf16 sum (the runtime has none)");
   Tensor *dst = c.tensor(kF32, {256, 4});
   check(!supported(c.cpy(b, dst)), "no copy into another tensor");
+}
+
+/// What the library takes of an operation is how convert-ggml-to-hip lowers
+/// it configured (GgmlToHipLegality.h): a split of what it takes but the
+/// lowering refuses would be refused whole.
+void testSupportedConfigurations() {
+  Context c;
+  const auto supported = [](const Tensor *op) {
+    SplitDescBuilder d({}, {});
+    d.addTensor(op, {op}, true);
+    return hipep_backend::supports(d.desc());
+  };
+  // ggml's enumerators: enum ggml_glu_op, GGML_ROPE_TYPE_*, enum ggml_prec.
+  constexpr int32_t kGeglu = 1, kSwiglu = 2, kSwigluOai = 3;
+  constexpr int32_t kNeox = 2, kMrope = 8;
+  constexpr int32_t kPrecisionF32 = 10;
+
+  Tensor *x = c.tensor(kF32, {64, 4});
+  check(supported(c.glu(x, x, kSwiglu, false)), "SwiGLU of a gate and an up");
+  check(!supported(c.glu(x, nullptr, kSwiglu, false)),
+        "no SwiGLU of one operand halved");
+  check(!supported(c.glu(x, x, kSwiglu, true)), "no swapped SwiGLU");
+  check(!supported(c.glu(x, x, kGeglu, false)), "no GEGLU");
+  check(!supported(c.glu(x, x, kSwigluOai, false)), "no SwiGLU-OAI");
+
+  Tensor *q = c.tensor(kF32, {16, 4, 6});
+  Tensor *positions = c.tensor(kI32, {6});
+  check(supported(c.rope(q, positions, 16, 0, 4096, 10000.0f)),
+        "a normal rotation");
+  check(supported(c.rope(q, positions, 16, kNeox, 4096, 10000.0f)),
+        "a NEOX rotation");
+  check(!supported(c.rope(q, positions, 16, kMrope, 4096, 10000.0f)),
+        "no multi-section rotation");
+  Tensor *yarn = c.rope(q, positions, 16, kNeox, 4096, 10000.0f);
+  const float extension = 1.0f;
+  std::memcpy(yarn->opParams + 7, &extension, sizeof(extension));
+  check(!supported(yarn), "no rotation with YaRN's extension");
+  Tensor *unknown = c.rope(q, positions, 16, 1, 4096, 10000.0f);
+  check(!supported(unknown), "no rotation of a mode the dialect does not have");
+
+  Tensor *k = c.tensor(kF16, {16, 256, 4});
+  Tensor *mask = c.tensor(kF16, {256, 6});
+  const auto attention = [&](const Tensor *m, float softcap,
+                             int32_t precision) {
+    Tensor *r = c.flashAttn(q, k, k, m, 0.25f);
+    std::memcpy(r->opParams + 2, &softcap, sizeof(softcap));
+    r->opParams[3] = precision;
+    return r;
+  };
+  check(supported(attention(mask, 0.0f, kPrecisionF32)),
+        "attention under a mask, at f32");
+  check(!supported(attention(nullptr, 0.0f, kPrecisionF32)),
+        "no attention without a mask");
+  check(!supported(attention(mask, 30.0f, kPrecisionF32)),
+        "no attention under a logit softcap");
+  check(!supported(attention(mask, 0.0f, 0)),
+        "no attention at the default precision");
 }
 
 /// ggml's type numbers (GgmlTensor.h) name types the dialect has a block
@@ -657,6 +729,7 @@ int main() {
   testDynamicSignature();
   testCompiledShapesFit();
   testSupportedOps();
+  testSupportedConfigurations();
   testTypeTable();
   if (failures != 0) {
     std::printf("%d check(s) failed\n", failures);
