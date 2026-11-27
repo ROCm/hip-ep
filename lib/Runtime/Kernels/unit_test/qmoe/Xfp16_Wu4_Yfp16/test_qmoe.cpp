@@ -671,7 +671,7 @@ int wrap_qmoe(RuntimeState *, const void *, const void *, const void *,
               const void *, const void *, const void *, const void *, void *,
               int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t,
               int64_t, int64_t, float, float, float, int64_t, int64_t,
-              const void *, int64_t, float);
+              const void *, int64_t, float, float);
 
 struct Case {
   int64_t m = 1, h = 128, inter = 128, experts = 8, topk = 2, gs = 32;
@@ -1008,7 +1008,7 @@ static bool runCase(const Case &c, int iters, unsigned seed) {
         w1.zeros.empty() ? nullptr : part(2, dz1),
         w2.zeros.empty() ? nullptr : part(6, dz2), nullptr, dy, c.m, c.h,
         c.inter, c.experts, c.topk, 4, c.gs, 1, 0, c.alpha, c.beta, c.limit,
-        c.normalize, 2, nullptr, HIPDNN_EP_QMOE_ROUTING_SOFTMAX, 1.0f);
+        c.normalize, 2, nullptr, HIPDNN_EP_QMOE_ROUTING_SOFTMAX, 1.0f, 0.0f);
     if (rc && !status)
       status = rc;
   };
