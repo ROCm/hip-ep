@@ -14,6 +14,10 @@ name: Windows GPU Test
 on:
   workflow_call:
     inputs:
+      gpu_runner_label:
+        description: Label of the Windows GPU runner for model and kernel tests
+        type: string
+        default: StrixHalo
       docs_only:
         description: >-
           Record success without the GPU suites. Set when the diff cannot
@@ -27,7 +31,7 @@ permissions:
 
 jobs:
   test:
-    runs-on: ${{ inputs.docs_only && 'ubuntu-latest' || 'StrixHalo' }}
+    runs-on: ${{ inputs.docs_only && 'ubuntu-latest' || inputs.gpu_runner_label }}
     # Never cancel an in-progress GPU run: queue newer runs of the same ref
     # behind it instead of killing the long-running perf / OGA / L2 suites.
     # The self-hosted StrixHalo runner already serializes physically, so

@@ -10,6 +10,11 @@ name: Windows Kernel Unit Test
 # lib/Runtime/Kernels/ or this file; pushes and manual runs always do.
 on:
   workflow_call:
+    inputs:
+      gpu_runner_label:
+        description: Label of the Windows GPU runner for model and kernel tests
+        type: string
+        default: StrixHalo
 
 permissions:
   contents: read
@@ -65,7 +70,7 @@ jobs:
   run:
     needs: changes
     if: needs.changes.outputs.run == 'true'
-    runs-on: StrixHalo
+    runs-on: ${{ inputs.gpu_runner_label }}
     timeout-minutes: 30
     concurrency:
       group: kernel-ut-${{ github.ref }}
