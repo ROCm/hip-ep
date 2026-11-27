@@ -4265,6 +4265,14 @@ static int tuneGemvConfigU2(
     constexpr int ITERS  = 5;
     constexpr int kFloorIters = 15;  // extra iters for sub-0.1ms configs
 
+    // Same cold probing as the int4 GEMV tuner (see gemvEvictAlloc), for
+    // weights large enough that cache residency decides the ranking. Below
+    // that the cold readings are not trustworthy: on the int2 Qwen3.6-35B-A3B
+    // the 256-512 KB projections read 1.0-1.2 us cold, ranked 16-row tiles
+    // first, and ran 2-3x slower in-model than the warm pick.
+    constexpr int64_t kU2ColdMinBytes = int64_t{1} << 20;
+    void* evict = N * K / 4 >= kU2ColdMinBytes ? gemvEvictAlloc() : nullptr;
+
     settleClock(ev0, ev1, stream, [&]{
         launchGemvConfigU2(best_id, stream, A, B, sc, zp, bi, out,
                            M, N, K, batch, bs);
@@ -4272,7 +4280,7 @@ static int tuneGemvConfigU2(
 
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
         float cfg_best_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
-                                            kFloorIters, 0.1f, nullptr, [&]{
+                                            kFloorIters, 0.1f, evict, [&]{
             launchGemvConfigU2(cid, stream, A, B, sc, zp, bi, out,
                                M, N, K, batch, bs);
         });
@@ -4288,6 +4296,7 @@ static int tuneGemvConfigU2(
         }
     }
 
+    if (evict) (void)hipFree(evict);
     hipEventDestroy(ev0);
     hipEventDestroy(ev1);
 
