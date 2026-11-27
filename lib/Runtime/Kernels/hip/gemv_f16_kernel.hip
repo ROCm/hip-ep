@@ -11,22 +11,51 @@
 
 #include "hip_custom_kernels.h"
 
-// fp16 GEMV out[N] = a[K] . B[K, N], B row-major (N contiguous), for the
-// narrow MatMuls of a decode step (an MoE router: K=2880, N=128).
+// GEMV out[N] = a[K] . B[K, N], B row-major (N contiguous), fp32 accumulation,
+// for the narrow MatMuls of a decode step: MoE routers (fp16 K=2880, N=128;
+// fp32 K=2048, N=256 and K=4096, N=288).
 //
-// Each workgroup owns LANES_N * kVec columns over all of K: LANES_N lanes each
-// load one 16-byte vector (8 columns) of a row, kThreads / LANES_N row groups
-// stride over K, and the row groups reduce through LDS. Every workgroup reads
-// the same rows, so a row's 2*N bytes are fetched from DRAM once and served to
-// the rest from L2. Wider outputs take more lanes per row so the workgroup
-// count, and with it the number of busy CUs, grows more slowly than N.
-static constexpr int kVec = 8;
+// Each workgroup owns LANES_N 16-byte vectors of columns over all of K:
+// LANES_N lanes each load one vector of a row, kThreads / LANES_N row groups
+// stride over K with U rows per thread in flight, and the row groups reduce
+// through LDS. Every workgroup reads the same rows, so a row's bytes are
+// fetched from DRAM once and served to the rest from L2.
 static constexpr int kThreads = 256;
 
-template <int LANES_N>
+template <typename T> struct GemvElem;
+
+template <> struct GemvElem<__half> {
+  static constexpr int kVec = 8;
+  __device__ static float load(const __half* p) { return __half2float(*p); }
+  __device__ static __half store(float x) { return __float2half(x); }
+  __device__ static void fma(float (&acc)[kVec], float av, const uint4& w) {
+    const __half2* h = reinterpret_cast<const __half2*>(&w);
+#pragma unroll
+    for (int v = 0; v < kVec / 2; v++) {
+      const float2 f = __half22float2(h[v]);
+      acc[2 * v] += av * f.x;
+      acc[2 * v + 1] += av * f.y;
+    }
+  }
+};
+
+template <> struct GemvElem<float> {
+  static constexpr int kVec = 4;
+  __device__ static float load(const float* p) { return *p; }
+  __device__ static float store(float x) { return x; }
+  __device__ static void fma(float (&acc)[kVec], float av, const uint4& w) {
+    const float* f = reinterpret_cast<const float*>(&w);
+#pragma unroll
+    for (int v = 0; v < kVec; v++) acc[v] += av * f[v];
+  }
+};
+
+template <typename T, int LANES_N, int U = 8>
 __global__ void __launch_bounds__(kThreads)
-gemv_f16_kn_kernel(const __half* __restrict__ a, const __half* __restrict__ B,
-                   __half* __restrict__ out, int K, int N) {
+gemv_kn_kernel(const T* __restrict__ a, const T* __restrict__ B,
+               T* __restrict__ out, int K, int N) {
+  using E = GemvElem<T>;
+  constexpr int kVec = E::kVec;
   constexpr int kRows = kThreads / LANES_N;
   constexpr int kCols = kVec * LANES_N;
   const int ln = threadIdx.x % LANES_N;
@@ -37,18 +66,18 @@ gemv_f16_kn_kernel(const __half* __restrict__ a, const __half* __restrict__ B,
 #pragma unroll
   for (int v = 0; v < kVec; v++) acc[v] = 0.0f;
   if (col < N) {
-#pragma unroll 4
-    for (int k = rg; k < K; k += kRows) {
-      const float av = __half2float(a[k]);
-      const uint4 w =
-          *reinterpret_cast<const uint4*>(B + static_cast<size_t>(k) * N + col);
-      const __half2* h = reinterpret_cast<const __half2*>(&w);
+    for (int k0 = rg; k0 < K; k0 += kRows * U) {
+      uint4 w[U];
+      float av[U];
 #pragma unroll
-      for (int v = 0; v < kVec / 2; v++) {
-        const float2 f = __half22float2(h[v]);
-        acc[2 * v] += av * f.x;
-        acc[2 * v + 1] += av * f.y;
+      for (int u = 0; u < U; u++) {
+        const int k = k0 + u * kRows;
+        w[u] = k < K ? *reinterpret_cast<const uint4*>(B + static_cast<size_t>(k) * N + col)
+                     : make_uint4(0u, 0u, 0u, 0u);
+        av[u] = k < K ? E::load(a + k) : 0.0f;
       }
+#pragma unroll
+      for (int u = 0; u < U; u++) E::fma(acc, av[u], w[u]);
     }
   }
 
@@ -60,47 +89,60 @@ gemv_f16_kn_kernel(const __half* __restrict__ a, const __half* __restrict__ B,
     float s = 0.0f;
     for (int r = 0; r < kRows; r++) s += red[r][i];
     const int c = blockIdx.x * kCols + i;
-    if (c < N) out[c] = __float2half(s);
+    if (c < N) out[c] = E::store(s);
   }
 }
 
-template <int LANES_N>
-static void launch_gemv_f16_kn(hipStream_t s, const __half* a, const __half* B,
-                               __half* out, int64_t K, int64_t N) {
-  constexpr int kCols = kVec * LANES_N;
+template <typename T, int LANES_N, int U = 8>
+static void launch_gemv_kn(hipStream_t s, const T* a, const T* B, T* out,
+                           int64_t K, int64_t N) {
+  constexpr int kCols = GemvElem<T>::kVec * LANES_N;
   const unsigned grid = static_cast<unsigned>((N + kCols - 1) / kCols);
-  hipLaunchKernelGGL(HIP_KERNEL_NAME(gemv_f16_kn_kernel<LANES_N>), dim3(grid),
+  hipLaunchKernelGGL(HIP_KERNEL_NAME(gemv_kn_kernel<T, LANES_N, U>), dim3(grid),
                      dim3(kThreads), 0, s, a, B, out, static_cast<int>(K),
                      static_cast<int>(N));
 }
 
-extern "C" int hip_gemv_f16_kn(void* stream, const void* a, const void* B,
-                               void* out, int64_t K, int64_t N) {
+template <typename T>
+static int gemv_kn(const char* name, void* stream, const void* a, const void* B,
+                   void* out, int64_t K, int64_t N) {
+  constexpr int kVec = GemvElem<T>::kVec;
   if (K <= 0 || N <= 0 || K > INT32_MAX || N > INT32_MAX || (N % kVec) != 0 ||
       (reinterpret_cast<uintptr_t>(B) % 16) != 0) {
-    fprintf(stderr, "[custom_kernels] hip_gemv_f16_kn: unsupported K=%lld "
-                    "N=%lld (N must be a multiple of %d, B 16-byte aligned)\n",
-            (long long)K, (long long)N, kVec);
+    fprintf(stderr, "[custom_kernels] %s: unsupported K=%lld N=%lld (N must be "
+                    "a multiple of %d, B 16-byte aligned)\n",
+            name, (long long)K, (long long)N, kVec);
     return -1;
   }
   hipStream_t s = static_cast<hipStream_t>(stream);
-  const auto* pa = static_cast<const __half*>(a);
-  const auto* pB = static_cast<const __half*>(B);
-  auto* po = static_cast<__half*>(out);
+  const auto* pa = static_cast<const T*>(a);
+  const auto* pB = static_cast<const T*>(B);
+  auto* po = static_cast<T*>(out);
+  // At these sizes the workgroup count, not the workgroup width, sets the
+  // bandwidth. gfx1151, cold weights: fp32 K=2048 N=256 11.0 us at 2 lanes vs
+  // 17.5 us at 8; fp32 K=4096 N=288 23.0 vs 36.2 us; fp16 K=2880 N=128 6.2 us
+  // at 1 lane vs 7.4 us at 2 and 11.8 us at 4.
+  const int64_t vecs = N / kVec;
   (void)hipGetLastError();
-  if (N <= 32)
-    launch_gemv_f16_kn<1>(s, pa, pB, po, K, N);
-  else if (N <= 128)
-    launch_gemv_f16_kn<2>(s, pa, pB, po, K, N);
-  else if (N <= 256)
-    launch_gemv_f16_kn<4>(s, pa, pB, po, K, N);
+  if (vecs >= 64)
+    launch_gemv_kn<T, 2>(s, pa, pB, po, K, N);
   else
-    launch_gemv_f16_kn<8>(s, pa, pB, po, K, N);
+    launch_gemv_kn<T, 1>(s, pa, pB, po, K, N);
   const hipError_t e = hipGetLastError();
   if (e != hipSuccess) {
-    fprintf(stderr, "[custom_kernels] hip_gemv_f16_kn failed: %s\n",
+    fprintf(stderr, "[custom_kernels] %s failed: %s\n", name,
             hipGetErrorString(e));
     return static_cast<int>(e);
   }
   return 0;
+}
+
+extern "C" int hip_gemv_f16_kn(void* stream, const void* a, const void* B,
+                               void* out, int64_t K, int64_t N) {
+  return gemv_kn<__half>("hip_gemv_f16_kn", stream, a, B, out, K, N);
+}
+
+extern "C" int hip_gemv_f32_kn(void* stream, const void* a, const void* B,
+                               void* out, int64_t K, int64_t N) {
+  return gemv_kn<float>("hip_gemv_f32_kn", stream, a, B, out, K, N);
 }
