@@ -43,6 +43,7 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Format.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
@@ -119,6 +120,74 @@ void dumpPreFusionIR(mlir::ModuleOp module,
      << (fuseOpts.standaloneElementwise ? "true" : "false")
      << " int4-weights=" << (fuseOpts.int4Weights ? "true" : "false") << "\n";
   module->print(os);
+}
+
+// The files that HIPDNN_EP_ROCMLIR_DUMP_HIP, HIPDNN_EP_ROCMLIR_DUMP_TOSA and
+// HIPDNN_EP_ROCMLIR_DUMP_PROBLEM_CACHE name for one compile. They are the
+// provider's counterparts of hip-rocmlir-compiler's --dump-hip, --dump-tosa
+// and --dump-problem-cache.
+//
+// ORT can invoke the compiler more than once per session, and a single sink
+// would be overwritten by each call, so every compile that asks for a dump
+// takes a process-wide sequence number and inserts it before the extension
+// (/tmp/hip.mlir -> /tmp/hip.0.mlir). The three dumps of one compile share the
+// number, so hip.3.mlir, tosa.3.mlir and cache.3.json belong together.
+struct RocMlirDumpTargets {
+  std::string hip;
+  std::string tosa;
+  std::string problemCache;
+};
+
+std::string numberedDumpPath(llvm::StringRef path, unsigned seq) {
+  llvm::StringRef ext = llvm::sys::path::extension(path);
+  llvm::StringRef stem = path.drop_back(ext.size());
+  return (llvm::Twine(stem) + "." + std::to_string(seq) + ext).str();
+}
+
+RocMlirDumpTargets rocMlirDumpTargetsFromEnv() {
+  std::string hip = hip_get_env("HIPDNN_EP_ROCMLIR_DUMP_HIP");
+  std::string tosa = hip_get_env("HIPDNN_EP_ROCMLIR_DUMP_TOSA");
+  std::string cache = hip_get_env("HIPDNN_EP_ROCMLIR_DUMP_PROBLEM_CACHE");
+  RocMlirDumpTargets targets;
+  if (hip.empty() && tosa.empty() && cache.empty())
+    return targets;
+  static std::atomic<unsigned> sDumpSeq{0};
+  unsigned seq = sDumpSeq.fetch_add(1);
+  if (!hip.empty())
+    targets.hip = numberedDumpPath(hip, seq);
+  if (!tosa.empty())
+    targets.tosa = numberedDumpPath(tosa, seq);
+  if (!cache.empty())
+    targets.problemCache = numberedDumpPath(cache, seq);
+  return targets;
+}
+
+// Write a module as MLIR text. These dumps are diagnostics, so a failure is
+// reported and the compile goes on, as in hip-rocmlir-compiler.
+void dumpModuleText(mlir::ModuleOp module, llvm::StringRef label,
+                    llvm::StringRef path) {
+  llvm::StringRef parent = llvm::sys::path::parent_path(path);
+  if (!parent.empty())
+    llvm::sys::fs::create_directories(parent);
+  std::error_code ec;
+  llvm::raw_fd_ostream os(path, ec);
+  if (ec) {
+    llvm::errs() << "[CompilerDriver] cannot open '" << path << "' to dump "
+                 << label << " MLIR: " << ec.message() << "\n";
+    return;
+  }
+  module->print(os);
+  os << "\n";
+  // A full disk shows up only when the stream is flushed.
+  os.flush();
+  if (os.has_error()) {
+    llvm::errs() << "[CompilerDriver] failed writing " << label << " MLIR to "
+                 << path << ": " << os.error().message() << "\n";
+    os.clear_error();
+    return;
+  }
+  llvm::errs() << "[CompilerDriver] wrote " << label << " MLIR to " << path
+               << "\n";
 }
 #endif
 
@@ -451,6 +520,10 @@ bool CompilerDriver::runMLIRPasses(
     // in that dump.
     mlir::hip::registerRocMlirDialects(*module.getContext());
 
+    // HIPDNN_EP_ROCMLIR_DUMP_HIP / _DUMP_TOSA / _DUMP_PROBLEM_CACHE: see
+    // RocMlirDumpTargets.
+    const RocMlirDumpTargets dumps = rocMlirDumpTargetsFromEnv();
+
     {
       mlir::PassManager headPm(module.getContext());
       // Same handle plumbing as the default arm below. rocMLIR only claims
@@ -500,6 +573,23 @@ bool CompilerDriver::runMLIRPasses(
         error_message = "rocMLIR fusion passes failed";
         return false;
       }
+      // HIPDNN_EP_ROCMLIR_DUMP_HIP=<file>: the hip MLIR after the ONNX->HIP
+      // head and the rocMLIR fusion, as --dump-hip writes it.
+      if (!dumps.hip.empty())
+        dumpModuleText(module, "hip", dumps.hip);
+      // HIPDNN_EP_ROCMLIR_DUMP_TOSA=<file>: the hip->tosa conversion of the
+      // whole module, as --dump-tosa writes it. It clones the entire model,
+      // which the compile path below never does, so it is debug-only cost.
+      if (!dumps.tosa.empty()) {
+        mlir::OwningOpRef<mlir::ModuleOp> tosaModule =
+            mlir::hip::buildRocMlirTosaClone(module);
+        if (tosaModule)
+          dumpModuleText(*tosaModule, "tosa", dumps.tosa);
+        else
+          llvm::errs() << "[CompilerDriver] hip->tosa conversion failed; no "
+                          "TOSA dump written to "
+                       << dumps.tosa << "\n";
+      }
     }
 
     mlir::hip::RocMlirEmbedOptions embedOpts;
@@ -539,6 +629,9 @@ bool CompilerDriver::runMLIRPasses(
       mlir::hip::rocMlirAutotuneBenchmarkFromEnv(autotuneOpts.benchmark);
       autotuneOpts.log = embedOpts.log;
       autotuneOpts.logPrefix = "[CompilerDriver/rocmlir-autotune]";
+      // HIPDNN_EP_ROCMLIR_VERBOSE also turns on the per-candidate lines, one
+      // per config per kernel, which hip-rocmlir-compiler --verbose prints.
+      autotuneOpts.verbose = embedOpts.log != nullptr;
       // problemCachePath stays empty here. The shipped LUT is skipped only
       // when HIPDNN_EP_ROCMLIR_AUTOTUNE is set explicitly.
       autotuneOpts.tuningTypeProvided =
@@ -560,10 +653,47 @@ bool CompilerDriver::runMLIRPasses(
       autotuner->installInto(embedOpts);
     }
 
-    if (mlir::failed(
-            mlir::hip::compileAndEmbedRocMlirKernels(module, embedOpts))) {
+    const bool embedOk =
+        mlir::hip::compileAndEmbedRocMlirKernels(module, embedOpts).succeeded();
+    // HIPDNN_EP_ROCMLIR_VERBOSE: where the autotune time went, as
+    // hip-rocmlir-compiler prints it at exit. Printed whether or not the embed
+    // succeeded, since a slow failed compile is the one most worth reading.
+    // Only the two times the autotuner measures are printed; the HIP-to-LLVM
+    // lowering runs later in the tail and is not timed here.
+    if (autotuner && embedOpts.log) {
+      const mlir::hip::AutotunePhaseTimes &times = autotuner->phaseTimes();
+      *embedOpts.log << "[CompilerDriver/rocmlir-autotune] perfConfig compile "
+                        "wall: "
+                     << llvm::format("%.1f", times.perfConfigCompileMs)
+                     << " ms, benchmark: "
+                     << llvm::format("%.1f", times.benchmarkMs) << " ms\n";
+    }
+    if (!embedOk) {
       error_message = "rocMLIR kernel compilation failed";
       return false;
+    }
+
+    // HIPDNN_EP_ROCMLIR_DUMP_PROBLEM_CACHE=<file.json>: the winners this
+    // compile tuned, as --dump-problem-cache writes them. Written only after a
+    // successful embed, so a failed compile does not leave a partial table. A
+    // failure to write is reported and does not fail the compile.
+    if (!dumps.problemCache.empty()) {
+      if (!autotuner) {
+        llvm::errs() << "[CompilerDriver] HIPDNN_EP_ROCMLIR_DUMP_PROBLEM_CACHE "
+                        "needs rocMLIR autotune; unset "
+                        "HIP_ROCMLIR_SKIP_BENCHMARKING to get "
+                     << dumps.problemCache << "\n";
+      } else {
+        llvm::StringRef parent =
+            llvm::sys::path::parent_path(dumps.problemCache);
+        if (!parent.empty())
+          llvm::sys::fs::create_directories(parent);
+        llvm::errs() << "[CompilerDriver] "
+                     << (autotuner->dumpProblemCache(dumps.problemCache)
+                             ? "wrote problem cache to "
+                             : "failed to write problem cache to ")
+                     << dumps.problemCache << "\n";
+      }
     }
 
     mlir::hip::OnnxToHipPipelineOptions tailOpts;

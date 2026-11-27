@@ -175,6 +175,41 @@ if(ENABLE_ROCMLIRTRITON)
       FOLDER "mlir/Test/Dialect/Hipsr"
     )
   endforeach()
+
+  # GPU-free check of the provider's HIPDNN_EP_ROCMLIR_DUMP_* variables. It
+  # runs CompilerDriver::compile several times in one process, because the dump
+  # counter is process-wide.
+  add_executable(test-rocmlir-provider-dumps test_rocmlir_provider_dumps.cpp)
+  target_compile_features(test-rocmlir-provider-dumps PRIVATE cxx_std_17)
+  target_include_directories(test-rocmlir-provider-dumps PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_BINARY_DIR}/include
+    ${CMAKE_BINARY_DIR}/schemas
+    ${MLIR_INCLUDE_DIRS}
+    ${LLVM_INCLUDE_DIRS}
+  )
+  add_dependencies(test-rocmlir-provider-dumps
+    HipDialectIncGen
+    HipTypesIncGen
+    HipOpsIncGen
+    HipPassesIncGen
+  )
+  target_link_libraries(test-rocmlir-provider-dumps PRIVATE
+    LibHipCompiler
+    LLVMSupport
+    HipSupport
+  )
+  # After LibHipCompiler so the GNU ld rescan group is the last link item.
+  hip_link_rocmlir_closure(test-rocmlir-provider-dumps)
+  add_test(NAME RocMlirProviderDumpsUnit COMMAND test-rocmlir-provider-dumps)
+  # TritonToHsaco dlopens triton_amd_codegen by bare name (see deps.cmake).
+  if(NOT WIN32)
+    set_tests_properties(RocMlirProviderDumpsUnit PROPERTIES
+      ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}/lib")
+  endif()
+  set_target_properties(test-rocmlir-provider-dumps PROPERTIES
+    FOLDER "mlir/Test/Dialect/Hipsr"
+  )
 endif()
 
 # Problem-cache lookup. GPU-free: the test builds an RCAL buffer in memory
