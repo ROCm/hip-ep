@@ -1497,16 +1497,26 @@ __device__ inline int64_t qgemm_wave_sum(int64_t v) {
 // `partial` is null for the single-pass form, where the wave owns all of K for
 // its columns and writes Y itself. Otherwise blockIdx.y selects a slice of K
 // and the totals go to scratch for qgemm_gemv_reduce_kernel to requantize.
-template <typename TA, typename TB, typename TY, int kCols, int kWaves>
+//
+// With kSplitK the waves of a block share one column group and divide its
+// slice of K between them, in wave_chunk pieces, folding their sums through
+// LDS before the store. A wave walks its k range with one load in flight, so a
+// long column leaves few waves each paying the DRAM latency serially; giving
+// each wave a piece of the column instead multiplies the loads in flight
+// without the scratch pass of a grid split.
+template <typename TA, typename TB, typename TY, int kCols, int kWaves,
+          bool kSplitK>
 __global__ __launch_bounds__(kGemvNkLanes *kWaves) void qgemm_gemv_nk_kernel(
     const TA *__restrict__ A, const uint8_t *__restrict__ B,
     TY *__restrict__ Y, int64_t *__restrict__ partial, int64_t N, int64_t K,
-    int64_t grid_chunk, QGemmRequant requant, int b_bits, bool need_row_a,
-    bool need_col_b) {
+    int64_t grid_chunk, int64_t wave_chunk, QGemmRequant requant, int b_bits,
+    bool need_row_a, bool need_col_b) {
   const int lane = threadIdx.x;
   const int wave = threadIdx.y;
   const int64_t n0 =
-      (static_cast<int64_t>(blockIdx.x) * kWaves + wave) * kCols;
+      kSplitK ? static_cast<int64_t>(blockIdx.x) * kCols
+              : (static_cast<int64_t>(blockIdx.x) * kWaves + wave) * kCols;
+  // Block-uniform under kSplitK, so no wave skips the barrier below.
   if (n0 >= N)
     return;
 
@@ -1518,9 +1528,18 @@ __global__ __launch_bounds__(kGemvNkLanes *kWaves) void qgemm_gemv_nk_kernel(
   for (int c = 0; c < kCols; ++c)
     col_offsets[c] = (n0 + c < N ? n0 + c : 0) * col_bytes;
 
-  const int64_t k_begin = static_cast<int64_t>(blockIdx.y) * grid_chunk;
-  const int64_t k_end =
-      (k_begin + grid_chunk < K) ? k_begin + grid_chunk : K;
+  int64_t k_begin = static_cast<int64_t>(blockIdx.y) * grid_chunk;
+  int64_t k_end = (k_begin + grid_chunk < K) ? k_begin + grid_chunk : K;
+  if constexpr (kSplitK) {
+    const int64_t slice_end = k_end;
+    k_begin += static_cast<int64_t>(wave) * wave_chunk;
+    k_end = (k_begin + wave_chunk < slice_end) ? k_begin + wave_chunk
+                                               : slice_end;
+    // A trailing wave can start past the slice; an empty range keeps it in
+    // the reduction with zero sums.
+    if (k_begin > k_end)
+      k_begin = k_end;
+  }
 
   int64_t acc[kCols] = {};
   int64_t col_b[kCols] = {};
@@ -1543,6 +1562,30 @@ __global__ __launch_bounds__(kGemvNkLanes *kWaves) void qgemm_gemv_nk_kernel(
   }
   if (need_row_a)
     row_a = qgemm_wave_sum(row_a);
+
+  if constexpr (kSplitK) {
+    __shared__ int64_t sums[kWaves][2 * kCols + 1];
+    if (lane == 0) {
+#pragma unroll
+      for (int c = 0; c < kCols; ++c) {
+        sums[wave][c] = acc[c];
+        sums[wave][kCols + c] = col_b[c];
+      }
+      sums[wave][2 * kCols] = row_a;
+    }
+    __syncthreads();
+    if (wave != 0)
+      return;
+#pragma unroll
+    for (int w = 1; w < kWaves; ++w) {
+#pragma unroll
+      for (int c = 0; c < kCols; ++c) {
+        acc[c] += sums[w][c];
+        col_b[c] += sums[w][kCols + c];
+      }
+      row_a += sums[w][2 * kCols];
+    }
+  }
 
   if (lane != 0)
     return;
@@ -1801,12 +1844,29 @@ bool qgemm_gemv_nk_ok(const QGemmArgs &g) {
          (g.K % align) == 0 && g.K / align >= kGemvNkLanes;
 }
 
+// The in-block k split hands each wave a whole number of 16-byte steps, so a
+// column needs a step per wave before it can be divided at all. Past that it
+// pays once a wave would otherwise walk this many steps in series: below it
+// the column group's own waves already cover the latency.
+constexpr int64_t kGemvNkSplitKMinSteps = 8;
+
+// Logical elements one wave consumes per 16-byte load step.
+int64_t qgemm_gemv_nk_wide_stride(int b_bits) {
+  return static_cast<int64_t>(kGemvNkLanes) * (128 / b_bits);
+}
+
+bool qgemm_gemv_nk_split_k(const QGemmArgs &g) {
+  return g.K / qgemm_gemv_nk_wide_stride(g.b_bits) >= kGemvNkSplitKMinSteps;
+}
+
 // Column groups are the only other source of blocks here, so a narrow N still
 // needs K split across the grid. Unlike the [K, N] path there is no in-block
 // slice count competing for the same K, so the cap is one whole wave step per
-// slice.
-int qgemm_gemv_nk_grid_splits(const QGemmArgs &g, int64_t step) {
-  const int64_t groups = (g.N + kGemvNkGroup - 1) / kGemvNkGroup;
+// slice -- or, when the waves of a block already divide K, one step per wave.
+int qgemm_gemv_nk_grid_splits(const QGemmArgs &g, int64_t step,
+                              bool split_k) {
+  const int64_t cols_per_block = split_k ? kGemvNkCols : kGemvNkGroup;
+  const int64_t groups = (g.N + cols_per_block - 1) / cols_per_block;
   const int64_t target =
       static_cast<int64_t>(qgemm_device_cu_count()) * kGemvTargetBlocksPerCU;
   if (groups >= target)
@@ -1814,7 +1874,9 @@ int qgemm_gemv_nk_grid_splits(const QGemmArgs &g, int64_t step) {
   if (!g.workspace || g.workspace_bytes < qgemm_gemv_scratch_bytes(g.N))
     return 1;
 
-  const int64_t cap = g.K / (kGemvNkLanes * step);
+  const int64_t cap =
+      split_k ? g.K / (qgemm_gemv_nk_wide_stride(g.b_bits) * kGemvNkWaves)
+              : g.K / (kGemvNkLanes * step);
   if (cap < 2)
     return 1;
 
@@ -1830,7 +1892,8 @@ template <typename TA, typename TB, typename TY>
 int qgemm_gemv_nk_launch(const QGemmArgs &g, const QGemmRequant &requant,
                          bool need_row_a, bool need_col_b) {
   const int64_t step = 32 / g.b_bits; // logical elements per dword
-  const int splits = qgemm_gemv_nk_grid_splits(g, step);
+  const bool split_k = qgemm_gemv_nk_split_k(g);
+  const int splits = qgemm_gemv_nk_grid_splits(g, step, split_k);
   auto *partial = splits > 1 ? static_cast<int64_t *>(g.workspace) : nullptr;
 
   (void)hipGetLastError();
@@ -1844,23 +1907,40 @@ int qgemm_gemv_nk_launch(const QGemmArgs &g, const QGemmRequant &requant,
   }
 
   // Rounded up to a whole wave step so a slice boundary lands where a lane
-  // starts a dword.
+  // starts a dword. Under the in-block split every boundary, grid or wave,
+  // lands on a 16-byte step instead, so each wave keeps the wide loads.
+  const int64_t unit =
+      split_k ? qgemm_gemv_nk_wide_stride(g.b_bits) : kGemvNkLanes * step;
   int64_t grid_chunk = g.K;
   if (splits > 1) {
-    const int64_t unit = kGemvNkLanes * step;
     grid_chunk = (g.K + splits - 1) / splits;
     grid_chunk = (grid_chunk + unit - 1) / unit * unit;
   }
+  int64_t wave_chunk = grid_chunk;
+  if (split_k) {
+    wave_chunk = (grid_chunk + kGemvNkWaves - 1) / kGemvNkWaves;
+    wave_chunk = (wave_chunk + unit - 1) / unit * unit;
+  }
 
+  const int64_t cols_per_block = split_k ? kGemvNkCols : kGemvNkGroup;
   const dim3 grid(
-      static_cast<unsigned>((g.N + kGemvNkGroup - 1) / kGemvNkGroup),
+      static_cast<unsigned>((g.N + cols_per_block - 1) / cols_per_block),
       static_cast<unsigned>(splits));
-  hipLaunchKernelGGL(
-      HIP_KERNEL_NAME(
-          qgemm_gemv_nk_kernel<TA, TB, TY, kGemvNkCols, kGemvNkWaves>),
-      grid, dim3(kGemvNkLanes, kGemvNkWaves), 0, g.stream,
-      static_cast<const TA *>(g.A), g.B, static_cast<TY *>(g.Y), partial, g.N,
-      g.K, grid_chunk, requant, g.b_bits, need_row_a, need_col_b);
+  const dim3 block(kGemvNkLanes, kGemvNkWaves);
+  const auto *a_ptr = static_cast<const TA *>(g.A);
+  auto *y_ptr = static_cast<TY *>(g.Y);
+  if (split_k)
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(
+            qgemm_gemv_nk_kernel<TA, TB, TY, kGemvNkCols, kGemvNkWaves, true>),
+        grid, block, 0, g.stream, a_ptr, g.B, y_ptr, partial, g.N, g.K,
+        grid_chunk, wave_chunk, requant, g.b_bits, need_row_a, need_col_b);
+  else
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(
+            qgemm_gemv_nk_kernel<TA, TB, TY, kGemvNkCols, kGemvNkWaves, false>),
+        grid, block, 0, g.stream, a_ptr, g.B, y_ptr, partial, g.N, g.K,
+        grid_chunk, wave_chunk, requant, g.b_bits, need_row_a, need_col_b);
   const hipError_t launched = hipGetLastError();
   if (launched != hipSuccess || !partial)
     return static_cast<int>(launched);
