@@ -8,14 +8,14 @@
 // RUN:   --verify-diagnostics %s | FileCheck %s
 
 // CHECK-LABEL: func.func @conv
-// CHECK: %[[INPUT:.*]] = tosa.transpose %arg1 {perms = array<i32: 0, 2, 3, 1>} : (tensor<1x4x7x9xf16>) -> tensor<1x7x9x4xf16>
-// CHECK: %[[WEIGHT:.*]] = tosa.transpose %arg2 {perms = array<i32: 0, 2, 3, 1>} : (tensor<6x4x3x2xf16>) -> tensor<6x3x2x4xf16>
+// CHECK: %[[INPUT:.*]] = tosa.transpose %arg1 perms([0, 2, 3, 1]) : (tensor<1x4x7x9xf16>) -> tensor<1x7x9x4xf16>
+// CHECK: %[[WEIGHT:.*]] = tosa.transpose %arg2 perms([0, 2, 3, 1]) : (tensor<6x4x3x2xf16>) -> tensor<6x3x2x4xf16>
 // CHECK: %[[CONV:.*]] = tosa.conv2d %[[INPUT]], %[[WEIGHT]], %arg3
-// CHECK-SAME: acc_type = f32
-// CHECK-SAME: dilation = array<i64: 1, 1>
-// CHECK-SAME: pad = array<i64: 1, 1, 2, 1>
-// CHECK-SAME: stride = array<i64: 1, 2>
-// CHECK: tosa.transpose %[[CONV]] {perms = array<i32: 0, 3, 1, 2>} : (tensor<1x7x6x6xf16>) -> tensor<1x6x7x6xf16>
+// CHECK-SAME: pad([1, 1, 2, 1])
+// CHECK-SAME: stride([1, 2])
+// CHECK-SAME: dilation([1, 1])
+// CHECK-SAME: acc_type(f32)
+// CHECK: tosa.transpose %[[CONV]] perms([0, 3, 1, 2]) : (tensor<1x7x6x6xf16>) -> tensor<1x6x7x6xf16>
 // CHECK-NOT: hip.conv
 func.func @conv(%ctx: !hip.context, %input: tensor<1x4x7x9xf16>,
                 %weight: tensor<6x4x3x2xf16>, %bias: tensor<6xf16>,
@@ -33,14 +33,14 @@ func.func @conv(%ctx: !hip.context, %input: tensor<1x4x7x9xf16>,
 // Rank-5 hip.conv uses NCDHW/OIDHW. TOSA and rocMLIR accept Conv3D in
 // NDHWC/ODHWI, so transpose the channel dimension around the convolution.
 // CHECK-LABEL: func.func @conv3d
-// CHECK: %[[INPUT3D:.*]] = tosa.transpose %arg1 {perms = array<i32: 0, 2, 3, 4, 1>} : (tensor<1x4x5x7x9xf16>) -> tensor<1x5x7x9x4xf16>
-// CHECK: %[[WEIGHT3D:.*]] = tosa.transpose %arg2 {perms = array<i32: 0, 2, 3, 4, 1>} : (tensor<6x4x3x1x1xf16>) -> tensor<6x3x1x1x4xf16>
+// CHECK: %[[INPUT3D:.*]] = tosa.transpose %arg1 perms([0, 2, 3, 4, 1]) : (tensor<1x4x5x7x9xf16>) -> tensor<1x5x7x9x4xf16>
+// CHECK: %[[WEIGHT3D:.*]] = tosa.transpose %arg2 perms([0, 2, 3, 4, 1]) : (tensor<6x4x3x1x1xf16>) -> tensor<6x3x1x1x4xf16>
 // CHECK: %[[CONV3D:.*]] = tosa.conv3d %[[INPUT3D]], %[[WEIGHT3D]], %arg3
-// CHECK-SAME: acc_type = f32
-// CHECK-SAME: dilation = array<i64: 1, 1, 1>
-// CHECK-SAME: pad = array<i64: 1, 1, 0, 0, 0, 0>
-// CHECK-SAME: stride = array<i64: 1, 1, 1>
-// CHECK: tosa.transpose %[[CONV3D]] {perms = array<i32: 0, 4, 1, 2, 3>} : (tensor<1x5x7x9x6xf16>) -> tensor<1x6x5x7x9xf16>
+// CHECK-SAME: pad([1, 1, 0, 0, 0, 0])
+// CHECK-SAME: stride([1, 1, 1])
+// CHECK-SAME: dilation([1, 1, 1])
+// CHECK-SAME: acc_type(f32)
+// CHECK: tosa.transpose %[[CONV3D]] perms([0, 4, 1, 2, 3]) : (tensor<1x5x7x9x6xf16>) -> tensor<1x6x5x7x9xf16>
 // CHECK-NOT: hip.conv
 func.func @conv3d(
     %ctx: !hip.context, %input: tensor<1x4x5x7x9xf16>,
@@ -59,7 +59,7 @@ func.func @conv3d(
 
 // An omitted HIP bias becomes a zero TOSA bias.
 // CHECK-LABEL: func.func @conv_without_bias
-// CHECK: %[[ZERO:.*]] = "tosa.const"() <{values = dense<0.000000e+00> : tensor<4xf32>}> : () -> tensor<4xf32>
+// CHECK: %[[ZERO:.*]] = tosa.const values(dense<0.000000e+00> : tensor<4xf32>) : () -> tensor<4xf32>
 // CHECK: tosa.conv2d {{.*}}, %[[ZERO]]
 // CHECK-NOT: hip.conv
 func.func @conv_without_bias(
@@ -78,8 +78,8 @@ func.func @conv_without_bias(
 // requires exact division. The trailing pad absorbs the odd remainder.
 // CHECK-LABEL: func.func @conv_stride_pad_absorbs_remainder
 // CHECK: tosa.conv2d
-// CHECK-SAME: pad = array<i64: 3, 2, 3, 2>
-// CHECK-SAME: stride = array<i64: 2, 2>
+// CHECK-SAME: pad([3, 2, 3, 2])
+// CHECK-SAME: stride([2, 2])
 // CHECK-SAME: -> tensor<1x112x112x64xf16>
 // CHECK-NOT: hip.conv
 func.func @conv_stride_pad_absorbs_remainder(
@@ -99,10 +99,10 @@ func.func @conv_stride_pad_absorbs_remainder(
 // ResNet downsample shortcut: a strided 1x1 kernel has no padding to give
 // back, so the row and column the convolution never reads are sliced off.
 // CHECK-LABEL: func.func @conv_stride_crops_input
-// CHECK: %[[NHWC:.*]] = tosa.transpose %arg1 {perms = array<i32: 0, 2, 3, 1>}
+// CHECK: %[[NHWC:.*]] = tosa.transpose %arg1 perms([0, 2, 3, 1])
 // CHECK: %[[CROP:.*]] = tosa.slice %[[NHWC]], {{.*}} -> tensor<1x55x55x256xf16>
 // CHECK: tosa.conv2d %[[CROP]]
-// CHECK-SAME: pad = array<i64: 0, 0, 0, 0>
+// CHECK-SAME: pad([0, 0, 0, 0])
 // CHECK-SAME: -> tensor<1x28x28x512xf16>
 // CHECK-NOT: hip.conv
 func.func @conv_stride_crops_input(
@@ -121,11 +121,11 @@ func.func @conv_stride_crops_input(
 
 // Grouped conv: weight IC is C/G. rocMLIR reads the discardable group attr.
 // CHECK-LABEL: func.func @grouped_conv
-// CHECK: %[[INPUT:.*]] = tosa.transpose %arg1 {perms = array<i32: 0, 2, 3, 1>} : (tensor<1x4x7x9xf16>) -> tensor<1x7x9x4xf16>
-// CHECK: %[[WEIGHT:.*]] = tosa.transpose %arg2 {perms = array<i32: 0, 2, 3, 1>} : (tensor<6x2x3x2xf16>) -> tensor<6x3x2x2xf16>
+// CHECK: %[[INPUT:.*]] = tosa.transpose %arg1 perms([0, 2, 3, 1]) : (tensor<1x4x7x9xf16>) -> tensor<1x7x9x4xf16>
+// CHECK: %[[WEIGHT:.*]] = tosa.transpose %arg2 perms([0, 2, 3, 1]) : (tensor<6x2x3x2xf16>) -> tensor<6x3x2x2xf16>
 // CHECK: %[[CONV:.*]] = tosa.conv2d %[[INPUT]], %[[WEIGHT]], %arg3
 // CHECK-SAME: group = 2 : i64
-// CHECK: tosa.transpose %[[CONV]] {perms = array<i32: 0, 3, 1, 2>} : (tensor<1x7x6x6xf16>) -> tensor<1x6x7x6xf16>
+// CHECK: tosa.transpose %[[CONV]] perms([0, 3, 1, 2]) : (tensor<1x7x6x6xf16>) -> tensor<1x6x7x6xf16>
 // CHECK-NOT: hip.conv
 func.func @grouped_conv(%ctx: !hip.context, %input: tensor<1x4x7x9xf16>,
                         %weight: tensor<6x2x3x2xf16>, %bias: tensor<6xf16>,
@@ -142,13 +142,13 @@ func.func @grouped_conv(%ctx: !hip.context, %input: tensor<1x4x7x9xf16>,
 
 // Depthwise: group == C, weight IC == 1. Filter becomes [C,Y,X,1] after OHWI.
 // CHECK-LABEL: func.func @depthwise_conv_stride1
-// CHECK: %[[INPUT:.*]] = tosa.transpose %arg1 {perms = array<i32: 0, 2, 3, 1>} : (tensor<1x4x7x7xf16>) -> tensor<1x7x7x4xf16>
-// CHECK: %[[WEIGHT:.*]] = tosa.transpose %arg2 {perms = array<i32: 0, 2, 3, 1>} : (tensor<4x1x3x3xf16>) -> tensor<4x3x3x1xf16>
+// CHECK: %[[INPUT:.*]] = tosa.transpose %arg1 perms([0, 2, 3, 1]) : (tensor<1x4x7x7xf16>) -> tensor<1x7x7x4xf16>
+// CHECK: %[[WEIGHT:.*]] = tosa.transpose %arg2 perms([0, 2, 3, 1]) : (tensor<4x1x3x3xf16>) -> tensor<4x3x3x1xf16>
 // CHECK: %[[CONV:.*]] = tosa.conv2d %[[INPUT]], %[[WEIGHT]], %arg3
+// CHECK-SAME: pad([1, 1, 1, 1])
+// CHECK-SAME: stride([1, 1])
 // CHECK-SAME: group = 4 : i64
-// CHECK-SAME: pad = array<i64: 1, 1, 1, 1>
-// CHECK-SAME: stride = array<i64: 1, 1>
-// CHECK: tosa.transpose %[[CONV]] {perms = array<i32: 0, 3, 1, 2>} : (tensor<1x7x7x4xf16>) -> tensor<1x4x7x7xf16>
+// CHECK: tosa.transpose %[[CONV]] perms([0, 3, 1, 2]) : (tensor<1x7x7x4xf16>) -> tensor<1x4x7x7xf16>
 // CHECK-NOT: hip.conv
 func.func @depthwise_conv_stride1(
     %ctx: !hip.context, %input: tensor<1x4x7x7xf16>,
@@ -165,13 +165,13 @@ func.func @depthwise_conv_stride1(
 }
 
 // CHECK-LABEL: func.func @depthwise_conv_stride2
-// CHECK: %[[INPUT:.*]] = tosa.transpose %arg1 {perms = array<i32: 0, 2, 3, 1>} : (tensor<1x4x8x8xf16>) -> tensor<1x8x8x4xf16>
-// CHECK: %[[WEIGHT:.*]] = tosa.transpose %arg2 {perms = array<i32: 0, 2, 3, 1>} : (tensor<4x1x3x3xf16>) -> tensor<4x3x3x1xf16>
+// CHECK: %[[INPUT:.*]] = tosa.transpose %arg1 perms([0, 2, 3, 1]) : (tensor<1x4x8x8xf16>) -> tensor<1x8x8x4xf16>
+// CHECK: %[[WEIGHT:.*]] = tosa.transpose %arg2 perms([0, 2, 3, 1]) : (tensor<4x1x3x3xf16>) -> tensor<4x3x3x1xf16>
 // CHECK: %[[CONV:.*]] = tosa.conv2d %[[INPUT]], %[[WEIGHT]], %arg3
+// CHECK-SAME: pad([1, 0, 1, 0])
+// CHECK-SAME: stride([2, 2])
 // CHECK-SAME: group = 4 : i64
-// CHECK-SAME: pad = array<i64: 1, 0, 1, 0>
-// CHECK-SAME: stride = array<i64: 2, 2>
-// CHECK: tosa.transpose %[[CONV]] {perms = array<i32: 0, 3, 1, 2>} : (tensor<1x4x4x4xf16>) -> tensor<1x4x4x4xf16>
+// CHECK: tosa.transpose %[[CONV]] perms([0, 3, 1, 2]) : (tensor<1x4x4x4xf16>) -> tensor<1x4x4x4xf16>
 // CHECK-NOT: hip.conv
 func.func @depthwise_conv_stride2(
     %ctx: !hip.context, %input: tensor<1x4x8x8xf16>,
@@ -241,9 +241,9 @@ func.func @kernel_shape_mismatch(
 // An i32 convolution passes explicit zero points and an i32 accumulator.
 
 // CHECK-LABEL: func.func @conv_i32
-// CHECK: %[[ZP:.*]] = "tosa.const"() <{values = dense<0> : tensor<1xi32>}> : () -> tensor<1xi32>
+// CHECK: %[[ZP:.*]] = tosa.const values(dense<0> : tensor<1xi32>) : () -> tensor<1xi32>
 // CHECK: tosa.conv2d {{.*}}, %[[ZP]], %[[ZP]]
-// CHECK-SAME: acc_type = i32
+// CHECK-SAME: acc_type(i32)
 // CHECK-NOT: hip.conv
 func.func @conv_i32(%ctx: !hip.context, %input: tensor<1x4x3x3xi32>,
                     %weight: tensor<2x4x1x1xi32>, %init: tensor<1x2x3x3xi32>)
