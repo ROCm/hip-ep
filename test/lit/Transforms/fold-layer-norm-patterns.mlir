@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// RUN: hip-mlir-opt --hip-fusion-transform --split-input-file %s | FileCheck %s
+// RUN: hip-mlir-opt --hip-fold-layer-norm --split-input-file %s | FileCheck %s
 
 // The residual add's destination may be produced by a side-effecting op.
 // The add folds into hip.skip_layer_norm, and that producer stays.

@@ -873,8 +873,9 @@ def _make_decomposed_layer_norm_model(
 
 class TestDecomposedLayerNorm:
     """Primitive LayerNorm chains fold into one hip.layer_norm (or
-    hip.skip_layer_norm with a residual Add). The CPU reference runs the
-    primitives op by op, so fp16 tolerances cover its per-op rounding."""
+    hip.skip_layer_norm with a residual Add) in hip-fold-layer-norm. The CPU
+    reference runs the primitives op by op, so fp16 tolerances cover its
+    per-op rounding."""
 
     @pytest.mark.parametrize(
         "spelling", ["div_sqrt", "mul_recip", "mul_pow", "div_pow"]
@@ -914,6 +915,18 @@ class TestDecomposedLayerNorm:
         actual, expected = model_runner.run_sample(model, [x, r])
         atol = 1e-4 if dtype == np.float32 else 1e-2
         compare_outputs(actual, expected, atol=atol, rtol=atol)
+
+    @pytest.mark.parametrize(
+        "shape", [[1, 77, 768], [1, 4096, 768], [1, 1500, 1280], [3, 5, 1030]]
+    )
+    def test_model_shapes_fp16(self, model_runner, shape):
+        """Text-encoder, image-encoder and speech-encoder rows, and a hidden
+        size that is not a multiple of the vector width."""
+        model = _make_decomposed_layer_norm_model(shape, np.float16, "div_sqrt")
+        rng = np.random.default_rng(1305)
+        x = rng.uniform(-2, 2, shape).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=1e-2, rtol=1e-2)
 
 
 def _make_residual_layer_norm_model(input_shape: list[int], dtype: np.dtype):

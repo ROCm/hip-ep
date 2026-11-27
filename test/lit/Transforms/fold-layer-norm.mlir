@@ -1,22 +1,22 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// A primitive LayerNorm chain over the last axis lowers to HIP ops, then
-// hip-fusion-transform folds it into one hip.layer_norm (fp32 accumulation):
-// Pow(d, 2) or Mul(d, d) for the square; Div by Sqrt / Pow(., 0.5) or Mul by
-// Reciprocal(Sqrt) / Pow(., -0.5) / Div(1, Sqrt) for the normalization; with
-// or without the affine tail. A residual Add feeding the norm folds into
+// hip-fold-layer-norm folds a primitive LayerNorm chain over the last axis,
+// as convert-onnx-to-hip lowers it to HIP ops, into one hip.layer_norm (fp32
+// accumulation): Pow(d, 2) or Mul(d, d) for the square; Div by Sqrt /
+// Pow(., 0.5) or Mul by Reciprocal(Sqrt) / Pow(., -0.5) / Div(1, Sqrt) for the
+// normalization; with or without the affine tail; ranks above 4 through their
+// collapse/expand pack. A residual Add feeding the norm folds into
 // hip.skip_layer_norm when its operands' runtime extents are proven equal.
-// Chains over a non-last axis, with a non-constant epsilon, or in bf16 are
-// left alone.
+// Chains over a non-last axis, with a non-constant epsilon, that regroup
+// rows, or in bf16 are left alone.
 //
-// The ONNX pre-lowering pass already folds a chain of rank 4 or below whose
-// intermediates have no other users into onnx.LayerNormalization (ONNX
-// prefix, conversion alone); hip-fusion-transform folds the rest and the
-// residual Add.
+// The second RUN line follows with the rocMLIR fusion: the pass runs in the
+// shared head before it, so the chain and its residual are folded before the
+// fusion can outline them.
 
-// RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip --hip-fusion-transform %s | FileCheck %s
-// RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s --check-prefix=ONNX
+// RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip --hip-fold-layer-norm %s | FileCheck %s
+// RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip --hip-fold-layer-norm --hip-fuse-rocmlir-elementwise --hip-fuse-rocmlir-anchor %s | FileCheck %s --check-prefix=RMT
 
 module {
   func.func @main_graph(%arg0: tensor<4xf32>) -> tensor<4xf32> {
@@ -47,13 +47,13 @@ module {
   // CHECK-NOT: hip.sqrt
   // CHECK: return %[[Y]]
 
-  // ONNX-LABEL: func.func @ln_pow
-  // ONNX-SAME: (%[[CTX:.*]]: !hip.context, %[[X:.*]]: tensor<1x16x768xf16>, %[[G:.*]]: tensor<768xf16>, %[[B:.*]]: tensor<768xf16>)
-  // ONNX-NOT: hip.reduce_mean
-  // ONNX: %[[Y:.*]] = hip.layer_norm(%[[CTX]])
-  // ONNX-SAME: ins(%[[X]], %[[G]], %[[B]] :
-  // ONNX-NOT: hip.sqrt
-  // ONNX: return %[[Y]]
+  // RMT-LABEL: func.func @ln_pow
+  // RMT-NOT: hip.reduce_mean
+  // RMT: hip.layer_norm
+  // RMT-NOT: hip.rocmlir
+  // RMT: return
+
+
 
   func.func @ln_mul_no_bias(%x: tensor<2x8xf32>, %g: tensor<8xf32>) -> tensor<2x8xf32> {
     %eps = "onnx.Constant"() {value = dense<1.0E-5> : tensor<f32>} : () -> tensor<f32>
@@ -366,15 +366,11 @@ module {
   // CHECK: %[[NEXT:.*]] = hip.add(%[[CTX]]) ins(%[[R]]#1, %[[C]] :
   // CHECK: return %[[R]]#0, %[[NEXT]]
 
-  // The conversion alone folds the chain; the residual Add stays for
-  // hip-fusion-transform.
-  // ONNX-LABEL: func.func @residual_add_folds
-  // ONNX-SAME: (%[[CTX:.*]]: !hip.context, %[[A:.*]]: tensor<1x4x8xf16>, %[[B:.*]]: tensor<1x4x8xf16>, %[[C:.*]]: tensor<1x4x8xf16>, %[[G:.*]]: tensor<8xf16>, %[[BE:.*]]: tensor<8xf16>)
-  // ONNX: %[[X:.*]] = hip.add(%[[CTX]]) ins(%[[A]], %[[B]] :
-  // ONNX-NOT: hip.reduce_mean
-  // ONNX: %[[Y:.*]] = hip.layer_norm(%[[CTX]]) ins(%[[X]], %[[G]], %[[BE]] :
-  // ONNX-NOT: hip.skip_layer_norm
-  // ONNX: return %[[Y]]
+  // RMT-LABEL: func.func @residual_add_folds
+  // RMT: hip.skip_layer_norm
+  // RMT: return
+
+
 
   // onnx.LayerNormalization of a residual Add used only by the norm: no sum
   // buffer.
@@ -449,11 +445,6 @@ module {
   // CHECK-SAME: ins(%[[X]], %[[G]] :
   // CHECK: return %[[Y]]
 
-  // Rank > 4 is left to hip-fusion-transform, which looks through the pack.
-  // ONNX-LABEL: func.func @ln_rank5
-  // ONNX-NOT: hip.layer_norm
-  // ONNX: hip.reduce_mean
-  // ONNX: return
 
   // A packed chain ends in an expand, so the norm gets a new destination;
   // it carries x's runtime batch.
@@ -523,10 +514,6 @@ module {
   // CHECK: hip.sqrt
   // CHECK: return
 
-  // ONNX-LABEL: func.func @bf16_chain_kept
-  // ONNX-NOT: hip.layer_norm
-  // ONNX: hip.reduce_mean
-  // ONNX: return
 
   // Two independent ?x16 arguments may hold [2, 16] and [1, 16]; hip.add
   // broadcasts, the fused kernel would not, so the add stays.
@@ -581,10 +568,4 @@ module {
   // CHECK: %[[S:.*]] = tensor.from_elements %[[D64]], %{{.*}} : tensor<2xi64>
   // CHECK: return %[[Y]], %[[S]]
 
-  // The mean has a user outside the chain, so the conversion leaves the chain
-  // for hip-fusion-transform.
-  // ONNX-LABEL: func.func @mean_shape_used
-  // ONNX-NOT: hip.layer_norm
-  // ONNX: hip.reduce_mean
-  // ONNX: return
 }
