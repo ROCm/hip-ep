@@ -432,6 +432,25 @@ def FoldBatchNormPass
   }];
 }
 
+def FoldSliceIntoMatmulPass
+    : Pass<"hip-fold-slice-into-matmul", "mlir::func::FuncOp"> {
+  let summary = "Pre-slice matmul/gemm weights for a slice of the N dimension";
+  let description = [{
+    A `tensor.extract_slice` that keeps every dimension of a `hip.matmul` or
+    `hip.gemm` result except the last (N) only needs the matching output
+    columns. The constant weight (and a constant gemm bias that spans N) is
+    sliced at compile time into a new inline `hip.constant`, and the matmul is
+    rebuilt at the sliced width, so the discarded columns are never computed.
+
+    The slice must have static offsets, sizes and strides, must not reduce
+    rank, and must be the only consumer of the matmul result. Weights must be
+    static and readable at compile time (inline or file-backed carriers) with
+    byte-sized elements; `transB` is honoured. The original weights are left
+    for their other users, if any.
+  }];
+  let dependentDialects = ["mlir::tensor::TensorDialect"];
+}
+
 def ForwardConcatSlotsPass : Pass<"hip-forward-concat-slots", "mlir::func::FuncOp"> {
   let summary = "Write a packed concat slot in place and share it with its readers";
   let description = [{

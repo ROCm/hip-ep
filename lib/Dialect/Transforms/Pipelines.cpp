@@ -453,6 +453,11 @@ void mlir::hip::buildOnnxToHipPipelineHead(OpPassManager &pm,
   // outlining there.
   pm.addNestedPass<func::FuncOp>(createFoldBatchNormPass());
 
+  // Slices of a matmul/gemm result along N are decomposed to
+  // tensor.extract_slice by now; pre-slice the weights instead of computing
+  // and discarding columns.
+  pm.addNestedPass<func::FuncOp>(createFoldSliceIntoMatmulPass());
+
   // Plugin slot: AfterConvertOnnxToHip. The most common slot for
   // vendor lowerings of `onnx.Custom` ops or vendor-specific hip.*
   // canonicalisations. This is the supported plugin boundary for emitting
