@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <string>
 
 namespace morphizen {
@@ -122,19 +123,54 @@ void ReleaseToDriver(const std::vector<void *> &buffers, int device_id,
   }
 }
 
-hipError_t DriverAlloc(void **ptr, size_t size, bool device_only) {
-  return device_only
-             ? hipMalloc(ptr, size)
-             : hipHostMalloc(ptr, size,
-                             hipHostMallocMapped | hipHostMallocCoherent);
+hipError_t DriverAlloc(void **ptr, size_t size, bool device_only,
+                       bool noncoherent = false) {
+  if (device_only) {
+    return hipMalloc(ptr, size);
+  }
+  return hipHostMalloc(
+      ptr, size,
+      hipHostMallocMapped |
+          (noncoherent ? hipHostMallocNonCoherent : hipHostMallocCoherent));
+}
+
+// MORPHIZEN_DEFAULT_HIPMALLOC=0: DEFAULT tensors get host-mapped memory instead
+// of hipMalloc (see UseDeviceOnly). Read once, because the data-transfer hot
+// path consults it on every copy.
+bool DefaultMemoryIsHostMapped() noexcept {
+  static const bool host_mapped = [] {
+    const char *env = std::getenv("MORPHIZEN_DEFAULT_HIPMALLOC");
+    return env != nullptr && std::strcmp(env, "0") == 0;
+  }();
+  return host_mapped;
 }
 
 bool UseDeviceOnly(const OrtMemoryInfo *memory_info) noexcept {
-  if (memory_info == nullptr) {
+  if (memory_info == nullptr || DefaultMemoryIsHostMapped()) {
     return false;
   }
-  const char *env = std::getenv("MORPHIZEN_DEFAULT_HIPMALLOC");
-  if (env != nullptr && std::strcmp(env, "0") == 0) {
+  try {
+    return Ort::ConstMemoryInfo(memory_info).GetDeviceMemoryType() ==
+           OrtDeviceMemoryType_DEFAULT;
+  } catch (const Ort::Exception &) {
+    return false;
+  }
+}
+
+// MORPHIZEN_DEFAULT_HIPMALLOC_NONCOHERENT=1, with host-mapped DEFAULT memory:
+// map those buffers non-coherent, so kernels re-reading them (a first
+// convolution re-reads the model input many times) hit the GPU caches instead
+// of going to system memory on every access. HIP makes non-coherent host
+// memory consistent at kernel boundaries and synchronization, and the host
+// touches DEFAULT buffers only between inferences of this synchronous EP.
+// HOST_ACCESSIBLE buffers stay coherent: the host may use them while the GPU
+// does.
+bool UseNonCoherentDefault(const OrtMemoryInfo *memory_info) noexcept {
+  if (memory_info == nullptr || !DefaultMemoryIsHostMapped()) {
+    return false;
+  }
+  const char *env = std::getenv("MORPHIZEN_DEFAULT_HIPMALLOC_NONCOHERENT");
+  if (env == nullptr || std::strcmp(env, "1") != 0) {
     return false;
   }
   try {
@@ -162,6 +198,18 @@ int TryGetDeviceId(const OrtMemoryInfo *memory_info) noexcept {
   }
 }
 
+// True when ptr is host memory the CPU can address directly, such as a
+// hipHostMalloc'd mapped buffer. Interior pointers report their allocation's
+// attributes, so only the memory type and a host mapping are checked.
+bool IsHostPointer(const void *ptr) noexcept {
+  hipPointerAttribute_t attr{};
+  if (hipPointerGetAttributes(&attr, ptr) != hipSuccess) {
+    (void)hipGetLastError();
+    return false;
+  }
+  return attr.type == hipMemoryTypeHost && attr.hostPointer != nullptr;
+}
+
 } // namespace
 
 // =============== HipGpuAllocator ===============
@@ -169,13 +217,31 @@ int TryGetDeviceId(const OrtMemoryInfo *memory_info) noexcept {
 HipGpuAllocator::HipGpuAllocator(const OrtMemoryInfo *memory_info,
                                  const OrtApi & /*api*/)
     : memory_info_{memory_info}, device_id_{TryGetDeviceId(memory_info)},
-      device_only_{UseDeviceOnly(memory_info)} {
+      device_only_{UseDeviceOnly(memory_info)},
+      noncoherent_{UseNonCoherentDefault(memory_info)} {
   version = NegotiatedOrtApiVersion();
   Alloc = AllocImpl;
   Free = FreeImpl;
   Info = InfoImpl;
   Reserve = ReserveImpl;
   GetStats = nullptr;
+  // The first hipHostMalloc in a process pays a one-time HIP setup (10-100 ms
+  // measured on Windows; later calls take microseconds). With host-mapped
+  // DEFAULT memory the first inference would pay it for its first input copy,
+  // so take it here, at session creation.
+  if (!device_only_ && DefaultMemoryIsHostMapped()) {
+    static std::once_flag warmed;
+    std::call_once(warmed, [this] {
+      ScopedDevice _(device_id_);
+      void *p = nullptr;
+      if (DriverAlloc(&p, 4096, /*device_only=*/false, noncoherent_) ==
+          hipSuccess) {
+        (void)hipHostFree(p);
+      } else {
+        (void)hipGetLastError();
+      }
+    });
+  }
 }
 
 // A capacity the model has just grown past cannot serve this request or any
@@ -325,7 +391,8 @@ void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
   // through CopyTensors. HOST_ACCESSIBLE memory must stay host-mapped since
   // OGA's PinnedMemory aliases p_cpu_ = p_device_.
   void *ptr = nullptr;
-  hipError_t err = DriverAlloc(&ptr, alloc_size, self->device_only_);
+  hipError_t err =
+      DriverAlloc(&ptr, alloc_size, self->device_only_, self->noncoherent_);
   if (err != hipSuccess) {
     // The large pool may be sitting on pinned pages this allocation could use,
     // and failing while holding reclaimable memory would be worse than not
@@ -337,7 +404,8 @@ void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
     }
     if (!drained.empty()) {
       ReleaseToDriver(drained, self->device_id_, self->device_only_);
-      err = DriverAlloc(&ptr, alloc_size, self->device_only_);
+      err =
+          DriverAlloc(&ptr, alloc_size, self->device_only_, self->noncoherent_);
     }
   }
   if (err != hipSuccess) {
@@ -546,6 +614,33 @@ OrtStatus *HipDataTransferImpl::CopyTensorsImpl(OrtDataTransferImpl *this_ptr,
     }
 
     hipError_t err = hipSuccess;
+
+    // Host-mapped DEFAULT memory is ordinary host memory to the CPU, so a copy
+    // between it and host memory is a memcpy rather than a blocking hipMemcpy,
+    // whose round trip costs tens of microseconds on Windows even for a few
+    // bytes. Ordering is that of the host-accessible branch below: drain the
+    // given stream first; without one the EP is synchronous, so no queued work
+    // can still be using either buffer.
+    if (DefaultMemoryIsHostMapped() && dst_data != src_data &&
+        src_is_gpu_default != dst_is_gpu_default) {
+      const bool src_on_host =
+          src_type == OrtMemoryInfoDeviceType_CPU ||
+          src_mem_type == OrtDeviceMemoryType_HOST_ACCESSIBLE;
+      const bool dst_on_host =
+          dst_type == OrtMemoryInfoDeviceType_CPU ||
+          dst_mem_type == OrtDeviceMemoryType_HOST_ACCESSIBLE;
+      if ((dst_is_gpu_default && src_on_host && IsHostPointer(dst_data)) ||
+          (src_is_gpu_default && dst_on_host && IsHostPointer(src_data))) {
+        if (hip_stream) {
+          err = hipStreamSynchronize(hip_stream);
+          if (err != hipSuccess) {
+            return MakeHipStatus(impl.ort_api, err, "hipStreamSynchronize");
+          }
+        }
+        std::memcpy(dst_data, src_data, bytes);
+        continue;
+      }
+    }
 
     if (dst_is_gpu_default) {
       if (src_is_gpu_default) {

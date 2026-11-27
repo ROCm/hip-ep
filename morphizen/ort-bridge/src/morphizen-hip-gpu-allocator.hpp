@@ -228,6 +228,9 @@ private:
   // DEFAULT memory comes from hipMalloc (not host-dereferenceable) unless
   // MORPHIZEN_DEFAULT_HIPMALLOC=0; HOST_ACCESSIBLE stays hipHostMalloc.
   bool device_only_;
+  // Host-mapped DEFAULT memory mapped non-coherent (opt-in, see
+  // UseNonCoherentDefault in the .cpp). Always false for HOST_ACCESSIBLE.
+  bool noncoherent_;
 };
 
 // hipMemcpy / hipMemcpyAsync based OrtDataTransferImpl. A single shared
