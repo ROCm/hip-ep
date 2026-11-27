@@ -31,6 +31,7 @@ struct SigmoidBiasRouting {
   mlir::Value logits;         // fp32 router logits
   mlir::Value correctionBias; // [num_experts] fp32
   float scale;                // routed_scaling_factor
+  float normEps;              // routing_norm_eps
 };
 
 //===----------------------------------------------------------------------===//
@@ -269,12 +270,14 @@ static mlir::LogicalResult convertQMoE(mlir::Operation *op,
   mlir::Value correctionBias;
   auto routingTypeAttr = rewriter.getStringAttr("softmax");
   auto scaleAttr = rewriter.getF32FloatAttr(1.0f);
+  auto normEpsAttr = rewriter.getF32FloatAttr(0.0f);
   if (sigmoid) {
     routerProbs = sigmoid->logits;
     routerWeights = mlir::Value{};
     correctionBias = sigmoid->correctionBias;
     routingTypeAttr = rewriter.getStringAttr("sigmoid_bias");
     scaleAttr = rewriter.getF32FloatAttr(sigmoid->scale);
+    normEpsAttr = rewriter.getF32FloatAttr(sigmoid->normEps);
   }
 
   auto rt = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
@@ -289,7 +292,7 @@ static mlir::LogicalResult convertQMoE(mlir::Operation *op,
       correctionBias, init, expertWeightBitsAttr, kAttr, blockSizeAttr,
       normalizeAttr, swigluFusionAttr, useSparseAttr, activationAlphaAttr,
       activationBetaAttr, swigluLimitAttr, activationTypeAttr, routingTypeAttr,
-      scaleAttr);
+      scaleAttr, normEpsAttr);
   rewriter.replaceOp(op, hipOp->getResults());
   return mlir::success();
 }
@@ -310,7 +313,7 @@ static mlir::LogicalResult convertQMoE(mlir::Operation *op,
 //   %sel = onnx.Add(%s, %bias)                         // %bias: [E] fp32
 //   %v, %idx = onnx.TopK(%sel, k)
 //   %g   = onnx.GatherElements(%s, %idx)  {axis = -1}
-//   %w   = onnx.Mul(onnx.Div(%g, onnx.ReduceSum(%g, [-1])), c)
+//   %w   = onnx.Mul(onnx.Div(%g, onnx.ReduceSum(%g, [-1]) [+ eps]), c)
 //   %rp  = onnx.ScatterElements(Expand(-inf), %idx, Expand(1.0))
 //   %rw  = onnx.ScatterElements(Expand(0.0), %idx, onnx.Cast(%w))
 //   %y   = onnx.Custom "QMoE"(%x, Reshape(%rp), ..., Reshape(%rw))
@@ -318,7 +321,7 @@ static mlir::LogicalResult convertQMoE(mlir::Operation *op,
 // After:
 //   %y = hip.qmoe(%ctx) ins(%x, %logits, ...) correction_bias(%bias : ...)
 //            {routing_type = "sigmoid_bias", routed_scaling_factor = c,
-//             normalize_routing_weights = 1}
+//             routing_norm_eps = eps, normalize_routing_weights = 1}
 //
 // The router MatMul is kept as is, so selection still sees fp32 logits.
 
@@ -440,6 +443,26 @@ static bool isLastAxisKeepdimsSum(mlir::Operation *r, mlir::Value x) {
   return axis && isLastAxis(*axis, rankOf(x));
 }
 
+/// Splits a `sum + eps` weight denominator into the sum and a non-negative
+/// constant eps, which the routing kernel adds back. A denominator without
+/// one comes back whole with eps = 0.
+static std::pair<mlir::Value, float> splitNormEps(mlir::Value denom) {
+  mlir::Operation *add = defOf(denom, "onnx.Add");
+  if (!add)
+    return {denom, 0.0f};
+  mlir::Value sum = add->getOperand(0);
+  mlir::Value epsValue = add->getOperand(1);
+  if (!getSplatFloat(epsValue))
+    std::swap(sum, epsValue);
+  std::optional<double> eps = getSplatFloat(epsValue);
+  if (!eps)
+    return {denom, 0.0f};
+  const float normEps = static_cast<float>(*eps);
+  if (!std::isfinite(normEps) || normEps < 0.0f)
+    return {denom, 0.0f};
+  return {sum, normEps};
+}
+
 struct QMoESigmoidRoutingFold : public mlir::RewritePattern {
   QMoESigmoidRoutingFold(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Custom", /*benefit=*/2, ctx) {}
@@ -513,11 +536,12 @@ struct QMoESigmoidRoutingFold : public mlir::RewritePattern {
     if (!scale || !std::isfinite(*scale) || !div)
       return rewriter.notifyMatchFailure(op, "weights are not s / sum * c");
     mlir::Value gathered = div->getOperand(0);
+    auto [sum, normEps] = splitNormEps(div->getOperand(1));
     mlir::Operation *gather = defOf(gathered, "onnx.GatherElements");
     if (!gather || gather->getOperand(0) != sig ||
         gather->getOperand(1) != idx ||
         !isLastAxis(getIntAttrOr(gather, "axis", 0), rankOf(sig)) ||
-        !isLastAxisKeepdimsSum(div->getOperand(1).getDefiningOp(), gathered))
+        !isLastAxisKeepdimsSum(sum.getDefiningOp(), gathered))
       return rewriter.notifyMatchFailure(
           op, "weights are not the normalized sigmoid of the selection");
 
@@ -544,7 +568,8 @@ struct QMoESigmoidRoutingFold : public mlir::RewritePattern {
                 inputTy.getDimSize(inputTy.getRank() - 1))
       return rewriter.notifyMatchFailure(op, "logits rows != input tokens");
 
-    SigmoidBiasRouting routing{logits, bias, static_cast<float>(*scale)};
+    SigmoidBiasRouting routing{logits, bias, static_cast<float>(*scale),
+                               normEps};
     mlir::Operation *probsRoot = probsIn.getDefiningOp();
     mlir::Operation *weightsRoot = weightsIn.getDefiningOp();
     if (mlir::failed(convertQMoE(op, rewriter, &routing)))

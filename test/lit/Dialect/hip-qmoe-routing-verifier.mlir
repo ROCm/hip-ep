@@ -133,3 +133,47 @@ func.func @correction_bias_length_mismatch(%ctx: !hip.context,
        activation_type = "swiglu", routing_type = "sigmoid_bias"}
   return
 }
+
+// -----
+
+func.func @norm_eps_with_softmax(%ctx: !hip.context,
+    %input: memref<1x8x256xf16, 1>, %probs: memref<8x16xf16, 1>,
+    %fc1_w: memref<16x256x128xui8, 1>, %fc1_s: memref<16x256x2xf16, 1>,
+    %fc2_w: memref<16x256x64xui8, 1>, %fc2_s: memref<16x256x1xf16, 1>,
+    %output: memref<1x8x256xf16, 1>) {
+  // expected-error @+1 {{routing_norm_eps requires routing_type sigmoid_bias}}
+  hip.qmoe(%ctx) ins(%input, %probs, %fc1_w, %fc1_s, %fc2_w, %fc2_s :
+      memref<1x8x256xf16, 1>, memref<8x16xf16, 1>,
+      memref<16x256x128xui8, 1>, memref<16x256x2xf16, 1>,
+      memref<16x256x64xui8, 1>, memref<16x256x1xf16, 1>)
+      outs(%output : memref<1x8x256xf16, 1>)
+      {expert_weight_bits = 4 : i64, k = 4 : i64, block_size = 128 : i64,
+       normalize_routing_weights = 1 : i64, swiglu_fusion = 1 : i64,
+       use_sparse_mixer = 0 : i64, activation_alpha = 1.0 : f32,
+       activation_beta = 0.0 : f32, swiglu_limit = 7.0 : f32,
+       activation_type = "swiglu", routing_norm_eps = 1.0e-20 : f32}
+  return
+}
+
+// -----
+
+func.func @negative_norm_eps(%ctx: !hip.context,
+    %input: memref<1x8x256xf16, 1>, %logits: memref<1x8x16xf32, 1>,
+    %fc1_w: memref<16x256x128xui8, 1>, %fc1_s: memref<16x256x2xf16, 1>,
+    %fc2_w: memref<16x256x64xui8, 1>, %fc2_s: memref<16x256x1xf16, 1>,
+    %bias: memref<16xf32, 1>, %output: memref<1x8x256xf16, 1>) {
+  // expected-error @+1 {{routing_norm_eps must be finite and non-negative}}
+  hip.qmoe(%ctx) ins(%input, %logits, %fc1_w, %fc1_s, %fc2_w, %fc2_s :
+      memref<1x8x256xf16, 1>, memref<1x8x16xf32, 1>,
+      memref<16x256x128xui8, 1>, memref<16x256x2xf16, 1>,
+      memref<16x256x64xui8, 1>, memref<16x256x1xf16, 1>)
+      correction_bias(%bias : memref<16xf32, 1>)
+      outs(%output : memref<1x8x256xf16, 1>)
+      {expert_weight_bits = 4 : i64, k = 4 : i64, block_size = 128 : i64,
+       normalize_routing_weights = 1 : i64, swiglu_fusion = 1 : i64,
+       use_sparse_mixer = 0 : i64, activation_alpha = 1.0 : f32,
+       activation_beta = 0.0 : f32, swiglu_limit = 7.0 : f32,
+       activation_type = "swiglu", routing_type = "sigmoid_bias",
+       routing_norm_eps = -1.0e-03 : f32}
+  return
+}
