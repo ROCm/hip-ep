@@ -169,8 +169,10 @@ bool mergeProblemCacheJson(std::string_view existing, std::string_view gpuArch,
 // that is not a regular file (a pipe would block, a device would be replaced),
 // for a file that is read-only, for a directory the rewrite could not put its
 // temporary file in (or create, when it does not exist yet; in a sticky
-// directory also when the file is another user's), and for a file that cannot
-// be read. Without these a compile would run in full and then fail to write.
+// directory also when the file is another user's; on Windows judged from the
+// access list of the nearest existing directory, for adding files and for
+// deleting the file it replaces), and for a file that cannot be read. Without
+// these a compile would run in full and then fail to write.
 bool checkProblemCacheJsonFile(const std::string &path,
                                std::string_view gpuArch, ProblemCacheLut &lut,
                                std::string &error);
@@ -181,22 +183,25 @@ bool checkProblemCacheJsonFile(const std::string &path,
 // refused.
 // The new contents go to a sibling temporary file that is renamed over \p path,
 // so a failed or interrupted write leaves the old file intact. The temporary
-// is created exclusively and readable by its owner only, whatever the umask is,
-// written and flushed to disk before the rename. The old file's mode and group
-// are then put on it, so a shared cache keeps its group access. The owner is
+// is created exclusively and readable by its owner only, whatever the umask is
+// (on Windows with an explicit, non-inherited access list that names only the
+// calling user), written and flushed to disk before the rename. On POSIX the
+// old file's mode and group are then put on it, so a shared cache keeps its
+// group access; on Windows the file stays private to its owner. The owner is
 // the caller's, which cannot be kept without root, and ACLs, extended
 // attributes and hard links of the old file are not carried over. The file is
 // read again at write time, not taken from an earlier load, so entries another
 // compile added in between are kept. Missing parent directories are created. A
-// symlinked \p path is rewritten at its target, which is created if the link
-// is dangling, and the link stays; a dangling link is followed only under the
+// symlinked \p path, or a path that goes through a symlinked directory, is
+// rewritten at its target, which (with its directories) is created if the link
+// is dangling, and the links stay; a dangling link is followed only under the
 // kernel's rule for sticky, world-writable directories (see
-// mayFollowDanglingLink). A symlink loop is refused, and so is anything but a
-// regular file, a read-only file, and a directory that does not allow the
-// rename (see checkProblemCacheJsonFile). Rewrites in one process are
-// serialized, so overlapping compiles there do not lose each other's winners;
-// separate processes can, and the last one to finish wins. Temporary files
-// older than an hour, left by a rewrite that was killed, are removed.
+// mayFollowDanglingLink). A symlink loop, in any component, is refused, and so
+// is anything but a regular file, a read-only file, and a directory that does
+// not allow the rename (see checkProblemCacheJsonFile). Rewrites in one process
+// are serialized, so overlapping compiles there do not lose each other's
+// winners; separate processes can, and the last one to finish wins. Temporary
+// files older than an hour, left by a rewrite that was killed, are removed.
 bool updateProblemCacheJsonFile(const std::string &path,
                                 std::string_view gpuArch,
                                 const std::vector<ProblemCacheWinner> &winners,

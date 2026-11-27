@@ -1442,6 +1442,80 @@ int main() {
                    fs::is_symlink(fs::symlink_status(dir / "loop_b.json")),
                "a refused symlink loop is left in place");
 
+        // A link in the middle of the path is followed as well, not only the
+        // last component. cache-dir -> real-dir with real-dir missing passes
+        // the check before the compile and then has to be written, which means
+        // creating real-dir through the link's target.
+        {
+          fs::create_symlink("parent_real", dir / "parent_link", linkEc);
+          const std::string viaParent =
+              (dir / "parent_link" / "cache.json").string();
+          mlir::hip::ProblemCacheLut parentLut;
+          expect(!linkEc && mlir::hip::checkProblemCacheJsonFile(
+                                viaParent, "gfx1151", parentLut, error),
+                 "a path through a dangling directory link passes the check");
+          expect(mlir::hip::updateProblemCacheJsonFile(
+                     viaParent, "gfx1151", {{exact, tile32}}, error),
+                 "a dangling directory link is written through");
+          expect(fs::is_symlink(fs::symlink_status(dir / "parent_link")) &&
+                     fs::is_regular_file(dir / "parent_real" / "cache.json"),
+                 "the directory link stays and its target holds the file");
+          expect(mlir::hip::loadProblemCacheLutJsonFile(viaParent, parentLut,
+                                                        error) &&
+                     parentLut.entries.size() == 1,
+                 "the table reads back through the link");
+          expect(mlir::hip::updateProblemCacheJsonFile(
+                     viaParent, "gfx1151", {{gemmAt(8), tile16}}, error) &&
+                     mlir::hip::loadProblemCacheLutJsonFile(
+                         (dir / "parent_real" / "cache.json").string(),
+                         parentLut, error) &&
+                     parentLut.entries.size() == 2,
+                 "a later compile updates the same file through the link");
+
+          // A relative link to two missing levels, with missing directories
+          // below it, and a chain of directory links.
+          fs::create_symlink("deep_a/deep_b", dir / "deep_link", linkEc);
+          expect(!linkEc &&
+                     mlir::hip::updateProblemCacheJsonFile(
+                         (dir / "deep_link" / "x" / "y" / "c.json").string(),
+                         "gfx1151", {{exact, tile32}}, error) &&
+                     fs::is_regular_file(dir / "deep_a" / "deep_b" / "x" / "y" /
+                                         "c.json"),
+                 "missing levels below a dangling directory link are created");
+          fs::create_symlink("hop_b", dir / "hop_a", linkEc);
+          fs::create_symlink("hop_dest", dir / "hop_b", linkEc);
+          expect(!linkEc &&
+                     mlir::hip::updateProblemCacheJsonFile(
+                         (dir / "hop_a" / "c.json").string(), "gfx1151",
+                         {{exact, tile32}}, error) &&
+                     fs::is_regular_file(dir / "hop_dest" / "c.json") &&
+                     fs::is_symlink(fs::symlink_status(dir / "hop_a")) &&
+                     fs::is_symlink(fs::symlink_status(dir / "hop_b")),
+                 "a chain of dangling directory links is written through");
+
+          // A directory link whose target exists is followed too.
+          fs::create_directories(dir / "live_dir");
+          fs::create_symlink("live_dir", dir / "live_link", linkEc);
+          expect(!linkEc &&
+                     mlir::hip::updateProblemCacheJsonFile(
+                         (dir / "live_link" / "c.json").string(), "gfx1151",
+                         {{exact, tile32}}, error) &&
+                     fs::is_regular_file(dir / "live_dir" / "c.json"),
+                 "a live directory link is written through");
+
+          // A loop of directory links cannot be resolved, so it is refused.
+          fs::create_symlink("dloop_b", dir / "dloop_a", linkEc);
+          fs::create_symlink("dloop_a", dir / "dloop_b", linkEc);
+          const std::string loopFile = (dir / "dloop_a" / "c.json").string();
+          expect(!linkEc &&
+                     !mlir::hip::checkProblemCacheJsonFile(loopFile, "gfx1151",
+                                                           parentLut, error) &&
+                     !mlir::hip::updateProblemCacheJsonFile(
+                         loopFile, "gfx1151", {{exact, tile32}}, error) &&
+                     error.find("symbolic links") != std::string::npos,
+                 "a directory link loop is refused");
+        }
+
         size_t temps = 0;
         for (const auto &entry : fs::recursive_directory_iterator(dir))
           if (entry.path().filename().string().find(".tmp") !=

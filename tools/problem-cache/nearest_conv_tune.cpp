@@ -20,6 +20,7 @@
 #include <chrono>
 #include <climits>
 #include <cmath>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -30,11 +31,16 @@
 #include <utility>
 
 #ifdef _WIN32
-#include <fcntl.h>
-#include <io.h>
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+// Keep after windows.h.
+#include <aclapi.h>
 #include <process.h>
-#include <share.h>
-#include <sys/stat.h>
 #else
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -1380,49 +1386,92 @@ bool mayFollowDanglingLink(uint32_t linkOwner, uint32_t directoryOwner,
 
 namespace {
 
+#ifndef _WIN32
 std::string errnoMessage() { return std::generic_category().message(errno); }
+#endif
 
 // Finds the file to rewrite for \p path: where a symlink points, not the link
-// itself. weakly_canonical resolves every link that leads to something that
-// exists, but leaves a dangling one in place, and renaming over that would
-// replace the link. A dangling link is followed by hand, so the file is
-// created at its target and the link stays. A loop, or a link that cannot be
-// read, is refused rather than overwritten.
+// itself. The path is walked one component at a time, so a symlink anywhere in
+// it is followed, not only the last component. A link whose target exists is
+// resolved to it, as the kernel would. A dangling one is followed by hand,
+// since weakly_canonical would leave it in place and the rewrite could then
+// neither rename over it nor create directories through it: the directories
+// and the file are created at its target and the link stays. A dangling link
+// is only followed under the kernel's rule for sticky, world-writable
+// directories (see mayFollowDanglingLink), which the by-hand follow would
+// otherwise bypass. Whatever follows the first component that does not exist
+// is kept as it is. A loop, or a link that cannot be read, is refused rather
+// than overwritten.
 bool resolveWriteTarget(const std::string &path, std::filesystem::path &target,
                         std::string &error) {
   namespace fs = std::filesystem;
   constexpr int kMaxLinkHops = 40;
   std::error_code ec;
-  fs::path current = path;
-  for (int hop = 0; hop < kMaxLinkHops; ++hop) {
-    fs::path resolved = fs::weakly_canonical(current, ec);
+  const fs::path absolute = fs::absolute(path, ec);
+  if (ec) {
+    error = "cannot resolve problem cache " + path + ": " + ec.message();
+    return false;
+  }
+  fs::path current = absolute.root_path();
+  std::deque<fs::path> pending;
+  for (const fs::path &part : absolute.relative_path())
+    if (!part.empty())
+      pending.push_back(part);
+  int hops = 0;
+  while (!pending.empty()) {
+    const fs::path part = pending.front();
+    pending.pop_front();
+    if (part == ".")
+      continue;
+    if (part == "..") {
+      current = current.parent_path();
+      continue;
+    }
+    const fs::path next = current / part;
+    const fs::file_status link = fs::symlink_status(next, ec);
+    if (link.type() == fs::file_type::not_found) {
+      // Nothing here, so nothing below it exists either.
+      current = next;
+      while (!pending.empty()) {
+        if (pending.front() == "..")
+          current = current.parent_path();
+        else if (pending.front() != ".")
+          current /= pending.front();
+        pending.pop_front();
+      }
+      break;
+    }
     if (ec) {
-      // Not resolvable (for example a link loop). A plain path is written
-      // as it is, but a link is never replaced.
-      std::error_code statusEc;
-      if (fs::is_symlink(fs::symlink_status(current, statusEc)) || statusEc) {
+      error = "cannot resolve problem cache " + path + ": " + ec.message();
+      return false;
+    }
+    if (!fs::is_symlink(link)) {
+      current = next;
+      continue;
+    }
+    if (++hops > kMaxLinkHops) {
+      error = "cannot resolve problem cache " + path +
+              ": too many levels of symbolic links";
+      return false;
+    }
+    if (fs::exists(next, ec)) {
+      // The kernel follows this one, so do as it does.
+      const fs::path resolved = fs::canonical(next, ec);
+      if (ec) {
         error = "cannot resolve problem cache " + path + ": " + ec.message();
         return false;
       }
-      target = current;
-      return true;
+      current = resolved;
+      continue;
     }
-    if (!fs::is_symlink(fs::symlink_status(resolved, ec)) || ec) {
-      target = std::move(resolved);
-      return true;
-    }
-    // Only a dangling link is still a link here. The kernel does not follow
-    // a link that someone else left in a sticky, world-writable directory like
-    // /tmp when it opens the path; following it here by hand would give that
-    // protection up, so the same rule is applied first.
+    // Dangling, or a loop: follow it by hand.
 #ifndef _WIN32
     {
       struct stat linkStat {};
       struct stat dirStat {};
-      const fs::path parent = resolved.parent_path();
-      if (::lstat(resolved.c_str(), &linkStat) != 0 ||
-          ::stat(parent.empty() ? "." : parent.c_str(), &dirStat) != 0) {
-        error = "cannot inspect symbolic link " + resolved.string() + ": " +
+      if (::lstat(next.c_str(), &linkStat) != 0 ||
+          ::stat(current.empty() ? "." : current.c_str(), &dirStat) != 0) {
+        error = "cannot inspect symbolic link " + next.string() + ": " +
                 errnoMessage();
         return false;
       }
@@ -1430,23 +1479,28 @@ bool resolveWriteTarget(const std::string &path, std::filesystem::path &target,
           (dirStat.st_mode & S_ISVTX) != 0 && (dirStat.st_mode & S_IWOTH) != 0;
       if (!mayFollowDanglingLink(linkStat.st_uid, dirStat.st_uid, sticky,
                                  ::geteuid())) {
-        error = "refusing to follow symbolic link " + resolved.string() +
+        error = "refusing to follow symbolic link " + next.string() +
                 " in a shared directory: it belongs to another user";
         return false;
       }
     }
 #endif
-    fs::path link = fs::read_symlink(resolved, ec);
+    const fs::path destination = fs::read_symlink(next, ec);
     if (ec) {
-      error = "cannot read symbolic link " + resolved.string() + ": " +
-              ec.message();
+      error =
+          "cannot read symbolic link " + next.string() + ": " + ec.message();
       return false;
     }
-    current = link.is_absolute() ? link : resolved.parent_path() / link;
+    if (destination.has_root_path())
+      current = destination.root_path();
+    std::deque<fs::path> inserted;
+    for (const fs::path &piece : destination.relative_path())
+      if (!piece.empty())
+        inserted.push_back(piece);
+    pending.insert(pending.begin(), inserted.begin(), inserted.end());
   }
-  error = "cannot resolve problem cache " + path +
-          ": too many levels of symbolic links";
-  return false;
+  target = std::move(current);
+  return true;
 }
 
 } // namespace
@@ -1542,23 +1596,65 @@ void removeStaleTemporaries(const std::filesystem::path &target) {
   }
 }
 
+#ifdef _WIN32
+std::string windowsMessage(DWORD code) {
+  return std::error_code(static_cast<int>(code), std::system_category())
+      .message();
+}
+
+// Whether the access control list of \p path grants the calling user all of
+// \p rights. This is the check the system itself makes when the rewrite
+// creates or replaces a file, so it also covers inherited and deny entries,
+// which the read-only attribute does not. A probe that cannot be completed is
+// not a refusal: the rewrite will then report the real error.
+bool windowsGrants(const std::filesystem::path &path, DWORD rights) {
+  PSECURITY_DESCRIPTOR descriptor = nullptr;
+  if (GetNamedSecurityInfoW(
+          const_cast<wchar_t *>(path.c_str()), SE_FILE_OBJECT,
+          OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+              DACL_SECURITY_INFORMATION,
+          nullptr, nullptr, nullptr, nullptr, &descriptor) != ERROR_SUCCESS)
+    return true;
+  HANDLE process = nullptr;
+  HANDLE token = nullptr;
+  bool granted = true;
+  if (OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY,
+                       &process) &&
+      DuplicateToken(process, SecurityImpersonation, &token)) {
+    GENERIC_MAPPING mapping = {FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+                               FILE_GENERIC_EXECUTE, FILE_ALL_ACCESS};
+    PRIVILEGE_SET privileges = {};
+    DWORD privilegesSize = sizeof(privileges);
+    DWORD grantedRights = 0;
+    BOOL allowed = FALSE;
+    DWORD desired = rights;
+    MapGenericMask(&desired, &mapping);
+    if (AccessCheck(descriptor, token, desired, &mapping, &privileges,
+                    &privilegesSize, &grantedRights, &allowed))
+      granted = allowed != FALSE;
+  }
+  if (token)
+    CloseHandle(token);
+  if (process)
+    CloseHandle(process);
+  LocalFree(descriptor);
+  return granted;
+}
+#endif
+
 // Whether a rewrite can put its temporary file beside \p target and rename it
 // over \p target: that needs write access to the directory, not just to the
 // file. A directory that does not exist yet is created by the rewrite, so the
-// nearest one that does exist is the one that has to allow it. In a sticky
-// directory (/tmp) the rename also needs the file to be yours, or the
-// directory, which the kernel enforces. Without this the compile would run in
-// full and only then fail to write its winners.
+// nearest one that does exist is the one that has to allow it. On POSIX, in a
+// sticky directory (/tmp) the rename also needs the file to be yours, or the
+// directory, which the kernel enforces. On Windows the rewrite needs the right
+// to add files (and, for a directory that is created, subdirectories) there,
+// and the right to delete the file it replaces, either on the file or on its
+// directory. Without this the compile would run in full and only then fail to
+// write its winners.
 bool canWriteBeside(const std::string &path,
                     const std::filesystem::path &target, bool present,
                     std::string &error) {
-#ifdef _WIN32
-  (void)path;
-  (void)target;
-  (void)present;
-  (void)error;
-  return true;
-#else
   namespace fs = std::filesystem;
   std::error_code ec;
   const fs::path parent =
@@ -1568,6 +1664,24 @@ bool canWriteBeside(const std::string &path,
          dir.parent_path() != dir)
     dir = dir.parent_path();
   const bool created = dir != parent;
+#ifdef _WIN32
+  const DWORD needed =
+      created ? (FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY) : FILE_ADD_FILE;
+  if (!windowsGrants(dir, needed)) {
+    error = "cannot write problem cache " + path + ": " + dir.string() +
+            (created ? ", where its directory would be created, does not "
+                       "allow it"
+                     : " does not allow new files");
+    return false;
+  }
+  if (present && !windowsGrants(target, DELETE) &&
+      !windowsGrants(dir, FILE_DELETE_CHILD)) {
+    error = "cannot replace problem cache " + path + ": neither the file nor " +
+            dir.string() + " allows deleting it";
+    return false;
+  }
+  return true;
+#else
   if (::access(dir.c_str(), W_OK | X_OK) != 0) {
     error = "cannot write problem cache " + path + ": " + dir.string() +
             (created ? ", where its directory would be created, is not "
@@ -1605,37 +1719,116 @@ bool isWritable(const std::filesystem::path &target) {
 #endif
 }
 
+#ifdef _WIN32
+// A security descriptor that grants the calling user, and nobody else, full
+// access, and that does not inherit entries from the directory. A file created
+// with it is closed to every other account from the moment it exists; the
+// read-only/read-write attribute that _S_IREAD | _S_IWRITE sets would say
+// nothing about that, and the file would take the ACL of the directory, which
+// commonly lets other users read it. Not copyable or movable, because the
+// attributes point into the object.
+class OwnerOnlyAttributes {
+public:
+  OwnerOnlyAttributes() = default;
+  OwnerOnlyAttributes(const OwnerOnlyAttributes &) = delete;
+  OwnerOnlyAttributes &operator=(const OwnerOnlyAttributes &) = delete;
+
+  bool init(std::string &error) {
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+      error = "cannot read the user of this process: " +
+              windowsMessage(GetLastError());
+      return false;
+    }
+    DWORD size = 0;
+    GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+    user_.resize(size);
+    if (size == 0 ||
+        !GetTokenInformation(token, TokenUser, user_.data(), size, &size)) {
+      error = "cannot read the user of this process: " +
+              windowsMessage(GetLastError());
+      CloseHandle(token);
+      return false;
+    }
+    CloseHandle(token);
+    PSID sid = reinterpret_cast<TOKEN_USER *>(user_.data())->User.Sid;
+    DWORD aclSize = sizeof(ACL) + sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) +
+                    GetLengthSid(sid);
+    aclSize = (aclSize + 3) & ~static_cast<DWORD>(3);
+    acl_.resize(aclSize);
+    PACL dacl = reinterpret_cast<PACL>(acl_.data());
+    if (!InitializeAcl(dacl, aclSize, ACL_REVISION) ||
+        !AddAccessAllowedAce(dacl, ACL_REVISION, FILE_ALL_ACCESS, sid) ||
+        !InitializeSecurityDescriptor(&descriptor_,
+                                      SECURITY_DESCRIPTOR_REVISION) ||
+        !SetSecurityDescriptorDacl(&descriptor_, TRUE, dacl, FALSE) ||
+        !SetSecurityDescriptorControl(&descriptor_, SE_DACL_PROTECTED,
+                                      SE_DACL_PROTECTED)) {
+      error = "cannot build an owner-only access list: " +
+              windowsMessage(GetLastError());
+      return false;
+    }
+    attributes_.nLength = sizeof(attributes_);
+    attributes_.lpSecurityDescriptor = &descriptor_;
+    attributes_.bInheritHandle = FALSE;
+    return true;
+  }
+
+  SECURITY_ATTRIBUTES *get() { return &attributes_; }
+
+private:
+  std::vector<unsigned char> user_;
+  std::vector<unsigned char> acl_;
+  SECURITY_DESCRIPTOR descriptor_ = {};
+  SECURITY_ATTRIBUTES attributes_ = {};
+};
+#endif
+
 // Creates \p path, which must not exist yet, writes \p text to it and flushes
 // it to the disk, so that a crash after the rename cannot leave an empty or
 // partial table in its place. \p exists is set when the name was taken. On any
 // other failure the caller removes the file.
 //
-// The file is created readable by its owner only, whatever the umask is, so
-// the table (which carries model metadata) is never readable by others while
-// it is written, or if the process dies before the rename. \p finalPerms and
-// \p groupId, the mode and the group of the file being replaced, are applied
-// once the contents are written, so that a shared cache keeps its group
-// access.
+// The file is created readable by its owner only, whatever the umask is (mode
+// 0600; on Windows an explicit access list that names only the calling user),
+// so the table (which carries model metadata) is never readable by others
+// while it is written, or if the process dies before the rename. On POSIX,
+// \p finalPerms and \p groupId, the mode and the group of the file being
+// replaced, are applied once the contents are written, so that a shared cache
+// keeps its group access. Windows has no such mode or group: the file stays
+// private to its owner, and anyone else who needs it has to be granted access
+// after the fact.
 bool writeNewFile(const std::filesystem::path &path, std::string_view text,
                   std::optional<std::filesystem::perms> finalPerms,
                   std::optional<uint32_t> groupId, bool &exists,
                   std::string &error) {
   exists = false;
 #ifdef _WIN32
-  int fd = -1;
-  if (_wsopen_s(&fd, path.c_str(),
-                _O_WRONLY | _O_CREAT | _O_EXCL | _O_BINARY | _O_NOINHERIT,
-                _SH_DENYNO, _S_IREAD | _S_IWRITE) != 0) {
-    exists = errno == EEXIST;
-    error = errnoMessage();
+  (void)finalPerms;
+  (void)groupId;
+  OwnerOnlyAttributes attributes;
+  if (!attributes.init(error))
+    return false;
+  HANDLE handle = CreateFileW(path.c_str(), GENERIC_WRITE, 0, attributes.get(),
+                              CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (handle == INVALID_HANDLE_VALUE) {
+    const DWORD code = GetLastError();
+    exists = code == ERROR_FILE_EXISTS || code == ERROR_ALREADY_EXISTS;
+    error = windowsMessage(code);
     return false;
   }
-  const auto writeSome = [fd](const char *data, size_t size) {
-    return static_cast<long long>(_write(
-        fd, data, static_cast<unsigned>(std::min<size_t>(size, INT_MAX))));
+  const auto writeSome = [handle](const char *data, size_t size) {
+    DWORD written = 0;
+    if (!WriteFile(handle, data,
+                   static_cast<DWORD>(std::min<size_t>(size, 1u << 30)),
+                   &written, nullptr))
+      return static_cast<long long>(-1);
+    return static_cast<long long>(written);
   };
-  const auto sync = [fd] { return _commit(fd) == 0; };
-  const auto closeFile = [fd] { return _close(fd) == 0; };
+  const auto sync = [handle] { return FlushFileBuffers(handle) != FALSE; };
+  const auto closeFile = [handle] { return CloseHandle(handle) != FALSE; };
+  const auto lastError = [] { return windowsMessage(GetLastError()); };
+  const auto interrupted = [] { return false; };
 #else
   const int fd =
       ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
@@ -1650,15 +1843,17 @@ bool writeNewFile(const std::filesystem::path &path, std::string_view text,
   };
   const auto sync = [fd] { return ::fsync(fd) == 0; };
   const auto closeFile = [fd] { return ::close(fd) == 0; };
+  const auto lastError = [] { return errnoMessage(); };
+  const auto interrupted = [] { return errno == EINTR; };
 #endif
   const char *data = text.data();
   size_t left = text.size();
   while (left > 0) {
     const long long written = writeSome(data, left);
     if (written < 0) {
-      if (errno == EINTR)
+      if (interrupted())
         continue;
-      error = errnoMessage();
+      error = lastError();
       closeFile();
       return false;
     }
@@ -1675,20 +1870,14 @@ bool writeNewFile(const std::filesystem::path &path, std::string_view text,
     (void)::fchmod(fd, static_cast<mode_t>(*finalPerms) & 0777);
 #endif
   if (!sync()) {
-    error = errnoMessage();
+    error = lastError();
     closeFile();
     return false;
   }
   if (!closeFile()) {
-    error = errnoMessage();
+    error = lastError();
     return false;
   }
-#ifdef _WIN32
-  if (finalPerms) {
-    std::error_code ec;
-    std::filesystem::permissions(path, *finalPerms, ec);
-  }
-#endif
   return true;
 }
 
