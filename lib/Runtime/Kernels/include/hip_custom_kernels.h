@@ -1220,6 +1220,14 @@ HIP_KERNEL_API int hip_gqa_softmax_inplace(
  * equal `output`. Used by the standalone `hip_softmax_typed` runtime entry
  * point, which is destination-passing and would otherwise have to copy its
  * input over its output before running an in-place kernel. */
+/* Rewrite a [K, C, 3, 3] fp16 conv filter into the Winograd F(2x2, 3x3) store
+ * that the generated Winograd conv kernel reads, C innermost: T = G g as
+ * [4, 3, K, C] (full_transform = 0) or the raw g as [3, 3, K, C]
+ * (full_transform = 1). `store` holds (full_transform ? 9 : 12) * K * C
+ * halves. Returns the launch status. */
+HIP_KERNEL_API int hip_winograd_f23_weight_transform_f16(void* stream, const void* weights, void* store,
+                                                         int64_t K, int64_t C, int full_transform);
+
 HIP_KERNEL_API int hip_softmax_row_2d(void* stream, const void* input, void* output, int rows, int cols);
 
 /* fp32 and bf16 variants of the above, with the same contract. All three
@@ -2304,6 +2312,32 @@ HIP_KERNEL_API int hip_layer_norm(
     float epsilon,
     int hip_dtype,
     int mean_dtype);
+
+/* Residual add fused with LayerNormalization over the last axis:
+ *
+ *   sum = input + skip [+ bias]       (fp32)
+ *   y   = (sum - mean) * rsqrt(var + epsilon) * gamma [+ beta]
+ *
+ * `beta`, `bias` and `input_skip_bias_sum` may be null. All tensors share
+ * `hip_dtype` (FLOAT16 or FLOAT32). `skip` holds `skip_rows` rows; input
+ * row r adds skip row r % skip_rows. When `round_sum` is non-zero the sum
+ * is rounded to hip_dtype before it is normalized.
+ */
+HIP_KERNEL_API int hip_skip_layer_norm(
+    void* stream,
+    const void* input,
+    const void* skip,
+    const void* gamma,
+    const void* beta,                 // optional
+    const void* bias,                 // optional
+    void* output,
+    void* input_skip_bias_sum,        // optional
+    int64_t outer,
+    int64_t skip_rows,
+    int64_t norm_size,
+    float epsilon,
+    int round_sum,
+    int hip_dtype);
 
 /* =========================================================================
  * InstanceNormalization
@@ -3915,6 +3949,27 @@ HIP_KERNEL_API int hip_strided_copy(void *stream, void *dst, const void *src,
                      const int64_t *src_outer_strides,
                      const int64_t *dst_outer_strides, int64_t row_elems,
                      int64_t outer_total);
+
+// N-D strided device-to-device copy (one launch). sizes and strides are in
+// elements and cover every dim, the innermost included. Source strides may be
+// negative, in which case `src` points at the element with every index 0. Up
+// to HIPDNN_MAX_MEMREF_RANK + 1 dims. Returns 0 on success, -2 if elem_size is
+// unsupported.
+HIP_KERNEL_API int hip_strided_copy_nd(void *stream, void *dst,
+                                       const void *src, int64_t elem_size,
+                                       int rank, const int64_t *sizes,
+                                       const int64_t *src_strides,
+                                       const int64_t *dst_strides);
+
+// Concat of `num_inputs` contiguous device buffers along a row-major axis in
+// one launch (more than 16 inputs take one launch per 16). The output and
+// input i are viewed as [outer, width]; input i has row width src_widths[i]
+// (elements) and the output row width is their sum. `srcs` is a host array of
+// device pointers. Returns 0 on success, -2 if elem_size is unsupported.
+HIP_KERNEL_API int hip_concat(void *stream, void *dst, int num_inputs,
+                              const void *const *srcs,
+                              const int64_t *src_widths, int64_t outer,
+                              int64_t elem_size);
 
 /* =========================================================================
  * Causal Depthwise 1D Conv -- single-step "decode" path

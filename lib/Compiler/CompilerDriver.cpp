@@ -17,6 +17,7 @@
 #ifdef ENABLE_ROCMLIRTRITON
 #include "hip/Compiler/RocMlirAutotune.h"
 #include "hip/Compiler/RocMlirKernelCompiler.h"
+#include "hip/Compiler/WinogradKernel.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Func/Transforms/Passes.h"
 #include <optional>
@@ -43,6 +44,7 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Format.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
@@ -117,8 +119,74 @@ void dumpPreFusionIR(mlir::ModuleOp module,
      << llvm::join(fuseOpts.gemmGemmAccelTypes, ",")
      << " standalone-elementwise="
      << (fuseOpts.standaloneElementwise ? "true" : "false")
-     << " int4-weights=" << (fuseOpts.int4Weights ? "true" : "false") << "\n";
+     << " int4-weights=" << (fuseOpts.int4Weights ? "true" : "false")
+     << " attention=" << (fuseOpts.attention ? "true" : "false")
+     << " attention-f32-min-score-bytes=" << fuseOpts.attentionF32MinScoreBytes
+     << "\n";
   module->print(os);
+}
+
+// The files that HIPDNN_EP_ROCMLIR_DUMP_HIP and HIPDNN_EP_ROCMLIR_DUMP_TOSA
+// name for one compile. They are the provider's counterparts of
+// hip-rocmlir-compiler's --dump-hip and --dump-tosa.
+//
+// ORT can invoke the compiler more than once per session, and a single sink
+// would be overwritten by each call, so every compile that asks for a dump
+// takes a process-wide sequence number and inserts it before the extension
+// (/tmp/hip.mlir -> /tmp/hip.0.mlir). The two dumps of one compile share the
+// number, so hip.3.mlir and tosa.3.mlir belong together.
+struct RocMlirDumpTargets {
+  std::string hip;
+  std::string tosa;
+};
+
+std::string numberedDumpPath(llvm::StringRef path, unsigned seq) {
+  llvm::StringRef ext = llvm::sys::path::extension(path);
+  llvm::StringRef stem = path.drop_back(ext.size());
+  return (llvm::Twine(stem) + "." + std::to_string(seq) + ext).str();
+}
+
+RocMlirDumpTargets rocMlirDumpTargetsFromEnv() {
+  std::string hip = hip_get_env("HIPDNN_EP_ROCMLIR_DUMP_HIP");
+  std::string tosa = hip_get_env("HIPDNN_EP_ROCMLIR_DUMP_TOSA");
+  RocMlirDumpTargets targets;
+  if (hip.empty() && tosa.empty())
+    return targets;
+  static std::atomic<unsigned> sDumpSeq{0};
+  unsigned seq = sDumpSeq.fetch_add(1);
+  if (!hip.empty())
+    targets.hip = numberedDumpPath(hip, seq);
+  if (!tosa.empty())
+    targets.tosa = numberedDumpPath(tosa, seq);
+  return targets;
+}
+
+// Write a module as MLIR text. These dumps are diagnostics, so a failure is
+// reported and the compile goes on, as in hip-rocmlir-compiler.
+void dumpModuleText(mlir::ModuleOp module, llvm::StringRef label,
+                    llvm::StringRef path) {
+  llvm::StringRef parent = llvm::sys::path::parent_path(path);
+  if (!parent.empty())
+    llvm::sys::fs::create_directories(parent);
+  std::error_code ec;
+  llvm::raw_fd_ostream os(path, ec);
+  if (ec) {
+    llvm::errs() << "[CompilerDriver] cannot open '" << path << "' to dump "
+                 << label << " MLIR: " << ec.message() << "\n";
+    return;
+  }
+  module->print(os);
+  os << "\n";
+  // A full disk shows up only when the stream is flushed.
+  os.flush();
+  if (os.has_error()) {
+    llvm::errs() << "[CompilerDriver] failed writing " << label << " MLIR to "
+                 << path << ": " << os.error().message() << "\n";
+    os.clear_error();
+    return;
+  }
+  llvm::errs() << "[CompilerDriver] wrote " << label << " MLIR to " << path
+               << "\n";
 }
 #endif
 
@@ -126,6 +194,14 @@ OnnxDialectKind onnxDialectKind() {
   return hipsrPipelineRequested() ? OnnxDialectKind::Modeled
                                   : OnnxDialectKind::Stub;
 }
+
+#ifdef ENABLE_ROCMLIRTRITON
+// The Winograd kernels exist for gfx1151 and the gfx12 family only.
+bool winogradRequested(llvm::StringRef arch) {
+  return hip_env_is_on("HIPDNN_EP_WINOGRAD") &&
+         mlir::hip::winogradKernelSupportsArch(arch);
+}
+#endif
 } // namespace
 
 std::string rocMlirArtifactTarget() {
@@ -143,13 +219,38 @@ std::string rocMlirArtifactTarget() {
     // built with another space must not be reused: the cache is keyed on the
     // graph alone.
     mlir::hip::AutotuneSpace space;
-    if (!target.empty() && mlir::hip::rocMlirAutotuneFromEnv(space))
+    const bool autotune =
+        !target.empty() && mlir::hip::rocMlirAutotuneFromEnv(space);
+    if (autotune)
       target += std::string("+autotune=") + mlir::hip::autotuneSpaceName(space);
+    // rock.num_cu changes tile grouping and which split-K variants exist, and
+    // split-K variants enter only the full and exhaustive spaces, so an
+    // artifact tuned for another CU count or split-K setting is not reused.
+    if (int64_t numCU = mlir::hip::resolveRocMlirNumCU();
+        !target.empty() && numCU > 0)
+      target += "+cu=" + std::to_string(numCU);
+    if (autotune && space != mlir::hip::AutotuneSpace::Quick &&
+        mlir::hip::rocMlirSplitKTuningEnabled())
+      target += "+splitk";
     // The same holds for the kernel plan: without standalone elementwise
     // kernels the leftover modules run as HIP ops, a different artifact.
     if (!target.empty() &&
         hip_env_is_on("HIPDNN_EP_ROCMLIR_NO_STANDALONE_ELEMENTWISE"))
       target += "+no-standalone-ew";
+    // Whether attention was fused, and above which f32 score size, is baked
+    // into the kernels the same way. Artifacts from before the attention
+    // merge carry neither suffix, like a NO_ATTENTION session.
+    if (!target.empty() && !hip_env_is_on("HIPDNN_EP_ROCMLIR_NO_ATTENTION")) {
+      target += "+attention";
+      if (int64_t f32MinBytes =
+              mlir::hip::resolveRocMlirAttentionF32MinScoreBytes(
+                  mlir::hip::resolveRocMlirArch()))
+        target += "-f32=" + std::to_string(f32MinBytes);
+    }
+    // Winograd changes which convs run as rocMLIR kernels, so it is a
+    // different artifact.
+    if (!target.empty() && winogradRequested(mlir::hip::resolveRocMlirArch()))
+      target += "+winograd";
     return target;
   }
 #endif
@@ -451,6 +552,9 @@ bool CompilerDriver::runMLIRPasses(
     // in that dump.
     mlir::hip::registerRocMlirDialects(*module.getContext());
 
+    // HIPDNN_EP_ROCMLIR_DUMP_HIP / _DUMP_TOSA: see RocMlirDumpTargets.
+    const RocMlirDumpTargets dumps = rocMlirDumpTargetsFromEnv();
+
     {
       mlir::PassManager headPm(module.getContext());
       // Same handle plumbing as the default arm below. rocMLIR only claims
@@ -462,16 +566,22 @@ bool CompilerDriver::runMLIRPasses(
         compiledGraphs_ =
             std::make_shared<llvm::StringMap<mlir::hip::OwnedGraph>>();
         mlir::hip::buildOnnxToHipPipelineHead(
-            headPm, static_cast<hipdnnHandle_t>(hipdnnHandle_),
-            compiledGraphs_);
+            headPm, static_cast<hipdnnHandle_t>(hipdnnHandle_), compiledGraphs_,
+            /*convIntegerQuantConv=*/true);
       } else {
-        mlir::hip::buildOnnxToHipPipelineHead(headPm);
+        mlir::hip::buildOnnxToHipPipelineHead(headPm, /*handle=*/nullptr, {},
+                                              /*convIntegerQuantConv=*/true);
       }
       // rocMLIR has no transposed-convolution anchor, so split
       // conv_transpose into plain convolutions before anything tries to
       // outline a kernel around it.
       headPm.addNestedPass<mlir::func::FuncOp>(
           mlir::hip::createDecomposeConvTransposePass());
+      // rocMLIR never sees hip.multi_head_attention: HipToTosa's converter
+      // runs only inside an outlined kernel, and this op is not an anchor.
+      // Split the static separate-QKV form into matmuls first.
+      headPm.addNestedPass<mlir::func::FuncOp>(
+          mlir::hip::createDecomposeMultiHeadAttentionPass());
       headPm.addPass(mlir::createCanonicalizerPass());
       mlir::hip::FuseRocMlirAnchorPassOptions fuseOpts;
       fuseOpts.arch = mlir::hip::resolveRocMlirArch();
@@ -486,6 +596,7 @@ bool CompilerDriver::runMLIRPasses(
       // i4 filter; the default perfConfig is one of them for f32.
       mlir::hip::AutotuneSpace int4Space;
       fuseOpts.int4Weights = mlir::hip::rocMlirAutotuneFromEnv(int4Space);
+      mlir::hip::setRocMlirAttentionOptions(fuseOpts);
       if (mlir::failed(headPm.run(module))) {
         error_message = "ONNX->HIP passes before the rocMLIR fusion failed";
         return false;
@@ -494,16 +605,47 @@ bool CompilerDriver::runMLIRPasses(
       mlir::PassManager fusePm(module.getContext());
       // HIPDNN_EP_ROCMLIR_FUSION_REPORT=<file> appends one JSON line per
       // kernel, to compare the kernels of two fusion pipelines.
+      // HIPDNN_EP_WINOGRAD=1 runs the gated fp16 3x3 convs as Winograd
+      // F(2x2, 3x3) kernels built for this model; see
+      // docs/design/winograd-conv.md.
+      const bool winograd = winogradRequested(fuseOpts.arch);
       mlir::hip::addRocMlirFusionPasses(
-          fusePm, fuseOpts, hip_get_env("HIPDNN_EP_ROCMLIR_FUSION_REPORT"));
+          fusePm, fuseOpts, hip_get_env("HIPDNN_EP_ROCMLIR_FUSION_REPORT"),
+          winograd);
       if (mlir::failed(fusePm.run(module))) {
         error_message = "rocMLIR fusion passes failed";
         return false;
+      }
+      if (winograd &&
+          mlir::failed(mlir::hip::compileWinogradKernels(
+              module, fuseOpts.arch,
+              hip_env_is_on("HIPDNN_EP_ROCMLIR_VERBOSE") ? &llvm::errs()
+                                                         : nullptr))) {
+        error_message = "Winograd kernel build failed";
+        return false;
+      }
+      // HIPDNN_EP_ROCMLIR_DUMP_HIP=<file>: the hip MLIR after the ONNX->HIP
+      // head and the rocMLIR fusion, as --dump-hip writes it.
+      if (!dumps.hip.empty())
+        dumpModuleText(module, "hip", dumps.hip);
+      // HIPDNN_EP_ROCMLIR_DUMP_TOSA=<file>: the hip->tosa conversion of the
+      // whole module, as --dump-tosa writes it. It clones the entire model,
+      // which the compile path below never does, so it is debug-only cost.
+      if (!dumps.tosa.empty()) {
+        mlir::OwningOpRef<mlir::ModuleOp> tosaModule =
+            mlir::hip::buildRocMlirTosaClone(module);
+        if (tosaModule)
+          dumpModuleText(*tosaModule, "tosa", dumps.tosa);
+        else
+          llvm::errs() << "[CompilerDriver] hip->tosa conversion failed; no "
+                          "TOSA dump written to "
+                       << dumps.tosa << "\n";
       }
     }
 
     mlir::hip::RocMlirEmbedOptions embedOpts;
     embedOpts.arch = mlir::hip::resolveRocMlirArch();
+    embedOpts.numCU = mlir::hip::resolveRocMlirNumCU();
     if (hip_env_is_on("HIPDNN_EP_ROCMLIR_VERBOSE")) {
       embedOpts.log = &llvm::errs();
       embedOpts.logPrefix = "[CompilerDriver/rocmlir]";
@@ -533,14 +675,32 @@ bool CompilerDriver::runMLIRPasses(
     // function_refs into it.
     std::optional<mlir::hip::RocMlirAutotuner> autotuner;
     mlir::hip::AutotuneSpace autotuneSpace;
+    const std::string problemCacheRw =
+        hip_get_env("HIPDNN_EP_ROCMLIR_PROBLEM_CACHE_RW");
+    bool updateProblemCache = !problemCacheRw.empty();
     if (mlir::hip::rocMlirAutotuneFromEnv(autotuneSpace)) {
       mlir::hip::AutotuneOptions autotuneOpts;
       autotuneOpts.space = autotuneSpace;
       mlir::hip::rocMlirAutotuneBenchmarkFromEnv(autotuneOpts.benchmark);
+      // HIPDNN_EP_ROCMLIR_NEAREST_CONFIG: borrow a neighbour's tile on a
+      // problem-cache miss. Off unless set, so a table answers only for the
+      // exact problems it holds.
+      autotuneOpts.nearestConfig = mlir::hip::rocMlirNearestConfigFromEnv();
       autotuneOpts.log = embedOpts.log;
       autotuneOpts.logPrefix = "[CompilerDriver/rocmlir-autotune]";
-      // problemCachePath stays empty here. The shipped LUT is skipped only
-      // when HIPDNN_EP_ROCMLIR_AUTOTUNE is set explicitly.
+      // HIPDNN_EP_ROCMLIR_VERBOSE also turns on the per-candidate lines, one
+      // per config per kernel, which hip-rocmlir-compiler --verbose prints.
+      autotuneOpts.verbose = embedOpts.log != nullptr;
+      // HIPDNN_EP_ROCMLIR_PROBLEM_CACHE_RW=<file.json>: the provider's
+      // counterpart of hip-rocmlir-compiler --enable-problem-cache-rw. The
+      // file is read as the external problem cache, and this compile's
+      // benchmarked winners are merged back into it once the kernels are
+      // embedded. Without it problemCachePath stays empty, and the shipped
+      // LUT is skipped only when HIPDNN_EP_ROCMLIR_AUTOTUNE is set explicitly.
+      if (!problemCacheRw.empty()) {
+        autotuneOpts.problemCachePath = problemCacheRw;
+        autotuneOpts.problemCacheRewrite = true;
+      }
       autotuneOpts.tuningTypeProvided =
           !hip_get_env("HIPDNN_EP_ROCMLIR_AUTOTUNE").empty();
       autotuner.emplace(embedOpts.arch, autotuneOpts);
@@ -557,14 +717,52 @@ bool CompilerDriver::runMLIRPasses(
                         "default perfConfig";
         return false;
       }
+      // Before the compile, so a file the rewrite would refuse is found now.
+      // As with every update failure here, it does not fail the compile: the
+      // file is not used and not updated.
+      std::string cacheError;
+      if (!problemCacheRw.empty() &&
+          !autotuner->checkProblemCacheFile(cacheError)) {
+        llvm::errs() << "[CompilerDriver] HIPDNN_EP_ROCMLIR_PROBLEM_CACHE_RW "
+                        "ignored, not read or updated: "
+                     << cacheError << "\n";
+        updateProblemCache = false;
+      }
       autotuner->installInto(embedOpts);
     }
+    if (!autotuner && !problemCacheRw.empty())
+      llvm::errs() << "[CompilerDriver] HIPDNN_EP_ROCMLIR_PROBLEM_CACHE_RW "
+                      "ignored: rocMLIR autotune is off, so "
+                   << problemCacheRw << " is not read or updated\n";
 
-    if (mlir::failed(
-            mlir::hip::compileAndEmbedRocMlirKernels(module, embedOpts))) {
+    const bool embedOk =
+        mlir::hip::compileAndEmbedRocMlirKernels(module, embedOpts).succeeded();
+    // HIPDNN_EP_ROCMLIR_VERBOSE: where the autotune time went, as
+    // hip-rocmlir-compiler prints it at exit. Printed whether or not the embed
+    // succeeded, since a slow failed compile is the one most worth reading.
+    // Only the two times the autotuner measures are printed; the HIP-to-LLVM
+    // lowering runs later in the tail and is not timed here.
+    if (autotuner && embedOpts.log) {
+      const mlir::hip::AutotunePhaseTimes &times = autotuner->phaseTimes();
+      *embedOpts.log << "[CompilerDriver/rocmlir-autotune] perfConfig compile "
+                        "wall: "
+                     << llvm::format("%.1f", times.perfConfigCompileMs)
+                     << " ms, benchmark: "
+                     << llvm::format("%.1f", times.benchmarkMs) << " ms\n";
+    }
+    if (!embedOk) {
       error_message = "rocMLIR kernel compilation failed";
       return false;
     }
+
+    // HIPDNN_EP_ROCMLIR_PROBLEM_CACHE_RW=<file.json>: merge the winners this
+    // compile benchmarked into the file, after a successful embed so a failed
+    // compile adds nothing. The file is one table across compiles, so unlike
+    // the dumps it is not numbered. A failure to update it is reported and
+    // does not fail the compile, as with the dumps.
+    if (autotuner && updateProblemCache && !autotuner->updateProblemCacheFile())
+      llvm::errs() << "[CompilerDriver] failed to update problem cache "
+                   << problemCacheRw << "\n";
 
     mlir::hip::OnnxToHipPipelineOptions tailOpts;
     tailOpts.externalizeMinNumElements =

@@ -85,6 +85,13 @@ def ConvertOnnxToHipPass : Pass<"convert-onnx-to-hip", "mlir::ModuleOp"> {
     Requires hip-add-context-arg to have run first so that !hip.context is
     available as function argument 0.
   }];
+  let options = [
+    Option<"convIntegerQuantConv", "conv-integer-quant-conv", "bool",
+           "false",
+           "Lower a static ConvInteger to hip.quant_conv and a static "
+           "MatMulInteger to hip.quant_matmul. Set only on the rocMLIR "
+           "pipeline; those ops have no lowering outside it">
+  ];
   let dependentDialects = [
     "mlir::hip::HipDialect",
     "mlir::arith::ArithDialect",
@@ -198,6 +205,32 @@ def HoistPointwiseOverViewsPass
   let dependentDialects = ["mlir::tensor::TensorDialect"];
 }
 
+def RocMlirPreFusionPass
+    : Pass<"hip-rocmlir-pre-fusion", "mlir::func::FuncOp"> {
+  let summary = "Rewrite main_graph into forms the rocMLIR fusion can take";
+  let description = [{
+    Applies the pre-fusion patterns to the ops of the top-level block of
+    main_graph, the block that the anchor fusion plans, without folding. It
+    runs after hip-fuse-rocmlir-elementwise, so a pattern can see which
+    pointwise readers are grouped into hip.rocmlir_elementwise modules. The
+    patterns:
+
+    - A hip.gather of one constant in-range index on static floating-point
+      data becomes a tensor.extract_slice of the gathered axis, plus a
+      tensor.collapse_shape that drops the axis for a scalar index, when its
+      result has one reader that will likely run in a rocMLIR kernel: an
+      anchor, a module next to an anchor, a module that the anchor pass makes
+      into a kernel of its own (the test of its outlinesAlone), or a fusable
+      view whose result in turn has such a reader. A module
+      takes each input once, so one op inside it must read the input. The
+      fusion absorbs the view into that kernel, so the gather launch goes
+      away. A slice that a kernel reads through several readers, or that the
+      fusion declines, would become a copy for each HIP reader; a gather with
+      an identical sibling is skipped, since CSE would merge the two slices.
+  }];
+  let dependentDialects = ["mlir::tensor::TensorDialect"];
+}
+
 def RocMlirPrepareQuantPass
     : Pass<"hip-rocmlir-prepare-quant", "mlir::func::FuncOp"> {
   let summary = "Prepare the quantize trees of main_graph for rocMLIR kernels";
@@ -279,7 +312,10 @@ def FuseRocMlirAnchorPass
     QLinearConv, a QLinearMatMul and a convolution of dequantizes become
     integer anchors only when their kernel outlines; a declined op keeps its
     HIP kernel. A module that no anchor takes and that saves a launch stays
-    whole and becomes a rock.elementwise kernel. After the outline, a
+    whole and becomes a rock.elementwise kernel. After the outline, a gemm
+    kernel whose only result is softmaxed over the last axis merges with that
+    softmax and the gemm kernel that reads it as its A operand into one
+    attention kernel. Then a
     matmul or gemm kernel whose only result feeds the A operand of the next
     gemm merges into it when the gemm-elementwise-gemm shape gates pass.
     Only main_graph is changed. Run hip-rocmlir-prepare-quant and
@@ -315,7 +351,20 @@ def FuseRocMlirAnchorPass
            "K, signed or unsigned), into its kernel, which then reads the "
            "4-bit weights. rocMLIR packs an i4 operand under only some "
            "perfConfigs, so this needs autotuning, which skips the ones that "
-           "fail.">
+           "fail.">,
+    Option<"attention", "attention", "bool", /*default=*/"true",
+           "Merge a gemm kernel, the last-axis softmax of its result and the "
+           "gemm kernel that reads the softmax into one attention kernel, "
+           "when both gemms read a float type in gemm-gemm-accel-types (or "
+           "f32 with a score matrix larger than "
+           "attention-f32-min-score-bytes) and both head dims are at most "
+           "256.">,
+    Option<"attentionF32MinScoreBytes", "attention-f32-min-score-bytes",
+           "int64_t", /*default=*/"0",
+           "f32 attention whose gemms lack matrix acceleration merges only "
+           "when its score matrix is strictly larger than this many bytes, "
+           "normally the target's L2 cache size. 0 keeps that f32 attention "
+           "unmerged; f32 in gemm-gemm-accel-types merges at any size.">
   ];
   let dependentDialects = [
     "mlir::arith::ArithDialect",
@@ -367,6 +416,31 @@ def ConvertHipToTosaPass : Pass<"convert-hip-to-tosa", "mlir::func::FuncOp"> {
   ];
 }
 
+def DecomposeMultiHeadAttentionPass
+    : Pass<"hip-decompose-multi-head-attention", "mlir::func::FuncOp"> {
+  let summary = "Rewrite static hip.multi_head_attention into two matmuls and a softmax";
+  let description = [{
+    Replaces a statically shaped hip.multi_head_attention that has separate
+    query, key, and value tensors with the graph MIGraphX builds at parse
+    time: reshape and transpose into [batch, heads, seq, dim], a query-key
+    hip.matmul, a scale hip.mul, hip.miopen.softmax, and a value hip.matmul.
+
+    hip-fuse-rocmlir then outlines each matmul. The softmax stays between
+    them, because it is not a pointwise epilogue. The element type must be
+    f16 or f32. bf16 is an error in this pass: the runtime kernel receives
+    only a byte size and would read bf16 as f16. An f16
+    prefill (query sequence longer than one, value head dim matching query,
+    padded head dim at most 256) stays on hip.multi_head_attention: wave32
+    runs it as flash attention and this pass cannot see the device. Packed
+    QKV, bias, masks, past key or value, causal masking, dynamic shapes, and
+    any other float type stay on that runtime kernel too.
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::tensor::TensorDialect"
+  ];
+}
+
 def DecomposeConvTransposePass
     : Pass<"hip-decompose-conv-transpose", "mlir::func::FuncOp"> {
   let summary = "Rewrite hip.conv_transpose into stride-1 hip.conv residues";
@@ -412,6 +486,28 @@ def DecomposeConvTransposePass
   ];
 }
 
+def WinogradConvPass : Pass<"hip-winograd-conv", "mlir::func::FuncOp"> {
+  let summary = "Run eligible fp16 3x3 convs as fused Winograd F(2x2, 3x3) kernels";
+  let description = [{
+    Rewrites a `hip.conv` into a `hip.winograd_conv` when it is fp16, NCHW,
+    rank 4 with static shapes, a 3x3 filter that is a model constant, stride
+    1, dilation 1, padding 1 on every side and group 1, and when the shape
+    gate says the Winograd kernel is faster. The gate is MIGraphX's NCHW fp16
+    heuristic without the band of large channel counts at small spatial
+    sizes, where the tuned rocMLIR conv wins. A conv that reads an upsample,
+    transpose, reshape or slice is left alone: a rocMLIR conv reads those as
+    views.
+
+    A `hip.leaky_relu`, or a `hip.max` with a zero constant (ReLU), that is the
+    only user of the conv result moves into the op as its `activation`.
+
+    The compiler builds the kernel later, so the op leaves this pass without
+    a binary. It runs first in the rocMLIR fusion passes when
+    `HIPDNN_EP_WINOGRAD=1`.
+  }];
+  let dependentDialects = ["mlir::hip::HipDialect"];
+}
+
 def FoldBatchNormPass
     : Pass<"hip-fold-batchnorm", "mlir::func::FuncOp"> {
   let summary = "Fold constant-parameter hip.batch_norm into hip.conv weights";
@@ -432,6 +528,33 @@ def FoldBatchNormPass
   }];
 }
 
+def FoldLayerNormPass
+    : Pass<"hip-fold-layer-norm", "mlir::func::FuncOp"> {
+  let summary = "Fold primitive last-axis LayerNorm chains and residual adds into one norm op";
+  let description = [{
+    A LayerNorm written as primitive HIP ops (ReduceMean, Sub, a square,
+    ReduceMean, an epsilon Add, Sqrt or a reciprocal square root, and an
+    optional per-channel Mul and Add) over the last axis is replaced by one
+    hip.layer_norm with that epsilon, which accumulates in fp32. The square may
+    be hip.mul(d, d) or hip.pow {2}; the normalization hip.div by hip.sqrt or
+    hip.pow {0.5}, or hip.mul by hip.reciprocal(hip.sqrt), hip.div(1, sqrt) or
+    hip.pow {-0.5}. Without a per-channel scale the norm gets a scale of ones.
+    A same-shape hip.add that produces the norm input (a residual) folds with
+    it into hip.skip_layer_norm, which also writes the sum for later users.
+
+    Only f16 and f32 chains with a static last dimension and a scalar constant
+    epsilon fold; the chain's intermediates must have no other users. It runs
+    in the shared ONNX->HIP head right after hip-fold-batchnorm, so any
+    frontend that emits these HIP ops gets the fold, and on the rocMLIR path
+    it runs before the fusion outlines the chain into elementwise kernels or
+    the residual add into the producing GEMM.
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::tensor::TensorDialect"
+  ];
+}
 def ForwardConcatSlotsPass : Pass<"hip-forward-concat-slots", "mlir::func::FuncOp"> {
   let summary = "Write a packed concat slot in place and share it with its readers";
   let description = [{
@@ -480,6 +603,15 @@ def PromoteStridedHipOperandsPass
     // consumer is rewritten to read from %tmp instead of %strided
     memref.dealloc %tmp : memref<...identity-layout...>
     ```
+
+    `hip.reverse` is skipped: its lowering reads the input through the memref
+    descriptor, so promoting it would only add a copy.
+
+    `hip.concat` reads each input from an offset-aware pointer, so contiguous
+    views (identity strides with any offset) are not promoted. When promoting
+    its strided inputs would launch at least one copy per input, the concat
+    is instead rewritten to one `memref.copy` per input into a
+    `memref.subview` of its output slot.
 
     DPS-init operands are intentionally left untouched because promoting a
     write target requires copy-back and must preserve read-before-write

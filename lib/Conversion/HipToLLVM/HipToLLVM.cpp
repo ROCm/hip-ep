@@ -232,6 +232,7 @@ populateLoweringPatterns(LLVMTypeConverter &typeConverter,
   populateConvTransposeLoweringPatterns(typeConverter, patterns);
   populateMatmulLoweringPatterns(typeConverter, patterns);
   populateRocMlirLoweringPatterns(typeConverter, patterns);
+  populateWinogradConvLoweringPatterns(typeConverter, patterns);
   populateElementwiseLoweringPatterns(typeConverter, patterns);
   populatePowerLoweringPatterns(typeConverter, patterns);
   populateActivationLoweringPatterns(typeConverter, patterns);
@@ -251,6 +252,7 @@ populateLoweringPatterns(LLVMTypeConverter &typeConverter,
   populateCastLoweringPatterns(typeConverter, patterns);
   populateReduceLoweringPatterns(typeConverter, patterns);
   populateTransposeLoweringPatterns(typeConverter, patterns);
+  populateCopyOpsLoweringPatterns(typeConverter, patterns);
   populateRopeLoweringPatterns(typeConverter, patterns);
   populateGqaLoweringPatterns(typeConverter, patterns, hostScalars);
   populateMultiHeadAttentionLoweringPatterns(typeConverter, patterns);

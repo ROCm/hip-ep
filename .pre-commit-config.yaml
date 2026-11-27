@@ -36,12 +36,13 @@ repos:
         name: licenseheaders
         entry: python -m licenseheaders
         # -x excludes paths from license-header insertion. morphizen/* (the
-        # vendored subtree) keeps its own upstream copyright headers, and
+        # vendored subtree) and third_party/* keep their own upstream copyright
+        # headers, and
         # lib/Runtime/Kernels/* (the hand-written GPU kernels) keeps its existing
         # headers untouched. Jekyll pages under site/ require YAML front matter
         # on the first line, so prepending a license comment would stop them
         # from rendering as pages.
-        args: [-t,./LICENSES/license.txt,-x,morphizen/*,lib/Runtime/Kernels/*,site/*,-s,./LICENSES/settings.json,-f]
+        args: [-t,./LICENSES/license.txt,-x,morphizen/*,lib/Runtime/Kernels/*,site/*,third_party/*,-s,./LICENSES/settings.json,-f]
         language: python
         additional_dependencies: [licenseheaders==0.8.8]
         types: [file]

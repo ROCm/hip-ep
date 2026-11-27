@@ -112,10 +112,14 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     ConvOp::attachInterface<HipDstBufferizableModel<ConvOp>>(*ctx);
     ConvTransposeOp::attachInterface<HipDstBufferizableModel<ConvTransposeOp>>(
         *ctx);
+    WinogradConvOp::attachInterface<HipDstBufferizableModel<WinogradConvOp>>(
+        *ctx);
     MatmulOp::attachInterface<HipDstBufferizableModel<MatmulOp>>(*ctx);
     RocMlirOp::attachInterface<HipDstBufferizableModel<RocMlirOp>>(*ctx);
     RmsNormOp::attachInterface<HipDstBufferizableModel<RmsNormOp>>(*ctx);
     SkipRmsNormOp::attachInterface<HipDstBufferizableModel<SkipRmsNormOp>>(
+        *ctx);
+    SkipLayerNormOp::attachInterface<HipDstBufferizableModel<SkipLayerNormOp>>(
         *ctx);
     RopeOp::attachInterface<HipDstBufferizableModel<RopeOp>>(*ctx);
     MRotaryEmbeddingOp::attachInterface<
@@ -126,6 +130,8 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     MiopenSoftmaxOp::attachInterface<HipDstBufferizableModel<MiopenSoftmaxOp>>(
         *ctx);
     TransposeOp::attachInterface<HipDstBufferizableModel<TransposeOp>>(*ctx);
+    ReverseOp::attachInterface<HipDstBufferizableModel<ReverseOp>>(*ctx);
+    ConcatOp::attachInterface<HipDstBufferizableModel<ConcatOp>>(*ctx);
     GatherOp::attachInterface<HipDstBufferizableModel<GatherOp>>(*ctx);
     GatherElementsOp::attachInterface<
         HipDstBufferizableModel<GatherElementsOp>>(*ctx);

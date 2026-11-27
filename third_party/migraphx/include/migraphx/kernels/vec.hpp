@@ -1,0 +1,429 @@
+/*
+ * The MIT License (MIT)
+ *
+ * Copyright (c) 2015-2026 Advanced Micro Devices, Inc. All rights reserved.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
+#ifndef MIGRAPHX_GUARD_KERNELS_VEC_HPP
+#define MIGRAPHX_GUARD_KERNELS_VEC_HPP
+
+#include <migraphx/kernels/types.hpp>
+#include <migraphx/kernels/integral_constant.hpp>
+#include <migraphx/kernels/functional.hpp>
+#include <migraphx/kernels/type_traits.hpp>
+#include <migraphx/kernels/tuple.hpp>
+#include <migraphx/kernels/debug.hpp>
+
+namespace migraphx {
+
+template <class T, index_int N>
+constexpr auto vec_size(vec<T, N>)
+{
+    return index_constant<N>{};
+}
+
+template <class T>
+constexpr auto vec_size(T, ...) // NOLINT
+{
+    return index_constant<0>{};
+}
+
+template <class T>
+constexpr auto vec_size()
+{
+    return decltype(vec_size(declval<T>())){};
+}
+
+template <class... Ts>
+constexpr auto is_any_vec()
+{
+    if constexpr(sizeof...(Ts) == 0)
+        return false_type{};
+    else
+        return bool_constant<((vec_size<Ts>() + ...) > 0)>{};
+}
+
+template <class... Ts>
+constexpr auto is_any_vec(Ts...)
+{
+    return is_any_vec<Ts...>();
+}
+
+template <class T, class I>
+constexpr auto vec_at(T x, I i)
+{
+    if constexpr(vec_size<T>() == 0)
+        return x;
+    else
+    {
+        MIGRAPHX_ASSERT(i < vec_size<T>());
+        return x[i];
+    }
+}
+
+template <class T>
+using vec_type = decltype(vec_at(T{}, 0));
+
+template <class... Ts>
+constexpr auto common_vec_size()
+{
+    return fold([](auto x, auto y) {
+        if constexpr(x > y)
+            return x;
+        else
+            return y;
+    })(vec_size<Ts>()...);
+}
+
+template <class... Ts>
+constexpr auto common_vec_size(Ts...)
+{
+    return common_vec_size<Ts...>();
+}
+
+namespace vec_detail {
+// Avoid instantiating vec<T, 0> when all types are scalar
+template <class T, index_int N>
+struct vec_or_scalar
+{
+    using type = vec<T, N>;
+};
+
+template <class T>
+struct vec_or_scalar<T, 0>
+{
+    using type = T;
+};
+} // namespace vec_detail
+
+/// A vec of N elements of T, or T itself when N is 0
+template <class T, index_int N>
+using vec_or_scalar_t = typename vec_detail::vec_or_scalar<T, N>::type;
+
+template <class... Ts>
+struct common_vec
+{
+    static constexpr auto size = common_vec_size<Ts...>();
+    using raw_type             = common_type_t<vec_type<Ts>...>;
+    using type                 = typename vec_detail::vec_or_scalar<raw_type, size>::type;
+};
+
+template <class... Ts>
+using common_vec_t = typename common_vec<Ts...>::type;
+
+// Bools can not be used as a vector type so convert it to uint8
+template <class T>
+__device__ __host__ T* remove_bool(T* x)
+{
+    return x;
+}
+
+inline __device__ __host__ uint8_t* remove_bool(bool* x) { return reinterpret_cast<uint8_t*>(x); }
+
+inline __device__ __host__ const uint8_t* remove_bool(const bool* x)
+{
+    return reinterpret_cast<const uint8_t*>(x);
+}
+
+template <class T>
+struct pack_factor : integral_constant<index_int, 1>
+{
+};
+
+template <class T, index_int N>
+struct pack_factor<packed<T, N>> : integral_constant<index_int, N>
+{
+};
+
+// Packed types can not be used as a vector type so unwrap the underlying type
+template <class T>
+__device__ __host__ T* remove_packed(T* x)
+{
+    return x;
+}
+
+template <class T, index_int N>
+__device__ __host__ T* remove_packed(packed<T, N>* x)
+{
+    static_assert(is_standard_layout<packed<T, N>>{} and sizeof(packed<T, N>) == sizeof(T),
+                  "packed must be a transparent wrapper of T");
+    return reinterpret_cast<T*>(x);
+}
+
+template <index_int N, class T>
+__device__ __host__ auto as_vec(T* x)
+{
+    if constexpr(N < 2)
+        return x;
+    else
+        return reinterpret_cast<vec<T, N>*>(x);
+}
+
+template <index_int N, class T>
+__device__ __host__ auto as_vec(const T* x)
+{
+    if constexpr(N < 2)
+        return x;
+    else
+        return reinterpret_cast<const vec<T, N>*>(x);
+}
+
+template <class T, index_int N>
+using safe_vec = vec<conditional_t<is_same<T, bool>{}, uint8_t, T>, N>;
+
+// A vector of N elements S apart in memory as one tensor element, so an input
+// strided along the vector axis is still read with wide loads. It is never
+// read through the struct: load_strided loads the S-aligned block of N*S
+// elements holding the lanes and selects them by the phase of the pointer
+// within the block.
+template <class T, index_int N, index_int S>
+struct strided_vec
+{
+    static_assert(S > 1, "A strided vector needs a stride greater than one");
+    T data[N * S];
+};
+
+template <class T>
+struct is_strided_vec : false_type
+{
+};
+
+template <class T, index_int N, index_int S>
+struct is_strided_vec<strided_vec<T, N, S>> : true_type
+{
+};
+
+// The vector width of the loaded lanes
+template <class T, index_int N, index_int S>
+constexpr auto vec_size(strided_vec<T, N, S>)
+{
+    return index_constant<N>{};
+}
+
+// The type an element of a tensor is loaded as
+template <class T>
+struct load_type_impl
+{
+    using type = T;
+};
+
+template <class T, index_int N, index_int S>
+struct load_type_impl<strided_vec<T, N, S>>
+{
+    using type = vec<T, N>;
+};
+
+template <class T, index_int N, index_int S>
+struct load_type_impl<const strided_vec<T, N, S>> : load_type_impl<strided_vec<T, N, S>>
+{
+};
+
+template <class T>
+using load_type = typename load_type_impl<T>::type;
+
+template <index_int N, index_int S, class T>
+__device__ __host__ auto as_strided_vec(T* x)
+{
+    return reinterpret_cast<strided_vec<T, N, S>*>(x);
+}
+
+template <index_int N, index_int S, class T>
+__device__ __host__ auto as_strided_vec(const T* x)
+{
+    return reinterpret_cast<const strided_vec<T, N, S>*>(x);
+}
+
+// Build a vector with one element per index: the callback runs for each index implied
+// by the length n, and n is fixed at compile time
+template <class N, class F>
+constexpr auto generate_vec(N n, F f)
+{
+    return sequence(n, [&](auto... is) {
+        constexpr index_int sz = n;
+        using elem             = decltype(f(_c<0>));
+        return safe_vec<elem, sz>{f(is)...};
+    });
+}
+
+namespace vec_detail {
+
+// Repack lane-wise tuples so each tuple field becomes one vector of length Size across lanes
+template <index_int Size, class GetLane>
+constexpr auto vec_transform_tuple_transpose(GetLane get_lane)
+{
+    using lane0 = remove_reference_t<decltype(declval<GetLane>()(_c<0>))>;
+    return generate_tuple(decltype(declval<lane0>().size()){}, [&](auto j) {
+        return generate_vec(index_constant<Size>{}, [&](auto i) { return get_lane(i)[j]; });
+    });
+}
+
+template <index_int Size, class F, class... Ts>
+constexpr auto vec_transform_tuple_vec_lanes_impl(F f, Ts... xs)
+{
+    auto at       = [](auto i) { return [=](auto x) { return vec_at(x, i); }; };
+    auto get_lane = [&](auto i) { return f(at(i)(xs)...); };
+    using lane0   = remove_reference_t<decltype(get_lane(_c<0>))>;
+    if constexpr(is_tuple<lane0>{})
+        return vec_transform_tuple_transpose<Size>(get_lane);
+    else
+        return generate_vec(index_constant<Size>{}, [&](auto i) { return get_lane(i); });
+}
+
+template <class F, class... Ts>
+constexpr auto vec_transform_tuple_vec_lanes(F f, Ts... xs)
+{
+    constexpr index_int sz = common_vec_size<Ts...>();
+    return vec_transform_tuple_vec_lanes_impl<sz>(f, xs...);
+}
+
+} // namespace vec_detail
+
+template <class... Ts>
+constexpr auto vec_transform(Ts... xs)
+{
+    return [=](auto f) {
+        if constexpr(is_any_vec<Ts...>())
+        {
+            using type                  = decltype(f(vec_at(xs, 0)...));
+            constexpr auto size         = common_vec_size<Ts...>();
+            safe_vec<type, size> result = {0};
+            for(int i = 0; i < size; i++)
+                result[i] = f(vec_at(xs, i)...);
+            return result;
+        }
+        else
+        {
+            return f(xs...);
+        }
+    };
+}
+
+template <class... Ts>
+constexpr auto vec_transform_tuple(Ts... xs)
+{
+    return [=](auto f) {
+        // join + lift pattern can fail to instantiate when xs are scalars
+        if constexpr(is_any_vec<Ts...>())
+            return vec_detail::vec_transform_tuple_vec_lanes(f, xs...);
+        else
+            return f(xs...);
+    };
+}
+
+// Return a vector type of N from index i in another larger vector
+// N will be 2 for half2 packing
+template <index_int N, class T, class I>
+constexpr vec<vec_type<T>, N> vec_packed_at(T x, I i)
+{
+    if constexpr(vec_size<T>() == 0)
+        return vec<T, N>{x};
+    else
+    {
+        MIGRAPHX_ASSERT((i + N) <= vec_size<T>());
+        vec<vec_type<T>, N> result = {0};
+        for(int j = 0; j < N; j++)
+        {
+            result[j] = x[i + j];
+        }
+        return result;
+    }
+}
+
+template <index_int N, class... Ts>
+constexpr auto vec_packed_transform(Ts... xs)
+{
+    return [=](auto f) {
+        if constexpr(is_any_vec<Ts...>())
+        {
+            using type                  = vec_type<decltype(f(vec_packed_at<N>(xs, 0)...))>;
+            constexpr auto size         = common_vec_size<Ts...>();
+            safe_vec<type, size> result = {0};
+            for(int i = 0; i < size / N; i++)
+            {
+                // Call the function with packed vectors
+                safe_vec<type, N> r = f(vec_packed_at<N>(xs, i * N)...);
+                // Copy the packed vectors to the result
+                for(int j = 0; j < N; j++)
+                    result[i * N + j] = r[j];
+            }
+            return result;
+        }
+        else
+        {
+            return f(xs...);
+        }
+    };
+}
+
+template <class T, class Op>
+constexpr auto vec_reduce(T x, Op op)
+{
+    if constexpr(vec_size<T>() < 2)
+        return vec_type<T>{x};
+    else
+    {
+        vec_type<T> result = x[0];
+        for(int i = 1; i < vec_size<T>(); i++)
+            result = op(result, x[i]);
+        return result;
+    }
+}
+
+template <index_int N, class F>
+constexpr auto vec_generate(F f)
+{
+    using type = decltype(f(_c<0>));
+    return sequence_c<N>([&](auto... is) { return safe_vec<type, N>{f(is)...}; });
+}
+
+template <class T>
+struct implicit_conversion_op
+{
+    T x;
+
+    template <index_int N, class U>
+    constexpr operator vec<U, N>() const
+    {
+        if constexpr(vec_size<T>() == 0)
+        {
+            return x;
+        }
+        else
+        {
+            static_assert(vec_size<T>() == N, "Vector mismatch size");
+            return __builtin_convertvector(x, vec<U, N>);
+        }
+    }
+
+    template <class U>
+    constexpr operator U() const
+    {
+        return static_cast<U>(x);
+    }
+};
+
+template <class T>
+constexpr implicit_conversion_op<T> implicit_conversion(T x)
+{
+    return {x};
+}
+
+} // namespace migraphx
+#endif // MIGRAPHX_GUARD_KERNELS_VEC_HPP

@@ -36,6 +36,8 @@
 namespace mlir {
 namespace hip {
 
+struct FuseRocMlirAnchorPassOptions;
+
 // One compiled kernel: the ELF blob plus the launch geometry rocMLIR picked.
 // A kernel argument that rocMLIR needs filled before every launch
 // (`rock.prefill`), such as the output of a split-K kernel, which the kernel
@@ -71,6 +73,9 @@ using RocMlirFinishCompilesFn =
 
 struct RocMlirEmbedOptions {
   std::string arch;
+  // Stamped as rock.num_cu on every kernel; 0 leaves it unset (rocMLIR then
+  // assumes the arch's minimum CU count).
+  int64_t numCU = 0;
   // Per-kernel progress. Null keeps the compile silent, which is what the EP
   // wants: its compiles happen inside ORT session creation.
   llvm::raw_ostream *log = nullptr;
@@ -90,6 +95,32 @@ struct RocMlirEmbedOptions {
 
 // ROCK_ARCH wins, else a default the rock backend can parse.
 std::string resolveRocMlirArch();
+
+// The L2 cache size of device 0 in bytes, as the HIP runtime reports it, or 0
+// when there is no runtime or device to ask.
+int64_t resolveRocMlirL2CacheBytes();
+
+// The attention-f32-min-score-bytes option for `arch`:
+// HIPDNN_EP_ROCMLIR_ATTENTION_F32_MIN_SCORE_BYTES when set, else the L2 size
+// of device 0 when that device is `arch`, else 0. rocMlirArtifactTarget
+// records the value.
+int64_t resolveRocMlirAttentionF32MinScoreBytes(StringRef arch);
+
+// The attention options of the rocMLIR fusion, shared by CompilerDriver and
+// hip-rocmlir-compiler so both form the same kernels for the same target:
+// HIPDNN_EP_ROCMLIR_NO_ATTENTION=1 keeps attention as two gemm kernels and a
+// softmax, and non-accelerated f32 attention merges only above
+// resolveRocMlirAttentionF32MinScoreBytes(options.arch). Set options.arch
+// first.
+void setRocMlirAttentionOptions(FuseRocMlirAnchorPassOptions &options);
+
+// The compute-unit count rocMLIR should tune for: the device's
+// multiProcessorCount (WGPs on RDNA), or 0 when no device answers.
+int64_t resolveRocMlirNumCU();
+
+// Whether full and exhaustive tuning may add split-K variants of every tile
+// (rock.enable_splitk_for_tuning). Off unless HIPDNN_EP_ROCMLIR_SPLITK is on.
+bool rocMlirSplitKTuningEnabled();
 
 // The gemm element types, printed as in IR (f16, bf16, ...), that `arch`
 // runs on matrix cores, for the rocMLIR fusion's gemm-gemm-accel-types option.
@@ -114,10 +145,12 @@ OwningOpRef<ModuleOp> buildRocMlirTosaClone(ModuleOp module);
 // kernels are IsolatedFromAbove and carry `rock.arch` on the func, so nothing
 // from the enclosing module needs to come with them. \p arch, when non-empty,
 // replaces the fixed `rock.arch` the rocMLIR fusion wrote, so the tuning passes
-// see the chip the backend is targeting. Returns an empty module when there are
-// no kernels, null on failure.
+// see the chip the backend is targeting. \p numCU, when positive, is stamped
+// as `rock.num_cu`. Returns an empty module when there are no kernels, null on
+// failure.
 OwningOpRef<ModuleOp> takeRocMlirKernelsAsTosaModule(ModuleOp module,
-                                                     StringRef arch = {});
+                                                     StringRef arch = {},
+                                                     int64_t numCU = 0);
 
 // Split one func back out of the module returned above into its own
 // single-func module, which is the shape the rock pipelines want. Another

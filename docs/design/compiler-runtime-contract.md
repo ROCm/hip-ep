@@ -79,9 +79,21 @@ which is empty when `HIPDNN_EP_ROCMLIR` was off, the arch with an
 `HIP_ROCMLIR_SKIP_BENCHMARKING` compiled the default perfConfig (`gfx1151`).
 There is no `+lut=` fingerprint. A provided `HIPDNN_EP_ROCMLIR_AUTOTUNE`
 skips the shipped `tools/problem-cache/lut/*.fb`; when it is unset, the shipped
-table is consulted before the search. `hip-rocmlir-compiler` still honors
-`--problem-cache` / `HIP_ROCMLIR_PROBLEM_CACHE` ahead of the search. The
-provider does not read `HIP_ROCMLIR_PROBLEM_CACHE`. `hip-rocmlir-compiler` and
+table is consulted before the search. Either table answers only for an
+identical problem string. A miss borrows the nearest measured tile of the same
+kernel kind only when nearest-config lookup is on:
+`HIPDNN_EP_ROCMLIR_NEAREST_CONFIG=1` in either binary, or
+`--enable-nearest-config` on `hip-rocmlir-compiler`. It is off by default, and
+the artifact suffix does not record it. `hip-rocmlir-compiler` still honors
+`--enable-problem-cache-rw` ahead of the search.
+The flag names a LUT JSON file (the document it writes) and merges the
+compile's search winners back into it; a file it would refuse to rewrite stops
+the compile before it starts; an external `.fb` is never accepted. The
+provider's counterpart of the flag is
+`HIPDNN_EP_ROCMLIR_PROBLEM_CACHE_RW=<file.json>`, which reads and updates the
+file the same way, except that a file it cannot use or update is reported and
+the compile still succeeds. The variable is ignored, with a message, when autotune is off.
+`hip-rocmlir-compiler` and
 the ONNX Runtime provider both read the skip variable: unset or `0`
 benchmarks. A present empty value skips, and so does any other value. Autotune
 otherwise runs for a rocMLIR session. Unset `HIPDNN_EP_ROCMLIR_AUTOTUNE`
@@ -90,18 +102,34 @@ values; anything else warns and stays on quick.
 That tool writes LLVM bitcode; it does not stamp `Metadata.rocmlir_arch`.
 The perfConfig a kernel was tuned to is baked into its code object, so a tuned
 and an untuned artifact are not interchangeable even on the same GPU.
+Every rocMLIR kernel carries `rock.num_cu`, the device's `multiProcessorCount`
+(WGPs on RDNA; `hip-rocmlir-compiler --num-cu <n>` sets it for offline compiles). It changes the
+tile grouping and which split-K variants the tuning space holds, so a known
+count adds a `+cu=<n>` suffix (`gfx1151+autotune=quick+cu=20`). Full and
+exhaustive tuning add split-K variants of every tile
+(`rock.enable_splitk_for_tuning`) only with `HIPDNN_EP_ROCMLIR_SPLITK=1`, which
+adds `+splitk` to those spaces; quick tuning always searches the quick list as
+is, including its split-K entries. A split-K candidate is timed with
+the zero fill of its output, as at inference.
 `HIPDNN_EP_ROCMLIR_NO_STANDALONE_ELEMENTWISE` adds a `+no-standalone-ew` suffix
 after that, because it changes which ops run as rocMLIR kernels
-(`gfx1151+autotune=quick+no-standalone-ew`).
+(`gfx1151+autotune=quick+cu=20+no-standalone-ew`). A `+attention` suffix follows
+when attention merges (the default), as `+attention-f32=<bytes>` when f32
+attention merges above that score size
+(`resolveRocMlirAttentionF32MinScoreBytes`). Whether and where attention was
+fused is baked into the code objects the same way.
+`HIPDNN_EP_ROCMLIR_NO_ATTENTION` drops the suffix, so artifacts built before
+the attention merge, which have unfused attention, match only such a session.
 
 The model cache / EPContext identity is derived from the graph alone, so the EP
 refuses to load an artifact whose recorded value differs from the current one;
-delete the cache and recompile after changing GPUs, or toggling either
-`HIPDNN_EP_ROCMLIR`,
-`HIP_ROCMLIR_SKIP_BENCHMARKING`, or
-`HIPDNN_EP_ROCMLIR_AUTOTUNE`. Compilation fails outright
-if autotune is on but no HIP device could be reached, so the suffix never
-claims tuning that did not happen.
+delete the cache and recompile after changing GPUs, or toggling
+`HIPDNN_EP_ROCMLIR`, `HIP_ROCMLIR_SKIP_BENCHMARKING`,
+`HIPDNN_EP_ROCMLIR_AUTOTUNE`, `HIPDNN_EP_ROCMLIR_NO_ATTENTION`,
+`HIPDNN_EP_ROCMLIR_ATTENTION_F32_MIN_SCORE_BYTES`, or
+`HIPDNN_EP_ROCMLIR_SPLITK`. Compilation
+fails outright if autotune is on but no HIP device could be reached, so the
+suffix never claims tuning that did not happen.
 
 `HIPDNN_EP_ROCMLIR_AUTOTUNE_BENCH` selects how candidates are timed and is not
 part of the suffix: both modes search the same space and record the same kind

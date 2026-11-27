@@ -59,12 +59,15 @@ inline constexpr const char *kHipAllocOutput = "hipdnn_ep_alloc_output";
 inline constexpr const char *kWrapHipMemcpyAsync = "wrap_hipMemcpyAsync";
 inline constexpr const char *kWrapHipMemcpy2DAsync = "wrap_hipMemcpy2DAsync";
 inline constexpr const char *kWrapStridedCopy = "wrap_strided_copy";
+inline constexpr const char *kWrapStridedCopyNd = "wrap_strided_copy_nd";
+inline constexpr const char *kWrapConcat = "wrap_concat";
 
 inline constexpr const char *kWrapConv = "wrap_conv";
 inline constexpr const char *kWrapConvTranspose = "wrap_conv_transpose";
 inline constexpr const char *kWrapHipblasltMatmul = "wrap_hipblasLtMatmul";
 inline constexpr const char *kWrapMatmulI32 = "wrap_matmul_i32";
 inline constexpr const char *kWrapRocMlir = "wrap_rocmlir";
+inline constexpr const char *kWrapWinogradConv = "wrap_winograd_conv";
 inline constexpr const char *kWrapRocMlirPrefill = "wrap_rocmlir_prefill";
 inline constexpr const char *kWrapRmsNorm = "wrap_rms_norm";
 inline constexpr const char *kWrapSkipSimplifiedLayerNorm =
@@ -73,6 +76,7 @@ inline constexpr const char *kWrapSkipSimplifiedLayerNormMixed =
     "wrap_skip_simplified_layer_norm_mixed";
 inline constexpr const char *kWrapLayerNormalization =
     "wrap_layer_normalization";
+inline constexpr const char *kWrapSkipLayerNorm = "wrap_skip_layer_norm";
 inline constexpr const char *kWrapInstanceNormalization =
     "wrap_instance_normalization";
 inline constexpr const char *kWrapBatchNormalization =
@@ -488,6 +492,8 @@ void populateMatmulLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns);
 void populateRocMlirLoweringPatterns(const LLVMTypeConverter &converter,
                                      RewritePatternSet &patterns);
+void populateWinogradConvLoweringPatterns(const LLVMTypeConverter &converter,
+                                          RewritePatternSet &patterns);
 void populateElementwiseLoweringPatterns(const LLVMTypeConverter &converter,
                                          RewritePatternSet &patterns);
 void populatePowerLoweringPatterns(const LLVMTypeConverter &converter,
@@ -530,6 +536,8 @@ void populateReduceLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns);
 void populateTransposeLoweringPatterns(const LLVMTypeConverter &converter,
                                        RewritePatternSet &patterns);
+void populateCopyOpsLoweringPatterns(const LLVMTypeConverter &converter,
+                                     RewritePatternSet &patterns);
 void populateRopeLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateGqaLoweringPatterns(

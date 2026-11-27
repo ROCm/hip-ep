@@ -28,13 +28,25 @@
 //         : (tensor<NxCxHxWxui8>, tensor<MxCxKxKxui8>, ...) ->
 //         tensor<NxMxH'xW'xi32>
 //
-//   After:
+//   After (default, and every dynamic ConvInteger):
 //     %xf = hip.cast %x to f32
 //     %wf = hip.cast %w to f32
 //     %xd = hip.sub %xf, %xzp
 //     %wd = hip.sub %wf, reshape(%wzp, [M, 1, 1, 1])
 //     %acc = hip.conv %xd, %wd
 //     %y = hip.cast %acc to i32
+//
+//   After, only when convert-onnx-to-hip is given conv-integer-quant-conv
+//   (the rocMLIR pipeline), every dimension is static, and the op is in
+//   the entry block of @main_graph:
+//     hip.quant_conv of the int8 operands, plus one hip.quant_conv per
+//     zero point that is not the rebase offset. uint8 is rebased to int8
+//     by subtracting 128. An omitted uint8 zero point is numeric 0, which
+//     rebases to -128, so it is materialized and still corrected.
+//     Anywhere else, including an outlined Loop/Scan/If body, and a
+//     dynamic batch stay on hip.conv: FuseRocMlirAnchorPass only outlines
+//     anchors in @main_graph's entry block, and an unoutlined
+//     hip.quant_conv has no lowering.
 //
 //===----------------------------------------------------------------------===//
 
@@ -172,10 +184,212 @@ static mlir::Value subtractZeroPoint(mlir::PatternRewriter &rewriter,
       ->getResult(0);
 }
 
+/// hip.quant_conv takes signless i8. uint8 is shifted by 128 into that range.
+static mlir::Value toSigned8(mlir::PatternRewriter &rewriter,
+                             mlir::Location loc, mlir::Value context,
+                             mlir::Value value) {
+  auto type = mlir::cast<mlir::RankedTensorType>(value.getType());
+  if (type.getElementType().isSignlessInteger(8))
+    return value;
+  // hip.quant_conv weights must be signless i8. A signed int8 tensor is the
+  // same bits; only the type changes.
+  if (type.getElementType().isSignedInteger(8)) {
+    auto dstType =
+        mlir::RankedTensorType::get(type.getShape(), rewriter.getI8Type());
+    return mlir::tensor::BitcastOp::create(rewriter, loc, dstType, value)
+        .getResult();
+  }
+  if (!type.getElementType().isUnsignedInteger(8))
+    return {};
+  mlir::Value wide = castTo(rewriter, loc, context, value,
+                            rewriter.getI32Type(), /*onnxTo=*/6);
+  auto offsetType = mlir::RankedTensorType::get({}, rewriter.getI32Type());
+  mlir::Value offset = mlir::hip::ConstantOp::create(
+      rewriter, loc, offsetType,
+      mlir::DenseElementsAttr::get(offsetType,
+                                   rewriter.getI32IntegerAttr(128)));
+  mlir::Value shifted = subtractZeroPoint(rewriter, loc, context, wide, offset);
+  return castTo(rewriter, loc, context, shifted, rewriter.getI8Type(),
+                /*onnxTo=*/3);
+}
+
+static mlir::Value broadcastTo(mlir::PatternRewriter &rewriter,
+                               mlir::Location loc, mlir::Value context,
+                               mlir::Value value,
+                               mlir::RankedTensorType dstType) {
+  if (value.getType() == dstType)
+    return value;
+  auto shapeType =
+      mlir::RankedTensorType::get({dstType.getRank()}, rewriter.getI64Type());
+  mlir::Value shape = mlir::arith::ConstantOp::create(
+      rewriter, loc, shapeType,
+      mlir::DenseElementsAttr::get(shapeType, dstType.getShape()));
+  mlir::Value init = createEmptyTensor(rewriter, loc, dstType, value);
+  return mlir::hip::ExpandOp::create(rewriter, loc, context, value, shape, init)
+      ->getResult(0);
+}
+
+/// An omitted uint8 zero point is 0. After the operand is rebased by -128
+/// that 0 is -128, so the correction convolution is required. A signed
+/// operand's omitted zero point is already 0 in the type hip.quant_conv uses.
+static mlir::Value
+materializeOmittedUnsignedZeroPoint(mlir::PatternRewriter &rewriter,
+                                    mlir::Location loc, mlir::Value data,
+                                    mlir::Value zp) {
+  if (zp)
+    return zp;
+  auto elem =
+      mlir::cast<mlir::RankedTensorType>(data.getType()).getElementType();
+  if (!elem.isUnsignedInteger(8))
+    return {};
+  auto zpType = mlir::RankedTensorType::get({}, elem);
+  return mlir::hip::ConstantOp::create(
+      rewriter, loc, zpType,
+      mlir::DenseElementsAttr::get(zpType, rewriter.getIntegerAttr(elem, 0)));
+}
+
+/// Static ConvInteger as int8 hip.quant_conv. Returns failure when the conv
+/// cannot be formed, and the caller keeps the cast/sub/hip.conv lowering.
+static mlir::LogicalResult tryLowerQuantConv(
+    mlir::PatternRewriter &rewriter, mlir::Operation *op, mlir::Value context,
+    mlir::Location loc, mlir::RankedTensorType inputType,
+    mlir::RankedTensorType weightType, mlir::RankedTensorType resultType,
+    bool is1D, llvm::ArrayRef<int64_t> kernelShapeIn,
+    llvm::ArrayRef<int64_t> stridesIn, llvm::ArrayRef<int64_t> dilationsIn,
+    llvm::ArrayRef<int64_t> padsIn, int64_t group) {
+  if (!inMainGraphEntry(op) || inputType.isDynamicDim(0))
+    return mlir::failure();
+  // hip.quant_conv verifies a signless i32 accumulator. An explicitly signed
+  // si32 result is the same bits, and the cast/sub/hip.conv path already
+  // casts back to that type.
+  if (!resultType.getElementType().isSignlessInteger(32))
+    return mlir::failure();
+  for (int64_t pad : padsIn) {
+    if (pad < 0)
+      return mlir::failure();
+  }
+
+  llvm::SmallVector<int64_t> kernelShape(kernelShapeIn);
+  llvm::SmallVector<int64_t> strides(stridesIn);
+  llvm::SmallVector<int64_t> dilations(dilationsIn);
+  llvm::SmallVector<int64_t> pads(padsIn);
+  mlir::Value input = op->getOperand(0);
+  mlir::Value weight = op->getOperand(1);
+  mlir::Value xZp = realOperand(op, 2);
+  mlir::Value wZp = realOperand(op, 3);
+
+  if (is1D) {
+    kernelShape.insert(kernelShape.begin(), 1);
+    strides.insert(strides.begin(), 1);
+    dilations.insert(dilations.begin(), 1);
+    pads = {0, pads[0], 0, pads[1]};
+
+    auto expand = [&](mlir::Value value) -> mlir::Value {
+      auto srcType = mlir::cast<mlir::RankedTensorType>(value.getType());
+      llvm::SmallVector<int64_t> shape(srcType.getShape());
+      shape.insert(shape.end() - 1, 1);
+      auto rank4 = mlir::RankedTensorType::get(shape, srcType.getElementType());
+      llvm::SmallVector<mlir::ReassociationIndices> reassoc = {
+          {0}, {1}, {2, 3}};
+      return mlir::tensor::ExpandShapeOp::create(rewriter, loc, rank4, value,
+                                                 reassoc)
+          .getResult();
+    };
+    input = expand(input);
+    weight = expand(weight);
+    // A full-rank weight zero point, such as [M, 1, 1] over [M, C, K], has
+    // to gain the same inserted 1. Left at rank 3, alignZeroPoint sees a
+    // rank mismatch with the rank-4 weight and reshapes it to a scalar.
+    if (wZp) {
+      auto zpType = mlir::dyn_cast<mlir::RankedTensorType>(wZp.getType());
+      if (zpType && zpType.getRank() == 3)
+        wZp = expand(wZp);
+    }
+    inputType = mlir::cast<mlir::RankedTensorType>(input.getType());
+    weightType = mlir::cast<mlir::RankedTensorType>(weight.getType());
+    llvm::SmallVector<int64_t> outShape(resultType.getShape());
+    outShape.insert(outShape.end() - 1, 1);
+    resultType =
+        mlir::RankedTensorType::get(outShape, resultType.getElementType());
+  }
+
+  xZp = materializeOmittedUnsignedZeroPoint(rewriter, loc, input, xZp);
+  wZp = materializeOmittedUnsignedZeroPoint(rewriter, loc, weight, wZp);
+  input = toSigned8(rewriter, loc, context, input);
+  weight = toSigned8(rewriter, loc, context, weight);
+  if (!input || !weight)
+    return mlir::failure();
+  inputType = mlir::cast<mlir::RankedTensorType>(input.getType());
+  weightType = mlir::cast<mlir::RankedTensorType>(weight.getType());
+  if (xZp && rebasedZeroPointIsZero(xZp))
+    xZp = {};
+  if (wZp && rebasedZeroPointIsZero(wZp))
+    wZp = {};
+  if (xZp) {
+    xZp = toSigned8(rewriter, loc, context, xZp);
+    if (!xZp)
+      return mlir::failure();
+    xZp = alignZeroPoint(rewriter, loc, xZp, inputType, /*perChannel=*/false);
+    xZp = broadcastTo(rewriter, loc, context, xZp, inputType);
+  }
+  if (wZp) {
+    wZp = toSigned8(rewriter, loc, context, wZp);
+    if (!wZp)
+      return mlir::failure();
+    wZp = alignZeroPoint(rewriter, loc, wZp, weightType, /*perChannel=*/true);
+    wZp = broadcastTo(rewriter, loc, context, wZp, weightType);
+  }
+
+  auto quant = [&](mlir::Value lhs, mlir::Value rhs) {
+    mlir::Value init = createEmptyTensor(rewriter, loc, resultType, lhs);
+    return mlir::hip::QuantConvOp::create(
+               rewriter, loc, mlir::TypeRange{resultType}, context, lhs, rhs,
+               init, rewriter.getI64ArrayAttr(kernelShape),
+               rewriter.getI64ArrayAttr(strides),
+               rewriter.getI64ArrayAttr(pads),
+               rewriter.getI64ArrayAttr(dilations),
+               rewriter.getI64IntegerAttr(group))
+        .getResult(0);
+  };
+  auto combine = [&](bool add, mlir::Value lhs, mlir::Value rhs) {
+    mlir::Value init = createEmptyTensor(rewriter, loc, resultType, lhs);
+    if (add)
+      return mlir::hip::AddOp::create(rewriter, loc, context, lhs, rhs, init)
+          ->getResult(0);
+    return mlir::hip::SubOp::create(rewriter, loc, context, lhs, rhs, init)
+        ->getResult(0);
+  };
+
+  mlir::Value acc = quant(input, weight);
+  if (xZp)
+    acc = combine(/*add=*/false, acc, quant(xZp, weight));
+  if (wZp)
+    acc = combine(/*add=*/false, acc, quant(input, wZp));
+  if (xZp && wZp)
+    acc = combine(/*add=*/true, acc, quant(xZp, wZp));
+
+  if (is1D) {
+    llvm::SmallVector<int64_t> collapsed(
+        mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType())
+            .getShape());
+    auto collapsedType =
+        mlir::RankedTensorType::get(collapsed, resultType.getElementType());
+    llvm::SmallVector<mlir::ReassociationIndices> reassoc = {{0}, {1}, {2, 3}};
+    acc = mlir::tensor::CollapseShapeOp::create(rewriter, loc, collapsedType,
+                                                acc, reassoc)
+              .getResult();
+  }
+  rewriter.replaceOp(op, acc);
+  return mlir::success();
+}
+
 /// onnx.ConvInteger -> hip.cast / hip.sub / hip.conv / hip.cast.
 struct ConvIntegerToHip : public mlir::RewritePattern {
-  ConvIntegerToHip(mlir::MLIRContext *ctx)
-      : RewritePattern("onnx.ConvInteger", /*benefit=*/1, ctx) {}
+  ConvIntegerToHip(mlir::MLIRContext *ctx, bool quantConv)
+      : RewritePattern("onnx.ConvInteger", /*benefit=*/1, ctx),
+        quantConv(quantConv) {}
+
+  bool quantConv = false;
 
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op,
@@ -360,6 +574,12 @@ ConvIntegerToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value context = *ctxOrFailure;
   mlir::Location loc = op->getLoc();
 
+  if (quantConv &&
+      mlir::succeeded(tryLowerQuantConv(
+          rewriter, op, context, loc, inputType, weightType, resultType, is1D,
+          kernelShape, strides, dilations, pads, group)))
+    return mlir::success();
+
   // ONNX FLOAT is datatype 1 and INT32 is 6. The cast kernel is selected
   // from the buffer types, not from this attribute.
   int64_t reduction = inC / group;
@@ -463,8 +683,8 @@ ConvIntegerToHip::matchAndRewrite(mlir::Operation *op,
 } // namespace
 
 void populateConvIntegerConversionPatterns(RewritePatternSet &patterns,
-                                           MLIRContext *ctx) {
-  patterns.add<ConvIntegerToHip>(ctx);
+                                           MLIRContext *ctx, bool quantConv) {
+  patterns.add<ConvIntegerToHip>(ctx, quantConv);
 }
 
 } // namespace hip

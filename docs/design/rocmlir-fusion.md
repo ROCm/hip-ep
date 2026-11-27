@@ -17,8 +17,10 @@ fusion for the EP, `hip-rocmlir-compiler`, `rocmlir-pipeline` and the
 `hip-rocmlir-fusion` pipeline of `hip-mlir-opt`:
 
 ```
+func.func(hip-hoist-pointwise-over-views)
 func.func(hip-rocmlir-prepare-quant)
 func.func(hip-fuse-rocmlir-elementwise)
+func.func(hip-rocmlir-pre-fusion)
 func.func(hip-fuse-rocmlir-anchor)
 duplicate-function-elimination
 hip-rocmlir-fusion-report        (only with a report file)
@@ -142,6 +144,40 @@ take a module whole:
   input or result is an integer wider than 32 bits, because the rocMLIR
   loads and stores take at most 32 bits.
 - A module of views alone is not made.
+
+## hip-rocmlir-pre-fusion
+
+The pass holds rewrites that put `main_graph` into a form the anchor fusion
+can take. It runs after the grouping, so a pattern can tell a pointwise reader
+inside a module from one that stays a HIP op, and it applies its patterns to
+the top-level block only, without folding.
+
+A `hip.gather` of one constant in-range index on static floating-point data
+reads a size-1 slice of the gathered axis. The pattern replaces it with a
+`tensor.extract_slice`, plus a `tensor.collapse_shape` that drops the axis for
+a scalar index, which a kernel absorbs as a view. A slice that stays in the
+graph becomes a copy for each HIP reader instead, which costs more than the
+gather once there are two, so the pattern rewrites a gather only when its one
+reader will likely run in a rocMLIR kernel:
+
+- an anchor;
+- a module whose input comes from an anchor or whose result an anchor reads,
+  so that it is likely its prologue or epilogue;
+- a module that the anchor pass makes into a kernel of its own when no plan
+  takes it. The pass applies the anchor pass's `outlinesAlone` test, with
+  `standalone-elementwise` on: two or more ops besides inits, reshapes and
+  slices, each lowering inside a rocMLIR kernel and safe under unsigned types,
+  and no result of several that only transposes a kernel argument;
+- a fusable view whose result in turn has such a reader.
+
+A module takes each input once, however many of its ops read it, so for a
+module reader one op inside the module must read the gather, through views.
+Two readers inside a module that the anchor pass then inlines would each copy
+the slice. A gather with an identical sibling is skipped, because a later CSE would merge
+the two slices into one value with two readers. When the anchor pass still
+declines the reader, the slice costs one copy for its one reader, about what
+the gather cost. Integer data, a runtime index and an out-of-range index keep
+the gather.
 
 ## hip-fuse-rocmlir-anchor
 
@@ -412,26 +448,91 @@ the A operand of the second gemm through pointwise ops and row-only reshapes
   g <= 64) or a skinny-k MLP bottom (m >= 98304, n >= 512, k <= 13,
   g <= 256).
 
+### Attention
+
+Before the gemm-elementwise-gemm merge, a gemm kernel, the
+`hip.miopen.softmax` that reads its only result, and the gemm kernel that
+reads the softmax as its A operand merge into one kernel, which rocMLIR
+lowers to `rock.attention`. The gates are:
+
+- Q, K and V share one float element type. Each gemm reads a type in
+  `gemm-gemm-accel-types`, or f32 with a score matrix strictly larger than
+  `attention-f32-min-score-bytes`.
+- Both head dims (k of Q·Kᵀ and g of P·V) are static and at most 256.
+  rocMLIR tiles larger head dims, but none are tested, so they keep the
+  three kernels.
+- The scores and the probabilities have no other reader, and the second gemm
+  does not transpose the probabilities.
+- Between the softmax and the second gemm sit only reshapes that regroup the
+  batch dims (rows and columns unchanged) and at most one cast. A cast there
+  must be matched by a cast to the softmax type in the first kernel (f16
+  gemm, cast to f32, f32 softmax, cast to f16, f16 gemm). Those are the
+  chains rocMLIR's attention matcher takes. It rejects others, and a gemm
+  kernel that fails to compile has no fallback.
+
+The f32 cutoff is the L2 size that the HIP runtime reports for device 0,
+used only when device 0 is the target chip (target features such as
+`:xnack-` are ignored). On a chip with a larger last-level cache behind L2,
+scores between the two sizes stay on chip unfused as well, so the L2 size is
+a lower bound and not a tuned threshold.
+A target that accelerates f32 lists it in `gemm-gemm-accel-types` and never
+reaches the cutoff. f16 and bf16 merge at every score size.
+
 ## Options
 
-`arch` and `gemm-gemm-accel-types` describe the target. `standalone-elementwise`
-and `int4-weights` are the fusion switches.
+`arch`, `gemm-gemm-accel-types` and `attention-f32-min-score-bytes` describe
+the target. `standalone-elementwise`, `int4-weights` and `attention` are the
+fusion switches.
 
 | Option | EP value | Effect |
 |---|---|---|
 | `arch=<gfx>` | detected | Stamps `rock.arch` on each kernel. |
-| `gemm-gemm-accel-types=<types>` | detected | The element types for the gemm-gemm gate. |
+| `gemm-gemm-accel-types=<types>` | detected | The element types for the gemm-gemm and attention gates. |
 | `standalone-elementwise=<bool>` | `true`; `false` with `HIPDNN_EP_ROCMLIR_NO_STANDALONE_ELEMENTWISE=1` | Outlines a module that no anchor takes as an elementwise kernel. |
 | `int4-weights=<bool>` | on when rocMLIR autotuning is on | Takes packed-int4 weight dequantizes into the kernel. |
+| `attention=<bool>` | on, off with `HIPDNN_EP_ROCMLIR_NO_ATTENTION=1` | Merges gemm -> softmax -> gemm into one attention kernel. |
+| `attention-f32-min-score-bytes=<n>` | `HIPDNN_EP_ROCMLIR_ATTENTION_F32_MIN_SCORE_BYTES`, else the L2 cache size of device 0 when it is the target arch, else 0 | When `gemm-gemm-accel-types` lacks f32, f32 attention merges only when its score matrix is strictly larger than `n` bytes, and `n = 0` keeps it apart. An f32 listed there merges at any size, like f16. |
 
 ## Tests and tools
 
 - `test/lit/Dialect/hip-fuse-rocmlir*.mlir` check the kernels of the whole
   fusion. `hip-fuse-rocmlir-elementwise.mlir` checks one grouping rule in each
   test, and `hip-fuse-rocmlir-anchor.mlir` checks the planning rules.
+  `hip-rocmlir-pre-fusion.mlir` checks each pre-fusion rule, and that
+  the fusion absorbs the slices it makes.
 - `HIPDNN_EP_ROCMLIR_PRE_FUSION_DUMP=<dir>` writes the IR that the fusion
   reads, with the fusion options on its first line, so that
   `hip-mlir-opt --hip-rocmlir-fusion` replays the fusion without a GPU.
+- `HIPDNN_EP_ROCMLIR_DUMP_HIP=<file>` and `HIPDNN_EP_ROCMLIR_DUMP_TOSA=<file>`
+  are the provider's counterparts of `hip-rocmlir-compiler --dump-hip` and
+  `--dump-tosa`. The first writes the hip MLIR after the ONNX->HIP head and this
+  fusion. The second writes the hip->tosa conversion of the whole module, a
+  clone that only this dump pays for. `HIPDNN_EP_IR_DUMP_PATH` does not show
+  these stages: it is attached to the tail pass manager only. ORT can compile
+  more than once per session, so each compile inserts a sequence number before
+  the extension (`hip.mlir` becomes `hip.0.mlir`) and the two dumps of one
+  compile share it. A dump that cannot be written is reported and the compile
+  goes on.
+- `HIPDNN_EP_ROCMLIR_PROBLEM_CACHE_RW=<file.json>` is the provider's
+  counterpart of `hip-rocmlir-compiler --enable-problem-cache-rw`. The file is
+  the external problem cache for the compile's autotune, and once the kernels
+  are embedded the winners the search benchmarked are merged into it (tiles
+  borrowed from the file are not written back). It is one table across
+  compiles, so unlike the dumps its path is not numbered. It needs autotune on;
+  with `HIP_ROCMLIR_SKIP_BENCHMARKING` it is ignored and says so. The file is
+  checked before the compile: one the rewrite would refuse (not a LUT, another
+  `gpu_arch`, malformed, read-only, not a regular file, in a directory it cannot
+  write to, or a `.fb`) is reported, then neither read nor updated, and the compile goes on. A failed write is reported the same way.
+- `HIPDNN_EP_ROCMLIR_NEAREST_CONFIG=1` lets a problem-cache miss borrow the
+  tile of the nearest measured problem of the same kernel kind, instead of
+  searching. It is off by default, so the shipped LUT and an external problem
+  cache answer only for identical problem strings. `hip-rocmlir-compiler` reads
+  the same variable and also takes `--enable-nearest-config` for one run.
 - `HIPDNN_EP_ROCMLIR_FUSION_REPORT=<file>` (pipeline option `report`)
   appends one JSON line for each kernel and each host function. Two runs make
   the same kernels when their records are equal as multisets.
+- `HIPDNN_EP_ROCMLIR_VERBOSE=1` prints the autotune progress to stderr: one line
+  per candidate and kernel, the nearest-tune and compile summaries, and at the
+  end the perfConfig compile and benchmark wall times, as
+  `hip-rocmlir-compiler --verbose` does. The HIP-to-LLVM time is not printed,
+  since the provider lowers the module later in the tail.

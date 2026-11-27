@@ -740,6 +740,24 @@ int wrap_strided_copy(RuntimeState *state, void *dst_ptr, const void *src_ptr,
                       int64_t src_pitch_elems, int64_t dst_pitch_elems,
                       int64_t row_elems);
 
+/// N-D strided D2D copy in one kernel launch (element units). `sizes`,
+/// `src_strides` and `dst_strides` are host arrays of `rank` entries. Source
+/// strides may be negative: `src_ptr` then addresses the element with every
+/// index 0, which is how hip.reverse reads its input backwards. Backs
+/// hip.reverse.
+int wrap_strided_copy_nd(RuntimeState *state, void *dst_ptr,
+                         const void *src_ptr, int64_t elem_bytes, int64_t rank,
+                         const int64_t *sizes, const int64_t *src_strides,
+                         const int64_t *dst_strides);
+
+/// Concat of `num_inputs` contiguous device buffers in one kernel launch.
+/// The output and every input are viewed as [outer, width]: input i has row
+/// width `src_widths[i]` elements, and the output row is the inputs' rows side
+/// by side. `src_ptrs` and `src_widths` are host arrays. Backs hip.concat.
+int wrap_concat(RuntimeState *state, void *dst_ptr, int64_t num_inputs,
+                void *const *src_ptrs, const int64_t *src_widths, int64_t outer,
+                int64_t elem_bytes);
+
 /// Copies device memory to host memory on the state's stream. Backs
 /// hipsr.copy_d2h.
 ///
@@ -883,6 +901,23 @@ int wrap_matmul_i32(RuntimeState *state, const void *A, const void *B,
 int wrap_rocmlir(RuntimeState *state, const char *kernel_binary,
                  char *func_name, int64_t block_size, int64_t grid_size,
                  void *kernargs, size_t size);
+
+// Winograd F(2x2, 3x3) conv dispatch (hip.winograd_conv). The compiler embeds
+// one code object per conv shape and epilogue; this entry builds the filter
+// store from `weights` once per op state, then launches the conv kernel and
+// its `<func_name>_fixup` (the edge outputs) with (input, store, bias if
+// non-null, output).
+//   kernel_binary : embedded code object (ELF)
+//   func_name     : NUL-terminated kernel symbol
+//   block_size    : threads per block
+//   grid_size     : blocks per grid
+//   K, C          : output and input channels
+//   full_transform: 1 if the kernel reads the raw filter g, 0 for T = G g
+int wrap_winograd_conv(RuntimeState *state, int32_t op_state_slot,
+                       const char *kernel_binary, char *func_name,
+                       int64_t block_size, int64_t grid_size, const void *input,
+                       const void *weights, const void *bias, void *output,
+                       int64_t K, int64_t C, int64_t full_transform);
 
 // Fills `count` elements of `element_bytes` (1, 2 or 4) at `buffer` with the
 // low bits of `pattern`, on the state's stream. The generated IR calls it
@@ -1624,6 +1659,18 @@ int wrap_layer_normalization(RuntimeState *state, void *input, void *scale,
                              int64_t scale_num_elements,
                              int64_t element_size_bytes, int64_t axis,
                              float epsilon, int64_t stash_type);
+
+// Residual add fused with LayerNormalization over the last axis
+// (hip.skip_layer_norm). beta, bias and input_skip_bias_sum may be nullptr.
+// A skip with fewer elements than input holds the trailing rows and repeats
+// over the input ([1, S, H] or [S, H] against [B, S, H]). A non-zero
+// round_sum rounds the sum to the element type before normalizing.
+int wrap_skip_layer_norm(RuntimeState *state, void *input, void *skip,
+                         void *gamma, void *beta, void *bias, void *output,
+                         void *input_skip_bias_sum, int64_t input_num_elements,
+                         int64_t skip_num_elements, int64_t gamma_num_elements,
+                         int64_t element_size_bytes, float epsilon,
+                         int32_t round_sum);
 
 // InstanceNormalization: y = scale * (x - mean) / sqrt(var + epsilon) + B
 // with mean/var over spatial axes of each (N, C) slice. Input is (N,C,D1..Dn).

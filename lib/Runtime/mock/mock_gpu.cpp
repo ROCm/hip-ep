@@ -500,6 +500,28 @@ int wrap_rocmlir_prefill(RuntimeState *state, void *buffer, int64_t count,
 // RocMLIR dispatch (hip.rocmlir). Empty for now: the generated IR builds the
 // kernargs buffer and passes the embedded GPU binary + launch geometry, but
 // this wrapper does not yet load the module or launch the kernel.
+int wrap_winograd_conv(RuntimeState *state, int32_t op_state_slot,
+                       const char *kernel_binary, char *func_name,
+                       int64_t block_size, int64_t grid_size, const void *input,
+                       const void *weights, const void *bias, void *output,
+                       int64_t K, int64_t C, int64_t full_transform) {
+  (void)op_state_slot;
+  (void)kernel_binary;
+  (void)input;
+  (void)weights;
+  (void)output;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_winograd_conv\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_winograd_conv(func=%s, block_size=%lld, "
+             "grid_size=%lld, K=%lld, C=%lld, bias=%d, full_transform=%lld)\n",
+             func_name ? func_name : "(null)", (long long)block_size,
+             (long long)grid_size, (long long)K, (long long)C, bias ? 1 : 0,
+             (long long)full_transform);
+  return 0;
+}
+
 int wrap_rocmlir(RuntimeState *state, const char *kernel_binary,
                  char *func_name, int64_t block_size, int64_t grid_size,
                  void *kernargs, size_t size) {
@@ -3230,6 +3252,33 @@ int wrap_layer_normalization(RuntimeState *state, void *input, void *scale,
              (long long)element_size_bytes, (long long)axis, epsilon,
              (long long)stash_type, bias ? "yes" : "null",
              mean ? "yes" : "null", inv_std ? "yes" : "null");
+
+  return 0;
+}
+
+int wrap_skip_layer_norm(RuntimeState *state, void *input, void *skip,
+                         void *gamma, void *beta, void *bias, void *output,
+                         void *input_skip_bias_sum, int64_t input_num_elements,
+                         int64_t skip_num_elements, int64_t gamma_num_elements,
+                         int64_t element_size_bytes, float epsilon,
+                         int32_t round_sum) {
+  (void)input;
+  (void)skip;
+  (void)round_sum;
+  (void)gamma;
+  (void)output;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_skip_layer_norm\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_skip_layer_norm(input_num_elements=%lld, "
+             "skip_num_elements=%lld, gamma_num_elements=%lld, "
+             "element_size_bytes=%lld, epsilon=%f, beta=%s, bias=%s, sum=%s)\n",
+             (long long)input_num_elements, (long long)skip_num_elements,
+             (long long)gamma_num_elements, (long long)element_size_bytes,
+             epsilon, beta ? "yes" : "null", bias ? "yes" : "null",
+             input_skip_bias_sum ? "yes" : "null");
 
   return 0;
 }

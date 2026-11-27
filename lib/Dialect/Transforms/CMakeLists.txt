@@ -28,6 +28,7 @@ add_library(HipDialectTransforms STATIC
   fusion_pattern/linear_attention_group_fold.cpp
   fusion_pattern/patch_embed_conv_to_gemm.cpp
   fusion_pattern/gelu_fusion.cpp
+  fusion_pattern/runtime_shape.cpp
   fusion_pattern/swiglu_fusion.cpp
   fusion_pattern/scaled_masked_softmax_fusion.cpp
   AddHipContextArg.cpp
@@ -35,9 +36,11 @@ add_library(HipDialectTransforms STATIC
   BufferUtils.cpp
   DecomposeConvTranspose.cpp
   DecomposeMatMulNBits.cpp
+  DecomposeMultiHeadAttention.cpp
   ExternalizeConstants.cpp
   FixLoopAccumulatorOffset.cpp
   FoldBatchNorm.cpp
+  FoldLayerNorm.cpp
   FoldConstantExtracts.cpp
   ForwardConcatSlots.cpp
   FuseRocMlirAnchor.cpp
@@ -54,6 +57,7 @@ add_library(HipDialectTransforms STATIC
   LoopBodyToOutParams.cpp
   LowerAllocs.cpp
   HoistPointwiseOverViews.cpp
+  WinogradConv.cpp
   MaterializeHostScalars.cpp
   OptimizeMemRefs.cpp
   Pipelines.cpp
@@ -63,6 +67,7 @@ add_library(HipDialectTransforms STATIC
   QuantizedEpilogue.cpp
   RebiasUnsignedQuantize.cpp
   RelaxMultiDynExpandShape.cpp
+  RocMlirPreFusion.cpp
   RocMlirPrepareQuant.cpp
   ResolveExternConstants.cpp
   ResolveMemRefDims.cpp

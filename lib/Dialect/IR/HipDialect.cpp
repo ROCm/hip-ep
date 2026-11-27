@@ -818,6 +818,38 @@ static bool isContiguousAtBase(MemRefType type) {
   return true;
 }
 
+LogicalResult WinogradConvOp::verify() {
+  auto shaped = [](Value v) { return cast<ShapedType>(v.getType()); };
+  ShapedType input = shaped(getInput()), weights = shaped(getWeights()),
+             output = shaped(getOutput());
+  if (!input.hasStaticShape() || !weights.hasStaticShape() ||
+      !output.hasStaticShape())
+    return emitOpError("requires static shapes");
+  if (input.getRank() != 4 || weights.getRank() != 4 || output.getRank() != 4)
+    return emitOpError("requires rank-4 input, weights and output");
+  if (!input.getElementType().isF16() || !weights.getElementType().isF16() ||
+      !output.getElementType().isF16())
+    return emitOpError("requires f16 input, weights and output");
+  ArrayRef<int64_t> x = input.getShape(), w = weights.getShape(),
+                    y = output.getShape();
+  if (w[2] != 3 || w[3] != 3)
+    return emitOpError("requires a 3x3 filter");
+  if (w[1] != x[1] || y[0] != x[0] || y[1] != w[0] || y[2] != x[2] ||
+      y[3] != x[3])
+    return emitOpError("requires output [N, K, H, W] for input [N, C, H, W] "
+                       "and weights [K, C, 3, 3]");
+  if (Value bias = getBias()) {
+    ShapedType b = shaped(bias);
+    if (!b.hasStaticShape() || b.getRank() != 1 || b.getDimSize(0) != w[0] ||
+        !b.getElementType().isF16())
+      return emitOpError("requires an f16 bias of shape [K]");
+  }
+  StringRef act = getActivation();
+  if (act != "none" && act != "relu" && act != "leaky_relu")
+    return emitOpError("activation must be none, relu or leaky_relu");
+  return success();
+}
+
 LogicalResult RocMlirOp::verify() {
   if (getOutputs().empty())
     return emitOpError("requires at least one outs operand");
@@ -927,6 +959,20 @@ MutableOperandRange ConvTransposeOp::getDpsInitsMutable() {
 }
 
 void ConvTransposeOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// WinogradConvOp: ins(input, weights, bias), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange WinogradConvOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void WinogradConvOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
@@ -1574,6 +1620,69 @@ void SkipRmsNormOp::getEffects(
 }
 
 LogicalResult SkipRmsNormOp::verify() { return success(); }
+
+//===----------------------------------------------------------------------===//
+// SkipLayerNormOp: ins(input, skip, gamma, [beta], [bias])
+//                  outs(output, [input_skip_bias_sum])
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SkipLayerNormOp::getDpsInitsMutable() {
+  return getOutputsMutable();
+}
+
+void SkipLayerNormOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult SkipLayerNormOp::verify() {
+  unsigned numOutputs = getOutputs().size();
+  if (numOutputs < 1 || numOutputs > 2)
+    return emitOpError("expected 1 or 2 output buffers (output, "
+                       "[input_skip_bias_sum]), got ")
+           << numOutputs;
+  SmallVector<Value> dataOperands{getInput(), getSkip(), getGamma()};
+  if (Value b = getBeta())
+    dataOperands.push_back(b);
+  if (Value b = getBias())
+    dataOperands.push_back(b);
+  for (Value out : getOutputs())
+    dataOperands.push_back(out);
+
+  // The runtime reads every operand as the input's element type, f16 or f32,
+  // and takes gamma's element count as the row length.
+  auto inputType = cast<ShapedType>(getInput().getType());
+  Type elemType = inputType.getElementType();
+  if (!elemType.isF16() && !elemType.isF32())
+    return emitOpError("expected f16 or f32 elements, got ") << elemType;
+  for (Value v : dataOperands)
+    if (cast<ShapedType>(v.getType()).getElementType() != elemType)
+      return emitOpError("expected all operands to have element type ")
+             << elemType;
+  // The kernel writes each output with the input's element count.
+  if (inputType.hasRank()) {
+    for (Value out : getOutputs()) {
+      auto type = cast<ShapedType>(out.getType());
+      if (!type.hasRank() ||
+          failed(verifyCompatibleShape(inputType.getShape(), type.getShape())))
+        return emitOpError("expected the outputs to have the input shape");
+    }
+  }
+  if (inputType.getRank() >= 1) {
+    int64_t hidden = inputType.getDimSize(inputType.getRank() - 1);
+    for (Value v : {getGamma(), getBeta(), getBias()}) {
+      if (!v)
+        continue;
+      auto type = cast<ShapedType>(v.getType());
+      if (!ShapedType::isDynamic(hidden) && type.hasStaticShape() &&
+          type.getNumElements() != hidden)
+        return emitOpError("expected gamma / beta / bias to hold ")
+               << hidden << " elements (the last input dimension)";
+    }
+  }
+  return verifyDpsComputeOp(*this, dataOperands, /*numInits=*/numOutputs);
+}
 
 //===----------------------------------------------------------------------===//
 // LayerNormOp: ins(input, scale, [bias]) outs(output, [mean, [inv_std]])
@@ -2413,6 +2522,107 @@ LogicalResult TransposeOp::verify() {
              << v << ")";
     seen[v] = true;
   }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// ReverseOp: ins(input), outs(output), attrs: axes
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ReverseOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ReverseOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult ReverseOp::verify() {
+  if (failed(
+          verifyDpsComputeOp(*this, {getInput(), getOutput()}, /*numInits=*/1)))
+    return failure();
+
+  auto inputType = cast<ShapedType>(getInput().getType());
+  auto outputType = cast<ShapedType>(getOutput().getType());
+  if (inputType.getElementType() != outputType.getElementType())
+    return emitOpError("input and output element types must match");
+  if (inputType.getRank() != outputType.getRank())
+    return emitOpError("input and output ranks must match");
+  for (int64_t d : llvm::seq<int64_t>(inputType.getRank()))
+    if (!inputType.isDynamicDim(d) && !outputType.isDynamicDim(d) &&
+        inputType.getDimSize(d) != outputType.getDimSize(d))
+      return emitOpError("input and output shapes must match");
+
+  llvm::SmallVector<bool> seen(inputType.getRank(), false);
+  for (Attribute a : getAxes()) {
+    auto intAttr = dyn_cast<IntegerAttr>(a);
+    if (!intAttr)
+      return emitOpError("axes must be a list of integers");
+    int64_t axis = intAttr.getInt();
+    if (axis < 0 || axis >= inputType.getRank())
+      return emitOpError("axis ") << axis << " is out of range";
+    if (seen[axis])
+      return emitOpError("duplicate axis ") << axis;
+    seen[axis] = true;
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// ConcatOp: ins(inputs...), outs(output), attrs: axis
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ConcatOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ConcatOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult ConcatOp::verify() {
+  if (getInputs().empty())
+    return emitOpError("expected at least one input");
+  llvm::SmallVector<Value> data(getInputs().begin(), getInputs().end());
+  data.push_back(getOutput());
+  if (failed(verifyDpsComputeOp(*this, data, /*numInits=*/1)))
+    return failure();
+
+  auto outputType = cast<ShapedType>(getOutput().getType());
+  int64_t rank = outputType.getRank();
+  int64_t axis = getAxis();
+  if (axis < 0 || axis >= rank)
+    return emitOpError("axis ") << axis << " is out of range";
+
+  int64_t axisSum = 0;
+  bool axisStatic = true;
+  for (Value input : getInputs()) {
+    auto inputType = cast<ShapedType>(input.getType());
+    if (inputType.getElementType() != outputType.getElementType())
+      return emitOpError("input and output element types must match");
+    if (inputType.getRank() != rank)
+      return emitOpError("input and output ranks must match");
+    for (int64_t d : llvm::seq<int64_t>(rank)) {
+      if (d == axis || inputType.isDynamicDim(d) || outputType.isDynamicDim(d))
+        continue;
+      if (inputType.getDimSize(d) != outputType.getDimSize(d))
+        return emitOpError("input dim ")
+               << d << " does not match the output off the concat axis";
+    }
+    if (inputType.isDynamicDim(axis))
+      axisStatic = false;
+    else
+      axisSum += inputType.getDimSize(axis);
+  }
+  if (axisStatic && !outputType.isDynamicDim(axis) &&
+      axisSum != outputType.getDimSize(axis))
+    return emitOpError("output axis extent ")
+           << outputType.getDimSize(axis)
+           << " is not the sum of the input extents (" << axisSum << ")";
   return success();
 }
 

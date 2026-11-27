@@ -382,7 +382,8 @@ void mlir::hip::buildOnnxToHipPipelineTail(
 
 void mlir::hip::buildOnnxToHipPipelineHead(OpPassManager &pm,
                                            hipdnnHandle_t handle,
-                                           CompiledGraphMap output_graphs) {
+                                           CompiledGraphMap output_graphs,
+                                           bool convIntegerQuantConv) {
   // Pre-lowering ONNX-dialect simplifications (currently: CastLike -> Cast
   // + drop dead type-donor function arguments). Pure ONNX dialect; runs
   // BEFORE hip-add-context-arg so it operates in the original ONNX
@@ -445,13 +446,22 @@ void mlir::hip::buildOnnxToHipPipelineHead(OpPassManager &pm,
     pm.addPass(createCompileHipDNNGraphsPass(handle, std::move(output_graphs)));
   }
 
-  pm.addPass(createConvertOnnxToHipPass());
+  if (convIntegerQuantConv) {
+    ConvertOnnxToHipPassOptions options;
+    options.convIntegerQuantConv = true;
+    pm.addPass(createConvertOnnxToHipPass(options));
+  } else {
+    pm.addPass(createConvertOnnxToHipPass());
+  }
 
   // Fold constant-parameter BatchNorm into the producing convolutions while
   // the conv -> add -> batch_norm chain is still as converted: this head is
   // shared with the rocMLIR flow, so it runs before any conv rewrite or kernel
   // outlining there.
   pm.addNestedPass<func::FuncOp>(createFoldBatchNormPass());
+  // Fold primitive LayerNorm chains here too: in the tail, the rocMLIR flow
+  // has already outlined their elementwise ops into kernels.
+  pm.addNestedPass<func::FuncOp>(createFoldLayerNormPass());
 
   // Plugin slot: AfterConvertOnnxToHip. The most common slot for
   // vendor lowerings of `onnx.Custom` ops or vendor-specific hip.*
@@ -561,18 +571,27 @@ void mlir::hip::buildRocMlirPipeline(
     OpPassManager &pm, const mlir::hip::RocMlirPipelineOptions &options) {
   // rocMLIR has no transposed-convolution anchor, so split conv_transpose into
   // plain convolutions before anything tries to outline a kernel around it.
-  pm.addPass(mlir::hip::createDecomposeConvTransposePass());
+  // The pipeline is registered on builtin.module and these passes are anchored
+  // on func.func. Nest them here, the same way the compiler driver does.
+  // hip-mlir-opt's implicit nesting would paper over addPass, but the default
+  // PassManager rejects that anchor mismatch.
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createDecomposeConvTransposePass());
+  pm.addNestedPass<func::FuncOp>(
+      mlir::hip::createDecomposeMultiHeadAttentionPass());
   addRocMlirFusionPasses(pm, FuseRocMlirAnchorPassOptions());
-  pm.addPass(mlir::hip::createConvertHipToTosaPass());
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createConvertHipToTosaPass());
   pm.addPass(mlir::createCanonicalizerPass());
 }
 
 void mlir::hip::addRocMlirFusionPasses(
     OpPassManager &pm, const FuseRocMlirAnchorPassOptions &fuseOptions,
-    llvm::StringRef reportPath) {
+    llvm::StringRef reportPath, bool winograd) {
+  if (winograd)
+    pm.addNestedPass<func::FuncOp>(createWinogradConvPass());
   pm.addNestedPass<func::FuncOp>(createHoistPointwiseOverViewsPass());
   pm.addNestedPass<func::FuncOp>(createRocMlirPrepareQuantPass());
   pm.addNestedPass<func::FuncOp>(createFuseRocMlirElementwisePass());
+  pm.addNestedPass<func::FuncOp>(createRocMlirPreFusionPass());
   pm.addNestedPass<func::FuncOp>(createFuseRocMlirAnchorPass(fuseOptions));
   pm.addPass(func::createDuplicateFunctionEliminationPass());
   if (!reportPath.empty()) {
@@ -590,6 +609,8 @@ void mlir::hip::buildRocMlirFusionPipeline(
                                         options.gemmGemmAccelTypes.end());
   fuseOptions.standaloneElementwise = options.standaloneElementwise;
   fuseOptions.int4Weights = options.int4Weights;
+  fuseOptions.attention = options.attention;
+  fuseOptions.attentionF32MinScoreBytes = options.attentionF32MinScoreBytes;
   addRocMlirFusionPasses(pm, fuseOptions, options.report);
 }
 

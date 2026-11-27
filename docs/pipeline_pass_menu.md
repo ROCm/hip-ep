@@ -115,21 +115,61 @@ plus the selected space) is searched; later kernels with that key compile only
 the winning perfConfig, together in a second pool, and are not benchmarked
 again. The compiled binary is not reused, because each outlined kernel has its
 own symbol. `--autotune[=quick|full|exhaustive]`
-overrides the search space. A given tuning type skips the shipped
-problem-cache LUT; with none given, the shipped LUT is consulted before the
-search. `--problem-cache` / `HIP_ROCMLIR_PROBLEM_CACHE` still takes priority over
-the search and replaces the shipped table. A repeated problem in the same
-compile reuses the in-session winner, then a miss searches the selected space.
-A provider artifact records `+autotune=<space>` only.
-`--dump-problem-cache <file.json>` writes that JSON after autotune, one
-point per unique problem and one config per distinct perfConfig. The flag
-requires autotune; `HIP_ROCMLIR_SKIP_BENCHMARKING` does not produce a dump.
-Set `HIP_ROCMLIR_SKIP_BENCHMARKING=1` (any present value other than `0`,
-including empty) to skip the GPU search and affix the first enumerated
-perfConfig. Neither the shipped LUT nor an external problem cache is consulted
-in that mode. When benchmarking is enabled, a provided tuning type skips the
-shipped LUT, but an external `--problem-cache` is consulted before the search.
-The log names the space (`quick`, `full`, or `exhaustive`) and the
+overrides the search space. A given tuning type skips the shipped problem-cache
+LUT; with none given, the shipped LUT is consulted before the search. A table
+answers only for an identical problem string; any other problem is searched.
+Nearest-config lookup, which lets a miss borrow the tile of the nearest
+measured problem of the same kernel kind, is off by default. It is turned on by
+`--enable-nearest-config` for one `hip-rocmlir-compiler` run, or by
+`HIPDNN_EP_ROCMLIR_NEAREST_CONFIG=1`, which both binaries read, for a whole
+shell. It applies to the shipped LUT and to an external file alike, and changes
+nothing when neither is in use. `--enable-problem-cache-rw <file.json>` still
+takes priority over the search and replaces the shipped table. The flag names a
+LUT JSON file, such as one it wrote. It also writes back: after a successful
+compile the winners the search picked are merged into that file, so a later
+compile reads them. Only winners of a search are written. A tile taken from the
+file, even a nearest neighbour's, is not a measurement and is not stored as
+one. Points already in the file are kept in their order, including ones this
+build cannot use, and so are fallbacks and the configs they name; new problems
+are appended. With no new winners the file is not rewritten. A missing or empty
+file is created. A file that is not a LUT, is for another `gpu_arch`, has a
+malformed `configs`, `points` or `fallbacks` section, has a value the table
+format cannot hold (`rocm_version` beyond 32 bits, `m`, `n` or `k` outside 0 to
+2^32-1, more than 65536 configs), is read-only, is not a regular file, sits in
+a directory the rewrite cannot write to (or create), or is a `.fb` is refused
+before the compile starts, with the file untouched; a write that fails after
+the compile is a warning, and the output is still written. The file is replaced
+atomically and flushed to disk before the rename. It is written owner-only
+(mode 0600, or on Windows an access list that names only you), so no one else
+can read it halfway. On POSIX a new file stays owner-only and a replaced one
+gets its old mode and group back, but not its owner, which becomes the user who
+ran the compile; on Windows the file stays private to you, and anyone else who
+needs it must be granted access afterwards. A symbolic link, in the file name
+or in any directory of the path, is followed to its target, which is created if
+the link is dangling. A dangling link is followed only by the rule the kernel
+uses in a shared directory like `/tmp`: its owner must be you or the
+directory's owner. On Windows the directory that must accept the new file (the
+nearest one that exists) is checked against its access list before the compile.
+The rename replaces the file, so ACLs, extended attributes and hard links of
+the old one are not carried over. `schema_version` is always written out.
+Compiles in one process take turns, but two processes writing it at once can
+lose one set of winners. The provider does the same as the flag through
+`HIPDNN_EP_ROCMLIR_PROBLEM_CACHE_RW=<file.json>`, except that a file it cannot
+use or update is reported and the compile still succeeds. A repeated problem in
+the same compile reuses the in-session winner, then a miss searches the
+selected space. A provider artifact records `+autotune=<space>` only. A table
+starts from a path that does not exist yet. The file has one point per unique
+problem and one config per distinct perfConfig, and `problem_cache_to_fb.py`
+compiles it to a `.fb` to ship it as a LUT. The flag requires autotune;
+`HIP_ROCMLIR_SKIP_BENCHMARKING` writes nothing. The provider's hip and TOSA
+dumps, `HIPDNN_EP_ROCMLIR_DUMP_HIP` and `_DUMP_TOSA`, are described in
+[rocmlir-fusion.md](design/rocmlir-fusion.md). Set
+`HIP_ROCMLIR_SKIP_BENCHMARKING=1` (any present value other than `0`, including
+empty) to skip the GPU search and affix the first enumerated perfConfig.
+Neither the shipped LUT nor an external problem cache is consulted in that
+mode. When benchmarking is enabled, a provided tuning type skips the shipped
+LUT, but an external `--enable-problem-cache-rw` file is consulted before the
+search. The log names the space (`quick`, `full`, or `exhaustive`) and the
 number of configs in each pool. At the end it prints three wall times:
 perfConfig compile (pool wait, summed across the two pools), serial GPU
 benchmark, and HIP-to-LLVM lowering plus bitcode emit. Per-config timing and
@@ -157,10 +197,11 @@ the selected perfConfig string are printed only with `--verbose`.
 | `outline-onnx-to-hipdnn` | module | Outline subgraphs targeted at hipDNN graph compilation. |
 | `convert-onnx-to-hip` | module | Pattern-match ONNX ops by name → HIP dialect; lower both constant sweeps to policy-neutral `hip.constant`; legalize GatherBlockQuantized (INT4 packing, unsigned, quantize_axis). Pre-lowering folds run first on ONNX IR, among them the `onnx.Attention` mask fold (sliding window and key-padding bias, `AttentionWindowFold.cpp`) and the sigmoid + correction-bias QMoE routing fold (`QMoEConversion.cpp`). |
 | `hip-fold-batchnorm` | func.func | Fold an inference `hip.batch_norm` with constant parameters into the filter and bias of the `hip.conv` producing it, directly or through a `hip.add` of two convs (the shift goes into one bias). Every intermediate result must have the batch norm as its only consumer. Reads inline and file-backed constants only; a batch norm over memory-address-backed weights is left in place. |
+| `hip-fold-layer-norm` | func.func | Fold a LayerNorm written as primitive HIP ops over the last axis (ReduceMean, Sub, a square, ReduceMean, an epsilon Add, a square root or its reciprocal, and an optional per-channel Mul and Add) into one `hip.layer_norm`, which accumulates in fp32, and a same-shape residual `hip.add` in front of a `hip.layer_norm` into `hip.skip_layer_norm`. f16 and f32 with a static last dimension and a scalar constant epsilon; the chain's intermediates must have no other users. Runs right after `hip-fold-batchnorm` in the shared head, so any frontend that emits these ops gets it, and on the rocMLIR path it runs before the fusion outlines the chain. |
 | `hip-externalize-constants` | module | Validate explicit serialization order, append unordered carriers deterministically, plan/serialize, then replace `hip.constant` using the existing inline/full/streaming/hybrid metadata contract. Direct threshold default: 0. |
 | `hip-fold-constant-extracts` | func.func | Resolve constant-index `tensor.extract` of vectors assembled with `tensor.insert_slice` (ONNX shape vectors) to the `from_elements` operand or integer constant element they read. |
 | `hip-infer-shapes` | module | Refine `?` dims on HIP DPS result types via `ReifyRankedShapedTypeOpInterface`. |
-| `hip-fusion-transform` | module | HIP-to-HIP rewriting at unrestricted arity (one op → many, many → one, or subgraph → subgraph). The patterns live in `lib/Dialect/Transforms/fusion_pattern/` — PDLL files compiled into the library, plus native C++ for rewrites whose shape depends on the matched op's rank — and share one `RewritePatternSet`. Includes the GELU fusion: collapses primitive `hip.mul`/`add`/`tanh`/`erf`/`div`/`pow` chains to one `hip.gelu` when the coefficients are statically known scalar or one-element floating-point constants, with supported casts evaluated. |
+| `hip-fusion-transform` | module | HIP-to-HIP rewriting at unrestricted arity (one op → many, many → one, or subgraph → subgraph). The patterns live in `lib/Dialect/Transforms/fusion_pattern/` — PDLL files compiled into the library, plus native C++ for rewrites whose shape depends on the matched op's rank — and share one `RewritePatternSet`. Includes the GELU fusion (primitive `hip.mul`/`add`/`tanh`/`erf`/`div`/`pow` chains to one `hip.gelu` when the coefficients are statically known scalar or one-element floating-point constants, with supported casts evaluated). |
 | `hip-split-duplicate-dps-inits` | func.func | De-alias DPS init operands that CSE merged onto one `tensor.empty`, so an op that reads back its own outputs (e.g. `hip.gqa` present K/V) does not share a buffer (pre-bufferize). |
 | `hip-resolve-tensor-dims` | func.func | Fold `tensor.dim` of reshape chains into root-dim arithmetic (pre-bufferize). |
 | `hip-loop-body-to-out-params` | module | Promote outlined loop bodies to the out-param ABI. |
@@ -168,7 +209,7 @@ the selected perfConfig string are printed only with `--verbose`.
 | `hip-fix-loop-accumulator-offset` | func.func | Rewrite frozen Concat-accumulator offsets in loop bodies to iter-driven offsets. |
 | `hip-forward-concat-slots` | func.func | Retarget the writer and every reader of a private buffer at an identity view of its packed concat slot, and drop that input's `memref.copy`. A chained concat buffer becomes a prefix view of the outer buffer, and a dense block's concats share one buffer. A slot off a 16-byte boundary keeps its copy. Runs after `hip-materialize-host-scalars`. |
 | `hip-optimize-memrefs` | func.func | HIP-specific buffer reuse / subview folding. |
-| `hip-promote-strided-operands` | func.func | Materialize identity-layout temporaries for non-identity-layout DPS-input memrefs. |
+| `hip-promote-strided-operands` | func.func | Materialize identity-layout temporaries for non-identity-layout DPS-input memrefs. `hip.reverse` reads strided inputs directly and is skipped. `hip.concat` reads contiguous views in place, and becomes per-input slot copies when its strided inputs would otherwise need as many copies. |
 | `hip-materialize-host-scalars` | func.func | Redirect tiny host-fed scalar allocs to runtime-owned host-mapped scratch (away from the GPU pool). |
 | `hip-resolve-memref-dims` | func.func | Fold post-bufferization `memref.dim` through view/reshape chains before pool planning. |
 | `hip-hoist-alloc-size-arith` | func.func | Hoist pure size producers before the earliest allocation their dependencies permit (PoolAllocs precondition). |
@@ -191,27 +232,36 @@ ONNX-to-HIP tail; the others do not. The fusion design is in
 | Name | Anchor | One-liner |
 |---|---|---|
 | `hip-decompose-conv-transpose` | func.func | Rewrite `hip.conv_transpose` into stride-1 `hip.conv`s, one per stride residue (MIOpen backward-data v4r1). Residues with equal tap counts, or unequal ones whose zero-padded filters cost at most twice the real taps, stack on the output-channel axis into one convolution with the constant bias tiled into it (a single-use `hip.add` of a per-channel constant after the op folds into that bias too); its result is interleaved by an expand, a transpose (DepthToSpace) and a collapse, then cropped. Other residues are one convolution each, with the bias, reassembled with `tensor.insert_slice`. Reads the filter from an inline or file-backed `hip.constant`. Rank-3 inputs expand to a unit-height rank-4 conv so dynamic batch and width stay legal. Leaves unsupported cases (grouped, dilated, rank-4 dynamic, non-constant, memory-address-backed or non-f16/bf16/f32 weights, stride > kernel, > 64 residues) for the MIOpen path. Also runs in the ONNX-to-HIP tail, before shape inference. |
+| `hip-decompose-multi-head-attention` | func.func | Rewrite a static f32 `hip.multi_head_attention`, or a static f16 one that is decode (query sequence 1) or whose padded head dim is above 256, with separate query, key, and value into two `hip.matmul`s, a scale `hip.mul`, and `hip.miopen.softmax`. f16 prefill with a padded head dim of at most 256 stays on the runtime kernel so wave32 can take the flash path. Packed QKV, bias, masks, past key or value, causal masking, dynamic shapes, and any other float type stay there too. bf16 is an error: the runtime kernel would read it as f16. |
+| `hip-winograd-conv` | func.func | Rewrite an eligible fp16 3x3 stride-1 pad-1 group-1 `hip.conv` with a constant filter, and the LeakyRelu or ReLU that alone consumes it, into `hip.winograd_conv` when the shape gate admits it. Runs first in the rocMLIR fusion passes with `HIPDNN_EP_WINOGRAD=1`; see [winograd-conv.md](design/winograd-conv.md). |
 | `hip-hoist-pointwise-over-views` | func.func | Move a pointwise op whose other inputs are constant scalars above a chain of single-use element-move views over a single-use conv, matmul or gemm result, so the anchor fusion takes it into the epilogue. The anchor result may have at most 50% more elements than the op's input. |
 | `hip-rocmlir-prepare-quant` | func.func | Split each static 4-bit `hip.matmul_nbits` into unpack, blocked dequantize and `hip.matmul`, then sink each per-tensor `hip.quantize_linear` back through element-move ops to its dequantizes, replace each QLinearConv / QLinearMatMul whose channels all have a requantize multiplier below 2^-33 with a constant of its output zero point, split each QLinearConv / QLinearMatMul with ui8 weights or a non-zero weight zero point into integer ops on `w - offset` and over the shifted zero point, then rebias each ui8 tree that reaches an integer anchor to i8. |
 | `hip-fuse-rocmlir-elementwise` | func.func | Group the pointwise ops, transposes, static reshapes and per-tensor quantizes and dequantizes into `hip.rocmlir_elementwise` modules that an anchor can take whole. |
+| `hip-rocmlir-pre-fusion` | func.func | Apply the pre-fusion patterns to main_graph's top-level block, without folding. A `hip.gather` of one constant index on static float data becomes a size-1 `tensor.extract_slice` (plus a `tensor.collapse_shape` for a scalar index) when its one reader will likely run in a rocMLIR kernel: an anchor, a module next to an anchor, a module the anchor pass makes into a kernel of its own (its `outlinesAlone` test), or a fusable view with such a reader; inside a module, one op must read it. A gather with an identical sibling is skipped. |
 | `hip-fuse-rocmlir-anchor` | func.func | Plan an epilogue and a prologue of modules for each conv, matmul and gemm anchor, and outline each plan into a `rock.kernel` function (stamped with `rock.arch` from the `arch` option when set) behind `hip.rocmlir`. A module that no plan takes and that saves a launch becomes a `rock.elementwise` kernel when `standalone-elementwise` is on (the default; `HIPDNN_EP_ROCMLIR_NO_STANDALONE_ELEMENTWISE=1` turns it off in the EP), after its boundary transposes that move the innermost dimension are peeled into HIP transposes and the slice chains of its inputs are copied into it; the other modules are inlined. Decomposes the QLinear ops and dequantized convs that become integer anchors, then merges gemm-elementwise-gemm pairs. |
 | `hip-inline-rocmlir-elementwise` | func.func | Put the body of each `hip.rocmlir_elementwise` back in its block. For tests and replays. |
 | `hip-rocmlir-fusion-report` | module | Append one JSON line for each kernel and host function to the `report` file. |
 | `convert-hip-to-tosa` | func.func | Lower the outlined kernel bodies from HIP ops to TOSA. |
 
-Order matters: `hip-decompose-conv-transpose` must run **before** the fusion,
-because rocMLIR has no transposed-convolution anchor and would otherwise refuse
-to outline the op at all. `hip-hoist-pointwise-over-views` then moves the
-activation after the interleave and crop onto the convolution's result.
+Order matters: `hip-decompose-conv-transpose` and
+`hip-decompose-multi-head-attention` must run **before** the fusion: rocMLIR
+has no transposed-convolution anchor, and `hip.multi_head_attention` is not an
+outlining anchor, so both would otherwise stay outside a `rock.kernel`.
+`hip-hoist-pointwise-over-views` then moves the activation after the
+interleave and crop onto the convolution's result.
 `hip-rocmlir-prepare-quant` fixes the quantize trees
 before the elementwise pass groups them, and the anchor pass plans its kernels
-on those modules. The registered pipeline runs
+on those modules. `hip-rocmlir-pre-fusion` runs between the two, so its
+patterns can tell a pointwise reader inside a module from one that stays a HIP
+op. The registered pipeline runs
 
 ```
 func.func(hip-decompose-conv-transpose)
+func.func(hip-decompose-multi-head-attention)
 func.func(hip-hoist-pointwise-over-views)
 func.func(hip-rocmlir-prepare-quant)
 func.func(hip-fuse-rocmlir-elementwise)
+func.func(hip-rocmlir-pre-fusion)
 func.func(hip-fuse-rocmlir-anchor)
 duplicate-function-elimination
 func.func(convert-hip-to-tosa)
@@ -276,6 +326,8 @@ ONNX → HIP  (buildOnnxToHipPipeline)
   convert-onnx-to-hip
   func.func(hip-fold-batchnorm)      (shared with the rocMLIR head, so it runs
                                       before any conv rewrite or kernel outlining)
+  func.func(hip-fold-layer-norm)     (shared head as well, so the rocMLIR fusion
+                                      sees one hip.layer_norm, not the chain)
   «slot: AfterConvertOnnxToHip»  (supported hip.constant producer boundary)
   func.func(hip-decompose-conv-transpose)  (rank-3 -> rank-4 hip.conv before
                                            the MIOpen lowering; rocmlir-pipeline
