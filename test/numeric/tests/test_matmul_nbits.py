@@ -365,6 +365,22 @@ class TestMatMulNBits:
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=2e-2, rtol=1e-2, cos_threshold=0.999)
 
+    @pytest.mark.parametrize("seq_len", range(1, 8))
+    def test_matmul_nbits_single_column(self, model_runner, seq_len):
+        """N=1 projection: [1, S, 2560] -> [1, S, 1] (Qwen3.8-Flash-Next).
+
+        No small-M config is as narrow as N=1, so the dp4a kernel runs its
+        fallback config, whose tile_m=4 needs two row blocks at M=5..7.
+        """
+        K = 2560
+        model = _make_matmul_nbits_model(1, seq_len, K, 1, scale_range=(-0.03, 0.03))
+
+        rng = np.random.default_rng(99)
+        x = rng.uniform(-1, 1, [1, seq_len, K]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=2e-2, rtol=1e-2, cos_threshold=0.999)
+
     @pytest.mark.parametrize("seq_len", SEQ_LENS)
     def test_matmul_nbits_lm_head_gpt_oss_shape(self, model_runner, seq_len):
         """LM head (vocab projection): [1, S, 2880] -> [1, S, 201088].
