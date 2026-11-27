@@ -115,21 +115,61 @@ plus the selected space) is searched; later kernels with that key compile only
 the winning perfConfig, together in a second pool, and are not benchmarked
 again. The compiled binary is not reused, because each outlined kernel has its
 own symbol. `--autotune[=quick|full|exhaustive]`
-overrides the search space. A given tuning type skips the shipped
-problem-cache LUT; with none given, the shipped LUT is consulted before the
-search. `--problem-cache` / `HIP_ROCMLIR_PROBLEM_CACHE` still takes priority over
-the search and replaces the shipped table. A repeated problem in the same
-compile reuses the in-session winner, then a miss searches the selected space.
-A provider artifact records `+autotune=<space>` only.
-`--dump-problem-cache <file.json>` writes that JSON after autotune, one
-point per unique problem and one config per distinct perfConfig. The flag
-requires autotune; `HIP_ROCMLIR_SKIP_BENCHMARKING` does not produce a dump.
-Set `HIP_ROCMLIR_SKIP_BENCHMARKING=1` (any present value other than `0`,
-including empty) to skip the GPU search and affix the first enumerated
-perfConfig. Neither the shipped LUT nor an external problem cache is consulted
-in that mode. When benchmarking is enabled, a provided tuning type skips the
-shipped LUT, but an external `--problem-cache` is consulted before the search.
-The log names the space (`quick`, `full`, or `exhaustive`) and the
+overrides the search space. A given tuning type skips the shipped problem-cache
+LUT; with none given, the shipped LUT is consulted before the search. A table
+answers only for an identical problem string; any other problem is searched.
+Nearest-config lookup, which lets a miss borrow the tile of the nearest
+measured problem of the same kernel kind, is off by default. It is turned on by
+`--enable-nearest-config` for one `hip-rocmlir-compiler` run, or by
+`HIPDNN_EP_ROCMLIR_NEAREST_CONFIG=1`, which both binaries read, for a whole
+shell. It applies to the shipped LUT and to an external file alike, and changes
+nothing when neither is in use. `--enable-problem-cache-rw <file.json>` still
+takes priority over the search and replaces the shipped table. The flag names a
+LUT JSON file, such as one it wrote. It also writes back: after a successful
+compile the winners the search picked are merged into that file, so a later
+compile reads them. Only winners of a search are written. A tile taken from the
+file, even a nearest neighbour's, is not a measurement and is not stored as
+one. Points already in the file are kept in their order, including ones this
+build cannot use, and so are fallbacks and the configs they name; new problems
+are appended. With no new winners the file is not rewritten. A missing or empty
+file is created. A file that is not a LUT, is for another `gpu_arch`, has a
+malformed `configs`, `points` or `fallbacks` section, has a value the table
+format cannot hold (`rocm_version` beyond 32 bits, `m`, `n` or `k` outside 0 to
+2^32-1, more than 65536 configs), is read-only, is not a regular file, sits in
+a directory the rewrite cannot write to (or create), or is a `.fb` is refused
+before the compile starts, with the file untouched; a write that fails after
+the compile is a warning, and the output is still written. The file is replaced
+atomically and flushed to disk before the rename. It is written owner-only
+(mode 0600, or on Windows an access list that names only you), so no one else
+can read it halfway. On POSIX a new file stays owner-only and a replaced one
+gets its old mode and group back, but not its owner, which becomes the user who
+ran the compile; on Windows the file stays private to you, and anyone else who
+needs it must be granted access afterwards. A symbolic link, in the file name
+or in any directory of the path, is followed to its target, which is created if
+the link is dangling. A dangling link is followed only by the rule the kernel
+uses in a shared directory like `/tmp`: its owner must be you or the
+directory's owner. On Windows the directory that must accept the new file (the
+nearest one that exists) is checked against its access list before the compile.
+The rename replaces the file, so ACLs, extended attributes and hard links of
+the old one are not carried over. `schema_version` is always written out.
+Compiles in one process take turns, but two processes writing it at once can
+lose one set of winners. The provider does the same as the flag through
+`HIPDNN_EP_ROCMLIR_PROBLEM_CACHE_RW=<file.json>`, except that a file it cannot
+use or update is reported and the compile still succeeds. A repeated problem in
+the same compile reuses the in-session winner, then a miss searches the
+selected space. A provider artifact records `+autotune=<space>` only. A table
+starts from a path that does not exist yet. The file has one point per unique
+problem and one config per distinct perfConfig, and `problem_cache_to_fb.py`
+compiles it to a `.fb` to ship it as a LUT. The flag requires autotune;
+`HIP_ROCMLIR_SKIP_BENCHMARKING` writes nothing. The provider's hip and TOSA
+dumps, `HIPDNN_EP_ROCMLIR_DUMP_HIP` and `_DUMP_TOSA`, are described in
+[rocmlir-fusion.md](design/rocmlir-fusion.md). Set
+`HIP_ROCMLIR_SKIP_BENCHMARKING=1` (any present value other than `0`, including
+empty) to skip the GPU search and affix the first enumerated perfConfig.
+Neither the shipped LUT nor an external problem cache is consulted in that
+mode. When benchmarking is enabled, a provided tuning type skips the shipped
+LUT, but an external `--enable-problem-cache-rw` file is consulted before the
+search. The log names the space (`quick`, `full`, or `exhaustive`) and the
 number of configs in each pool. At the end it prints three wall times:
 perfConfig compile (pool wait, summed across the two pools), serial GPU
 benchmark, and HIP-to-LLVM lowering plus bitcode emit. Per-config timing and

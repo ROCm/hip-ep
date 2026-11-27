@@ -465,6 +465,36 @@ fusion switches.
 - `HIPDNN_EP_ROCMLIR_PRE_FUSION_DUMP=<dir>` writes the IR that the fusion
   reads, with the fusion options on its first line, so that
   `hip-mlir-opt --hip-rocmlir-fusion` replays the fusion without a GPU.
+- `HIPDNN_EP_ROCMLIR_DUMP_HIP=<file>` and `HIPDNN_EP_ROCMLIR_DUMP_TOSA=<file>`
+  are the provider's counterparts of `hip-rocmlir-compiler --dump-hip` and
+  `--dump-tosa`. The first writes the hip MLIR after the ONNX->HIP head and this
+  fusion. The second writes the hip->tosa conversion of the whole module, a
+  clone that only this dump pays for. `HIPDNN_EP_IR_DUMP_PATH` does not show
+  these stages: it is attached to the tail pass manager only. ORT can compile
+  more than once per session, so each compile inserts a sequence number before
+  the extension (`hip.mlir` becomes `hip.0.mlir`) and the two dumps of one
+  compile share it. A dump that cannot be written is reported and the compile
+  goes on.
+- `HIPDNN_EP_ROCMLIR_PROBLEM_CACHE_RW=<file.json>` is the provider's
+  counterpart of `hip-rocmlir-compiler --enable-problem-cache-rw`. The file is
+  the external problem cache for the compile's autotune, and once the kernels
+  are embedded the winners the search benchmarked are merged into it (tiles
+  borrowed from the file are not written back). It is one table across
+  compiles, so unlike the dumps its path is not numbered. It needs autotune on;
+  with `HIP_ROCMLIR_SKIP_BENCHMARKING` it is ignored and says so. The file is
+  checked before the compile: one the rewrite would refuse (not a LUT, another
+  `gpu_arch`, malformed, read-only, not a regular file, in a directory it cannot
+  write to, or a `.fb`) is reported, then neither read nor updated, and the compile goes on. A failed write is reported the same way.
+- `HIPDNN_EP_ROCMLIR_NEAREST_CONFIG=1` lets a problem-cache miss borrow the
+  tile of the nearest measured problem of the same kernel kind, instead of
+  searching. It is off by default, so the shipped LUT and an external problem
+  cache answer only for identical problem strings. `hip-rocmlir-compiler` reads
+  the same variable and also takes `--enable-nearest-config` for one run.
 - `HIPDNN_EP_ROCMLIR_FUSION_REPORT=<file>` (pipeline option `report`)
   appends one JSON line for each kernel and each host function. Two runs make
   the same kernels when their records are equal as multisets.
+- `HIPDNN_EP_ROCMLIR_VERBOSE=1` prints the autotune progress to stderr: one line
+  per candidate and kernel, the nearest-tune and compile summaries, and at the
+  end the perfConfig compile and benchmark wall times, as
+  `hip-rocmlir-compiler --verbose` does. The HIP-to-LLVM time is not printed,
+  since the provider lowers the module later in the tail.
