@@ -3284,9 +3284,12 @@ MutableOperandRange QMoEOp::getDpsInitsMutable() { return getOutputMutable(); }
 
 LogicalResult QMoEOp::verify() {
   StringRef routing = getRoutingType();
+  const float normEps = getRoutingNormEps().convertToFloat();
   if (routing == "softmax") {
     if (getCorrectionBias())
       return emitOpError("correction_bias requires routing_type sigmoid_bias");
+    if (normEps != 0.0f)
+      return emitOpError("routing_norm_eps requires routing_type sigmoid_bias");
     return success();
   }
   if (routing != "sigmoid_bias")
@@ -3295,6 +3298,9 @@ LogicalResult QMoEOp::verify() {
   if (getRouterWeights())
     return emitOpError("sigmoid_bias routing computes its own weights; "
                        "router_weights must be absent");
+  if (!std::isfinite(normEps) || normEps < 0.0f)
+    return emitOpError("routing_norm_eps must be finite and non-negative, got ")
+           << normEps;
   auto logitsTy = dyn_cast<ShapedType>(getRouterProbs().getType());
   auto biasTy = getCorrectionBias()
                     ? dyn_cast<ShapedType>(getCorrectionBias().getType())
