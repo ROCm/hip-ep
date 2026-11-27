@@ -8,12 +8,13 @@ module {
     return %arg0 : tensor<4xf16>
   }
 
+  // A constant scale folds into the swish: one kernel, no hip.mul.
   // CHECK-LABEL: func.func @scaled_silu_alpha
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[X:.*]]: tensor<?x?x320xf16>)
   // CHECK-NOT: onnx.Custom
-  // CHECK: %[[S:.*]] = hip.constant {{.*}} value = dense<2.500000e-01> : tensor<f16>
-  // CHECK: %[[Z:.*]] = hip.mul(%[[CTX]]) ins(%[[X]], %[[S]] : tensor<?x?x320xf16>, tensor<f16>)
-  // CHECK: hip.swish(%[[CTX]]) ins(%[[Z]] : tensor<?x?x320xf16>) outs({{.*}}) : tensor<?x?x320xf16>{{$}}
+  // CHECK-NOT: hip.mul
+  // CHECK: hip.swish(%[[CTX]]) ins(%[[X]] : tensor<?x?x320xf16>) outs({{.*}}) {input_scale = 2.500000e-01 : f64} : tensor<?x?x320xf16>{{$}}
+  // CHECK-NOT: hip.mul
   func.func @scaled_silu_alpha(%x: tensor<?x?x320xf16>) -> tensor<?x?x320xf16> {
     %y = "onnx.Custom"(%x) {
       function_name = "ScaledSiLU",

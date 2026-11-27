@@ -59,11 +59,10 @@ template <> struct SwishTraits<double> {
 };
 
 template <typename T>
-__device__ __forceinline__ T computeSwish(T input, double alpha) {
+__device__ __forceinline__ T
+computeSwish(typename SwishTraits<T>::ComputeType x, double alpha) {
   using Traits = SwishTraits<T>;
   using ComputeType = typename Traits::ComputeType;
-
-  ComputeType x = Traits::load(input);
 
   // ONNX defines Swish as a function of CastLike, Mul, Sigmoid, and Mul.
   // Round each intermediate back to T so low-precision behavior matches that
@@ -83,11 +82,42 @@ __global__ void swishKernel(const T *__restrict__ input,
                             double alpha) {
   int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (idx < numElements)
-    output[idx] = computeSwish<T>(input[idx], alpha);
+    output[idx] = computeSwish<T>(SwishTraits<T>::load(input[idx]), alpha);
+}
+
+// com.microsoft ScaledSiLU's z = s * x is a separate node there, so z is
+// rounded to T before the swish sees it, as the hip.mul it replaces did.
+template <typename T>
+__global__ void scaledSwishKernel(const T *__restrict__ input,
+                                  T *__restrict__ output, int64_t numElements,
+                                  double alpha, double inputScale) {
+  using Traits = SwishTraits<T>;
+  using ComputeType = typename Traits::ComputeType;
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < numElements) {
+    ComputeType s = Traits::load(Traits::store(static_cast<ComputeType>(inputScale)));
+    ComputeType z = Traits::load(Traits::store(s * Traits::load(input[idx])));
+    output[idx] = computeSwish<T>(z, alpha);
+  }
+}
+
+template <typename T>
+void launchSwish(hipStream_t stream, const void *input, void *output,
+                 int64_t numElements, int gridSize, int blockSize, double alpha,
+                 double inputScale) {
+  const T *in = static_cast<const T *>(input);
+  T *out = static_cast<T *>(output);
+  if (inputScale == 1.0)
+    hipLaunchKernelGGL(swishKernel<T>, dim3(gridSize), dim3(blockSize), 0,
+                       stream, in, out, numElements, alpha);
+  else
+    hipLaunchKernelGGL(scaledSwishKernel<T>, dim3(gridSize), dim3(blockSize),
+                       0, stream, in, out, numElements, alpha, inputScale);
 }
 
 extern "C" int hip_swish(void *stream, const void *input, void *output,
-                         int64_t numElements, int hipDtype, double alpha) {
+                         int64_t numElements, int hipDtype, double alpha,
+                         double inputScale) {
   if (numElements <= 0)
     return 0;
 
@@ -100,25 +130,20 @@ extern "C" int hip_swish(void *stream, const void *input, void *output,
   (void)hipGetLastError();
   switch (hipDtype) {
   case HIP_DTYPE_FLOAT16:
-    hipLaunchKernelGGL(swishKernel<__half>, dim3(gridSize), dim3(kBlockSize), 0,
-                       hipStream, static_cast<const __half *>(input),
-                       static_cast<__half *>(output), numElements, alpha);
+    launchSwish<__half>(hipStream, input, output, numElements, gridSize,
+                        kBlockSize, alpha, inputScale);
     break;
   case HIP_DTYPE_FLOAT32:
-    hipLaunchKernelGGL(swishKernel<float>, dim3(gridSize), dim3(kBlockSize), 0,
-                       hipStream, static_cast<const float *>(input),
-                       static_cast<float *>(output), numElements, alpha);
+    launchSwish<float>(hipStream, input, output, numElements, gridSize,
+                       kBlockSize, alpha, inputScale);
     break;
   case HIP_DTYPE_BFLOAT16:
-    hipLaunchKernelGGL(
-        swishKernel<__hip_bfloat16>, dim3(gridSize), dim3(kBlockSize), 0,
-        hipStream, static_cast<const __hip_bfloat16 *>(input),
-        static_cast<__hip_bfloat16 *>(output), numElements, alpha);
+    launchSwish<__hip_bfloat16>(hipStream, input, output, numElements,
+                                gridSize, kBlockSize, alpha, inputScale);
     break;
   case HIP_DTYPE_FLOAT64:
-    hipLaunchKernelGGL(swishKernel<double>, dim3(gridSize), dim3(kBlockSize), 0,
-                       hipStream, static_cast<const double *>(input),
-                       static_cast<double *>(output), numElements, alpha);
+    launchSwish<double>(hipStream, input, output, numElements, gridSize,
+                        kBlockSize, alpha, inputScale);
     break;
   default:
     fprintf(stderr, "[custom_kernels] hip_swish: unsupported dtype=%d\n",
@@ -127,8 +152,9 @@ extern "C" int hip_swish(void *stream, const void *input, void *output,
   }
 
   CUSTOM_KERNELS_DEBUG_LOG(
-      "[custom_kernels] hip_swish: dtype=%d, alpha=%f, num=%lld\n", hipDtype,
-      alpha, (long long)numElements);
+      "[custom_kernels] hip_swish: dtype=%d, alpha=%f, input_scale=%f, "
+      "num=%lld\n",
+      hipDtype, alpha, inputScale, (long long)numElements);
   hipError_t error = hipGetLastError();
   if (error != hipSuccess)
     fprintf(stderr, "[custom_kernels] hip_swish launch failed: %s\n",
