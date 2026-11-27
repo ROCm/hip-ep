@@ -256,6 +256,7 @@ __device__ static inline int hipdnn_dot4(int a, int b, int acc) {
  * device after hipSetDevice. Query failure yields 32, the RDNA/WMMA-capable
  * default, so dispatch decisions stay as they were before CDNA support. */
 #ifdef __cplusplus
+#include <cstring>
 #include <hip/hip_runtime.h>
 static inline int hipdnn_device_wave_size() {
   constexpr int kMaxCachedDevices = 16;
@@ -286,6 +287,50 @@ static inline int hipdnn_device_wave_size() {
 
 static inline bool hipdnn_device_is_wave64() {
   return hipdnn_device_wave_size() >= 64;
+}
+
+/* Whether a target named by gcnArchName has the WMMA matrix instructions, which
+ * gfx11 and gfx12 have and every earlier family lacks. Wave size does not
+ * decide this: gfx10 is wave32 without them. Only the families known to lack
+ * WMMA are excluded, so an empty or unrecognised name (gcnArchName has been
+ * seen empty on some Windows builds) keeps the dispatch it had before. Feature
+ * suffixes such as ":xnack-" do not matter to a prefix test. */
+static inline bool hipdnn_arch_has_wmma(const char *gcnArchName) {
+  static const char *const kWithoutWmma[] = {"gfx8", "gfx9", "gfx10"};
+  for (const char *family : kWithoutWmma) {
+    if (std::strncmp(gcnArchName, family, std::strlen(family)) == 0)
+      return false;
+  }
+  return true;
+}
+
+/* Host-side probe for whether the currently selected device can run the WMMA
+ * kernels, which compile to a trap on a target without the instructions. Cached
+ * per device ordinal for the same reason as hipdnn_device_wave_size(). A failed
+ * query keeps the WMMA dispatch, as it does for the wave size. */
+static inline bool hipdnn_device_has_wmma() {
+  if (hipdnn_device_is_wave64())
+    return false;
+
+  constexpr int kMaxCachedDevices = 16;
+  // 0 == not probed yet, 1 == has WMMA, 2 == does not.
+  static int cached[kMaxCachedDevices] = {};
+
+  auto probe = [](int d) {
+    hipDeviceProp_t p;
+    return hipGetDeviceProperties(&p, d) != hipSuccess ||
+           hipdnn_arch_has_wmma(p.gcnArchName);
+  };
+
+  int dev = 0;
+  if (hipGetDevice(&dev) != hipSuccess || dev < 0)
+    return true;
+  if (dev >= kMaxCachedDevices)
+    return probe(dev);
+
+  if (cached[dev] == 0)
+    cached[dev] = probe(dev) ? 1 : 2;
+  return cached[dev] == 1;
 }
 #endif
 
