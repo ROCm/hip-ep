@@ -6,8 +6,12 @@ LUT next door (`../gqa/`). MatMulNBits matches categorical fields exactly and
 uses weighted log-space distance over the literal `M`, `N` and `K` dimensions.
 An optional M interval can override that lookup for one literal K/N key.
 
-Currently populated for **bits=4 on gfx1151**. The schema reserves the other
-bit widths; adding them is a table regeneration, not a schema change.
+Currently populated for **bits=4 on gfx1151**, plus bits=2 `Decode` rows for
+the 2-bit GEMV shapes of Qwen3.6-35B-A3B int2 (gs32, symmetric). The schema
+reserves the other bit widths; adding them is a table regeneration, not a
+schema change. The sweep driver below is 4-bit only, so the B2 rows come from
+the native UT ranking (`Xfp16_Wu2_Yfp16`, see the last section). B2 has no
+fallback: a 2-bit shape outside the measured groups keeps the runtime sweep.
 
 ## Where it sits
 

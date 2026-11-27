@@ -25,8 +25,8 @@
 // outright (measured: cfg11 -> cfg3 at N=5120 K=4096). Interpolating across
 // them would be meaningless.
 //
-// Only bits=4 is populated today. The enums reserve the other widths so adding
-// i8/u3/u2 later is a table regeneration, not a schema break.
+// bits=4 is populated, and bits=2 for the decode GEMV. The enums reserve the
+// other widths so adding i8/u3 later is a table regeneration, not a schema break.
 
 namespace hipdnn_ep.matmul_nbits_autotune.fbs;
 

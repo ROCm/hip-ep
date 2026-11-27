@@ -3033,7 +3033,16 @@
   {"bits": "B4", "config": 57, "group_size": "G32", "k": 6144, "m": 8192, "n": 2560, "phase": "Prefill", "row_stride": "Padded", "zero_point": "Symmetric"},
   {"bits": "B4", "config": 58, "group_size": "G32", "k": 10240, "m": 16384, "n": 320, "phase": "Prefill", "row_stride": "Padded", "zero_point": "Symmetric"},
   {"bits": "B4", "config": 78, "group_size": "G32", "k": 10240, "m": 16384, "n": 324, "phase": "Prefill", "row_stride": "Padded", "zero_point": "Symmetric"},
-  {"bits": "B4", "config": 78, "group_size": "G32", "k": 6144, "m": 16384, "n": 2560, "phase": "Prefill", "row_stride": "Padded", "zero_point": "Symmetric"}
+  {"bits": "B4", "config": 78, "group_size": "G32", "k": 6144, "m": 16384, "n": 2560, "phase": "Prefill", "row_stride": "Padded", "zero_point": "Symmetric"},
+  {"bits": "B2", "config": 9, "group_size": "G32", "k": 2048, "m": 1, "n": 512, "phase": "Decode", "row_stride": "Any", "zero_point": "Symmetric"},
+  {"bits": "B2", "config": 5, "group_size": "G32", "k": 2048, "m": 1, "n": 32, "phase": "Decode", "row_stride": "Any", "zero_point": "Symmetric"},
+  {"bits": "B2", "config": 9, "group_size": "G32", "k": 2048, "m": 1, "n": 8192, "phase": "Decode", "row_stride": "Any", "zero_point": "Symmetric"},
+  {"bits": "B2", "config": 3, "group_size": "G32", "k": 4096, "m": 1, "n": 2048, "phase": "Decode", "row_stride": "Any", "zero_point": "Symmetric"},
+  {"bits": "B2", "config": 5, "group_size": "G32", "k": 2048, "m": 1, "n": 256, "phase": "Decode", "row_stride": "Any", "zero_point": "Symmetric"},
+  {"bits": "B2", "config": 2, "group_size": "G32", "k": 512, "m": 1, "n": 2048, "phase": "Decode", "row_stride": "Any", "zero_point": "Symmetric"},
+  {"bits": "B2", "config": 7, "group_size": "G32", "k": 2048, "m": 1, "n": 1, "phase": "Decode", "row_stride": "Any", "zero_point": "Symmetric"},
+  {"bits": "B2", "config": 9, "group_size": "G32", "k": 2048, "m": 1, "n": 4096, "phase": "Decode", "row_stride": "Any", "zero_point": "Symmetric"},
+  {"bits": "B2", "config": 2, "group_size": "G32", "k": 2048, "m": 1, "n": 248320, "phase": "Decode", "row_stride": "Any", "zero_point": "Symmetric"}
  ],
  "extended_configs": [
   {"config": 38, "variant": 129},

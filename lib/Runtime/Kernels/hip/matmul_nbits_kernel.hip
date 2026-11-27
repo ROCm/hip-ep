@@ -2007,11 +2007,11 @@ static bool matmulNbitsGemvValidator(void*, const matmul_lut::GemvAnswer& g) {
  * point whose payload is Gemv (pointConsistent enforces that at load), so a
  * Wmma answer on this path would be a malformed table and is rejected. */
 static int matmulNbitsLutGemvConfig(matmul_lut::Phase phase, int M, int N, int K, int gs,
-                           bool has_zp) {
+                           bool has_zp, int bits = 4) {
     if (!matmulNbitsLutLookupEnabled()) return -1;   // online mode: sweep, skip the LUT
     matmul_lut::Request req;
     req.phase = phase;
-    req.bits = 4;
+    req.bits = bits;
     req.m = M;
     req.n = N;
     req.k = K;
@@ -4198,7 +4198,8 @@ __global__ __launch_bounds__(BLOCK_SIZE) void matmul_nbits_gemv_kernel_u2(
 /* -----------------------------------------------------------------------
  * GEMV (uint2) Autotune: dispatch, benchmark, cache. Reuses kGemvConfigs
  * from the int4 autotune (same (BLOCK_SIZE, TILE_N) search space), caches
- * into a dedicated map -- the u2 decode cost differs from u3/u4.
+ * into a dedicated map -- the u2 decode cost differs from u3/u4 -- and
+ * resolves from the offline LUT's B2 Decode rows before sweeping.
  * ----------------------------------------------------------------------- */
 
 template <typename ZPT = uint8_t>
@@ -4340,6 +4341,18 @@ static int getOrTuneGemvConfigU2(
     auto it = gemv_u2_cache.find(key);
     if (it != gemv_u2_cache.end())
         return it->second;
+
+    // The table keys zero points by presence only, and its B2 rows are measured
+    // with uint8 ones; the fractional fp16 kernel keeps the sweep.
+    if (std::is_same<ZPT, uint8_t>::value) {
+        const int lut = matmulNbitsLutGemvConfig(
+            matmul_lut::Phase::Decode, static_cast<int>(M), static_cast<int>(N),
+            static_cast<int>(K), static_cast<int>(bs), has_zp, /*bits=*/2);
+        if (lut >= 0) {
+            gemv_u2_cache[key] = lut;
+            return lut;
+        }
+    }
 
     int best = tuneGemvConfigU2<ZPT>(stream, A, B, sc, zp, bi, out,
                                      M, N, K, batch, bs);
