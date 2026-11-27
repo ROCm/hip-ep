@@ -1,10 +1,11 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// Verify the ONNX Concat lowering: every onnx.Concat is rewritten to a
-// `tensor.empty` + N x `tensor.insert_slice` sequence. No `hip.*` op is
-// produced; bufferization later folds the inserts into `memref.subview`
-// copies against a pooled output buffer.
+// Verify the ONNX Concat lowering. A static concat with more than one row
+// before the axis and at least 4096 output elements becomes one `hip.concat`.
+// Every other onnx.Concat is rewritten to a `tensor.empty` + N x
+// `tensor.insert_slice` sequence; bufferization later folds the inserts into
+// `memref.subview` copies against a pooled output buffer.
 
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
 
@@ -151,5 +152,52 @@ module {
     // CHECK: return
 
     return %r : tensor<3xi64>
+  }
+
+  // Test 8: a static interleave (many rows, one element per input row) is one
+  // hip.concat; empty inputs are dropped.
+  func.func @test_concat_interleave(%a: tensor<64x64x1xf32>,
+                                    %e: tensor<64x64x0xf32>,
+                                    %b: tensor<64x64x1xf32>) -> tensor<64x64x2xf32> {
+    // CHECK-LABEL: func.func @test_concat_interleave
+    // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[A:.*]]: tensor<64x64x1xf32>, %{{.*}}: tensor<64x64x0xf32>, %[[B:.*]]: tensor<64x64x1xf32>)
+    %r = "onnx.Concat"(%a, %e, %b) {axis = -1 : si64}
+        : (tensor<64x64x1xf32>, tensor<64x64x0xf32>, tensor<64x64x1xf32>)
+        -> tensor<64x64x2xf32>
+
+    // CHECK-NOT: tensor.insert_slice
+    // CHECK: %[[INIT:.*]] = tensor.empty() : tensor<64x64x2xf32>
+    // CHECK: hip.concat(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<64x64x1xf32>, tensor<64x64x1xf32>) outs(%[[INIT]] : tensor<64x64x2xf32>) {axis = 2 : i64}
+
+    return %r : tensor<64x64x2xf32>
+  }
+
+  // Test 9: a single-row concat (outer extent 1) keeps insert_slice even when
+  // large: each input is one contiguous block.
+  func.func @test_concat_single_row(%a: tensor<1x64x64xf32>,
+                                    %b: tensor<1x64x64xf32>) -> tensor<1x128x64xf32> {
+    // CHECK-LABEL: func.func @test_concat_single_row
+    %r = "onnx.Concat"(%a, %b) {axis = 1 : si64}
+        : (tensor<1x64x64xf32>, tensor<1x64x64xf32>) -> tensor<1x128x64xf32>
+
+    // CHECK-NOT: hip.concat
+    // CHECK: tensor.insert_slice
+    // CHECK: tensor.insert_slice
+
+    return %r : tensor<1x128x64xf32>
+  }
+
+  // Test 10: a bool multi-row concat is one hip.concat; i1 is one byte per
+  // element in device memory.
+  func.func @test_concat_bool_rows(%a: tensor<64x64x1xi1>,
+                                   %b: tensor<64x64x1xi1>) -> tensor<64x64x2xi1> {
+    // CHECK-LABEL: func.func @test_concat_bool_rows
+    %r = "onnx.Concat"(%a, %b) {axis = 2 : si64}
+        : (tensor<64x64x1xi1>, tensor<64x64x1xi1>) -> tensor<64x64x2xi1>
+
+    // CHECK-NOT: tensor.insert_slice
+    // CHECK: hip.concat(%{{.*}}) ins(%{{.*}}, %{{.*}} : tensor<64x64x1xi1>, tensor<64x64x1xi1>) outs(%{{.*}} : tensor<64x64x2xi1>) {axis = 2 : i64}
+
+    return %r : tensor<64x64x2xi1>
   }
 }

@@ -3916,6 +3916,27 @@ HIP_KERNEL_API int hip_strided_copy(void *stream, void *dst, const void *src,
                      const int64_t *dst_outer_strides, int64_t row_elems,
                      int64_t outer_total);
 
+// N-D strided device-to-device copy (one launch). sizes and strides are in
+// elements and cover every dim, the innermost included. Source strides may be
+// negative, in which case `src` points at the element with every index 0. Up
+// to HIPDNN_MAX_MEMREF_RANK + 1 dims. Returns 0 on success, -2 if elem_size is
+// unsupported.
+HIP_KERNEL_API int hip_strided_copy_nd(void *stream, void *dst,
+                                       const void *src, int64_t elem_size,
+                                       int rank, const int64_t *sizes,
+                                       const int64_t *src_strides,
+                                       const int64_t *dst_strides);
+
+// Concat of `num_inputs` contiguous device buffers along a row-major axis in
+// one launch (more than 16 inputs take one launch per 16). The output and
+// input i are viewed as [outer, width]; input i has row width src_widths[i]
+// (elements) and the output row width is their sum. `srcs` is a host array of
+// device pointers. Returns 0 on success, -2 if elem_size is unsupported.
+HIP_KERNEL_API int hip_concat(void *stream, void *dst, int num_inputs,
+                              const void *const *srcs,
+                              const int64_t *src_widths, int64_t outer,
+                              int64_t elem_size);
+
 /* =========================================================================
  * Causal Depthwise 1D Conv -- single-step "decode" path
  * =========================================================================
