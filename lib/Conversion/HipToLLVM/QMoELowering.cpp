@@ -130,11 +130,13 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
     Value elemSizeVal = createI64Const(elemSize);
     Value routedScaleVal =
         createF32Const(op.getRoutedScalingFactor().convertToFloat());
+    Value routingNormEpsVal =
+        createF32Const(op.getRoutingNormEps().convertToFloat());
     Value routingTypeVal = createI64Const(op.getRoutingType() == "sigmoid_bias"
                                               ? kQMoERoutingSigmoidBias
                                               : kQMoERoutingSoftmax);
 
-    SmallVector<Type, 34> paramTypes = {
+    SmallVector<Type, 35> paramTypes = {
         ptrType, // state
         ptrType, // input
         ptrType, // router_probs
@@ -168,7 +170,8 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
         i64Type, // elem_size
         ptrType, // correction_bias (nullable)
         i64Type, // routing_type
-        f32Type  // routed_scaling_factor
+        f32Type, // routed_scaling_factor
+        f32Type  // routing_norm_eps
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
@@ -177,7 +180,7 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
       return failure();
     }
 
-    SmallVector<Value, 34> args = {statePtr,
+    SmallVector<Value, 35> args = {statePtr,
                                    inputPtr,
                                    routerPtr,
                                    routerWeightsPtr,
@@ -210,7 +213,8 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
                                    elemSizeVal,
                                    correctionBiasPtr,
                                    routingTypeVal,
-                                   routedScaleVal};
+                                   routedScaleVal,
+                                   routingNormEpsVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
