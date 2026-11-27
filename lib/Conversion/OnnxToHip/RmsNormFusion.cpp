@@ -182,8 +182,8 @@ bool matchSquare(mlir::Value square, mlir::Value &xSource,
 /// BroadcastDivToMulReciprocal form Mul(1, Reciprocal(sqrt)).
 /// On success, `invOp` is the op that produces `inv` (feeds the normalize
 /// Mul), and `sqrtConsumer` is the op that must be Sqrt's only user.
-bool matchInvRms(mlir::Value inv, mlir::Value &sqrtVal,
-                 mlir::Operation *&invOp, mlir::Operation *&sqrtConsumer) {
+bool matchInvRms(mlir::Value inv, mlir::Value &sqrtVal, mlir::Operation *&invOp,
+                 mlir::Operation *&sqrtConsumer) {
   invOp = inv.getDefiningOp();
   if (isOnnxOp(invOp, "onnx.Reciprocal") && invOp->getNumOperands() == 1) {
     sqrtVal = invOp->getOperand(0);
@@ -196,7 +196,8 @@ bool matchInvRms(mlir::Value inv, mlir::Value &sqrtVal,
     sqrtConsumer = invOp;
     return isOnnxOp(sqrtVal.getDefiningOp(), "onnx.Sqrt");
   }
-  // After BroadcastDivToMulReciprocal: Div(1, sqrt) -> Mul(1, Reciprocal(sqrt)).
+  // After BroadcastDivToMulReciprocal: Div(1, sqrt) -> Mul(1,
+  // Reciprocal(sqrt)).
   if (isOnnxOp(invOp, "onnx.Mul") && invOp->getNumOperands() == 2) {
     for (unsigned oneIdx : {0u, 1u}) {
       if (!isNear(getScalarConstant(invOp->getOperand(oneIdx)), 1.0))
@@ -260,14 +261,14 @@ struct RmsNormFusion : public mlir::RewritePattern {
       mlir::Operation *sqrtOp = nullptr;
       mlir::Operation *consumerOfSqrt = nullptr;
 
-      // Path A: Mul(Cast?(x), inv_rms) with inv = Div(1,sqrt) | Reciprocal(sqrt)
-      // or Mul(1, Reciprocal(sqrt)) after BroadcastDivToMulReciprocal.
+      // Path A: Mul(Cast?(x), inv_rms) with inv = Div(1,sqrt) |
+      // Reciprocal(sqrt) or Mul(1, Reciprocal(sqrt)) after
+      // BroadcastDivToMulReciprocal.
       if (isOnnxOp(normOp, "onnx.Mul") && normOp->getNumOperands() == 2) {
         bool matched = false;
         for (unsigned xIdx : {0u, 1u}) {
           mlir::Operation *maybeXCast = nullptr;
-          mlir::Value xCand =
-              peekCast(normOp->getOperand(xIdx), &maybeXCast);
+          mlir::Value xCand = peekCast(normOp->getOperand(xIdx), &maybeXCast);
           mlir::Value invCand = normOp->getOperand(1u - xIdx);
           mlir::Value sqrtCand;
           mlir::Operation *invCandOp = nullptr;
@@ -338,10 +339,9 @@ struct RmsNormFusion : public mlir::RewritePattern {
         continue;
 
       mlir::Operation *rmOp = meanVal.getDefiningOp();
-      auto meanInType =
-          rmOp ? mlir::dyn_cast<mlir::RankedTensorType>(
-                     rmOp->getOperand(0).getType())
-               : mlir::RankedTensorType();
+      auto meanInType = rmOp ? mlir::dyn_cast<mlir::RankedTensorType>(
+                                   rmOp->getOperand(0).getType())
+                             : mlir::RankedTensorType();
       if (!reduceMeanIsLastAxisKeepdims(rmOp, meanInType))
         continue;
       if (!hasOnlyUser(rmOp->getResult(0), addOp))

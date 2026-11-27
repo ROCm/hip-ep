@@ -43,7 +43,7 @@ module {
   // CHECK-NOT: hip.sqrt
   // CHECK: %[[Y:.*]] = hip.rms_norm(%[[CTX]]) ins(%[[X]], %[[SCALE]] : tensor<2x4x8xf16>, tensor<8xf16>)
   // CHECK-SAME: axis = -1
-  // CHECK-SAME: epsilon = 1.000000e-06
+  // CHECK-SAME: epsilon = 9.99999997E-7
   // CHECK: return %[[Y]]
 
   // Plain fp16: Mul(x,x) + Reciprocal.

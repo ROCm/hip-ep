@@ -1,12 +1,13 @@
-#!/usr/bin/env python3
+#
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Licensed under the MIT License.
+#
 """Basic numeric check for the RMSNorm expand pattern we fuse.
-
 Builds the SD3.5-style primitive chain (fp32 stash Casts + Pow/ReduceMean/...
 + scale Mul) and checks ORT CPU against the closed-form RMSNorm. Does not
 require hip-mlir-opt; fusion lowering is covered by the LIT file.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -29,14 +30,30 @@ def _expanded_onnx(shape, scale_shape, eps: float) -> bytes:
     y = helper.make_tensor_value_info("y", TensorProto.FLOAT16, list(shape))
 
     nodes = [
-        helper.make_node("Constant", [], ["two"], value=helper.make_tensor(
-            "two_t", TensorProto.FLOAT, [], [2.0])),
-        helper.make_node("Constant", [], ["eps"], value=helper.make_tensor(
-            "eps_t", TensorProto.FLOAT, [], [float(eps)])),
-        helper.make_node("Constant", [], ["one"], value=helper.make_tensor(
-            "one_t", TensorProto.FLOAT, [], [1.0])),
-        helper.make_node("Constant", [], ["axes"], value=helper.make_tensor(
-            "axes_t", TensorProto.INT64, [1], [-1])),
+        helper.make_node(
+            "Constant",
+            [],
+            ["two"],
+            value=helper.make_tensor("two_t", TensorProto.FLOAT, [], [2.0]),
+        ),
+        helper.make_node(
+            "Constant",
+            [],
+            ["eps"],
+            value=helper.make_tensor("eps_t", TensorProto.FLOAT, [], [float(eps)]),
+        ),
+        helper.make_node(
+            "Constant",
+            [],
+            ["one"],
+            value=helper.make_tensor("one_t", TensorProto.FLOAT, [], [1.0]),
+        ),
+        helper.make_node(
+            "Constant",
+            [],
+            ["axes"],
+            value=helper.make_tensor("axes_t", TensorProto.INT64, [1], [-1]),
+        ),
         helper.make_node("Cast", ["x"], ["x0"], to=TensorProto.FLOAT),
         helper.make_node("Pow", ["x0", "two"], ["sq"]),
         helper.make_node("ReduceMean", ["sq", "axes"], ["mean"], keepdims=1),
