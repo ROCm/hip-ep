@@ -243,8 +243,9 @@ __global__ void topk_routing_wave_kernel(
 // Sigmoid + correction-bias routing over fp32 logits: the experts are the
 // top-k of sigmoid(logit) + bias in descending order, ties to the lower index
 // (ONNX TopK), and each weight is its unbiased sigmoid score, divided by the
-// sum over the k selected when `normalize`, times `scale`, rounded once to
-// fp16. Same output layout as topk_routing_kernel. A NaN score sorts last.
+// sum over the k selected plus `norm_eps` when `normalize`, times `scale`,
+// rounded once to fp16. Same output layout as topk_routing_kernel. A NaN
+// score sorts last.
 // ---------------------------------------------------------------------------
 __global__ void qmoe_sigmoid_bias_route_kernel(
     const float* __restrict__ logits,
@@ -255,7 +256,8 @@ __global__ void qmoe_sigmoid_bias_route_kernel(
     int64_t num_experts,
     int64_t k,
     int64_t normalize,
-    float scale) {
+    float scale,
+    float norm_eps) {
   const int token = static_cast<int>(blockIdx.x);
   if (token >= num_tokens) return;
 
@@ -320,7 +322,7 @@ __global__ void qmoe_sigmoid_bias_route_kernel(
     float sum = 0.0f;
     for (int i = 0; i < ik; i++) sum += s_w[i];
     for (int i = 0; i < ik; i++) {
-      const float w = normalize ? s_w[i] / sum : s_w[i];
+      const float w = normalize ? s_w[i] / (sum + norm_eps) : s_w[i];
       expert_weights[static_cast<int64_t>(token) * k + i] =
           static_cast<__half>(w * scale);
     }
@@ -338,7 +340,7 @@ __global__ void qmoe_sigmoid_bias_route_wave_kernel(
     const float* __restrict__ correction_bias,
     int32_t* __restrict__ expert_indices,
     __half* __restrict__ expert_weights,
-    int num_experts, int k, int normalize, float scale) {
+    int num_experts, int k, int normalize, float scale, float norm_eps) {
   const int token = static_cast<int>(blockIdx.x);
   const int lane = static_cast<int>(threadIdx.x);
   const int ne = num_experts;
@@ -398,7 +400,7 @@ __global__ void qmoe_sigmoid_bias_route_wave_kernel(
   }
 
   if (lane < k) {
-    const float w = normalize ? my_w / sum : my_w;
+    const float w = normalize ? my_w / (sum + norm_eps) : my_w;
     expert_indices[static_cast<int64_t>(token) * k + lane] = my_idx;
     expert_weights[static_cast<int64_t>(token) * k + lane] =
         static_cast<__half>(w * scale);
@@ -813,6 +815,7 @@ extern "C" int hip_qmoe_sigmoid_bias_routing(
     int64_t k,
     int64_t normalize,
     float scale,
+    float norm_eps,
     int64_t element_size_bytes) {
   if (num_tokens <= 0) return 0;
   if (element_size_bytes != 2 || !logits || !correction_bias || k <= 0 ||
@@ -836,23 +839,27 @@ extern "C" int hip_qmoe_sigmoid_bias_routing(
     const int nz = normalize ? 1 : 0;
     if (num_experts <= 32)
       hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_sigmoid_bias_route_wave_kernel<1>),
-                         grid, block, 0, s, lg, cb, idx, w, ne, ik, nz, scale);
+                         grid, block, 0, s, lg, cb, idx, w, ne, ik, nz, scale,
+                         norm_eps);
     else if (num_experts <= 64)
       hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_sigmoid_bias_route_wave_kernel<2>),
-                         grid, block, 0, s, lg, cb, idx, w, ne, ik, nz, scale);
+                         grid, block, 0, s, lg, cb, idx, w, ne, ik, nz, scale,
+                         norm_eps);
     else if (num_experts <= 128)
       hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_sigmoid_bias_route_wave_kernel<4>),
-                         grid, block, 0, s, lg, cb, idx, w, ne, ik, nz, scale);
+                         grid, block, 0, s, lg, cb, idx, w, ne, ik, nz, scale,
+                         norm_eps);
     else
       hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_sigmoid_bias_route_wave_kernel<8>),
-                         grid, block, 0, s, lg, cb, idx, w, ne, ik, nz, scale);
+                         grid, block, 0, s, lg, cb, idx, w, ne, ik, nz, scale,
+                         norm_eps);
   } else {
     // s_prob, s_sel and s_taken, one 4-byte slot per expert each.
     const size_t shmem = 3 * static_cast<size_t>(num_experts) * sizeof(float);
     hipLaunchKernelGGL(qmoe_sigmoid_bias_route_kernel,
                        dim3(static_cast<unsigned>(num_tokens)),
                        dim3(kRoutingBlock), shmem, s, lg, cb, idx, w,
-                       num_tokens, num_experts, k, normalize, scale);
+                       num_tokens, num_experts, k, normalize, scale, norm_eps);
   }
   hipError_t err = hipGetLastError();
   if (err != hipSuccess)

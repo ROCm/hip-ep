@@ -30,7 +30,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
               float activation_alpha, float activation_beta, float swiglu_limit,
               int64_t normalize_routing_weights, int64_t elem_size,
               const void *correction_bias, int64_t routing_type,
-              float routed_scaling_factor) {
+              float routed_scaling_factor, float routing_norm_eps) {
   OP_PROFILE(
       "qmoe",
       [&] {
@@ -327,7 +327,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     HIP_CHECK(hip_qmoe_sigmoid_bias_routing(
         stream, router_probs, correction_bias, d_expert_indices,
         d_expert_weights, num_tokens, num_experts, k, normalize_routing_weights,
-        routed_scaling_factor, elem_size));
+        routed_scaling_factor, routing_norm_eps, elem_size));
   } else {
     OP_ROCTX_MARK("hip_ep.op.qmoe.route.topk");
     HIP_CHECK(hip_qmoe_topk_routing(stream, router_probs, router_weights,

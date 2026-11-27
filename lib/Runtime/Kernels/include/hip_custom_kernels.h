@@ -1217,18 +1217,17 @@ HIP_KERNEL_API int hip_gqa_softmax_inplace(
 /* Row-wise softmax over a flattened [rows, cols] row-major fp16 buffer,
  * reading `input` and writing normalized probabilities to `output`. Matches
  * ONNX Softmax semantics for axis = -1 on the flattened input. `input` may
- * equal `output`. Used by the standalone `hip_miopen_softmax` runtime entry
+ * equal `output`. Used by the standalone `hip_softmax_typed` runtime entry
  * point, which is destination-passing and would otherwise have to copy its
  * input over its output before running an in-place kernel. */
 HIP_KERNEL_API int hip_softmax_row_2d(void* stream, const void* input, void* output, int rows, int cols);
 
-/* fp32 variant of the above — for models where Softmax input is fp32.
- * Qwen VLM vision encoder attention scores are fp32; using the fp16 kernel
- * there misinterprets the data and produces completely wrong outputs.
- * Called by hip_miopen_softmax when elem_size_bytes == 4. */
+/* fp32 and bf16 variants of the above, with the same contract. All three
+ * compute in fp32; hip_softmax_typed selects one from its data_type. */
 HIP_KERNEL_API int hip_softmax_row_2d_fp32(void* stream, const void* input, void* output, int rows, int cols);
+HIP_KERNEL_API int hip_softmax_row_2d_bf16(void* stream, const void* input, void* output, int rows, int cols);
 
-/* Single-buffer forms of the two above, for callers that softmax a buffer
+/* Single-buffer forms of the fp16 and fp32 kernels, for callers that softmax a buffer
  * in place. Equivalent to passing `data` as both source and destination. */
 HIP_KERNEL_API int hip_softmax_row_2d_inplace(void* stream, void* data, int rows, int cols);
 HIP_KERNEL_API int hip_softmax_row_2d_inplace_fp32(void* stream, void* data, int rows, int cols);
@@ -3206,8 +3205,9 @@ HIP_KERNEL_API int hip_qmoe_topk_routing(
  *   expert_indices  - GPU [num_tokens, k] int32 (output), in descending
  *                     sigmoid + bias order, ties to the lower expert index
  *   expert_weights  - GPU [num_tokens, k] fp16 (output):
- *                     s / sum_k(s) * scale (no sum when normalize == 0),
- *                     s = sigmoid(logit) of the selected expert
+ *                     s / (sum_k(s) + norm_eps) * scale (no sum when
+ *                     normalize == 0), s = sigmoid(logit) of the selected
+ *                     expert
  * Same output layout as hip_qmoe_topk_routing. element_size_bytes is that
  * of expert_weights; only fp16 is supported.
  */
@@ -3222,6 +3222,7 @@ HIP_KERNEL_API int hip_qmoe_sigmoid_bias_routing(
     int64_t k,
     int64_t normalize,
     float scale,
+    float norm_eps,
     int64_t element_size_bytes);
 
 /* Gather rows: gathered[i,:] = input[token_ids[i],:]
