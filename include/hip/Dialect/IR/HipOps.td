@@ -5161,12 +5161,15 @@ def Hip_SparseAttentionIndexerOp : Hip_DpsOp_AutoReify<"sparse_attention_indexer
 }
 
 def Hip_GemmOp : Hip_DpsOp_WithInfer<"gemm", "Output", [OpStateOpInterface]> {
+  let hasVerifier = 1;
   let summary = "General matrix multiplication (ONNX Gemm)";
   let description = [{
     Computes Y = alpha * A' * B' + beta * C, where:
       A' = transpose(A) if transA else A
       B' = transpose(B) if transB else B
     Input C is optional and broadcastable to (M, N).
+    A and B have the same dtype. Output either has that dtype or is f32
+    for f16/bf16 inputs; C has the output dtype.
     Implements ONNX Gemm operator (opset 13).
     Uses destination-passing style: output buffer is provided as argument.
     Example:

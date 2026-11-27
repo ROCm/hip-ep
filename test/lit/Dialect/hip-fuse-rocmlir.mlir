@@ -312,36 +312,6 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf32>,
 
 // -----
 
-// ONNX BOOL is ui8 outside the kernel. A ui8 value used specifically as a
-// Where condition becomes signless i8 in the private rocMLIR kernel ABI, so
-// its byte storage can feed rocMLIR arithmetic without a conversion op.
-
-// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
-// CHECK-SAME: {{.*}}tensor<1x2x4x3xf32>{{.*}}tensor<1x1x3x5xf32>{{.*}}tensor<1x1x4x5xi8>
-// CHECK: hip.where
-// CHECK-SAME: tensor<1x1x4x5xi8>
-
-// CHECK-LABEL: func.func @main_graph
-func.func @main_graph(%ctx: !hip.context, %a: tensor<1x2x4x3xf32>,
-                      %b: tensor<1x1x3x5xf32>,
-                      %cond: tensor<1x1x4x5xui8>,
-                      %x: tensor<f32>) -> tensor<1x2x4x5xf32> {
-  %matmulInit = tensor.empty() : tensor<1x2x4x5xf32>
-  %matmul = hip.matmul(%ctx) ins(%a, %b :
-      tensor<1x2x4x3xf32>, tensor<1x1x3x5xf32>)
-      outs(%matmulInit : tensor<1x2x4x5xf32>)
-      {transA = 0 : i64, transB = 0 : i64} : tensor<1x2x4x5xf32>
-  %whereInit = tensor.empty() : tensor<1x2x4x5xf32>
-  // CHECK: hip.rocmlir
-  // CHECK-SAME: %{{.*}} : tensor<1x2x4x3xf32>, tensor<1x1x3x5xf32>, tensor<1x1x4x5xui8>, tensor<1xf32>)
-  %result = hip.where(%ctx) ins(%cond, %x, %matmul :
-      tensor<1x1x4x5xui8>, tensor<f32>, tensor<1x2x4x5xf32>)
-      outs(%whereInit : tensor<1x2x4x5xf32>) : tensor<1x2x4x5xf32>
-  return %result : tensor<1x2x4x5xf32>
-}
-
-// -----
-
 // An NHWC convolution arrives wrapped in layout transposes, and the graph
 // around it transposes back for the residual add. Every transpose becomes part
 // of the kernel's input or output layout, so the kernel reads the NHWC
@@ -428,17 +398,16 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x4x4x8xf32>,
 
 // -----
 
-// rocMLIR cannot load an i64 tensor, so a cast from i64 stays outside and the
-// kernel takes its f32 result.
 
-// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
-// CHECK-SAME: (%{{[a-z0-9]+}}: tensor<4x8xf32>, %{{[a-z0-9]+}}: tensor<8x16xf32>)
-// CHECK-NOT: hip.cast
-// CHECK: hip.matmul
 
+
+// Dense GEMMs remain on hip_gemm; the surrounding operations stay in main_graph.
 // CHECK-LABEL: func.func @main_graph
-// CHECK: %[[CAST:.*]] = hip.cast({{.*}}) ins(%{{.*}} : tensor<4x8xi64>)
-// CHECK: hip.rocmlir({{.*}}) @mlir_{{[a-z0-9_]+}} ins(%[[CAST]],
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.cast
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.matmul
+// CHECK-NOT: hip.rocmlir
 func.func @main_graph(%ctx: !hip.context, %x: tensor<4x8xi64>,
                       %w: tensor<8x16xf32>) -> tensor<4x16xf32> {
   %fe = tensor.empty() : tensor<4x8xf32>
@@ -452,15 +421,16 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<4x8xi64>,
 
 // -----
 
-// Nor can it store one: a cast to i64 ends the forward chain.
 
-// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
-// CHECK-SAME: -> tensor<4x16xf32>
-// CHECK-NOT: hip.cast
 
+
+// Dense GEMMs remain on hip_gemm; the surrounding operations stay in main_graph.
 // CHECK-LABEL: func.func @main_graph
-// CHECK: %[[K:.*]] = hip.rocmlir
-// CHECK: hip.cast({{.*}}) ins(%[[K]] : tensor<4x16xf32>)
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.matmul
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.cast
+// CHECK-NOT: hip.rocmlir
 func.func @main_graph(%ctx: !hip.context, %x: tensor<4x8xf32>,
                       %w: tensor<8x16xf32>) -> tensor<4x16xi64> {
   %e = tensor.empty() : tensor<4x16xf32>
@@ -554,20 +524,18 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
 
 // -----
 
-// A matmul takes the transposes on both sides, as a convolution does: the
-// kernel reads the untransposed A and writes the transposed result.
 
-// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
-// CHECK-SAME: (%[[A:.*]]: tensor<16x8xf16>, %{{.*}}: tensor<16x32xf16>) -> tensor<32x8xf16>
-// CHECK: %[[AT:.*]] = hip.transpose({{.*}}) ins(%[[A]]
-// CHECK: %[[M:.*]] = hip.matmul({{.*}}) ins(%[[AT]],
-// CHECK: %[[O:.*]] = hip.transpose({{.*}}) ins(%[[M]]
-// CHECK: return %[[O]]
 
+
+// Dense GEMMs remain on hip_gemm; the surrounding operations stay in main_graph.
 // CHECK-LABEL: func.func @main_graph
-// CHECK-NOT: hip.transpose
-// CHECK: hip.rocmlir
-// CHECK-NOT: hip.transpose
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.transpose
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.matmul
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.transpose
+// CHECK-NOT: hip.rocmlir
 func.func @main_graph(%ctx: !hip.context, %a: tensor<16x8xf16>,
                       %b: tensor<16x32xf16>) -> tensor<32x8xf16> {
   %ae = tensor.empty() : tensor<8x16xf16>
@@ -584,18 +552,16 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<16x8xf16>,
 
 // -----
 
-// A pointwise op that broadcasts the anchor result ends the chain: rocMLIR
-// cannot map the wider output back to the GEMM tile.
 
-// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
-// CHECK-SAME: -> tensor<1x32xf16>
-// CHECK: hip.matmul
-// CHECK-NOT: hip.add
-// CHECK: return
 
+
+// Dense GEMMs remain on hip_gemm; the surrounding operations stay in main_graph.
 // CHECK-LABEL: func.func @main_graph
-// CHECK: %[[K:.*]] = hip.rocmlir
-// CHECK: hip.add({{.*}}) ins(%{{.*}}, %[[K]] : tensor<2x32xf16>, tensor<1x32xf16>)
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.matmul
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.add
+// CHECK-NOT: hip.rocmlir
 func.func @main_graph(%ctx: !hip.context, %a: tensor<1x16xf16>,
                       %b: tensor<16x32xf16>, %r: tensor<2x32xf16>)
     -> tensor<2x32xf16> {
@@ -1315,22 +1281,16 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
 
 // -----
 
-// An erf GELU behind a reshape reads the reshaped matmul result twice. Both
-// readers join the chain, so the reshape and the whole GELU go in the kernel.
 
-// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
-// CHECK: hip.matmul
-// CHECK: tensor.expand_shape
-// CHECK: hip.mul
+
+
+// The GEMM stays native; its GELU epilogue can still fuse independently.
+// CHECK-LABEL: func.func @mlir_mul_erf_add_mul_0
 // CHECK: hip.erf
-// CHECK: hip.add
-// CHECK: %[[G:.*]] = hip.mul
-// CHECK: return %[[G]]
-
 // CHECK-LABEL: func.func @main_graph
-// CHECK-NOT: hip.erf
-// CHECK: hip.rocmlir
-// CHECK-NOT: hip.mul
+// CHECK: %[[MM:.*]] = hip.matmul
+// CHECK: hip.rocmlir({{.*}}) @mlir_mul_erf_add_mul_0 ins(%[[MM]] : tensor<8x32xf16>)
+// CHECK-NOT: hip.matmul
 func.func @main_graph(%ctx: !hip.context, %a: tensor<8x16xf16>,
                       %b: tensor<16x32xf16>) -> tensor<1x8x32xf16> {
   %scale = hip.constant {value = dense<7.070310e-01> : tensor<f16>} : tensor<f16>
@@ -1357,19 +1317,16 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<8x16xf16>,
 
 // -----
 
-// A reshape that is also a graph output has no init to be a kernel result
-// from, so it ends the chain and its readers stay outside.
 
-// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
-// CHECK: hip.matmul
-// CHECK-NOT: hip.erf
-// CHECK: return
 
+
+// Dense GEMMs remain on hip_gemm; the surrounding operations stay in main_graph.
 // CHECK-LABEL: func.func @main_graph
-// CHECK: %[[R:.*]] = hip.rocmlir
-// CHECK: %[[V:.*]] = tensor.expand_shape %[[R]]
-// CHECK: hip.erf({{.*}}) ins(%[[V]]
-// CHECK: return
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.matmul
+// CHECK-NOT: hip.rocmlir
+// CHECK: tensor.expand_shape
+// CHECK-NOT: hip.rocmlir
 func.func @main_graph(%ctx: !hip.context, %a: tensor<8x16xf16>,
                       %b: tensor<16x32xf16>)
     -> (tensor<1x8x32xf16>, tensor<1x8x32xf16>) {
@@ -1538,6 +1495,52 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<?x16xf16>,
 
 // -----
 
+// ONNX BOOL is ui8 outside the kernel. A ui8 value used specifically as a
+// Where condition becomes signless i8 in the private rocMLIR kernel ABI, so
+// its byte storage can feed rocMLIR arithmetic without a conversion op.
+
+// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
+// CHECK-SAME: {{.*}}tensor<1x3x4x5xf32>{{.*}}tensor<2x3x1x1xf32>{{.*}}tensor<1x1x4x5xi8>
+// CHECK: hip.where
+// CHECK-SAME: tensor<1x1x4x5xi8>
+
+// CHECK-LABEL: func.func @main_graph
+func.func @main_graph(%ctx: !hip.context, %a: tensor<1x3x4x5xf32>,
+                      %b: tensor<2x3x1x1xf32>,
+                      %cond: tensor<1x1x4x5xui8>,
+                      %x: tensor<f32>) -> tensor<1x2x4x5xf32> {
+  %matmulInit = tensor.empty() : tensor<1x2x4x5xf32>
+  %matmul = hip.conv(%ctx) ins(%a, %b :
+      tensor<1x3x4x5xf32>, tensor<2x3x1x1xf32>)
+      outs(%matmulInit : tensor<1x2x4x5xf32>)
+      {dilations = [1, 1], group = 1 : i64, kernel_shape = [1, 1],
+       pads = [0, 0, 0, 0], strides = [1, 1]} : tensor<1x2x4x5xf32>
+  %whereInit = tensor.empty() : tensor<1x2x4x5xf32>
+  // CHECK: hip.rocmlir
+  // CHECK-SAME: %{{.*}} : tensor<1x3x4x5xf32>, tensor<2x3x1x1xf32>, tensor<1x1x4x5xui8>, tensor<1xf32>)
+  %result = hip.where(%ctx) ins(%cond, %x, %matmul :
+      tensor<1x1x4x5xui8>, tensor<f32>, tensor<1x2x4x5xf32>)
+      outs(%whereInit : tensor<1x2x4x5xf32>) : tensor<1x2x4x5xf32>
+  return %result : tensor<1x2x4x5xf32>
+}
+
+// -----
+
+// Dense MatMul remains a runtime operation even when all shapes are static.
+// CHECK-LABEL: func.func @main_graph
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.matmul
+// CHECK-NOT: hip.rocmlir
+func.func @main_graph(%ctx: !hip.context, %a: tensor<19x37xf16>,
+                      %b: tensor<37x21xf16>) -> tensor<19x21xf16> {
+  %e = tensor.empty() : tensor<19x21xf16>
+  %y = hip.matmul(%ctx) ins(%a, %b : tensor<19x37xf16>, tensor<37x21xf16>)
+      outs(%e : tensor<19x21xf16>) : tensor<19x21xf16>
+  return %y : tensor<19x21xf16>
+}
+
+// -----
+
 // A single-use hip.dequant_bnb4 stays in main_graph. Absorbing it makes
 // HipToTosa emit a tosa.gather of the codebook, which rocMLIR rejects. The
 // outlined matmul reads the dequantized f32 weight. transB swaps the [N, K]
@@ -1566,6 +1569,24 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<2x8xf32>,
       outs(%e : tensor<2x4xf32>)
       {transA = 0 : i64, transB = 1 : i64} : tensor<2x4xf32>
   return %c : tensor<2x4xf32>
+}
+
+// -----
+
+// Gemm keeps its runtime bias/transpose/alpha/beta contract with static shapes.
+// CHECK-LABEL: func.func @main_graph
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.gemm
+// CHECK-NOT: hip.rocmlir
+func.func @main_graph(%ctx: !hip.context, %a: tensor<37x19xf16>,
+                      %b: tensor<21x37xf16>, %c: tensor<21xf16>)
+    -> tensor<19x21xf16> {
+  %e = tensor.empty() : tensor<19x21xf16>
+  %y = hip.gemm(%ctx) ins(%a, %b, %c : tensor<37x19xf16>,
+      tensor<21x37xf16>, tensor<21xf16>) outs(%e : tensor<19x21xf16>)
+      {alpha = 7.500000e-01 : f32, beta = 2.500000e-01 : f32,
+       transA = 1 : i64, transB = 1 : i64} : tensor<19x21xf16>
+  return %y : tensor<19x21xf16>
 }
 
 // -----

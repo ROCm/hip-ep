@@ -43,6 +43,17 @@ struct GemmOpLowering : public ConvertOpToLLVMPattern<GemmOp> {
     else
       return failure();
     Value typeCodeVal = createI64Const(typeCode);
+    Type outputType =
+        cast<MemRefType>(op.getOutput().getType()).getElementType();
+    const bool mixedOutput = outputType != elemType;
+    if (cast<MemRefType>(op.getInputB().getType()).getElementType() !=
+            elemType ||
+        (mixedOutput &&
+         !((elemType.isF16() || elemType.isBF16()) && outputType.isF32())) ||
+        (op.getInputC() &&
+         cast<MemRefType>(op.getInputC().getType()).getElementType() !=
+             outputType))
+      return op.emitError("unsupported GEMM dtype combination");
 
     Value statePtr = adaptor.getCtx();
     Value input_A_ptr =
@@ -123,8 +134,11 @@ struct GemmOpLowering : public ConvertOpToLLVMPattern<GemmOp> {
         i64Type, // cDim0
         i64Type, // cDim1
     };
+    if (mixedOutput)
+      paramTypes.push_back(i64Type);
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kWrapGemm, paramTypes, i32Type);
+        rewriter, module, mixedOutput ? "wrap_gemm_typed" : kWrapGemm,
+        paramTypes, i32Type);
     if (failed(funcOp)) {
       return failure();
     }
@@ -138,6 +152,8 @@ struct GemmOpLowering : public ConvertOpToLLVMPattern<GemmOp> {
         beta,        transA,
         transB,      typeCodeVal,
         cDim0,       cDim1};
+    if (mixedOutput)
+      args.push_back(createI64Const(1));
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
     return success();

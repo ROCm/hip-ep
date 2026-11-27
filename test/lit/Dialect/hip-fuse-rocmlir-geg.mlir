@@ -1,10 +1,6 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// Gemm-pointwise-gemm: two outlined matmul kernels merge into one when the
-// first kernel's only result feeds the second gemm's A operand, both gemms
-// read a type in gemm-gemm-accel-types, and the shape gates pass.
-// An empty type list keeps them apart.
 
 // RUN: hip-mlir-opt --split-input-file --hip-rocmlir-prepare-quant \
 // RUN:   --hip-fuse-rocmlir-elementwise --hip-fuse-rocmlir-anchor="arch=gfx1151 gemm-gemm-accel-types=f16,bf16" %s \
@@ -13,28 +9,19 @@
 // RUN: hip-mlir-opt --split-input-file --hip-rocmlir-prepare-quant \
 // RUN:   --hip-fuse-rocmlir-elementwise --hip-fuse-rocmlir-anchor %s \
 // RUN:   | hip-mlir-opt --split-input-file \
-// RUN:   | FileCheck %s --check-prefixes=NOGEG,NOARCH
+// RUN:   | FileCheck %s
 
-// A column-vector intermediate (n == 1) passes the gate: one kernel runs
-// matmul -> sigmoid -> matmul, and the dispatch reads x and both weights.
 
-// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
-// CHECK-SAME: (%[[X:.*]]: tensor<512x64xf16>, %[[W0:.*]]: tensor<64x1xf16>, %[[W1:.*]]: tensor<1x32xf16>) -> tensor<512x32xf16>
-// CHECK-SAME: rock.arch = "gfx1151"
-// CHECK: %[[M0:.*]] = hip.matmul({{.*}}) ins(%[[X]], %[[W0]]
-// CHECK: %[[S:.*]] = hip.sigmoid({{.*}}) ins(%[[M0]]
-// CHECK: %[[M1:.*]] = hip.matmul({{.*}}) ins(%[[S]], %[[W1]]
-// CHECK: return %[[M1]]
 
+
+
+// Dense GEMMs remain on hip_gemm; the surrounding operations stay in main_graph.
 // CHECK-LABEL: func.func @main_graph
-// CHECK: hip.rocmlir
-// CHECK-SAME: ins(%{{.*}}, %{{.*}}, %{{.*}} : tensor<512x64xf16>, tensor<64x1xf16>, tensor<1x32xf16>)
 // CHECK-NOT: hip.rocmlir
-
-// NOARCH-NOT: rock.arch
-// NOGEG-LABEL: func.func @main_graph
-// NOGEG: hip.rocmlir
-// NOGEG: hip.rocmlir
+// CHECK: hip.matmul
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.matmul
+// CHECK-NOT: hip.rocmlir
 func.func @main_graph(%ctx: !hip.context, %x: tensor<512x64xf16>,
                       %w0: tensor<64x1xf16>, %w1: tensor<1x32xf16>)
     -> tensor<512x32xf16> {
@@ -52,22 +39,16 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<512x64xf16>,
 
 // -----
 
-// The gate reads the matmul's transB: B stored as [n, k] = [1, 64] is still a
-// column-vector intermediate (n == 1), so the pair merges.
 
-// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
-// CHECK-SAME: tensor<1x64xf16>
-// CHECK: hip.matmul
-// CHECK-SAME: transB = 1
-// CHECK: hip.sigmoid
-// CHECK: hip.matmul
+
+
+// Dense GEMMs remain on hip_gemm; the surrounding operations stay in main_graph.
 // CHECK-LABEL: func.func @main_graph
-// CHECK: hip.rocmlir
 // CHECK-NOT: hip.rocmlir
-
-// NOGEG-LABEL: func.func @main_graph
-// NOGEG: hip.rocmlir
-// NOGEG: hip.rocmlir
+// CHECK: hip.matmul
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.matmul
+// CHECK-NOT: hip.rocmlir
 func.func @main_graph(%ctx: !hip.context, %x: tensor<512x64xf16>,
                       %w0: tensor<1x64xf16>, %w1: tensor<1x32xf16>)
     -> tensor<512x32xf16> {
@@ -86,12 +67,15 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<512x64xf16>,
 
 // -----
 
-// A wide intermediate (n = 64) fails the gate: the m x n tile is cheap to
-// round-trip, so the kernels stay apart.
 
+
+// Dense GEMMs remain on hip_gemm; the surrounding operations stay in main_graph.
 // CHECK-LABEL: func.func @main_graph
-// CHECK: hip.rocmlir
-// CHECK: hip.rocmlir
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.matmul
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.matmul
+// CHECK-NOT: hip.rocmlir
 func.func @main_graph(%ctx: !hip.context, %x: tensor<512x64xf16>,
                       %w0: tensor<64x64xf16>, %w1: tensor<64x32xf16>)
     -> tensor<512x32xf16> {
@@ -106,11 +90,15 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<512x64xf16>,
 
 // -----
 
-// f32 is not in gemm-gemm-accel-types, so an fp32 pair stays apart.
 
+
+// Dense GEMMs remain on hip_gemm; the surrounding operations stay in main_graph.
 // CHECK-LABEL: func.func @main_graph
-// CHECK: hip.rocmlir
-// CHECK: hip.rocmlir
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.matmul
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.matmul
+// CHECK-NOT: hip.rocmlir
 func.func @main_graph(%ctx: !hip.context, %x: tensor<512x64xf32>,
                       %w0: tensor<64x1xf32>, %w1: tensor<1x32xf32>)
     -> tensor<512x32xf32> {
@@ -125,12 +113,15 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<512x64xf32>,
 
 // -----
 
-// The first kernel's result has a second reader, so it must still be written
-// out and the kernels stay apart.
 
+
+// Dense GEMMs remain on hip_gemm; the surrounding operations stay in main_graph.
 // CHECK-LABEL: func.func @main_graph
-// CHECK: hip.rocmlir
-// CHECK: hip.rocmlir
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.matmul
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.matmul
+// CHECK-NOT: hip.rocmlir
 func.func @main_graph(%ctx: !hip.context, %x: tensor<512x64xf16>,
                       %w0: tensor<64x1xf16>, %w1: tensor<1x32xf16>)
     -> (tensor<512x32xf16>, tensor<512x1xf16>) {
@@ -145,15 +136,14 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<512x64xf16>,
 
 // -----
 
-// A reshape that only regroups the rows (batch and m) may sit between the
-// gemms, as in a 2-D gemm whose result feeds a batched matmul.
 
-// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
-// CHECK: hip.matmul
-// CHECK: tensor.expand_shape
-// CHECK: hip.matmul
+
+// Dense GEMMs remain on hip_gemm; the surrounding operations stay in main_graph.
 // CHECK-LABEL: func.func @main_graph
-// CHECK: hip.rocmlir
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.matmul
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.matmul
 // CHECK-NOT: hip.rocmlir
 func.func @main_graph(%ctx: !hip.context, %x: tensor<512x64xf16>,
                       %w0: tensor<64x1xf16>, %w1: tensor<1x32xf16>)
@@ -171,12 +161,15 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<512x64xf16>,
 
 // -----
 
-// A transpose between the gemms would turn the first gemm's n into the second
-// gemm's rows, which rocMLIR's gemm-elementwise-gemm cannot express.
 
+
+// Dense GEMMs remain on hip_gemm; the surrounding operations stay in main_graph.
 // CHECK-LABEL: func.func @main_graph
-// CHECK: hip.rocmlir
-// CHECK: hip.rocmlir
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.matmul
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.matmul
+// CHECK-NOT: hip.rocmlir
 func.func @main_graph(%ctx: !hip.context, %x: tensor<256x64xf16>,
                       %w0: tensor<64x1xf16>, %w1: tensor<256x32xf16>)
     -> tensor<1x32xf16> {

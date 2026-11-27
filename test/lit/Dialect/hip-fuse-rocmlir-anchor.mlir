@@ -47,17 +47,16 @@ func.func @main_graph(%ctx: !hip.context, %in: tensor<1x8x4x4xf16>,
 
 // -----
 
-// A lone transpose that reads the matmul is the kernel's epilogue.
 
-// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
-// CHECK: %[[MM:.*]] = hip.matmul
-// CHECK: %[[T:.*]] = hip.transpose({{.*}}) ins(%[[MM]] :
-// CHECK: return %[[T]]
+
+
+// Dense GEMMs remain on hip_gemm; the surrounding operations stay in main_graph.
 // CHECK-LABEL: func.func @main_graph
-// CHECK: %[[K:.*]] = hip.rocmlir({{.*}}) @mlir_{{[a-z0-9_]+}} {{.*}} : tensor<8x4xf16>
-// CHECK-NOT: hip.transpose
-// CHECK: return %[[K]]
-
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.matmul
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.transpose
+// CHECK-NOT: hip.rocmlir
 func.func @main_graph(%ctx: !hip.context, %x: tensor<4x16xf16>,
                       %y: tensor<16x8xf16>) -> tensor<8x4xf16> {
   %e = tensor.empty() : tensor<4x8xf16>
@@ -203,17 +202,18 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf16>,
 
 // -----
 
-// A reshape without an init leads to a transpose: both are the epilogue.
 
-// CHECK-LABEL: func.func @mlir_{{[a-z0-9_]+}}
-// CHECK: %[[MM:.*]] = hip.matmul
-// CHECK: %[[V:.*]] = tensor.expand_shape %[[MM]]
-// CHECK: %[[T:.*]] = hip.transpose({{.*}}) ins(%[[V]] :
-// CHECK: return %[[T]]
+
+
+// Dense GEMMs remain on hip_gemm; the surrounding operations stay in main_graph.
 // CHECK-LABEL: func.func @main_graph
-// CHECK-NOT: tensor.expand_shape
-// CHECK-NOT: hip.transpose
-
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.matmul
+// CHECK-NOT: hip.rocmlir
+// CHECK: tensor.expand_shape
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.transpose
+// CHECK-NOT: hip.rocmlir
 func.func @main_graph(%ctx: !hip.context, %x: tensor<4x16xf16>,
                       %y: tensor<16x8xf16>) -> tensor<2x4x4xf16> {
   %e = tensor.empty() : tensor<4x8xf16>
@@ -361,19 +361,16 @@ func.func @main_graph(%ctx: !hip.context, %x: tensor<1x8x4x4xf32>,
 
 // -----
 
-// A matmul with 32 output columns and a 2048-deep reduction relies on
-// split-K, which rocMLIR drops for a quantize epilogue. The quantize stays a
-// HIP op after the kernel.
 
-// CHECK-LABEL: func.func @mlir_matmul_{{[0-9]+}}
-// CHECK-NOT: hip.quantize_linear
-// CHECK: hip.matmul
-// CHECK-NOT: hip.quantize_linear
-// CHECK: return
+
+
+// Dense GEMMs remain on hip_gemm; the surrounding operations stay in main_graph.
 // CHECK-LABEL: func.func @main_graph
-// CHECK: %[[K:.*]] = hip.rocmlir({{.*}}) @mlir_matmul_{{[0-9]+}}
-// CHECK: hip.quantize_linear({{.*}}) ins(%[[K]],
-
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.matmul
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.quantize_linear
+// CHECK-NOT: hip.rocmlir
 func.func @main_graph(%ctx: !hip.context, %a: tensor<1x2048xf32>,
                       %b: tensor<2048x32xf32>) -> tensor<1x32xi8> {
   %s = hip.constant {value = dense<5.000000e-01> : tensor<f32>} : tensor<f32>
@@ -391,16 +388,16 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<1x2048xf32>,
 
 // -----
 
-// The same matmul with a 64-deep reduction does not need split-K, so the
-// quantize joins its epilogue.
 
-// CHECK-LABEL: func.func @mlir_matmul_quantize_linear_{{[0-9]+}}
-// CHECK: hip.matmul
-// CHECK: hip.quantize_linear
+
+
+// Dense GEMMs remain on hip_gemm; the surrounding operations stay in main_graph.
 // CHECK-LABEL: func.func @main_graph
-// CHECK: hip.rocmlir
-// CHECK-NOT: hip.quantize_linear
-
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.matmul
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.quantize_linear
+// CHECK-NOT: hip.rocmlir
 func.func @main_graph(%ctx: !hip.context, %a: tensor<1x64xf32>,
                       %b: tensor<64x32xf32>) -> tensor<1x32xi8> {
   %s = hip.constant {value = dense<5.000000e-01> : tensor<f32>} : tensor<f32>
@@ -418,16 +415,16 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<1x64xf32>,
 
 // -----
 
-// An add is linear, so split-K keeps it: the narrow, deep matmul still takes
-// its bias add.
 
-// CHECK-LABEL: func.func @mlir_matmul_add_{{[0-9]+}}
-// CHECK: hip.matmul
-// CHECK: hip.add
+
+
+// Dense GEMMs remain on hip_gemm; the surrounding operations stay in main_graph.
 // CHECK-LABEL: func.func @main_graph
-// CHECK: hip.rocmlir
-// CHECK-NOT: hip.add
-
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.matmul
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.add
+// CHECK-NOT: hip.rocmlir
 func.func @main_graph(%ctx: !hip.context, %a: tensor<1x2048xf32>,
                       %b: tensor<2048x32xf32>, %bias: tensor<1x32xf32>)
     -> tensor<1x32xf32> {
@@ -442,17 +439,16 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<1x2048xf32>,
 
 // -----
 
-// At the split-K limits (64 columns, 16 * 64 = 1024 deep) the matmul relies on
-// split-K. A relu (max with 0) is not linear in the accumulator, so applied to
-// each partial sum it would be wrong: it stays a HIP op after the kernel.
 
-// CHECK-LABEL: func.func @mlir_matmul_{{[0-9]+}}
-// CHECK-NOT: hip.max
-// CHECK: return
+
+
+// Dense GEMMs remain on hip_gemm; the surrounding operations stay in main_graph.
 // CHECK-LABEL: func.func @main_graph
-// CHECK: %[[K:.*]] = hip.rocmlir({{.*}}) @mlir_matmul_{{[0-9]+}}
-// CHECK: hip.max({{.*}}) ins(%[[K]],
-
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.matmul
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.max
+// CHECK-NOT: hip.rocmlir
 func.func @main_graph(%ctx: !hip.context, %a: tensor<1x1024xf32>,
                       %b: tensor<1024x64xf32>) -> tensor<1x64xf32> {
   %e = tensor.empty() : tensor<1x64xf32>
@@ -467,16 +463,16 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<1x1024xf32>,
 
 // -----
 
-// With 65 columns the matmul does not rely on split-K, so the relu joins its
-// epilogue.
 
-// CHECK-LABEL: func.func @mlir_matmul_max_{{[0-9]+}}
-// CHECK: hip.matmul
-// CHECK: hip.max
+
+
+// Dense GEMMs remain on hip_gemm; the surrounding operations stay in main_graph.
 // CHECK-LABEL: func.func @main_graph
-// CHECK: hip.rocmlir
-// CHECK-NOT: hip.max
-
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.matmul
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.max
+// CHECK-NOT: hip.rocmlir
 func.func @main_graph(%ctx: !hip.context, %a: tensor<1x2048xf32>,
                       %b: tensor<2048x65xf32>) -> tensor<1x65xf32> {
   %e = tensor.empty() : tensor<1x65xf32>
@@ -491,16 +487,16 @@ func.func @main_graph(%ctx: !hip.context, %a: tensor<1x2048xf32>,
 
 // -----
 
-// A residual add is linear: rocMLIR divides the residual by the split count,
-// so the sum of the splits adds it once. The split-K matmul takes it.
 
-// CHECK-LABEL: func.func @mlir_matmul_add_{{[0-9]+}}
-// CHECK: hip.matmul
-// CHECK: hip.add
+
+
+// Dense GEMMs remain on hip_gemm; the surrounding operations stay in main_graph.
 // CHECK-LABEL: func.func @main_graph
-// CHECK: hip.rocmlir
-// CHECK-NOT: hip.add
-
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.matmul
+// CHECK-NOT: hip.rocmlir
+// CHECK: hip.add
+// CHECK-NOT: hip.rocmlir
 func.func @main_graph(%ctx: !hip.context, %a: tensor<4x2048xf32>,
                       %b: tensor<2048x32xf32>, %residual: tensor<4x32xf32>)
     -> tensor<4x32xf32> {

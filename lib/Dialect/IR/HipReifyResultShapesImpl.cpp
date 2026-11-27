@@ -16,6 +16,7 @@
 
 #include "llvm/ADT/Sequence.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -53,7 +54,8 @@ LogicalResult reifyMatmulLikeShape(Operation *op, OpBuilder &b, Value A,
   size_t bRank = bShape.size();
 
   // Loop-invariant: right-alignment padding for A's and B's batch dims.
-  size_t batchRank = outRank - 2;
+  size_t batchRank =
+      std::max(aRank > 2 ? aRank - 2 : 0, bRank > 2 ? bRank - 2 : 0);
   size_t aPad = batchRank - (aRank >= 2 ? aRank - 2 : 0);
   size_t bPad = batchRank - (bRank >= 2 ? bRank - 2 : 0);
 
@@ -61,23 +63,34 @@ LogicalResult reifyMatmulLikeShape(Operation *op, OpBuilder &b, Value A,
   dims.reserve(outRank);
   for (size_t i : llvm::seq<size_t>(0, outRank)) {
     // M dim: A[-2], or A[-1] when transA.
-    if (i + 2 == outRank) {
+    if (aRank > 1 && i == batchRank) {
       size_t aDim = transA ? aRank - 1 : aRank - 2;
       dims.push_back(
           mlir::hip::reifyDimOrConstant(b, loc, outShape[i], A, aDim));
       continue;
     }
     // N dim: B[-1], or B[-2] when transB.
-    if (i + 1 == outRank) {
+    if (bRank > 1 && i == batchRank + (aRank > 1 ? 1 : 0)) {
       size_t bDim = transB ? bRank - 2 : bRank - 1;
       dims.push_back(
           mlir::hip::reifyDimOrConstant(b, loc, outShape[i], B, bDim));
       continue;
     }
-    // Batch dim: prefer the side that contributes the size (in range, not 1).
-    // When neither contributes, prefer A in range so folds see a stable source.
+    // A dynamic leading dimension can be one at runtime while B contributes
+    // the output size. Preserve right-aligned broadcast selection in that case.
     int64_t aDim = i < aPad ? 1 : aShape[i - aPad];
     int64_t bDim = i < bPad ? 1 : bShape[i - bPad];
+    if (ShapedType::isDynamic(outShape[i]) && ShapedType::isDynamic(aDim) &&
+        ShapedType::isDynamic(bDim)) {
+      Value aExtent = tensor::DimOp::create(b, loc, A, i - aPad);
+      Value bExtent = tensor::DimOp::create(b, loc, B, i - bPad);
+      Value one = arith::ConstantIndexOp::create(b, loc, 1);
+      Value aIsOne =
+          arith::CmpIOp::create(b, loc, arith::CmpIPredicate::eq, aExtent, one);
+      dims.push_back(arith::SelectOp::create(b, loc, aIsOne, bExtent, aExtent)
+                         .getResult());
+      continue;
+    }
     bool aCanonical = i >= aPad && aDim != 1;
     bool bCanonical = i >= bPad && bDim != 1;
     bool pickA = aCanonical || (!bCanonical && i >= aPad);
