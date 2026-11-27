@@ -80,8 +80,15 @@ which is empty when `HIPDNN_EP_ROCMLIR` was off, the arch with an
 There is no `+lut=` fingerprint. A provided `HIPDNN_EP_ROCMLIR_AUTOTUNE`
 skips the shipped `tools/problem-cache/lut/*.fb`; when it is unset, the shipped
 table is consulted before the search. `hip-rocmlir-compiler` still honors
-`--problem-cache` / `HIP_ROCMLIR_PROBLEM_CACHE` ahead of the search. The
-provider does not read `HIP_ROCMLIR_PROBLEM_CACHE`. `hip-rocmlir-compiler` and
+`--enable-problem-cache-rw` ahead of the search.
+The flag names a LUT JSON file (the document it writes) and merges the
+compile's search winners back into it; a file it would refuse to rewrite stops
+the compile before it starts; an external `.fb` is never accepted. The
+provider's counterpart of the flag is
+`HIPDNN_EP_ROCMLIR_PROBLEM_CACHE_RW=<file.json>`, which reads and updates the
+file the same way, except that a file it cannot use or update is reported and
+the compile still succeeds. The variable is ignored, with a message, when autotune is off.
+`hip-rocmlir-compiler` and
 the ONNX Runtime provider both read the skip variable: unset or `0`
 benchmarks. A present empty value skips, and so does any other value. Autotune
 otherwise runs for a rocMLIR session. Unset `HIPDNN_EP_ROCMLIR_AUTOTUNE`

@@ -142,6 +142,104 @@ static void dumpModule(mlir::ModuleOp mod, llvm::StringRef label,
                << path << "\n";
 }
 
+// Usage text for --help, and for an unknown or missing option.
+static void printUsage(llvm::raw_ostream &os, const char *prog) {
+  os << "Usage: " << prog
+     << " <input.onnx.mlir|input.hip.mlir> -o <output> [options]\n"
+     << "  Accepts either an ONNX-dialect module (runs the ONNX->HIP head\n"
+     << "  passes) or a module already in the HIP dialect (skips them).\n"
+     << "  Then compiles the fused GEMM via the rocMLIR pipeline (linked\n"
+     << "  in-tree), embeds the GPU binary into hip.rocmlir, runs the\n"
+     << "  ONNX->HIP tail + HIP->LLVM lowering, and emits LLVM bitcode to\n"
+     << "  <output>.\n"
+     << "\n"
+     << "Options:\n"
+     << "  --autotune[=quick|full|exhaustive]\n"
+     << "                       Override the default quick autotune space "
+        "and\n"
+     << "                       embed the fastest GPU candidate. A given\n"
+     << "                       tuning type skips the shipped "
+        "problem-cache\n"
+     << "                       LUT. --enable-problem-cache-rw is still "
+        "consulted\n"
+     << "                       first.\n"
+     << "  --autotune-bench=adaptive|simple\n"
+     << "                       How candidates are timed (default: "
+        "adaptive, or\n"
+     << "                       HIPDNN_EP_ROCMLIR_AUTOTUNE_BENCH). adaptive "
+        "is\n"
+     << "                       MIGraphX's coarse pass plus bundled "
+        "precise pass\n"
+     << "                       over the fastest candidates; simple times "
+        "every\n"
+     << "                       candidate with the two options below.\n"
+     << "  --autotune-warmup <n>\n"
+     << "                       simple only: warmup launches per "
+        "candidate\n"
+     << "                       (default: 20).\n"
+     << "  --autotune-runs <n> simple only: timed launches per candidate\n"
+     << "                       (default: 100).\n"
+     << "                       Lower values get noisy: at 5/20 the same "
+        "kernel\n"
+     << "                       measured 4.2e-02 to 7.5e-02 ms, wider than "
+        "the\n"
+     << "                       differences being searched for.\n"
+     << "  --enable-problem-cache-rw <file.json>\n"
+     << "                       Read and update this LUT JSON (configs,\n"
+     << "                       points, fallbacks). It takes priority over\n"
+     << "                       the search and replaces the shipped table. An\n"
+     << "                       identical problem string is compiled as\n"
+     << "                       stored. A conv miss requires matching arch,\n"
+     << "                       dtype, -F, layouts, stride, dilation, and\n"
+     << "                       fusions, then the nearest M/N/K tile (weights\n"
+     << "                       1) that fits. A tile that fails to compile is\n"
+     << "                       skipped for the next nearest; otherwise the\n"
+     << "                       search runs. After a successful compile the\n"
+     << "                       winners that the search picked are merged\n"
+     << "                       into the file itself, so the next compile\n"
+     << "                       reads them back. Tiles taken from the file\n"
+     << "                       are not written as winners. A missing or\n"
+     << "                       empty file is created. A file that is not a\n"
+     << "                       LUT, is malformed, is for another GPU, is\n"
+     << "                       read-only, is not a regular file, is in a\n"
+     << "                       directory that cannot be written, or is a\n"
+     << "                       FlatBuffer (.fb) stops the compile before it\n"
+     << "                       starts, with the file untouched. A failed\n"
+     << "                       write is a warning. The file is replaced\n"
+     << "                       atomically; with several processes at once\n"
+     << "                       the last writer wins. Needs autotune.\n"
+     << "                       problem_cache_to_fb.py compiles the JSON to a\n"
+     << "                       .fb to ship it as a LUT.\n"
+     << "  --verbose            Print per-config compile/benchmark lines "
+        "and the\n"
+     << "                       selected perfConfig.\n"
+     << "  --dump-hip <file>    Write the hip MLIR after the ONNX->HIP head "
+        "passes\n"
+     << "                       and the rocMLIR fusion, then keep going.\n"
+     << "  --dump-tosa <file>   Write the TOSA MLIR handed to the rocMLIR "
+        "pipeline,\n"
+     << "                       then keep going.\n"
+     << "  --dump-high-level    Stop after the rocMLIR high-level pipeline "
+        "and\n"
+     << "                       write the rock MLIR (text) to <output> "
+        "instead of\n"
+     << "                       the compiled bitcode.\n"
+     << "  Set ROCK_ARCH to override the target GPU arch (default: "
+     << mlir::hip::resolveRocMlirArch() << ").\n"
+     << "  Set HIP_ROCMLIR_SKIP_BENCHMARKING=1 to skip autotune and affix "
+        "the\n"
+     << "  first enumerated perfConfig (same role as "
+        "MIGRAPHX_SKIP_BENCHMARKING).\n"
+     << "  Set HIP_ROCMLIR_COMPILE_JOBS to how many perfConfig compiles "
+        "run\n"
+     << "  at once (default: one per hardware thread). Benchmarks stay\n"
+     << "  serial.\n"
+     << "  Every search config in the model is compiled in one pool, then\n"
+     << "  benchmarked. Repeated rocMLIR problems compile only the winning\n"
+     << "  perfConfig, together in a second pool.\n"
+     << "  -h, --help           Print this help and exit.\n";
+}
+
 int main(int argc, char **argv) {
   hip::install_crash_handlers("hip-rocmlir-compiler");
 
@@ -197,127 +295,55 @@ int main(int argc, char **argv) {
         llvm::errs() << "error: invalid --autotune-warmup value\n";
         return 1;
       }
-    } else if (arg == "--problem-cache" && i + 1 < argc) {
+    } else if (arg == "--enable-problem-cache-rw" && i + 1 < argc &&
+               argv[i + 1][0] != '-') {
       autotune.problemCachePath = argv[++i];
-    } else if (arg == "--dump-problem-cache" && i + 1 < argc) {
-      autotune.problemCacheDumpPath = argv[++i];
+      autotune.problemCacheRewrite = true;
+    } else if (arg == "--enable-problem-cache-rw") {
+      // No value, or the next argument is an option:
+      // `--enable-problem-cache-rw -o out` must not take `-o` as the file. A
+      // path that starts with '-' can be given as ./-name.
+      llvm::errs() << "error: --enable-problem-cache-rw needs a JSON file "
+                      "path\n";
+      return 1;
     } else if (arg == "--autotune-runs" && i + 1 < argc) {
       if (llvm::StringRef(argv[++i]).getAsInteger(10, autotune.measuredRuns) ||
           autotune.measuredRuns == 0) {
         llvm::errs() << "error: --autotune-runs must be greater than zero\n";
         return 1;
       }
+    } else if (arg == "-h" || arg == "--help") {
+      printUsage(llvm::outs(), argv[0]);
+      return 0;
     } else if (argv[i][0] != '-') {
       inputFilename = argv[i];
+    } else {
+      // Anything else starting with '-' is not an option this tool knows,
+      // including a value option whose value is missing (e.g. a trailing -o).
+      llvm::errs() << "error: unknown option '" << arg << "'\n";
+      printUsage(llvm::errs(), argv[0]);
+      return 1;
     }
-  }
-  if (autotune.problemCachePath.empty()) {
-    if (const char *env = std::getenv("HIP_ROCMLIR_PROBLEM_CACHE"))
-      autotune.problemCachePath = env;
   }
   if (mlir::hip::rocMlirSkipBenchmarking())
     autotuneEnabled = false;
 #if !HIP_ROCMLIR_AUTOTUNE
-  if ((autotuneFlagSeen && autotuneEnabled) ||
-      !autotune.problemCacheDumpPath.empty()) {
+  if ((autotuneFlagSeen && autotuneEnabled) || autotune.problemCacheRewrite) {
     llvm::errs() << "error: autotune requires a real HIP build\n";
     return 1;
   }
   autotuneEnabled = false;
 #endif
   // After the stub override. A HIP_ROCMLIR_AUTOTUNE=0 build leaves
-  // autotuneEnabled true until that block, and --problem-cache without
+  // autotuneEnabled true until that block, and a problem cache without
   // --autotune would otherwise be ignored with no warning.
   if (!autotune.problemCachePath.empty() && !autotuneEnabled)
-    llvm::errs() << "warning: problem cache ignored because autotune is off\n";
-  if (!autotune.problemCacheDumpPath.empty() && !autotuneEnabled) {
-    llvm::errs() << "error: --dump-problem-cache requires autotune\n";
-    return 1;
-  }
+    llvm::errs() << "warning: problem cache ignored because autotune is off"
+                 << (autotune.problemCacheRewrite
+                         ? "; the file is not updated\n"
+                         : "\n");
   if (inputFilename.empty() || outputPath.empty()) {
-    llvm::errs()
-        << "Usage: " << argv[0]
-        << " <input.onnx.mlir|input.hip.mlir> -o <output> [options]\n"
-        << "  Accepts either an ONNX-dialect module (runs the ONNX->HIP head\n"
-        << "  passes) or a module already in the HIP dialect (skips them).\n"
-        << "  Then compiles the fused GEMM via the rocMLIR pipeline (linked\n"
-        << "  in-tree), embeds the GPU binary into hip.rocmlir, runs the\n"
-        << "  ONNX->HIP tail + HIP->LLVM lowering, and emits LLVM bitcode to\n"
-        << "  <output>.\n"
-        << "\n"
-        << "Options:\n"
-        << "  --autotune[=quick|full|exhaustive]\n"
-        << "                       Override the default quick autotune space "
-           "and\n"
-        << "                       embed the fastest GPU candidate. A given\n"
-        << "                       tuning type skips the shipped "
-           "problem-cache\n"
-        << "                       LUT. --problem-cache is still consulted "
-           "first.\n"
-        << "  --autotune-bench=adaptive|simple\n"
-        << "                       How candidates are timed (default: "
-           "adaptive, or\n"
-        << "                       HIPDNN_EP_ROCMLIR_AUTOTUNE_BENCH). adaptive "
-           "is\n"
-        << "                       MIGraphX's coarse pass plus bundled "
-           "precise pass\n"
-        << "                       over the fastest candidates; simple times "
-           "every\n"
-        << "                       candidate with the two options below.\n"
-        << "  --autotune-warmup <n>\n"
-        << "                       simple only: warmup launches per "
-           "candidate\n"
-        << "                       (default: 20).\n"
-        << "  --autotune-runs <n> simple only: timed launches per candidate\n"
-        << "                       (default: 100).\n"
-        << "                       Lower values get noisy: at 5/20 the same "
-           "kernel\n"
-        << "                       measured 4.2e-02 to 7.5e-02 ms, wider than "
-           "the\n"
-        << "                       differences being searched for.\n"
-        << "  --problem-cache <file.fb>\n"
-        << "                       Takes priority over the search. Use this\n"
-        << "                       LUT FlatBuffer instead of the shipped\n"
-        << "                       table. An identical problem string is\n"
-        << "                       compiled as stored. HIP_ROCMLIR_PROBLEM_"
-           "CACHE\n"
-        << "                       sets the same path. A conv miss requires\n"
-        << "                       matching arch, dtype, -F, layouts, stride,\n"
-        << "                       dilation, and fusions, then the nearest\n"
-        << "                       M/N/K tile (weights 1) that fits. A tile\n"
-        << "                       that fails to compile is skipped for the\n"
-        << "                       next nearest; otherwise the search runs.\n"
-        << "  --dump-problem-cache <file.json>\n"
-        << "                       After autotune, write the LUT JSON\n"
-        << "                       (configs, points, fallbacks). Compile it\n"
-        << "                       to a .fb with problem_cache_to_fb.py.\n"
-        << "  --verbose            Print per-config compile/benchmark lines "
-           "and the\n"
-        << "                       selected perfConfig.\n"
-        << "  --dump-hip <file>    Write the hip MLIR after the ONNX->HIP head "
-           "passes\n"
-        << "                       and the rocMLIR fusion, then keep going.\n"
-        << "  --dump-tosa <file>   Write the TOSA MLIR handed to the rocMLIR "
-           "pipeline,\n"
-        << "                       then keep going.\n"
-        << "  --dump-high-level    Stop after the rocMLIR high-level pipeline "
-           "and\n"
-        << "                       write the rock MLIR (text) to <output> "
-           "instead of\n"
-        << "                       the compiled bitcode.\n"
-        << "  Set ROCK_ARCH to override the target GPU arch (default: "
-        << mlir::hip::resolveRocMlirArch() << ").\n"
-        << "  Set HIP_ROCMLIR_SKIP_BENCHMARKING=1 to skip autotune and affix "
-           "the\n"
-        << "  first enumerated perfConfig (same role as "
-           "MIGRAPHX_SKIP_BENCHMARKING).\n"
-        << "  Set HIP_ROCMLIR_COMPILE_JOBS to how many perfConfig compiles "
-           "run\n"
-        << "  at once (default: one per hardware thread). Benchmarks stay\n"
-        << "  serial.\n"
-        << "  Every search config in the model is compiled in one pool, then\n"
-        << "  benchmarked. Repeated rocMLIR problems compile only the winning\n"
-        << "  perfConfig, together in a second pool.\n";
+    printUsage(llvm::errs(), argv[0]);
     return 1;
   }
 
@@ -499,6 +525,14 @@ int main(int argc, char **argv) {
       llvm::errs() << "error: autotune could not reach a HIP device\n";
       return 1;
     }
+    // Before the compile, so a file the rewrite would refuse costs nothing
+    // rather than a whole search.
+    std::string cacheError;
+    if (!autotuner->checkProblemCacheFile(cacheError)) {
+      llvm::errs() << "error: --enable-problem-cache-rw: " << cacheError
+                   << "\n";
+      return 1;
+    }
     autotuner->installInto(embedOpts);
   }
 #else
@@ -524,9 +558,15 @@ int main(int argc, char **argv) {
   }
   if (!embedOk)
     return 1;
-  if (autotuner && !autotune.problemCacheDumpPath.empty() &&
-      !autotuner->dumpProblemCache(autotune.problemCacheDumpPath))
-    return 1;
+  // --enable-problem-cache-rw: only after a successful embed, so a failed
+  // compile adds nothing. The file was checked before the compile, so a
+  // failure here is a write error. It is reported, and the compile still
+  // produces its output: the kernels are good, and the file is replaced
+  // atomically, so the previous table is still in place.
+  if (autotuner && autotune.problemCacheRewrite &&
+      !autotuner->updateProblemCacheFile())
+    llvm::errs() << "warning: the problem cache was not updated; the output "
+                    "is written anyway\n";
 
   // Stage 4: run the standard ONNX-to-HIP tail (shape inference, constant
   // externalization, bufferization, output-allocator rewrite, pooling, extern-
