@@ -90,9 +90,18 @@ values; anything else warns and stays on quick.
 That tool writes LLVM bitcode; it does not stamp `Metadata.rocmlir_arch`.
 The perfConfig a kernel was tuned to is baked into its code object, so a tuned
 and an untuned artifact are not interchangeable even on the same GPU.
+Every rocMLIR kernel carries `rock.num_cu`, the device's `multiProcessorCount`
+(WGPs on RDNA; `hip-rocmlir-compiler --num-cu <n>` sets it for offline compiles). It changes the
+tile grouping and which split-K variants the tuning space holds, so a known
+count adds a `+cu=<n>` suffix (`gfx1151+autotune=quick+cu=20`). Full and
+exhaustive tuning add split-K variants of every tile
+(`rock.enable_splitk_for_tuning`) only with `HIPDNN_EP_ROCMLIR_SPLITK=1`, which
+adds `+splitk` to those spaces; quick tuning always searches the quick list as
+is, including its split-K entries. A split-K candidate is timed with
+the zero fill of its output, as at inference.
 `HIPDNN_EP_ROCMLIR_NO_STANDALONE_ELEMENTWISE` adds a `+no-standalone-ew` suffix
 after that, because it changes which ops run as rocMLIR kernels
-(`gfx1151+autotune=quick+no-standalone-ew`). A `+attention` suffix follows
+(`gfx1151+autotune=quick+cu=20+no-standalone-ew`). A `+attention` suffix follows
 when attention merges (the default), as `+attention-f32=<bytes>` when f32
 attention merges above that score size
 (`resolveRocMlirAttentionF32MinScoreBytes`). Whether and where attention was
@@ -104,8 +113,9 @@ The model cache / EPContext identity is derived from the graph alone, so the EP
 refuses to load an artifact whose recorded value differs from the current one;
 delete the cache and recompile after changing GPUs, or toggling
 `HIPDNN_EP_ROCMLIR`, `HIP_ROCMLIR_SKIP_BENCHMARKING`,
-`HIPDNN_EP_ROCMLIR_AUTOTUNE`, `HIPDNN_EP_ROCMLIR_NO_ATTENTION`, or
-`HIPDNN_EP_ROCMLIR_ATTENTION_F32_MIN_SCORE_BYTES`. Compilation
+`HIPDNN_EP_ROCMLIR_AUTOTUNE`, `HIPDNN_EP_ROCMLIR_NO_ATTENTION`,
+`HIPDNN_EP_ROCMLIR_ATTENTION_F32_MIN_SCORE_BYTES`, or
+`HIPDNN_EP_ROCMLIR_SPLITK`. Compilation
 fails outright if autotune is on but no HIP device could be reached, so the
 suffix never claims tuning that did not happen.
 

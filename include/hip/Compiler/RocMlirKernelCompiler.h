@@ -73,6 +73,9 @@ using RocMlirFinishCompilesFn =
 
 struct RocMlirEmbedOptions {
   std::string arch;
+  // Stamped as rock.num_cu on every kernel; 0 leaves it unset (rocMLIR then
+  // assumes the arch's minimum CU count).
+  int64_t numCU = 0;
   // Per-kernel progress. Null keeps the compile silent, which is what the EP
   // wants: its compiles happen inside ORT session creation.
   llvm::raw_ostream *log = nullptr;
@@ -111,6 +114,14 @@ int64_t resolveRocMlirAttentionF32MinScoreBytes(StringRef arch);
 // first.
 void setRocMlirAttentionOptions(FuseRocMlirAnchorPassOptions &options);
 
+// The compute-unit count rocMLIR should tune for: the device's
+// multiProcessorCount (WGPs on RDNA), or 0 when no device answers.
+int64_t resolveRocMlirNumCU();
+
+// Whether full and exhaustive tuning may add split-K variants of every tile
+// (rock.enable_splitk_for_tuning). Off unless HIPDNN_EP_ROCMLIR_SPLITK is on.
+bool rocMlirSplitKTuningEnabled();
+
 // The gemm element types, printed as in IR (f16, bf16, ...), that `arch`
 // runs on matrix cores, for the rocMLIR fusion's gemm-gemm-accel-types option.
 std::vector<std::string> getRocMlirGemmAccelTypes(MLIRContext &context,
@@ -134,10 +145,12 @@ OwningOpRef<ModuleOp> buildRocMlirTosaClone(ModuleOp module);
 // kernels are IsolatedFromAbove and carry `rock.arch` on the func, so nothing
 // from the enclosing module needs to come with them. \p arch, when non-empty,
 // replaces the fixed `rock.arch` the rocMLIR fusion wrote, so the tuning passes
-// see the chip the backend is targeting. Returns an empty module when there are
-// no kernels, null on failure.
+// see the chip the backend is targeting. \p numCU, when positive, is stamped
+// as `rock.num_cu`. Returns an empty module when there are no kernels, null on
+// failure.
 OwningOpRef<ModuleOp> takeRocMlirKernelsAsTosaModule(ModuleOp module,
-                                                     StringRef arch = {});
+                                                     StringRef arch = {},
+                                                     int64_t numCU = 0);
 
 // Split one func back out of the module returned above into its own
 // single-func module, which is the shape the rock pipelines want. Another
