@@ -55,6 +55,9 @@ KERNELS = HERE.parent  # lib/Runtime/Kernels
 # Wave32 VGPRs per SIMD, as HIPDNN_VGPRS_PER_SIMD in include/hip_arch_compat.h;
 # every other arch (and gfx11-generic) has 1024.
 VGPRS_PER_SIMD = {"gfx1100": 1536, "gfx1101": 1536, "gfx1151": 1536}
+# The slices built with MMQ's device code, as HIP_KQUANT_MMQ_DEVICE_ENABLED in
+# ../CMakeLists.txt.
+KQUANT_MMQ_DEVICE_ARCHS = ("gfx1151", "gfx11-generic")
 REMARKS = {"VGPRs": 0, "ScratchSize [bytes/lane]": 1, "VGPRs Spill": 2, "Occupancy [waves/SIMD]": 3}
 NAMES = ("vgpr", "scratch", "vgpr_spill", "occupancy", "insns", "lds_loads", "lds_load_bytes")
 LABEL = re.compile(r"^(_Z\w+):")
@@ -96,6 +99,8 @@ def product_flags(arch):
         flags += ["-I", str(KERNELS / inc)]
     # hip/kquant_abi.h, shared with the compiler.
     flags += ["-I", str(KERNELS.parents[2] / "include")]
+    # The ggml kernels as a HIPDNN_EP_BUILD_GGML build compiles them.
+    flags.append(f"-DHIP_KQUANT_MMQ_DEVICE_ENABLED={int(arch in KQUANT_MMQ_DEVICE_ARCHS)}")
     return flags
 
 

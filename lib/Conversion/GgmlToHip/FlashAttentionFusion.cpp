@@ -24,43 +24,6 @@ static bool hasPermutation(ggml::PermuteOp op, ArrayRef<int64_t> expected) {
   return true;
 }
 
-/// Returns the destination rows written by the cache update that produced
-/// `keyCache`, or a null value when the chain cannot be proved.
-///
-/// The rows let the kernel traverse only the live part of the cache. Anything
-/// this function cannot prove leaves the operand absent, which keeps the
-/// previous whole-cache traversal.
-static Value cacheUpdateRows(Value keyCache) {
-  // The key operand reaches attention through layout-only views of the
-  // updated cache. Walk a bounded chain of them; a longer or unexpected chain
-  // is not proof that the rows describe this cache.
-  constexpr int kMaximumViewDepth = 4;
-  Value current = keyCache;
-  for (int depth = 0; depth <= kMaximumViewDepth; ++depth) {
-    Operation *producer = current.getDefiningOp();
-    if (!producer)
-      return Value();
-    if (auto setRows = dyn_cast<ggml::SetRowsOp>(producer)) {
-      Value indices = setRows.getIndices();
-      auto indicesType = dyn_cast<RankedTensorType>(indices.getType());
-      if (!indicesType || indicesType.getRank() != 4 ||
-          !indicesType.getElementType().isSignlessInteger(64)) {
-        return Value();
-      }
-      for (int64_t dimension = 0; dimension < 3; ++dimension) {
-        if (indicesType.getDimSize(dimension) != 1)
-          return Value();
-      }
-      return indices;
-    }
-    if (!isa<ggml::PermuteOp, ggml::ViewOp, ggml::ReshapeOp, tensor::ReshapeOp>(
-            producer))
-      return Value();
-    current = producer->getOperand(0);
-  }
-  return Value();
-}
-
 /// Prove the result extents of a candidate layout-only permutation. The
 /// BSHD/BNSH permutation used here is self-inverse, so the GGML axes attribute
 /// and MLIR output-to-input dimension map are both [0, 2, 1, 3].
@@ -205,9 +168,13 @@ struct FuseFlashAttentionLayout final
     if (!init)
       return failure();
 
+    // The rows this step's cache update writes do not bound the rows its
+    // queries see: llama.cpp reuses freed cells (seq_rm moves the head back),
+    // so a step can write below cells that are still live. Without
+    // written_rows the kernel reads the extent off the mask.
     auto fused = TokenMajorGqaOp::create(
         rewriter, op.getLoc(), TypeRange{resultType}, *context, query, key,
-        value, mask, cacheUpdateRows(key), init, op.getScaleAttr());
+        value, mask, /*written_rows=*/Value(), init, op.getScaleAttr());
     copyGgmlResultProvenanceAttrs(op, fused);
 
     rewriter.replaceOp(op, fused.getResultTensors());
