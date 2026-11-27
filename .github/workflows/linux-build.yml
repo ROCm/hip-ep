@@ -167,9 +167,9 @@ jobs:
           echo "ref=$LLVM_REF" >> "$GITHUB_OUTPUT"
           echo "commit=$LLVM_COMMIT" >> "$GITHUB_OUTPUT"
 
-      - name: Cache LLVM install prefix
+      - name: Restore LLVM install prefix
         id: cache-llvm
-        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ runner.workspace }}/llvm-install
           # Keyed on the pinned commit: a protobuf/ORT bump must not
@@ -212,6 +212,14 @@ jobs:
           cmake --build "${{ runner.workspace }}/build-llvm" --target install-distribution
           du -sh "${{ runner.workspace }}"/llvm-install/{bin,include,lib}
           rm -rf "$SRC" "${{ runner.workspace }}/build-llvm"
+
+      # Preserve the completed LLVM build even if a downstream step fails.
+      - name: Save LLVM install prefix
+        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: ${{ runner.workspace }}/llvm-install
+          key: ${{ steps.cache-llvm.outputs.cache-primary-key }}
 
       # -----------------------------------------------------------------------
       # ONNX Runtime built from source into ort-install (cached): checkout ->
