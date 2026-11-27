@@ -90,3 +90,60 @@ func.func @gdn_bad_state_type(%ctx: !hip.context,
       : tensor<1x1x4x16xf16>, tensor<1x4x16x32xf32>
   return %r#0, %r#1 : tensor<1x1x4x16xf16>, tensor<1x4x16x32xf32>
 }
+
+// -----
+
+func.func @gdn_varlen_bad_cu_size(%ctx: !hip.context,
+    %qkv: tensor<5x128xf16>, %decay: tensor<5x4xf32>,
+    %beta: tensor<5x4xf32>, %cu: tensor<4xi32>, %state: tensor<2x4x16x32xf32>,
+    %a_log: tensor<4xf32>, %dt_bias: tensor<4xf32>,
+    %out: tensor<5x4x16xf16>, %final: tensor<2x4x16x32xf32>)
+    -> (tensor<5x4x16xf16>, tensor<2x4x16x32xf32>) {
+  // expected-error @+1 {{cumulative_sequence_length must have batch + 1 = 3 entries, got 4}}
+  %r:2 = hip.gated_delta_net(%ctx)
+      ins(%qkv, %decay, %beta, %state, %a_log, %dt_bias :
+          tensor<5x128xf16>, tensor<5x4xf32>, tensor<5x4xf32>,
+          tensor<2x4x16x32xf32>, tensor<4xf32>, tensor<4xf32>)
+      cu(%cu : tensor<4xi32>)
+      outs(%out, %final : tensor<5x4x16xf16>, tensor<2x4x16x32xf32>)
+      : tensor<5x4x16xf16>, tensor<2x4x16x32xf32>
+  return %r#0, %r#1 : tensor<5x4x16xf16>, tensor<2x4x16x32xf32>
+}
+
+// -----
+
+func.func @gdn_cu_requires_rank2_qkv(%ctx: !hip.context,
+    %qkv: tensor<1x5x128xf16>, %decay: tensor<1x5x4xf32>,
+    %beta: tensor<1x5x4xf32>, %cu: tensor<3xi32>, %state: tensor<2x4x16x32xf32>,
+    %a_log: tensor<4xf32>, %dt_bias: tensor<4xf32>,
+    %out: tensor<5x4x16xf16>, %final: tensor<2x4x16x32xf32>)
+    -> (tensor<5x4x16xf16>, tensor<2x4x16x32xf32>) {
+  // expected-error @+1 {{qkv must be rank 2, got rank 3}}
+  %r:2 = hip.gated_delta_net(%ctx)
+      ins(%qkv, %decay, %beta, %state, %a_log, %dt_bias :
+          tensor<1x5x128xf16>, tensor<1x5x4xf32>, tensor<1x5x4xf32>,
+          tensor<2x4x16x32xf32>, tensor<4xf32>, tensor<4xf32>)
+      cu(%cu : tensor<3xi32>)
+      outs(%out, %final : tensor<5x4x16xf16>, tensor<2x4x16x32xf32>)
+      : tensor<5x4x16xf16>, tensor<2x4x16x32xf32>
+  return %r#0, %r#1 : tensor<5x4x16xf16>, tensor<2x4x16x32xf32>
+}
+
+// -----
+
+func.func @gdn_cu_not_i32(%ctx: !hip.context,
+    %qkv: tensor<5x128xf16>, %decay: tensor<5x4xf32>,
+    %beta: tensor<5x4xf32>, %cu: tensor<3xi64>, %state: tensor<2x4x16x32xf32>,
+    %a_log: tensor<4xf32>, %dt_bias: tensor<4xf32>,
+    %out: tensor<5x4x16xf16>, %final: tensor<2x4x16x32xf32>)
+    -> (tensor<5x4x16xf16>, tensor<2x4x16x32xf32>) {
+  // expected-error @+1 {{cumulative_sequence_length must be i32, got 'i64'}}
+  %r:2 = hip.gated_delta_net(%ctx)
+      ins(%qkv, %decay, %beta, %state, %a_log, %dt_bias :
+          tensor<5x128xf16>, tensor<5x4xf32>, tensor<5x4xf32>,
+          tensor<2x4x16x32xf32>, tensor<4xf32>, tensor<4xf32>)
+      cu(%cu : tensor<3xi64>)
+      outs(%out, %final : tensor<5x4x16xf16>, tensor<2x4x16x32xf32>)
+      : tensor<5x4x16xf16>, tensor<2x4x16x32xf32>
+  return %r#0, %r#1 : tensor<5x4x16xf16>, tensor<2x4x16x32xf32>
+}

@@ -61,3 +61,83 @@ func.func @state_channels_mismatch(%ctx: !hip.context,
        state_channels_last = true}
   return
 }
+
+// -----
+
+func.func @varlen_cumulative_length_mismatch(%ctx: !hip.context,
+    %input: memref<6x4xf16, 1>, %weight: memref<4x1x4xf16, 1>,
+    %cumulative: memref<4xi32, 1>, %state: memref<2x4x3xf16, 1>,
+    %output: memref<6x4xf16, 1>, %final: memref<2x4x3xf16, 1>) {
+  // expected-error @+1 {{cumulative_sequence_length must have batch + 1 entries}}
+  hip.varlen_causal_conv_with_state(%ctx)
+      ins(%input, %weight, %cumulative, %state :
+          memref<6x4xf16, 1>, memref<4x1x4xf16, 1>, memref<4xi32, 1>,
+          memref<2x4x3xf16, 1>)
+      outs(%output, %final : memref<6x4xf16, 1>, memref<2x4x3xf16, 1>)
+      {activation = "silu"}
+  return
+}
+
+// -----
+
+func.func @varlen_output_shape_mismatch(%ctx: !hip.context,
+    %input: memref<6x4xf16, 1>, %weight: memref<4x1x4xf16, 1>,
+    %cumulative: memref<3xi32, 1>, %state: memref<2x4x3xf16, 1>,
+    %output: memref<5x4xf16, 1>, %final: memref<2x4x3xf16, 1>) {
+  // expected-error @+1 {{output shape must match the input shape}}
+  hip.varlen_causal_conv_with_state(%ctx)
+      ins(%input, %weight, %cumulative, %state :
+          memref<6x4xf16, 1>, memref<4x1x4xf16, 1>, memref<3xi32, 1>,
+          memref<2x4x3xf16, 1>)
+      outs(%output, %final : memref<5x4xf16, 1>, memref<2x4x3xf16, 1>)
+      {activation = "silu"}
+  return
+}
+
+// -----
+
+func.func @varlen_element_type_mismatch(%ctx: !hip.context,
+    %input: memref<6x4xf16, 1>, %weight: memref<4x1x4xf32, 1>,
+    %cumulative: memref<3xi32, 1>, %state: memref<2x4x3xf16, 1>,
+    %output: memref<6x4xf16, 1>, %final: memref<2x4x3xf16, 1>) {
+  // expected-error @+1 {{weight element type must match the input element type}}
+  hip.varlen_causal_conv_with_state(%ctx)
+      ins(%input, %weight, %cumulative, %state :
+          memref<6x4xf16, 1>, memref<4x1x4xf32, 1>, memref<3xi32, 1>,
+          memref<2x4x3xf16, 1>)
+      outs(%output, %final : memref<6x4xf16, 1>, memref<2x4x3xf16, 1>)
+      {activation = "silu"}
+  return
+}
+
+// -----
+
+func.func @varlen_weight_channels_mismatch(%ctx: !hip.context,
+    %input: memref<6x4xf16, 1>, %weight: memref<5x1x4xf16, 1>,
+    %cumulative: memref<3xi32, 1>, %state: memref<2x4x3xf16, 1>,
+    %output: memref<6x4xf16, 1>, %final: memref<2x4x3xf16, 1>) {
+  // expected-error @+1 {{weight channels must match the input}}
+  hip.varlen_causal_conv_with_state(%ctx)
+      ins(%input, %weight, %cumulative, %state :
+          memref<6x4xf16, 1>, memref<5x1x4xf16, 1>, memref<3xi32, 1>,
+          memref<2x4x3xf16, 1>)
+      outs(%output, %final : memref<6x4xf16, 1>, memref<2x4x3xf16, 1>)
+      {activation = "silu"}
+  return
+}
+
+// -----
+
+func.func @varlen_state_len_mismatch(%ctx: !hip.context,
+    %input: memref<6x4xf16, 1>, %weight: memref<4x1x4xf16, 1>,
+    %cumulative: memref<3xi32, 1>, %state: memref<2x4x2xf16, 1>,
+    %output: memref<6x4xf16, 1>, %final: memref<2x4x2xf16, 1>) {
+  // expected-error @+1 {{initial_state dim 2 must be (kernel_size - 1) * dilation = 3}}
+  hip.varlen_causal_conv_with_state(%ctx)
+      ins(%input, %weight, %cumulative, %state :
+          memref<6x4xf16, 1>, memref<4x1x4xf16, 1>, memref<3xi32, 1>,
+          memref<2x4x2xf16, 1>)
+      outs(%output, %final : memref<6x4xf16, 1>, memref<2x4x2xf16, 1>)
+      {activation = "silu"}
+  return
+}

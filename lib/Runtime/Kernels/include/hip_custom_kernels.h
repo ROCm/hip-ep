@@ -4040,27 +4040,45 @@ HIP_KERNEL_API int hip_causal_conv_nlc_state(
     int64_t activation,
     int64_t element_size_bytes);
 
+// Packed token-major causal depthwise conv. input/output are
+// [total_tokens, channels]; weight is [channels, 1, kernel_size];
+// cumulative_sequence_length is device int32 [batch + 1]; both states are
+// [batch, channels, (kernel_size - 1) * dilation] and may alias. activation
+// 0/1, element_size 2/4. Returns 0 on success.
+HIP_KERNEL_API int hip_varlen_causal_conv(
+    void *stream, const void *input, const void *weight,
+    const void *cumulative_sequence_length, const void *bias,
+    const void *initial_state, void *output, void *final_state,
+    int64_t total_tokens, int64_t channels, int64_t batch, int64_t kernel_size,
+    int64_t dilation, int64_t state_len, int64_t activation,
+    int64_t element_size_bytes);
+
 // com.microsoft GatedDeltaNet with packed QKV, gate_activation=qwen,
 // beta_activation=sigmoid, qk_l2_norm=1, update_rule=gated_delta.
-//   qkv           [B, L, 2*Hqk*dk + Hv*dv]   T = fp16 / fp32 (element_size_bytes)
-//   decay, beta   [B, L, Hv]                 fp32, raw projections
+//   qkv           [T, 2*Hqk*dk + Hv*dv]      T = fp16 / fp32 (element_size_bytes)
+//   decay, beta   [T, Hv]                    fp32, raw projections
 //   initial_state [B, Hv, dv, dk]            fp32, may alias final_state
 //   a_log, dt_bias [Hv]                      fp32
-//   output        [B, L, Hv, dv]             T
+//   output        [T, Hv, dv]                T
 //   final_state   [B, Hv, dv, dk]            fp32
+// T is the total token count. cumulative_sequence_length is int32 device
+// memory of length batch + 1: request b owns tokens [cu[b], cu[b+1]), and a
+// request whose range is empty or out of bounds leaves its state unchanged.
+// When it is null every request has T / batch tokens.
 // dk must be 32, 64, 128 or 256 and Hv a multiple of Hqk.
 HIP_KERNEL_API int hip_gated_delta_net(
     void* stream,
     const void* qkv,
     const float* decay,
     const float* beta,
+    const void* cumulative_sequence_length,
     const float* initial_state,
     const float* a_log,
     const float* dt_bias,
     void* output,
     float* final_state,
+    int64_t total_tokens,
     int64_t batch,
-    int64_t seq_len,
     int64_t num_heads_qk,
     int64_t num_heads_v,
     int64_t head_size_qk,
@@ -4362,6 +4380,23 @@ HIP_KERNEL_API int hip_gemv_f16_kn(void* stream, const void* a, const void* B,
  */
 HIP_KERNEL_API int hip_gemm_wmma_fp16(void* stream, const void* A, const void* B,
                        void* C, int M, int K, int N);
+
+/* fp16 causal paged attention. Metadata pointers may be host or device memory.
+ * scratch is device memory of at least hip_paged_attention_scratch_bytes()
+ * bytes for the same shape; it stages the metadata and holds the key-range
+ * slice partials, and must stay untouched until the stream has consumed the
+ * launch. key_cache and value_cache are updated in place; the caller supplies
+ * the buffers to update. */
+HIP_KERNEL_API size_t hip_paged_attention_scratch_bytes(
+    int64_t num_heads, int64_t kv_num_heads, int64_t num_tokens,
+    int64_t head_size, int64_t batch, int64_t block_size, int64_t max_blocks);
+HIP_KERNEL_API int hip_paged_attention(
+    void *stream, const void *query, const void *key, const void *value,
+    void *key_cache, void *value_cache, const void *cumulative_sequence_length,
+    const void *past_seqlens, const void *block_table, void *output,
+    int64_t num_heads, int64_t kv_num_heads, int64_t num_tokens,
+    int64_t head_size, int64_t batch, int64_t num_blocks, int64_t block_size,
+    int64_t max_blocks, float scale, void *scratch, size_t scratch_bytes);
 
 #ifdef __cplusplus
 }

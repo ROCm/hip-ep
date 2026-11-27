@@ -149,4 +149,33 @@ module {
   // CHECK-NOT: hip.gated_delta_net
   // CHECK: "onnx.Custom"
   // CHECK-SAME: qk_l2_norm = 0 : si64
+
+  func.func @gdn_varlen(
+      %qkv: tensor<?x10240xf16>,
+      %cu: tensor<?xi32>,
+      %decay: tensor<?x48xf32>,
+      %beta: tensor<?x48xf32>,
+      %state: tensor<?x48x128x128xf32>,
+      %a_log: tensor<48xf32>,
+      %dt_bias: tensor<48xf32>
+  ) -> (tensor<?x48x128xf16>, tensor<?x48x128x128xf32>) {
+    %none = "onnx.NoValue"() {value} : () -> none
+    %out, %final = "onnx.Custom"(%qkv, %none, %none, %cu, %decay, %beta, %state, %a_log, %dt_bias) {
+      function_name = "GatedDeltaNet",
+      domain_name = "com.microsoft",
+      update_rule = "gated_delta",
+      gate_activation = "qwen",
+      beta_activation = "sigmoid",
+      qk_l2_norm = 1 : si64,
+      scale = 0.0 : f32,
+      chunk_size = 64 : si64
+    } : (tensor<?x10240xf16>, none, none, tensor<?xi32>, tensor<?x48xf32>, tensor<?x48xf32>, tensor<?x48x128x128xf32>, tensor<48xf32>, tensor<48xf32>)
+      -> (tensor<?x48x128xf16>, tensor<?x48x128x128xf32>)
+    return %out, %final : tensor<?x48x128xf16>, tensor<?x48x128x128xf32>
+  }
+
+  // CHECK-LABEL: func.func @gdn_varlen
+  // CHECK: %[[T:.*]] = tensor.dim %{{.*}}, %{{.*}} : tensor<?x10240xf16>
+  // CHECK: %[[OUT:.*]] = tensor.empty(%[[T]]) : tensor<?x48x128xf16>
+  // CHECK: %[[R:.*]]:2 = hip.gated_delta_net(%{{.*}}) ins(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}} : tensor<?x10240xf16>, tensor<?x48xf32>, tensor<?x48xf32>, tensor<?x48x128x128xf32>, tensor<48xf32>, tensor<48xf32>) cu(%{{.*}} : tensor<?xi32>) outs(%[[OUT]], %{{.*}} : tensor<?x48x128xf16>, tensor<?x48x128x128xf32>)
 }
