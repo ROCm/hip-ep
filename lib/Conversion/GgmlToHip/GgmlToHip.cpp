@@ -86,6 +86,33 @@ static LogicalResult verifySupportedStorage(ModuleOp module) {
   return failure(walked.wasInterrupted());
 }
 
+/// The code is handed an input's data and extents, not its strides, and every
+/// pattern reads an input row-major. A copy the ggml scheduler makes of a
+/// permuted or strided view keeps that view's strides (ggml_dup_tensor_layout;
+/// ggml-symbolize-shapes accepts the permuted ones), so an input that is read
+/// must be proven dense.
+static LogicalResult verifyRowMajorInputs(ModuleOp module) {
+  WalkResult walked = module.walk([](func::FuncOp function) {
+    if (function.getBody().empty())
+      return WalkResult::advance();
+    for (BlockArgument argument : function.getBody().front().getArguments()) {
+      if (argument.use_empty() || hasDenseInputEvidence(argument))
+        continue;
+      InFlightDiagnostic diagnostic = function.emitOpError("function input ");
+      diagnostic << argument.getArgNumber();
+      if (auto name = function.getArgAttrOfType<StringAttr>(
+              argument.getArgNumber(), "ggml.source_name"))
+        diagnostic << " (" << name << ")";
+      diagnostic << " is not proven dense in row-major order: "
+                 << argument.getType()
+                 << "; HIP lowering reads inputs without their strides";
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+  return failure(walked.wasInterrupted());
+}
+
 /// Takes each value's layout out of its type and leaves it beside the operation
 /// that produced it.
 ///
@@ -434,6 +461,7 @@ struct ConvertGgmlToHipPass
 
     if (failed(lowerPackedRuntimeWeights(module)) ||
         failed(verifySupportedStorage(module)) ||
+        failed(verifyRowMajorInputs(module)) ||
         failed(generateModuleMetadata(module))) {
       signalPassFailure();
       return;
