@@ -48,6 +48,14 @@ void registerElementMoveExternalModels(DialectRegistry &registry);
 
 namespace mlir {
 namespace hip {
+/// Values of the `pool_mode` attribute of `hip.pool`. They are also the
+/// HIPDNN_EP_POOL_* values of the runtime (lib/Runtime/hipdnn_ep_runtime.h),
+/// which compiler code does not include: the runtime keeps its own copy, so
+/// a new mode is added there and here together.
+inline constexpr int64_t kPoolAverage = 0;
+inline constexpr int64_t kPoolMax = 1;
+inline constexpr int64_t kPoolLp = 2;
+
 /// Discardable attribute names stamped on `hip.alloc_output` by
 /// `hip-use-output-allocator` and consumed by `AllocOutputOpLowering`. They
 /// describe the ONNX / func.return ("ABI") output shape when it differs from

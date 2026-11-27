@@ -56,12 +56,6 @@ namespace {
 //                        ceil_mode = 0, storage_order = 0,
 //                        count_include_pad = 1, p = 2}
 
-// Reduction-mode tags.  Values mirror HIPDNN_EP_POOL_* in
-// lib/Runtime/hipdnn_ep_runtime.h and kPool* in HipToLLVMUtils.h.
-constexpr int64_t kPoolAverage = 0;
-constexpr int64_t kPoolMax = 1;
-constexpr int64_t kPoolLp = 2;
-
 struct PoolToHip : public mlir::RewritePattern {
   int64_t poolMode;
   PoolToHip(mlir::MLIRContext *ctx, llvm::StringRef onnxName, int64_t mode)

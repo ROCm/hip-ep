@@ -238,12 +238,8 @@ inline constexpr int64_t kQMoEActivationRelu2 = 5;
 inline constexpr int64_t kQMoERoutingSoftmax = 0;
 inline constexpr int64_t kQMoERoutingSigmoidBias = 1;
 
-// Window-pool reduction mode constants (hip.pool / wrap_pool).
-// Values must match HIPDNN_EP_POOL_* in lib/Runtime/hipdnn_ep_runtime.h
-// and the `pool_mode` constants used in OnnxToHip/PoolConversion.cpp.
-inline constexpr int64_t kPoolAverage = 0;
-inline constexpr int64_t kPoolMax = 1;
-inline constexpr int64_t kPoolLp = 2;
+// The window-pool modes (hip.pool / wrap_pool), kPoolAverage, kPoolMax and
+// kPoolLp, are defined in hip/Dialect/IR/HipDialect.h.
 // Global-pool reduction mode constants.
 // Values must match HIPDNN_EP_GLOBAL_POOL_* in lib/Runtime/hipdnn_ep_runtime.h
 // and the `mode` constants used in OnnxToHip/GlobalPoolConversion.cpp.

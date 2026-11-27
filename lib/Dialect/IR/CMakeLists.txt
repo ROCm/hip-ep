@@ -11,6 +11,7 @@ add_library(HipDialectIR STATIC
   HipDpsOpInterface.cpp
   HipElementMoveInterface.cpp
   HipOpStateInterface.cpp
+  HipPoolCanonicalize.cpp
   RuntimeAccessOpInterface.cpp
   HipReadbackCanonicalize.cpp
   HipReifyResultShapesImpl.cpp

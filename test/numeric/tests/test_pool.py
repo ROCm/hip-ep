@@ -17,6 +17,8 @@ The cases cover the three pool kernels by shape:
   is 0, dilation, count_include_pad, LpPool, and fp16.
 * Everything else, and MaxPool with argmax indices: the one-thread-per-output
   kernel.
+* An average pool whose one window covers the whole input does not reach a pool
+  kernel: the compiler turns it into a mean over the spatial dims.
 """
 
 import numpy as np
@@ -160,6 +162,45 @@ WIDE_IDS = [
 ]
 
 
+# Average pools whose one window covers the whole input (the compiler turns
+# them into a mean over the spatial dims). A kernel larger than the input is
+# only legal with ceil_mode; either count_include_pad mode then divides by the
+# number of input elements.
+WHOLE_INPUT_CASES = [
+    ([2, 32, 7, 7], dict(kernel_shape=[7, 7], strides=[7, 7])),
+    ([1, 5, 9, 4], dict(kernel_shape=[9, 4], strides=[1, 1])),
+    ([2, 8, 7, 7], dict(kernel_shape=[9, 9], strides=[9, 9], ceil_mode=1)),
+    (
+        [1, 8, 7, 7],
+        dict(kernel_shape=[9, 9], strides=[9, 9], ceil_mode=1, count_include_pad=1),
+    ),
+    ([1, 4, 5, 3], dict(kernel_shape=[32, 32], strides=[32, 32], ceil_mode=1)),
+    (
+        [1, 4, 5, 3],
+        dict(kernel_shape=[32, 32], strides=[32, 32], ceil_mode=1, count_include_pad=1),
+    ),
+    ([2, 6, 10], dict(kernel_shape=[10], strides=[10])),
+    ([2, 6, 10], dict(kernel_shape=[12], strides=[12], ceil_mode=1)),
+    (
+        [2, 6, 10],
+        dict(kernel_shape=[12], strides=[12], ceil_mode=1, count_include_pad=1),
+    ),
+    ([1, 3, 4, 5, 6], dict(kernel_shape=[4, 5, 6], strides=[1, 1, 1])),
+]
+WHOLE_INPUT_IDS = [
+    "global7x7",
+    "global9x4",
+    "larger_ceil",
+    "larger_ceil_include_pad",
+    "much_larger_ceil",
+    "much_larger_ceil_include_pad",
+    "1d",
+    "1d_larger_ceil",
+    "1d_larger_ceil_include_pad",
+    "3d",
+]
+
+
 class TestPool:
     @pytest.mark.parametrize("dtype", [np.float32, np.float16], ids=["fp32", "fp16"])
     @pytest.mark.parametrize("op, shape, attrs", SMALL_CASES, ids=SMALL_IDS)
@@ -189,6 +230,48 @@ class TestPool:
         model = _make_pool_model("AveragePool", shape, np.float16, attrs)
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=2e-2, rtol=2e-2)
+
+    @pytest.mark.parametrize("dtype", [np.float32, np.float16], ids=["fp32", "fp16"])
+    @pytest.mark.parametrize("shape, attrs", WHOLE_INPUT_CASES, ids=WHOLE_INPUT_IDS)
+    def test_avgpool_whole_input(self, model_runner, shape, attrs, dtype):
+        rng = np.random.default_rng(66)
+        x = rng.uniform(-3, 3, shape).astype(dtype)
+        model = _make_pool_model("AveragePool", shape, dtype, attrs)
+        actual, expected = model_runner.run_sample(model, [x])
+        tol = 2e-3 if dtype == np.float16 else 1e-5
+        compare_outputs(actual, expected, atol=tol, rtol=tol)
+
+    @pytest.mark.parametrize("dtype", [np.float32, np.float16], ids=["fp32", "fp16"])
+    def test_global_average_pool(self, model_runner, dtype):
+        shape = [2, 32, 7, 7]
+        tp = np_to_onnx_type(dtype)
+        X = helper.make_tensor_value_info("X", tp, shape)
+        Y = helper.make_tensor_value_info("Y", tp, [2, 32, 1, 1])
+        node = helper.make_node("GlobalAveragePool", ["X"], ["Y"])
+        model = make_model_from_nodes([node], [X], [Y], opset=19)
+        rng = np.random.default_rng(67)
+        x = rng.uniform(-3, 3, shape).astype(dtype)
+        actual, expected = model_runner.run_sample(model, [x])
+        tol = 2e-3 if dtype == np.float16 else 1e-5
+        compare_outputs(actual, expected, atol=tol, rtol=tol)
+
+    @pytest.mark.parametrize("batch", [1, 3])
+    @pytest.mark.parametrize("dtype", [np.float32, np.float16], ids=["fp32", "fp16"])
+    def test_avgpool_whole_input_dynamic_batch(self, model_runner, batch, dtype):
+        """The batch stays dynamic through the rewrite; spatial extents are static."""
+        tp = np_to_onnx_type(dtype)
+        X = helper.make_tensor_value_info("X", tp, ["batch", 16, 7, 7])
+        Y = helper.make_tensor_value_info("Y", tp, ["batch", 16, 1, 1])
+        node = helper.make_node(
+            "AveragePool", ["X"], ["Y"], kernel_shape=[7, 7], strides=[7, 7]
+        )
+        model = make_model_from_nodes([node], [X], [Y], opset=19)
+        rng = np.random.default_rng(68)
+        x = rng.uniform(-3, 3, [batch, 16, 7, 7]).astype(dtype)
+        actual, expected = model_runner.run_sample(model, [x])
+        assert actual[0].shape == (batch, 16, 1, 1)
+        tol = 2e-3 if dtype == np.float16 else 1e-5
+        compare_outputs(actual, expected, atol=tol, rtol=tol)
 
     def test_maxpool_with_indices(self, model_runner):
         """Argmax indices keep the one-thread-per-output kernel."""
