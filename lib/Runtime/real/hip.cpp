@@ -137,7 +137,8 @@ int wrap_hipStreamSynchronize(void *stream) {
 // The strategy below has three tiers:
 //   1. Fast path (both sides fully contiguous): one hipMemcpyAsync.
 //   2. Single outer non-contiguous dim (the canonical Concat-on-last-axis
-//      pattern): one hipMemcpy2DAsync using GPU DMA, no kernel launch.
+//      pattern): one strided-copy kernel for small copies, otherwise one
+//      hipMemcpy2DAsync on the GPU DMA engine.
 //   3. General case (outer rank >= 2): walk the outer index space and
 //      issue one hipMemcpyAsync per row. Per-row copies are correct for
 //      any rank and stride pattern; if a future hotspot lands here we
@@ -235,12 +236,20 @@ extern "C" void memrefCopy(int64_t elemSize, UnrankedMemRefHeader *src,
   // Tier 2: exactly one outer dim — hipMemcpy2DAsync handles strided
   // destinations natively. This is the canonical Concat-axis-last on
   // rank-2 (and on higher ranks when only the concat axis breaks
-  // contiguity) — the GPU DMA engine performs the strided copy with no
-  // kernel launch overhead.
+  // contiguity). Large copies use the GPU DMA engine. A copy small enough to
+  // be latency-bound runs as a kernel instead: a DMA transfer queued between
+  // two compute kernels makes the stream switch engines and wait on each
+  // switch, which costs far more than the copy itself.
   if (rowStart == 1) {
     int64_t height = srcSizes[0];
     int64_t srcPitch = srcStrides[0] * elemSize;
     int64_t dstPitch = dstStrides[0] * elemSize;
+    constexpr int64_t kKernelCopyMaxBytes = 4 << 20;
+    if (rowBytes * height <= kKernelCopyMaxBytes &&
+        hip_strided_copy(stream, dstBase, srcBase, elemSize,
+                         /*outer_rank=*/1, srcSizes, srcStrides, dstStrides,
+                         rowElems, /*outer_total=*/height) == 0)
+      return;
     hipError_t err =
         hipMemcpy2DAsync(dstBase, dstPitch, srcBase, srcPitch, rowBytes, height,
                          hipMemcpyDeviceToDevice, stream);
