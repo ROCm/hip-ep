@@ -1,0 +1,71 @@
+##
+## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+name: Resolve Linux LLVM distribution
+on:
+  workflow_call:
+    inputs:
+      variant: {type: string, required: true}
+    outputs:
+      artifact_id:
+        value: ${{ jobs.plan.outputs.artifact_id || jobs.wait.outputs.artifact_id || jobs.preview.outputs.artifact_id }}
+      run_id:
+        value: ${{ jobs.plan.outputs.run_id || jobs.wait.outputs.run_id || github.run_id }}
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      name: ${{ steps.plan.outputs.name }}
+      sha: ${{ steps.plan.outputs.sha }}
+      preview: ${{ steps.plan.outputs.preview }}
+      artifact_id: ${{ steps.plan.outputs.artifact_id }}
+      run_id: ${{ steps.plan.outputs.run_id }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          sparse-checkout: |
+            .github/llvm
+            cmake
+            test/ci
+      - run: python3 test/ci/test_linux_llvm_packages.py
+      - id: plan
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+          VARIANT: ${{ inputs.variant }}
+        run: python3 .github/llvm/packages.py plan "$VARIANT"
+
+  wait:
+    needs: plan
+    if: needs.plan.outputs.preview == 'false' && needs.plan.outputs.artifact_id == ''
+    name: await ${{ needs.plan.outputs.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 320
+    outputs:
+      artifact_id: ${{ steps.wait.outputs.artifact_id }}
+      run_id: ${{ steps.wait.outputs.run_id }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          sparse-checkout: .github/llvm
+      - id: wait
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          PACKAGE: ${{ needs.plan.outputs.name }}
+        run: python3 .github/llvm/packages.py wait "$PACKAGE"
+
+  preview:
+    needs: plan
+    if: needs.plan.outputs.preview == 'true'
+    uses: ./.github/workflows/linux-llvm-build.yml
+    with:
+      name: ${{ needs.plan.outputs.name }}
+      sha: ${{ needs.plan.outputs.sha }}
+      variant: ${{ inputs.variant }}

@@ -1,0 +1,71 @@
+##
+## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+name: Build Linux LLVM distribution
+on:
+  workflow_call:
+    inputs:
+      name: {type: string, required: true}
+      sha: {type: string, required: true}
+      variant: {type: string, required: true}
+    outputs:
+      artifact_id:
+        value: ${{ jobs.build.outputs.artifact_id }}
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      LLVM_SHA: ${{ inputs.sha }}
+      LLVM_VARIANT: ${{ inputs.variant }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            .github/llvm
+            cmake
+      # Runs inside the publisher's per-package concurrency group. A queued
+      # producer observes the first producer's upload before allocating disk.
+      - name: Check for published distribution
+        id: lookup
+        if: github.event_name == 'workflow_run'
+        env:
+          PACKAGE: ${{ inputs.name }}
+        run: python3 .github/llvm/packages.py lookup "$PACKAGE"
+      - name: Verify upstream source
+        if: github.event_name == 'workflow_run' && steps.lookup.outputs.exists != 'true'
+        run: python3 .github/llvm/packages.py verify "$LLVM_SHA"
+      - name: Free disk space
+        if: steps.lookup.outputs.exists != 'true'
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
+        with:
+          tool-cache: false
+          docker-images: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          swap-storage: false
+      - name: Build and pack LLVM
+        if: steps.lookup.outputs.exists != 'true'
+        run: bash .github/llvm/build.sh "$LLVM_SHA" "$LLVM_VARIANT"
+      - name: Publish LLVM distribution
+        id: upload
+        if: steps.lookup.outputs.exists != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.name }}
+          path: ${{ runner.temp }}/llvm.tar.zst
+          compression-level: 0
+          if-no-files-found: error
