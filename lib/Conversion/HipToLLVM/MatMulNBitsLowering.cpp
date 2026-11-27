@@ -5,6 +5,9 @@
 
 #include "HipToLLVMUtils.h"
 
+#include <array>
+#include <optional>
+
 namespace mlir {
 namespace hip {
 namespace {
@@ -118,11 +121,122 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
   }
 };
 
+//===----------------------------------------------------------------------===//
+// MatMulNBitsGroup Lowering
+//===----------------------------------------------------------------------===//
+
+struct MatMulNBitsGroupOpLowering
+    : public ConvertOpToLLVMPattern<MatMulNBitsGroupOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  static constexpr int kMaxSegments = 4;
+
+  LogicalResult
+  matchAndRewrite(MatMulNBitsGroupOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i32Type = rewriter.getI32Type();
+    Type i64Type = rewriter.getI64Type();
+
+    auto createI64Const = [&](int64_t value) -> Value {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(value));
+    };
+
+    ValueRange weights = adaptor.getWeights();
+    ValueRange scales = adaptor.getScales();
+    ValueRange zeroPoints = adaptor.getZeroPoints();
+    ValueRange outputs = adaptor.getOutputs();
+    ArrayAttr nAttr = op.getN();
+    int64_t nseg = static_cast<int64_t>(weights.size());
+    if (nseg < 1 || nseg > kMaxSegments)
+      return rewriter.notifyMatchFailure(op, "unsupported segment count");
+
+    // Bytes per weight row of each per-member operand, for row_offsets.
+    int64_t kBlocks = (op.getK() + op.getBlockSize() - 1) / op.getBlockSize();
+    int64_t rowBytes[3] = {kBlocks * op.getBlockSize() * op.getBits() / 8,
+                           kBlocks * op.getScaleElemSize(),
+                           (kBlocks * op.getBits() + 7) / 8};
+    std::optional<ArrayRef<int64_t>> rowOffsets = op.getRowOffsets();
+    Type i8Type = rewriter.getI8Type();
+    auto segmentPtr = [&](ValueRange vals, int64_t i, int operand) -> Value {
+      Value ptr = extractOptionalMemRefPtr(
+          i < static_cast<int64_t>(vals.size()) ? vals[i] : Value(), rewriter,
+          loc);
+      if (operand >= 3 || !rowOffsets || i >= nseg ||
+          i >= static_cast<int64_t>(vals.size()) || (*rowOffsets)[i] == 0)
+        return ptr;
+      // An SSA index: a constant GEPArg holds only 29 signed bits, which a
+      // row offset into a large weight can exceed.
+      return LLVM::GEPOp::create(rewriter, loc, ptrType, i8Type, ptr,
+                                 ArrayRef<LLVM::GEPArg>{createI64Const(
+                                     (*rowOffsets)[i] * rowBytes[operand])},
+                                 LLVM::GEPNoWrapFlags::inbounds);
+    };
+
+    auto AType = cast<MemRefType>(op.getA().getType());
+    int64_t ARank = AType.getRank();
+    int64_t elemSize = AType.getElementType().getIntOrFloatBitWidth() / 8;
+    Value m = (ARank >= 2) ? getMemRefDimSize(AType, ARank - 2, adaptor.getA(),
+                                              rewriter, loc)
+                           : createI64Const(1);
+    Value batch = createI64Const(1);
+    for (int64_t i = 0; i < ARank - 2; ++i) {
+      batch = LLVM::MulOp::create(
+          rewriter, loc, batch,
+          getMemRefDimSize(AType, i, adaptor.getA(), rewriter, loc));
+    }
+
+    SmallVector<Type, 24> paramTypes = {ptrType, i32Type, ptrType, i64Type};
+    SmallVector<Value, 24> args = {
+        adaptor.getHandle(), getOpStateSlotValue(op, rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getA(), rewriter, loc),
+        createI64Const(nseg)};
+    for (auto [operand, vals] : llvm::enumerate(
+             std::array<ValueRange, 4>{weights, scales, zeroPoints, outputs})) {
+      for (int64_t i = 0; i < kMaxSegments; ++i) {
+        paramTypes.push_back(ptrType);
+        args.push_back(segmentPtr(vals, i, static_cast<int>(operand)));
+      }
+    }
+    for (int64_t i = 0; i < kMaxSegments; ++i) {
+      paramTypes.push_back(i64Type);
+      args.push_back(
+          createI64Const(i < nseg ? cast<IntegerAttr>(nAttr[i]).getInt() : 0));
+    }
+    // M, K, batch_count, bits, block_size, elem_size, scale_elem_size,
+    // epilogue
+    paramTypes.append(8, i64Type);
+    args.append({m, createI64Const(op.getK()), batch,
+                 createI64Const(op.getBits()),
+                 createI64Const(op.getBlockSize()), createI64Const(elemSize),
+                 createI64Const(op.getScaleElemSize()),
+                 createI64Const(op.getEpilogue())});
+    // a_quant, a_scale
+    paramTypes.append(2, ptrType);
+    args.push_back(
+        extractOptionalMemRefPtr(adaptor.getAQuant(), rewriter, loc));
+    args.push_back(
+        extractOptionalMemRefPtr(adaptor.getAScale(), rewriter, loc));
+
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapMatMulNBitsGroup, paramTypes, i32Type);
+    if (failed(funcOp))
+      return failure();
+
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 } // namespace
 
 void populateMatMulNBitsLoweringPatterns(const LLVMTypeConverter &converter,
                                          RewritePatternSet &patterns) {
-  patterns.add<MatMulNBitsOpLowering>(converter);
+  patterns.add<MatMulNBitsOpLowering, MatMulNBitsGroupOpLowering>(converter);
 }
 
 } // namespace hip

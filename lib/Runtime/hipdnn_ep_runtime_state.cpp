@@ -544,6 +544,8 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->qsigmoid_scratch_size = 0;
   state->matmul_dp4a_scratch = nullptr;
   state->matmul_dp4a_scratch_size = 0;
+  state->matmul_group_scratch = nullptr;
+  state->matmul_group_scratch_size = 0;
   state->la_scratch = nullptr;
   state->la_scratch_size = 0;
   state->gqa_fp32_adapter_scratch = nullptr;
@@ -1158,6 +1160,10 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   // Free the W4A8 dp4a matmul_nbits scratch (if allocated).
   if (state->matmul_dp4a_scratch) {
     HIP_CLEANUP(hipdnn_ep_state_device_free(state, state->matmul_dp4a_scratch));
+  }
+  if (state->matmul_group_scratch) {
+    HIP_CLEANUP(
+        hipdnn_ep_state_device_free(state, state->matmul_group_scratch));
   }
 
   // Free the linear-attention chunk-parallel prefill scratch (if allocated).
@@ -2161,6 +2167,47 @@ int hipdnn_ep_state_ensure_matmul_dp4a_scratch(RuntimeState *state,
     return -1;
   }
   state->matmul_dp4a_scratch_size = alloc_size;
+  return 0;
+}
+
+void *hipdnn_ep_state_get_matmul_group_scratch(RuntimeState *state) {
+  return state ? state->matmul_group_scratch : nullptr;
+}
+
+int hipdnn_ep_state_ensure_matmul_group_scratch(RuntimeState *state,
+                                                size_t needed_size) {
+  if (!state)
+    return -1;
+  if (needed_size == 0 || state->matmul_group_scratch_size >= needed_size)
+    return 0;
+
+  size_t alloc_size = needed_size;
+  if (state->matmul_group_scratch_size > 0) {
+    size_t grown =
+        state->matmul_group_scratch_size + state->matmul_group_scratch_size / 2;
+    if (grown > alloc_size)
+      alloc_size = grown;
+  }
+
+  if (state->matmul_group_scratch) {
+    if (state->stream) {
+      hipStreamSynchronize(state->stream);
+    }
+    HIP_CLEANUP(
+        hipdnn_ep_state_device_free(state, state->matmul_group_scratch));
+    state->matmul_group_scratch = nullptr;
+    state->matmul_group_scratch_size = 0;
+  }
+
+  if (hipdnn_ep_state_device_alloc(state, &state->matmul_group_scratch,
+                                   alloc_size) != hipSuccess) {
+    fprintf(stderr,
+            "hipdnn_ep_state_ensure_matmul_group_scratch: hipMalloc failed for "
+            "%zu bytes\n",
+            alloc_size);
+    return -1;
+  }
+  state->matmul_group_scratch_size = alloc_size;
   return 0;
 }
 

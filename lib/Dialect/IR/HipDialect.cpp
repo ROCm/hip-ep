@@ -1564,7 +1564,11 @@ LogicalResult RmsNormOp::verify() {
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange SkipRmsNormOp::getDpsInitsMutable() {
-  return getOutputsMutable();
+  // outputs and quant_outputs are adjacent segments; together they are the
+  // inits, tied to results in that order.
+  OperandRange outs = getOutputs();
+  return MutableOperandRange(getOperation(), outs.getBeginOperandIndex(),
+                             outs.size() + getQuantOutputs().size());
 }
 
 void SkipRmsNormOp::getEffects(
@@ -1573,7 +1577,55 @@ void SkipRmsNormOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
-LogicalResult SkipRmsNormOp::verify() { return success(); }
+// 0 or 2 quant_outputs with a 32-element block: an i8 copy shaped like
+// `source` and f32 scales with one entry per 32-element run of its last axis.
+// The kernels write both with the source's row stride and no bounds check,
+// and always in 32-element groups, so another block size would size a_scale
+// for fewer entries than they write.
+template <typename OpT>
+static LogicalResult verifyQuantOutputs(OpT op, Value source) {
+  size_t numQuant = op.getQuantOutputs().size();
+  if (numQuant != 0 && numQuant != 2)
+    return op.emitOpError(
+               "expected 0 or 2 quant_outputs (a_quant, a_scale), got ")
+           << numQuant;
+  if (numQuant == 0)
+    return success();
+  int64_t block = op.getQuantBlockSize();
+  if (block != 32)
+    return op.emitOpError("quant_outputs require quant_block_size 32, got ")
+           << block;
+  auto src = dyn_cast<ShapedType>(source.getType());
+  auto quant = dyn_cast<ShapedType>(op.getQuantOutputs()[0].getType());
+  auto scale = dyn_cast<ShapedType>(op.getQuantOutputs()[1].getType());
+  if (!src || !src.hasRank() || src.getRank() < 1 || !quant ||
+      !quant.hasRank() || !scale || !scale.hasRank())
+    return op.emitOpError("quant_outputs and the output they copy must be "
+                          "ranked");
+  if (!quant.getElementType().isInteger(8) ||
+      failed(verifyCompatibleShape(quant.getShape(), src.getShape())))
+    return op.emitOpError("a_quant must be i8 shaped like the output it "
+                          "quantizes");
+  SmallVector<int64_t> scaleShape(src.getShape());
+  int64_t width = scaleShape.back();
+  if (!ShapedType::isDynamic(width)) {
+    if (width % block != 0)
+      return op.emitOpError("quantized width ")
+             << width << " is not a multiple of quant_block_size " << block;
+    scaleShape.back() = width / block;
+  }
+  if (!scale.getElementType().isF32() ||
+      failed(verifyCompatibleShape(scale.getShape(), scaleShape)))
+    return op.emitOpError("a_scale must be f32 with one entry per "
+                          "quant_block_size run of the quantized output");
+  return success();
+}
+
+LogicalResult SkipRmsNormOp::verify() {
+  if (getOutputs().empty())
+    return emitOpError("expected at least one output");
+  return verifyQuantOutputs(*this, getOutputs()[0]);
+}
 
 //===----------------------------------------------------------------------===//
 // LayerNormOp: ins(input, scale, [bias]) outs(output, [mean, [inv_std]])
@@ -1893,7 +1945,10 @@ LogicalResult EngramGateOp::verify() {
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange HyperConnectionPreMixOp::getDpsInitsMutable() {
-  return getOutputMutable();
+  // output and quant_outputs are adjacent; together they are the inits.
+  return MutableOperandRange(getOperation(),
+                             getOutputMutable().getOperandNumber(),
+                             1 + getQuantOutputs().size());
 }
 
 void HyperConnectionPreMixOp::getEffects(
@@ -1903,8 +1958,12 @@ void HyperConnectionPreMixOp::getEffects(
 }
 
 LogicalResult HyperConnectionPreMixOp::verify() {
-  if (failed(verifyDpsComputeOp(*this, {getStreams(), getPreMix(), getOutput()},
-                                /*numInits=*/1)))
+  if (failed(verifyQuantOutputs(*this, getOutput())))
+    return failure();
+  SmallVector<Value> dataOperands{getStreams(), getPreMix(), getOutput()};
+  llvm::append_range(dataOperands, getQuantOutputs());
+  if (failed(verifyDpsComputeOp(*this, dataOperands,
+                                /*numInits=*/1 + getQuantOutputs().size())))
     return failure();
 
   int64_t branches = getBranches();
@@ -2064,7 +2123,10 @@ LogicalResult HyperConnectionPostMixOp::verify() {
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange HyperConnectionPostMixNormOp::getDpsInitsMutable() {
-  return getOutputsMutable();
+  // outputs and quant_outputs are adjacent; together they are the inits.
+  OperandRange outs = getOutputs();
+  return MutableOperandRange(getOperation(), outs.getBeginOperandIndex(),
+                             outs.size() + getQuantOutputs().size());
 }
 
 void HyperConnectionPostMixNormOp::getEffects(
@@ -2082,7 +2144,11 @@ LogicalResult HyperConnectionPostMixNormOp::verify() {
     dataOperands.push_back(getStreamMix());
   dataOperands.push_back(getOutputs()[0]);
   dataOperands.push_back(getOutputs()[1]);
-  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/2)))
+  if (failed(verifyQuantOutputs(*this, getOutputs()[1])))
+    return failure();
+  llvm::append_range(dataOperands, getQuantOutputs());
+  if (failed(verifyDpsComputeOp(*this, dataOperands,
+                                /*numInits=*/2 + getQuantOutputs().size())))
     return failure();
   if (getBranches() <= 0 || getHidden() <= 0)
     return emitOpError("branches and hidden must be positive");
@@ -3269,6 +3335,106 @@ LogicalResult DequantBnb4Op::verify() {
   if (absmaxType.getNumElements() != numel / blockSize)
     return emitOpError("absmax length must be N * K / block_size");
   return success();
+}
+
+//===----------------------------------------------------------------------===//
+// MatMulNBitsGroupOp
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange MatMulNBitsGroupOp::getDpsInitsMutable() {
+  return getOutputsMutable();
+}
+
+void MatMulNBitsGroupOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult MatMulNBitsGroupOp::verify() {
+  size_t numWeights = getWeights().size();
+  if (numWeights < 1 || numWeights > 4)
+    return emitOpError("expected 1 to 4 weights, got ") << numWeights;
+  if (getScales().size() != numWeights)
+    return emitOpError("expected one scales operand per weight");
+  if (!getZeroPoints().empty() && getZeroPoints().size() != numWeights)
+    return emitOpError("expected no zero_points or one per weight");
+  ArrayAttr nAttr = getN();
+  if (nAttr.size() != numWeights)
+    return emitOpError("expected one N entry per weight");
+  for (Attribute a : nAttr) {
+    auto n = dyn_cast<IntegerAttr>(a);
+    if (!n || n.getInt() <= 0)
+      return emitOpError("N entries must be positive integers");
+  }
+  if (std::optional<ArrayRef<int64_t>> offsets = getRowOffsets()) {
+    if (offsets->size() != numWeights)
+      return emitOpError("expected one row_offsets entry per weight");
+    for (auto [i, offset] : llvm::enumerate(*offsets)) {
+      if (offset < 0)
+        return emitOpError("row_offsets entries must be non-negative");
+      int64_t end = offset + cast<IntegerAttr>(nAttr[i]).getInt();
+      for (Value v : {getWeights()[i], getScales()[i]}) {
+        auto type = dyn_cast<ShapedType>(v.getType());
+        if (type && type.hasRank() && type.getRank() >= 2 &&
+            !type.isDynamicDim(0) && end > type.getDimSize(0))
+          return emitOpError("member ")
+                 << i << " reads rows [" << offset << ", " << end
+                 << ") of an operand with " << type.getDimSize(0) << " rows";
+      }
+    }
+  }
+
+  int64_t epilogue = getEpilogue();
+  if (epilogue == 0) {
+    if (getOutputs().size() != numWeights)
+      return emitOpError("concat epilogue expects one output per weight");
+  } else if (epilogue == 1) {
+    if (numWeights != 2 || getOutputs().size() != 1)
+      return emitOpError("silu_mul epilogue expects 2 weights and 1 output");
+    if (cast<IntegerAttr>(nAttr[0]).getInt() !=
+        cast<IntegerAttr>(nAttr[1]).getInt())
+      return emitOpError("silu_mul epilogue expects equal N");
+  } else {
+    return emitOpError("unknown epilogue ") << epilogue;
+  }
+  if (getBits() != 4 && getBits() != 8)
+    return emitOpError("bits must be 4 or 8");
+  if (getK() <= 0 || getBlockSize() <= 0)
+    return emitOpError("K and block_size must be positive");
+  if (static_cast<bool>(getAQuant()) != static_cast<bool>(getAScale()))
+    return emitOpError("a_quant and a_scale must be given together");
+
+  // Packed zero points hold ceil(k_blocks * bits / 8) bytes per row, whatever
+  // their shape; member i reads rows [row_offsets[i], row_offsets[i] + N[i]).
+  int64_t kBlocks = (getK() + getBlockSize() - 1) / getBlockSize();
+  int64_t zpRowBytes = (kBlocks * getBits() + 7) / 8;
+  for (auto [i, zp] : llvm::enumerate(getZeroPoints())) {
+    auto type = dyn_cast<ShapedType>(zp.getType());
+    if (!type || !type.hasStaticShape())
+      continue;
+    int64_t offset = getRowOffsets() ? (*getRowOffsets())[i] : 0;
+    int64_t end = offset + cast<IntegerAttr>(nAttr[i]).getInt();
+    int64_t rows = type.getNumElements() / zpRowBytes;
+    if (end > rows)
+      return emitOpError("member ")
+             << i << " reads zero-point rows [" << offset << ", " << end
+             << ") of an operand with " << rows << " rows of " << zpRowBytes
+             << " bytes";
+  }
+
+  SmallVector<Value> dataOperands;
+  dataOperands.push_back(getA());
+  llvm::append_range(dataOperands, getWeights());
+  llvm::append_range(dataOperands, getScales());
+  llvm::append_range(dataOperands, getZeroPoints());
+  if (getAQuant()) {
+    dataOperands.push_back(getAQuant());
+    dataOperands.push_back(getAScale());
+  }
+  llvm::append_range(dataOperands, getOutputs());
+  return verifyDpsComputeOp(*this, dataOperands,
+                            /*numInits=*/getOutputs().size());
 }
 
 //===----------------------------------------------------------------------===//
