@@ -28,6 +28,11 @@ int wrap_hipMemcpyAsync(RuntimeState *state, void *dst_ptr, const void *src_ptr,
     fprintf(stderr, "wrap_hipMemcpyAsync: null pointer\n");
     return -1;
   }
+  // An in-place update (output bound to its own input buffer) copies a buffer
+  // onto itself; overlapping copies are undefined and the data is already
+  // there.
+  if (dst_ptr == src_ptr)
+    return 0;
 
   // Extract stream from opaque RuntimeState using accessor function
   // (Maintains abstraction barrier - no direct field access)

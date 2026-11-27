@@ -38,6 +38,7 @@ message(STATUS "[custom_kernels] Using HIP_ARCHITECTURES: ${HIP_ARCHITECTURES}")
 set(_kernel_sources
     hip/rope_kernel.hip
     hip/gqa_kernel.hip
+    hip/paged_attention_kernel.hip
     hip/multi_head_attention_kernel.hip
     hip/gemm_wmma_kernel.hip
     hip/elementwise_sub_kernel.hip
@@ -108,6 +109,7 @@ set(_kernel_sources
     hip/sparse_attention_indexer_kernel.hip
     hip/transpose_kernel.hip
     hip/causal_conv_step_kernel.hip
+    hip/varlen_causal_conv_kernel.hip
     hip/slice_kernel.hip
     hip/scatter_nd_kernel.hip
     hip/gather_block_quantized_kernel.hip
