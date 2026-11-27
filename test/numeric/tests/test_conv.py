@@ -20,48 +20,63 @@ from framework.comparator import compare_outputs
 from framework.onnx_utils import make_model_from_nodes
 
 
+def _np_dtype(dtype):
+    return np.float32 if dtype == TensorProto.FLOAT else np.float16
+
+
 def _make_conv_model(
     in_c: int,
     out_c: int,
     group: int,
     k: int = 3,
-    spatial: int = 8,
+    spatial: "int | tuple[int, int]" = 8,
     seed: int = 7,
+    dtype: int = TensorProto.FLOAT16,
+    n: int = 1,
+    stride: int = 1,
+    pad: "int | None" = None,
+    bias: bool = True,
 ):
-    """Build an fp16 2D Conv model with weight+bias initializers.
+    """Build a 2D Conv model with weight (and optional bias) initializers.
 
-    input:   [1, in_c, spatial, spatial] f16
-    weights: [out_c, in_c // group, k, k] f16  (initializer)
-    bias:    [out_c] f16                        (initializer)
-    output:  [1, out_c, spatial, spatial] f16   (stride 1, pad k//2 keeps size)
+    input:   [n, in_c, h, w]
+    weights: [out_c, in_c // group, k, k]  (initializer)
+    bias:    [out_c]                       (initializer, omitted if bias=False)
+    output:  [n, out_c, oh, ow]
+    All tensors are `dtype` (TensorProto.FLOAT16 or FLOAT). `spatial` is the
+    input height and width, or an (h, w) pair. `pad` defaults to k // 2, which
+    keeps the size at stride 1.
     """
     assert in_c % group == 0 and out_c % group == 0
-    pad = k // 2
+    h, w = (spatial, spatial) if isinstance(spatial, int) else spatial
+    pad = k // 2 if pad is None else pad
+    oh = (h + 2 * pad - k) // stride + 1
+    ow = (w + 2 * pad - k) // stride + 1
+    np_dtype = _np_dtype(dtype)
 
-    inp = helper.make_tensor_value_info(
-        "input", TensorProto.FLOAT16, [1, in_c, spatial, spatial]
-    )
-    out = helper.make_tensor_value_info(
-        "output", TensorProto.FLOAT16, [1, out_c, spatial, spatial]
-    )
+    inp = helper.make_tensor_value_info("input", dtype, [n, in_c, h, w])
+    out = helper.make_tensor_value_info("output", dtype, [n, out_c, oh, ow])
 
     rng = np.random.default_rng(seed)
-    w = rng.uniform(-0.1, 0.1, [out_c, in_c // group, k, k]).astype(np.float16)
-    b = rng.uniform(-0.1, 0.1, [out_c]).astype(np.float16)
-    w_init = numpy_helper.from_array(w, name="weight")
-    b_init = numpy_helper.from_array(b, name="bias")
+    wt = rng.uniform(-0.1, 0.1, [out_c, in_c // group, k, k]).astype(np_dtype)
+    inits = [numpy_helper.from_array(wt, name="weight")]
+    names = ["input", "weight"]
+    if bias:
+        b = rng.uniform(-0.1, 0.1, [out_c]).astype(np_dtype)
+        inits.append(numpy_helper.from_array(b, name="bias"))
+        names.append("bias")
 
     node = helper.make_node(
         "Conv",
-        ["input", "weight", "bias"],
+        names,
         ["output"],
         group=group,
         kernel_shape=[k, k],
-        strides=[1, 1],
-        pads=[pad, pad, pad, pad],
+        strides=[stride, stride],
+        pads=[pad] * 4,
         dilations=[1, 1],
     )
-    return make_model_from_nodes([node], [inp], [out], initializers=[w_init, b_init])
+    return make_model_from_nodes([node], [inp], [out], initializers=inits)
 
 
 class TestConv:
@@ -130,3 +145,48 @@ class TestConv:
         )
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1e-2, rtol=1e-2, cos_threshold=0.999)
+
+
+class TestConvScalarTiles:
+    """fp32 shapes that run on the scalar tiles with a grid far short of the
+    device, plus the narrow-Cout fallback. fp16 is not covered here: it takes
+    the matrix cores, never the scalar tiles.
+
+    Rows below 32 output channels per group used to fall back to the
+    one-thread-per-output direct kernel; they now run on a 64x64 tile with dead
+    rows, which must be zero-filled on load and skipped on store. The two rows
+    at 32 and 40 channels make the block-count rule pick the 32x32 and the
+    32x128 tile on any device with two or more units. The reduction
+    K = in_c / group * k * k is deliberately not a multiple of the 16-tap slice
+    in most rows, so the last slice is partial and exercises the masked filter
+    loads and the invalid-K sentinel next to leading padding; K = 27 and 9 are
+    shorter than two slices. The narrow rows are large enough (>= 1M
+    multiply-accumulates) to leave the direct kernel behind."""
+
+    @pytest.mark.parametrize(
+        "n,in_c,hw,out_c,k,group",
+        [
+            (1, 3, 128, 3, 3, 1),  # 3 channels, K = 27
+            (1, 256, 24, 16, 1, 1),  # 1x1, K = 256
+            (1, 50, 32, 24, 3, 1),  # K = 450
+            (2, 7, 28, 30, 3, 1),  # batch > 1, one row short of a tile, K = 63
+            (1, 64, 40, 24, 3, 2),  # grouped: 12 channels per group, K = 288
+            (1, 3, 9, 32, 3, 1),  # 32x32 tile, K = 27
+            (1, 1, 8, 40, 3, 1),  # 32x128 tile, K = 9 (< one slice)
+        ],
+    )
+    def test_conv_scalar_tiles(self, model_runner, n, in_c, hw, out_c, k, group):
+        model = _make_conv_model(
+            in_c,
+            out_c,
+            group,
+            k=k,
+            spatial=hw,
+            seed=11,
+            dtype=TensorProto.FLOAT,
+            n=n,
+        )
+        rng = np.random.default_rng(9)
+        x = rng.uniform(-1.0, 1.0, [n, in_c, hw, hw]).astype(np.float32)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=1e-3, rtol=1e-3, cos_threshold=0.9999)

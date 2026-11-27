@@ -474,6 +474,24 @@ static inline ConvParams withWindowGrid(ConvParams pr, int64_t bm, int64_t th,
 // loop wants: a fixed k, contiguous in the tile index, so TM and TN reads
 // vectorise.
 
+// One im2col element with no data-dependent branch: the load is always issued
+// (the address is clamped to 0 when the tap is padding or the column is past
+// the end) and the result selected, so a group of these can be in flight
+// together instead of each waiting on its own bounds test.
+template <typename T>
+__device__ __forceinline__ float
+gatherMasked(const T *__restrict__ xChan, const ConvParams &pr,
+             const PosOrigin &org, const KSlice &ks, bool colValid) {
+  const int32_t x0 = org.x0 + ks.c0;
+  const int32_t x1 = org.x1 + ks.c1;
+  const int32_t x2 = org.x2 + ks.c2;
+  const bool ok = colValid & (x0 >= 0) & (x0 < pr.in0i) & (x1 >= 0) &
+                  (x1 < pr.in1i) & (x2 >= 0) & (x2 < pr.in2i);
+  const int64_t addr = ok ? (org.lin + ks.off) : 0;
+  const float v = to_float<T>(xChan[addr]);
+  return ok ? v : 0.0f;
+}
+
 template <typename T, int BM, int BN, int BK, int TM, int TN>
 __global__ __launch_bounds__((BM / TM) * (BN / TN)) void
 conv_tiled_kernel(const T *__restrict__ x, const T *__restrict__ w,
@@ -490,11 +508,15 @@ conv_tiled_kernel(const T *__restrict__ x, const T *__restrict__ w,
   constexpr int kRowThreadsA = BK / kVecA;
   static_assert(kVecA <= BK && BK % kVecA == 0, "filter run divides BK");
 
-  __shared__ float As[BK][BM]; // filter slice, k-major for the inner loop
-  __shared__ float Bs[BK][BN]; // im2col slice
+  // Both tiles are double-buffered: one half is read by the arithmetic while the
+  // other is written with the next slice, so a slice costs one barrier. 16-byte
+  // aligned so the inner loop's TM/TN-wide reads compile to ds_load_b128 rather
+  // than pairs of ds_load_2addr_b32.
+  __shared__ __attribute__((aligned(16))) float As[2][BK][BM]; // filter, k-major
+  __shared__ __attribute__((aligned(16))) float Bs[2][BK][BN]; // im2col
   // The contraction half of the im2col address, one entry per k in the slice,
-  // decoded once for the whole block. Double-buffered so the next slice's
-  // decode overlaps this slice's arithmetic and costs no extra barrier.
+  // decoded once for the whole block. Slice s uses ks[s & 1], so the decode of
+  // the slice after next overlaps this slice's arithmetic.
   __shared__ KSlice ks[2][BK];
 
   const int tid = threadIdx.x;
@@ -533,73 +555,85 @@ conv_tiled_kernel(const T *__restrict__ x, const T *__restrict__ w,
 #pragma unroll
     for (int j = 0; j < TN; ++j) acc[i][j] = 0.0f;
 
-  int cur = 0;
-  if (tid < BK) ks[0][tid] = makeKSlice(pr, tid);
-  __syncthreads();
+  // Software pipeline. The next slice is fetched into registers before the
+  // arithmetic on this one starts and written to the other half of LDS after
+  // it, so the global-load latency that used to sit exposed at the top of every
+  // iteration overlaps the multiply-adds. Loads past the end of the reduction
+  // are masked rather than skipped (see gatherMasked), so they carry no branch.
+  float aReg[kVecA];
+  float bReg[kLoadsB];
+  const int64_t nSlices = (pr.K + BK - 1) / BK;
 
-  for (int64_t kBase = 0; kBase < pr.K; kBase += BK) {
+  const auto loadSlice = [&](int64_t kBase, int ksBuf) {
     const int64_t wBase = wRowBase + kBase + kOffA;
     const int64_t kRem = pr.K - kBase - kOffA; // taps left in this thread's run
 #pragma unroll
-    for (int i = 0; i < kVecA; ++i)
-      As[kOffA + i][rowA] =
-          (rowValidA && i < kRem) ? to_float<T>(w[wBase + i]) : 0.0f;
-
-#pragma unroll
-    for (int l = 0; l < kLoadsB; ++l) {
-      const int kk = kkB + l * kStepB;
-      Bs[kk][colB] =
-          colValid ? gatherSplit<T>(xChan, pr, org, ks[cur][kk]) : 0.0f;
+    for (int i = 0; i < kVecA; ++i) {
+      const bool ok = rowValidA && i < kRem;
+      const float v = to_float<T>(w[ok ? wBase + i : 0]);
+      aReg[i] = ok ? v : 0.0f;
     }
-    __syncthreads();
+#pragma unroll
+    for (int l = 0; l < kLoadsB; ++l)
+      bReg[l] = gatherMasked<T>(xChan, pr, org, ks[ksBuf][kkB + l * kStepB],
+                                colValid);
+  };
+  const auto storeSlice = [&](int buf) {
+#pragma unroll
+    for (int i = 0; i < kVecA; ++i) As[buf][kOffA + i][rowA] = aReg[i];
+#pragma unroll
+    for (int l = 0; l < kLoadsB; ++l) Bs[buf][kkB + l * kStepB][colB] = bReg[l];
+  };
 
-    // Unrolled by four, not fully. The bound is a compile-time BK=16, so the
-    // default here was a full unroll -- and that is what made the widest tile
-    // the slowest one.
-    //
-    // Each unrolled step needs TM+TN live LDS reads, and the scheduler hoists
-    // them to cover the ds_read latency, so peak pressure is the unroll factor
-    // times TM+TN on top of the TM*TN accumulator. At 8x8 a full unroll asks
-    // for 16*(8+8) + 64 values at once, which does not fit: the tile compiled
-    // to 256 VGPRs with 100 of them spilled to 396 bytes of scratch per lane,
-    // and 5 waves/SIMD. Every multiply-add in the hottest loop of the kernel
-    // was then a private-memory round trip.
-    //
-    // Four steps is enough to hide LDS latency and cheap enough to keep the
-    // accumulator resident: <float,128,128,16,8,8> becomes 135 VGPRs, no
-    // scratch and 10 waves/SIMD. Measured across the whole shape census,
-    // simplebev's convolution goes from 875 ms to 340 ms.
-    //
-    // The factor is measured, not assumed. Two costs a little throughput for
-    // registers nothing needs (345 ms). Eight leaves the 8x8 tile exactly where
-    // four does, but pushes the narrow tiles that were comfortable -- 64x64
-    // from 71 VGPRs to 103, 32x128 from 79 to 119, both dropping from 16
-    // waves/SIMD to 12 -- and measures worst of the three (398 ms).
-#pragma unroll 4
+  if (tid < BK) {
+    ks[0][tid] = makeKSlice(pr, tid);
+    ks[1][tid] = makeKSlice(pr, BK + tid);
+  }
+  __syncthreads();
+  loadSlice(0, 0);
+  storeSlice(0);
+  __syncthreads();
+
+  for (int64_t s = 0; s < nSlices; ++s) {
+    const int cur = static_cast<int>(s & 1);
+    const bool hasNext = s + 1 < nSlices;
+    if (hasNext) loadSlice((s + 1) * BK, cur ^ 1);
+
+    // Unrolled by eight, not fully. Each unrolled step needs TM+TN live LDS
+    // reads, and the scheduler hoists them to cover the ds_read latency, so
+    // peak pressure is the unroll factor times TM+TN on top of the TM*TN
+    // accumulator and the prefetch registers. A full unroll of the 8x8 tile
+    // does not fit and spills the accumulator to scratch.
+#pragma unroll 8
     for (int kk = 0; kk < BK; ++kk) {
       float a[TM], b[TN];
 #pragma unroll
-      for (int i = 0; i < TM; ++i) a[i] = As[kk][aOff + i];
+      for (int i = 0; i < TM; ++i) a[i] = As[cur][kk][aOff + i];
 #pragma unroll
-      for (int j = 0; j < TN; ++j) b[j] = Bs[kk][bOff + j];
+      for (int j = 0; j < TN; ++j) b[j] = Bs[cur][kk][bOff + j];
 #pragma unroll
       for (int i = 0; i < TM; ++i)
 #pragma unroll
         for (int j = 0; j < TN; ++j) acc[i][j] += a[i] * b[j];
     }
-    if (tid < BK) ks[cur ^ 1][tid] = makeKSlice(pr, kBase + BK + tid);
+    if (tid < BK) ks[cur][tid] = makeKSlice(pr, (s + 2) * BK + tid);
+    if (hasNext) storeSlice(cur ^ 1);
     __syncthreads();
-    cur ^= 1;
   }
 
-  // Store, folding in the bias.
+  // Store, folding in the bias. Both loops are unrolled so that acc[i][j] is
+  // indexed statically: with the early-exit `break`s the compiler otherwise
+  // keeps the loops rolled, addresses the accumulator tile dynamically, and
+  // moves all of it to scratch memory.
   const int64_t yBatchBase = nbatch * pr.Cout * pr.Nout;
+#pragma unroll
   for (int i = 0; i < TM; ++i) {
     const int64_t m = m0 + aOff + i;
     if (m >= pr.MPerGroup) break;
     const int64_t oc = g * pr.MPerGroup + m;
     const float bv = bias ? to_float<T>(bias[oc]) : 0.0f;
     T *row = y + yBatchBase + oc * pr.Nout;
+#pragma unroll
     for (int j = 0; j < TN; ++j) {
       const int64_t o = n0 + bOff + j;
       if (o >= pr.Nout) break;
@@ -1391,6 +1425,12 @@ static bool windowCovers(const ConvParams &pr, int64_t bm, int64_t th,
   return blocks >= units;
 }
 
+// How many blocks a bm x bn tile makes for this convolution.
+static int64_t tileBlocks(const ConvParams &pr, int64_t bm, int64_t bn) {
+  return ((pr.MPerGroup + bm - 1) / bm) * ((pr.Nout + bn - 1) / bn) * pr.N *
+         pr.group;
+}
+
 // Whether a tile shape is worth using: its row block has to be fully live (a
 // block computes its whole tile whether or not the rows exist) and the grid it
 // produces has to cover the device.
@@ -1402,9 +1442,7 @@ static bool windowCovers(const ConvParams &pr, int64_t bm, int64_t th,
 // choose and this only does the arithmetic.
 static bool tileCovers(const ConvParams &pr, int64_t bm, int64_t bn,
                        int64_t units) {
-  const int64_t blocks = ((pr.MPerGroup + bm - 1) / bm) *
-                         ((pr.Nout + bn - 1) / bn) * pr.N * pr.group;
-  return blocks >= units;
+  return tileBlocks(pr, bm, bn) >= units;
 }
 
 static bool tileFits(const ConvParams &pr, int64_t bm, int64_t bn,
@@ -1559,6 +1597,15 @@ bool launchWmmaIfProfitable<__half>(hipStream_t stream, const void *x,
   return true;
 }
 
+// Whether a convolution too narrow for every scalar tile is big enough for a
+// tile to beat conv_direct. Below about a million multiply-accumulates the
+// whole problem is a few microseconds and launch overhead decides, so the
+// simple kernel stays.
+static bool smallMTileWorthwhile(const ConvParams &pr) {
+  constexpr int64_t kMinMacs = int64_t(1) << 20;
+  return pr.N * pr.Cout * pr.Nout * pr.K >= kMinMacs;
+}
+
 template <typename T>
 static int launch(hipStream_t stream, const void *x, const void *w,
                   const void *bias, void *y, const ConvParams &pr) {
@@ -1582,8 +1629,10 @@ static int launch(hipStream_t stream, const void *x, const void *w,
   }
 
   // Two passes over the ladder. The first asks a tile shape to cover the
-  // device; the second takes the widest tile whose rows are live and accepts
-  // whatever grid that gives.
+  // device. The second accepts whatever grid it gets: the 32x128 or 32x32 tile
+  // by block count, or for outputs narrower than any tile the 64x64 tile with
+  // dead rows (once the problem is large enough to beat it) and conv_direct
+  // below that.
   //
   // The second pass exists because coverage is the wrong thing to insist on
   // when the problem is small. A shape with few output channels over a small
@@ -1605,12 +1654,12 @@ static int launch(hipStream_t stream, const void *x, const void *w,
                 hipGetErrorString(err));
       return static_cast<int>(err);
     }
-    // Widest scalar tile that fits, then narrower ones. A wider tile does more
-    // FMAs per LDS read -- 8x8 does 64 per 16, where 4x4 does 16 per 8 -- and
-    // measured across simplebev's 31 shapes the widest one that fits is indeed
-    // the fastest: 277 ms on 128x128 against 335 on 64x64 and 612 on 32x128,
-    // and the ladder lands within noise of picking the best tile for every
-    // shape individually.
+    // Pass 0: widest scalar tile that covers the device, then narrower ones. A
+    // wider tile does more FMAs per LDS read -- 8x8 does 64 per 16, where 4x4
+    // does 16 per 8 -- and measured across simplebev's 31 shapes the widest one
+    // that fits is indeed the fastest: 277 ms on 128x128 against 335 on 64x64
+    // and 612 on 32x128, and the ladder lands within noise of picking the best
+    // tile for every shape individually.
     //
     // That ordering was wrong for as long as the register tile spilled. With
     // the contraction loop fully unrolled the 8x8 tile ran at 5 waves/SIMD out
@@ -1618,29 +1667,51 @@ static int launch(hipStream_t stream, const void *x, const void *w,
     // tile is better" and is really "the wide tile is broken". The unroll
     // comment in conv_tiled_kernel has the numbers. Reorder these rungs only
     // against a sweep taken with a kernel that does not spill.
-    if (tileFits(pr, 128, 128, need)) {
-      launchTile<T, 128, 128, 8, 8>(stream, x, w, bias, y, pr);
+    if (pass == 0) {
+      if (tileFits(pr, 128, 128, units)) {
+        launchTile<T, 128, 128, 8, 8>(stream, x, w, bias, y, pr);
+        break;
+      }
+      if (tileFits(pr, 64, 64, units)) {
+        launchTile<T, 64, 64, 4, 4>(stream, x, w, bias, y, pr);
+        break;
+      }
+      if (tileFits(pr, 32, 128, units)) {
+        launchTile<T, 32, 128, 2, 8>(stream, x, w, bias, y, pr);
+        break;
+      }
+      continue;
+    }
+
+    // Pass 1: no tile covers the device, so the widest-first order above would
+    // leave most of it idle: a 256-channel 14x14 output is 4 blocks at 128x128
+    // but 56 at 32x32. Take the 32x128 tile, or the 32x32 tile when it makes
+    // more than twice as many blocks, since its register tile does half the
+    // FMAs per LDS read. A 64x64 or 128x128 tile never makes more blocks than
+    // 32x32, since each of its sides is at least as long, so they are not
+    // candidates here.
+    if (pr.MPerGroup >= 32) {
+      if (tileBlocks(pr, 32, 32) > 2 * tileBlocks(pr, 32, 128)) {
+        launchTile<T, 32, 32, 2, 2>(stream, x, w, bias, y, pr);
+      } else {
+        launchTile<T, 32, 128, 2, 8>(stream, x, w, bias, y, pr);
+      }
       break;
     }
-    if (tileFits(pr, 64, 64, need)) {
+    if (smallMTileWorthwhile(pr)) {
+      // Fewer output channels than the smallest tile has rows. The tile still
+      // reuses each staged input slice across its block, which conv_direct does
+      // not, and its dead rows are zero-filled on load and skipped on store.
       launchTile<T, 64, 64, 4, 4>(stream, x, w, bias, y, pr);
       break;
     }
-    if (pr.MPerGroup >= 24 && tileFits(pr, 32, 128, need)) {
-      launchTile<T, 32, 128, 2, 8>(stream, x, w, bias, y, pr);
-      break;
-    }
-    if (pass == 1) {
-      logPick("direct", pr);
-      const int block = 256;
-      const int64_t grid = (totalOut + block - 1) / block;
-      hipLaunchKernelGGL(conv_direct_kernel<T>,
-                         dim3(static_cast<unsigned>(grid)), dim3(block), 0,
-                         stream, static_cast<const T *>(x),
-                         static_cast<const T *>(w),
-                         static_cast<const T *>(bias), static_cast<T *>(y), pr,
-                         totalOut);
-    }
+    logPick("direct", pr);
+    const int block = 256;
+    const int64_t grid = (totalOut + block - 1) / block;
+    hipLaunchKernelGGL(conv_direct_kernel<T>, dim3(static_cast<unsigned>(grid)),
+                       dim3(block), 0, stream, static_cast<const T *>(x),
+                       static_cast<const T *>(w), static_cast<const T *>(bias),
+                       static_cast<T *>(y), pr, totalOut);
   }
 
   hipError_t err = hipGetLastError();
