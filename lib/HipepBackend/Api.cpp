@@ -27,6 +27,11 @@ template <typename T> T *failed(const std::string &error) {
   return nullptr;
 }
 
+void tell(int *status, hipep_backend_status value) {
+  if (status != nullptr)
+    *status = value;
+}
+
 } // namespace
 
 extern "C" {
@@ -57,22 +62,32 @@ hipep_backend_supports(hipep_backend_ctx *ctx,
 
 HIPEP_BACKEND_API hipep_backend_code *
 hipep_backend_find(hipep_backend_ctx *ctx,
-                   const hipep_backend_split_desc *split) {
-  if (ctx == nullptr || split == nullptr)
+                   const hipep_backend_split_desc *split, int *status) {
+  if (ctx == nullptr || split == nullptr) {
+    tell(status, HIPEP_BACKEND_STATUS_INVALID);
     return failed<hipep_backend_code>("no context or split");
+  }
+  hipep_backend_status found = HIPEP_BACKEND_STATUS_INVALID;
   std::string error;
-  hipep_backend_code *code = ctx->engine->find(*split, error);
+  hipep_backend_code *code = ctx->engine->find(*split, found, error);
+  tell(status, found);
   lastError = code ? "" : error;
   return code;
 }
 
 HIPEP_BACKEND_API hipep_backend_code *
 hipep_backend_compile(hipep_backend_ctx *ctx,
-                      const hipep_backend_split_desc *split, int wait) {
-  if (ctx == nullptr || split == nullptr)
+                      const hipep_backend_split_desc *split, int wait,
+                      int *status) {
+  if (ctx == nullptr || split == nullptr) {
+    tell(status, HIPEP_BACKEND_STATUS_INVALID);
     return failed<hipep_backend_code>("no context or split");
+  }
+  hipep_backend_status found = HIPEP_BACKEND_STATUS_INVALID;
   std::string error;
-  hipep_backend_code *code = ctx->engine->compile(*split, wait != 0, error);
+  hipep_backend_code *code =
+      ctx->engine->compile(*split, wait != 0, found, error);
+  tell(status, found);
   lastError = code ? "" : error;
   return code;
 }

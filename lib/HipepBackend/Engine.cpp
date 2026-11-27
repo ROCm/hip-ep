@@ -9,6 +9,7 @@
 
 #include "LlvmIrJit.h"
 #include "custom_op_mlir.hpp"
+#include "hip/Frontend/Ggml/Error.h"
 #include "hip/Frontend/Ggml/SplitCompiler.h"
 #include "hip/Support/DiskFileSystem.h"
 #include "hip/artifact_abi.h"
@@ -212,11 +213,15 @@ struct Engine::DynamicCode {
   std::vector<Variant> variants;
   /// The latest generation in the cache.
   long generation = 0;
-  /// The symbols its code could not be compiled with: not tried again.
+  /// The symbols its code could not be compiled with: not tried again. The
+  /// compiler refused those of `refused` (the cache keeps them); those of
+  /// `failed` were not made or loaded in this process.
   std::set<std::string> refused;
+  std::set<std::string> failed;
   /// Why a split of it could be compiled neither with dynamic shapes nor
   /// with its own static shapes, "" otherwise: its splits of other sizes are
-  /// not compiled either (what failed is the structure, which they share).
+  /// not compiled either (what failed is the structure, which they share -
+  /// or, in this process, the disk or the device).
   std::string failure;
 
   /// The code that runs `description`, or null.
@@ -252,10 +257,11 @@ Engine::Engine(int device, const char *cacheDir) : device_(device) {
 Engine::~Engine() {
   stop();
   if (logging() || compiles_ > 0)
-    std::fprintf(stderr,
-                 "hipep_backend: %lld compiles (%lld refused) in %.1f s\n",
-                 static_cast<long long>(compiles_),
-                 static_cast<long long>(failures_), compileSeconds_);
+    std::fprintf(
+        stderr,
+        "hipep_backend: %lld compiles (%lld refused, %lld failed) in %.1f s\n",
+        static_cast<long long>(compiles_), static_cast<long long>(refusals_),
+        static_cast<long long>(failures_), compileSeconds_);
 }
 
 void Engine::stop() {
@@ -420,12 +426,40 @@ hipep_backend_code *Engine::readyLocked(SignatureEntry &entry,
   return handle.get();
 }
 
+hipep_backend_status Engine::statusLocked(SignatureEntry &entry,
+                                          const DynamicCode &dynamic,
+                                          std::string &error) {
+  if (entry.state == SignatureEntry::State::Failed) {
+    error = entry.error;
+    return HIPEP_BACKEND_STATUS_REFUSED;
+  }
+  if (entry.state == SignatureEntry::State::Compiling) {
+    error = "being compiled";
+    return HIPEP_BACKEND_STATUS_COMPILING;
+  }
+  if (!dynamic.failure.empty()) {
+    entry.state = SignatureEntry::State::Failed;
+    entry.error =
+        "a split of its structure was not compiled: " + dynamic.failure;
+    error = entry.error;
+    return HIPEP_BACKEND_STATUS_REFUSED;
+  }
+  if (environment("HIPEP_BACKEND_COMPILE", "1") == "0") {
+    error = "compiling is off (HIPEP_BACKEND_COMPILE=0)";
+    return HIPEP_BACKEND_STATUS_REFUSED;
+  }
+  error = "not compiled";
+  return HIPEP_BACKEND_STATUS_NOT_COMPILED;
+}
+
 hipep_backend_code *Engine::find(const hipep_backend_split_desc &desc,
+                                 hipep_backend_status &status,
                                  std::string &error) {
   std::unique_ptr<Graph> graph;
   try {
     graph = std::make_unique<Graph>(desc);
   } catch (const std::exception &e) {
+    status = HIPEP_BACKEND_STATUS_INVALID;
     error = e.what();
     return nullptr;
   }
@@ -434,19 +468,23 @@ hipep_backend_code *Engine::find(const hipep_backend_split_desc &desc,
   std::shared_ptr<DynamicCode> dynamic =
       dynamicCodeOf(capture::dynamicSignature(graph->description));
   std::lock_guard<std::mutex> lock(mutex_);
-  hipep_backend_code *code = readyLocked(*entry, *dynamic, signature, *graph);
-  if (!code)
-    error = entry->state == SignatureEntry::State::Failed ? entry->error
-                                                          : "not compiled";
-  return code;
+  if (hipep_backend_code *code =
+          readyLocked(*entry, *dynamic, signature, *graph)) {
+    status = HIPEP_BACKEND_STATUS_READY;
+    return code;
+  }
+  status = statusLocked(*entry, *dynamic, error);
+  return nullptr;
 }
 
 hipep_backend_code *Engine::compile(const hipep_backend_split_desc &desc,
-                                    bool wait, std::string &error) {
+                                    bool wait, hipep_backend_status &status,
+                                    std::string &error) {
   std::unique_ptr<Graph> graph;
   try {
     graph = std::make_unique<Graph>(desc);
   } catch (const std::exception &e) {
+    status = HIPEP_BACKEND_STATUS_INVALID;
     error = e.what();
     return nullptr;
   }
@@ -458,27 +496,13 @@ hipep_backend_code *Engine::compile(const hipep_backend_split_desc &desc,
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (hipep_backend_code *code =
-            readyLocked(*entry, *dynamic, signature, *graph))
+            readyLocked(*entry, *dynamic, signature, *graph)) {
+      status = HIPEP_BACKEND_STATUS_READY;
       return code;
-    if (entry->state == SignatureEntry::State::Failed) {
-      error = entry->error;
-      return nullptr;
     }
-    if (entry->state == SignatureEntry::State::Compiling) {
-      error = "being compiled";
+    status = statusLocked(*entry, *dynamic, error);
+    if (status != HIPEP_BACKEND_STATUS_NOT_COMPILED)
       return nullptr;
-    }
-    if (!dynamic->failure.empty()) {
-      entry->state = SignatureEntry::State::Failed;
-      entry->error =
-          "a split of its structure was refused: " + dynamic->failure;
-      error = entry->error;
-      return nullptr;
-    }
-    if (environment("HIPEP_BACKEND_COMPILE", "1") == "0") {
-      error = "compiling is off (HIPEP_BACKEND_COMPILE=0)";
-      return nullptr;
-    }
     // Compiled with the symbols the compiler derives from it - dynamic-shape
     // code, or static-shape code of its own -, unless dynamic-shape code
     // compiled meanwhile fits it.
@@ -497,19 +521,24 @@ hipep_backend_code *Engine::compile(const hipep_backend_split_desc &desc,
     if (!thread_.joinable())
       thread_ = std::thread([this] { worker(); });
     wake_.notify_one();
+    status = HIPEP_BACKEND_STATUS_COMPILING;
     error = "being compiled";
     return nullptr;
   }
   process(std::move(job));
   std::lock_guard<std::mutex> lock(mutex_);
-  hipep_backend_code *code = readyLocked(*entry, *dynamic, signature, *graph);
-  if (!code)
-    error = entry->error.empty() ? "not compiled" : entry->error;
-  return code;
+  if (hipep_backend_code *code =
+          readyLocked(*entry, *dynamic, signature, *graph)) {
+    status = HIPEP_BACKEND_STATUS_READY;
+    return code;
+  }
+  status = statusLocked(*entry, *dynamic, error);
+  return nullptr;
 }
 
 void Engine::process(Job job) {
   std::string error;
+  bool refused = false;
   std::unique_ptr<capture::SplitCapture> captured;
   const capture::SymbolSpec staticSymbols;
   std::unique_ptr<Graph> graph;
@@ -556,6 +585,8 @@ void Engine::process(Job job) {
                                               : ": " + captured->symbolsError)
             : dynamic->refused.count(job.symbols) != 0
                 ? "its dynamic-shape code refused these symbols"
+            : dynamic->failed.count(job.symbols) != 0
+                ? "its dynamic-shape code of these symbols failed here"
             : previous && previous->shapes &&
                     !previous->shapes->fits(graph->description, &fitError)
                 ? "its dynamic-shape code has these symbols and does not "
@@ -600,17 +631,20 @@ void Engine::process(Job job) {
       captured =
           capture::captureSplit(graph->split, graph->tensors, &staticSymbols);
     }
+  } catch (const hip::ggml::Error &e) {
+    refused = true;
+    error = std::string("capture failed: ") + e.what();
   } catch (const std::exception &e) {
     error = std::string("capture failed: ") + e.what();
   }
   if (!captured) {
     job.key = job.requestedSignature;
     job.dynamic = false;
-    finish(job, nullptr, error);
+    finish(job, nullptr, error, refused);
     return;
   }
-  std::shared_ptr<Compiled> code = build(job, *captured, error);
-  finish(job, code, error);
+  std::shared_ptr<Compiled> code = build(job, *captured, error, refused);
+  finish(job, code, error, refused);
   if (!job.dynamic)
     return;
   // The new dynamic-shape code is derived from this split; should it be
@@ -626,27 +660,40 @@ void Engine::process(Job job) {
                  "hipep_backend: split %s compiled with static shapes: its "
                  "dynamic-shape code %s\n",
                  job.requestedSignature.substr(0, 12).c_str(),
-                 code ? ("does not fit it: " + fitError).c_str()
-                      : "was refused");
+                 code      ? ("does not fit it: " + fitError).c_str()
+                 : refused ? "was refused"
+                           : "failed");
   }
   job.key = job.directory = job.requestedSignature;
   job.dynamic = false;
   job.symbols.clear();
+  refused = false;
+  {
+    // finish() made the split that asked unknown again: it is being compiled.
+    std::shared_ptr<SignatureEntry> entry = signatureEntryOf(job.key);
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (entry->state == SignatureEntry::State::Unknown)
+      entry->state = SignatureEntry::State::Compiling;
+  }
   try {
     captured = nullptr;
     graph = std::make_unique<Graph>(job.desc->get());
     captured =
         capture::captureSplit(graph->split, graph->tensors, &staticSymbols);
-    code = build(job, *captured, error);
+    code = build(job, *captured, error, refused);
+  } catch (const hip::ggml::Error &e) {
+    code = nullptr;
+    refused = true;
+    error = std::string("capture failed: ") + e.what();
   } catch (const std::exception &e) {
     code = nullptr;
     error = std::string("capture failed: ") + e.what();
   }
-  finish(job, code, error);
+  finish(job, code, error, refused);
 }
 
 void Engine::finish(const Job &job, std::shared_ptr<Compiled> code,
-                    const std::string &error) {
+                    const std::string &error, bool refused) {
   const fs::path cache(cacheDir_);
   if (job.dynamic) {
     const std::string name = job.key.substr(1);
@@ -681,16 +728,18 @@ void Engine::finish(const Job &job, std::shared_ptr<Compiled> code,
     }
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      dynamic->refused.insert(job.symbols);
+      (refused ? dynamic->refused : dynamic->failed).insert(job.symbols);
       for (const std::string &r : dynamic->refused)
         refusedSymbols.push_back(r);
     }
-    writeJson(cache / (job.key + ".refused.json"),
-              llvm::json::Object{{"compiler", compilerIdentity()},
-                                 {"refused", std::move(refusedSymbols)}});
+    if (refused)
+      writeJson(cache / (job.key + ".refused.json"),
+                llvm::json::Object{{"compiler", compilerIdentity()},
+                                   {"refused", std::move(refusedSymbols)}});
     if (logging())
-      std::fprintf(stderr, "hipep_backend: dynamic-shape code %s refused: %s\n",
-                   name.substr(0, 12).c_str(), error.c_str());
+      std::fprintf(stderr, "hipep_backend: dynamic-shape code %s %s: %s\n",
+                   name.substr(0, 12).c_str(), refused ? "refused" : "failed",
+                   error.c_str());
     return;
   }
   std::shared_ptr<SignatureEntry> entry = signatureEntryOf(job.key);
@@ -702,9 +751,10 @@ void Engine::finish(const Job &job, std::shared_ptr<Compiled> code,
     entry->error = error;
   }
   if (!code) {
-    std::ofstream failed(cache / (job.key + ".failed"));
-    failed << compilerIdentity() << "\n" << error << "\n";
-    // Its dynamic-shape code failed it first: the structure is refused.
+    if (refused)
+      std::ofstream(cache / (job.key + ".failed")) << compilerIdentity() << "\n"
+                                                   << error << "\n";
+    // Its dynamic-shape code failed it first: the structure has no code.
     if (!job.dynamicSignature.empty()) {
       std::shared_ptr<DynamicCode> dynamic =
           dynamicCodeOf(job.dynamicSignature);
@@ -712,13 +762,15 @@ void Engine::finish(const Job &job, std::shared_ptr<Compiled> code,
         std::lock_guard<std::mutex> lock(mutex_);
         dynamic->failure = error;
       }
-      std::ofstream(cache / ("d" + job.dynamicSignature + ".failed"))
-          << compilerIdentity() << "\n"
-          << error << "\n";
+      if (refused)
+        std::ofstream(cache / ("d" + job.dynamicSignature + ".failed"))
+            << compilerIdentity() << "\n"
+            << error << "\n";
     }
     if (logging())
-      std::fprintf(stderr, "hipep_backend: split %s: %s\n",
-                   job.key.substr(0, 12).c_str(), error.c_str());
+      std::fprintf(stderr, "hipep_backend: split %s %s: %s\n",
+                   job.key.substr(0, 12).c_str(),
+                   refused ? "refused" : "failed", error.c_str());
   }
 }
 
@@ -741,7 +793,8 @@ void Engine::worker() {
 
 std::shared_ptr<Compiled> Engine::build(const Job &job,
                                         const capture::SplitCapture &captured,
-                                        std::string &error) {
+                                        std::string &error, bool &refused) {
+  refused = false;
   const fs::path cache(cacheDir_);
   const fs::path directory = cache / job.directory;
   const fs::path work =
@@ -759,7 +812,16 @@ std::shared_ptr<Compiled> Engine::build(const Job &job,
   bool ok = true;
   try {
     capture::compileSplit(captured, work.string());
-    std::ofstream(work / "compiler.txt") << compilerIdentity() << "\n";
+    std::ofstream stamp(work / "compiler.txt");
+    stamp << compilerIdentity() << "\n";
+    stamp.close();
+    if (!stamp)
+      throw std::runtime_error("cannot write " +
+                               (work / "compiler.txt").string());
+  } catch (const hip::ggml::Error &e) {
+    ok = false;
+    refused = true;
+    error = std::string("compile failed: ") + e.what();
   } catch (const std::exception &e) {
     ok = false;
     error = std::string("compile failed: ") + e.what();
@@ -771,11 +833,13 @@ std::shared_ptr<Compiled> Engine::build(const Job &job,
     std::lock_guard<std::mutex> lock(mutex_);
     ++compiles_;
     compileSeconds_ += seconds;
-    if (!ok)
+    if (refused)
+      ++refusals_;
+    else if (!ok)
       ++failures_;
   }
   if (!ok) {
-    // Why is the caller's to keep (`<signature>.failed`).
+    // Why is the caller's to keep (`<signature>.failed`, when refused).
     fs::remove_all(work, ec);
     return nullptr;
   }

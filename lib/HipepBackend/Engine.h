@@ -14,6 +14,12 @@
 // does not fit has its symbols derived again: other symbols compile the
 // dynamic-shape code's next generation; the same ones, none, or refused ones
 // compile the split with static shapes, as it is.
+//
+// Failures. A split the compiler refuses (a hip::ggml::Error: a statement
+// about the split, Error.h) it would refuse again: the cache keeps the
+// refusal, for every process of this library. A split whose code could not be
+// made or loaded otherwise - the cache's disk, memory, the device - has no
+// code in this process alone: the next one tries again.
 
 #ifndef HIPEP_BACKEND_ENGINE_H
 #define HIPEP_BACKEND_ENGINE_H
@@ -68,9 +74,9 @@ public:
   Engine &operator=(const Engine &) = delete;
 
   hipep_backend_code *find(const hipep_backend_split_desc &desc,
-                           std::string &error);
+                           hipep_backend_status &status, std::string &error);
   hipep_backend_code *compile(const hipep_backend_split_desc &desc, bool wait,
-                              std::string &error);
+                              hipep_backend_status &status, std::string &error);
   bool run(const hipep_backend_code &code, void *const *data,
            std::string &error);
 
@@ -107,13 +113,20 @@ private:
   hipep_backend_code *readyLocked(SignatureEntry &entry, DynamicCode &dynamic,
                                   const std::string &signature,
                                   const Graph &graph);
+  /// What find and compile say of `entry` when it has no code: refused,
+  /// being compiled or not compiled, and why (`error`). Under mutex_.
+  hipep_backend_status statusLocked(SignatureEntry &entry,
+                                    const DynamicCode &dynamic,
+                                    std::string &error);
   void process(Job job);
+  /// `refused`: no `code` because the compiler refused the split, which the
+  /// cache then keeps.
   void finish(const Job &job, std::shared_ptr<Compiled> code,
-              const std::string &error);
+              const std::string &error, bool refused);
   void worker();
   std::shared_ptr<Compiled>
   build(const Job &job, const hip::ggml::capture::SplitCapture &capture,
-        std::string &error);
+        std::string &error, bool &refused);
   std::shared_ptr<Compiled> load(const std::string &directory,
                                  std::string &error);
   /// Waits for the compile under way and stops compiling.
@@ -130,6 +143,7 @@ private:
   bool stopping_ = false;
   std::thread thread_;
   int64_t compiles_ = 0;
+  int64_t refusals_ = 0;
   int64_t failures_ = 0;
   double compileSeconds_ = 0;
 };

@@ -191,14 +191,21 @@ llvm::json::Value shapes(mlir::ModuleOp module,
                             {"tensors", std::move(tensors)}};
 }
 
+/// Whether `path` now holds `text`.
+bool writeText(const fs::path &path, const std::string &text) {
+  std::ofstream out(path);
+  out << text << "\n";
+  out.close();
+  return static_cast<bool>(out);
+}
+
+/// What the disk does not take refuses nothing of the split (Error.h): not a
+/// hip::ggml::Error.
 void write(const fs::path &path, const llvm::json::Value &document,
            bool pretty = false) {
-  std::ofstream out(path);
-  out << (pretty ? llvm::formatv("{0:2}", document).str()
-                 : llvm::formatv("{0}", document).str())
-      << "\n";
-  if (!out)
-    fail("cannot write ", path.string());
+  if (!writeText(path, pretty ? llvm::formatv("{0:2}", document).str()
+                              : llvm::formatv("{0}", document).str()))
+    throw std::runtime_error("cannot write " + path.string());
 }
 
 /// Each captured value named by the described tensor it is ("t7"); a leaf
@@ -578,10 +585,9 @@ void compileSplit(const SplitCapture &captured,
     llvm::raw_string_ostream stream(text);
     module->print(stream);
   }
-  {
-    std::ofstream out(directory / "model.ggml.mlir");
-    out << text << "\n";
-  }
+  const fs::path source = directory / "model.ggml.mlir";
+  if (!writeText(source, text))
+    throw std::runtime_error("cannot write " + source.string());
 
   // hip-ep's compiler, in this process: LLVM bitcode, its constants in
   // constants.bin beside it.
@@ -591,9 +597,15 @@ void compileSplit(const SplitCapture &captured,
   driver.setFileSystem(&files);
   std::string compileError;
   if (!driver.compile(text, (directory / "model.bc").string(), options,
-                      compileError))
+                      compileError)) {
+    // The compiler fails alike where it cannot write model.bc or
+    // constants.bin: a disk that no longer takes the module again failed it.
+    if (!writeText(source, text))
+      throw std::runtime_error("cannot write the code in " +
+                               directory.string() + ": " + compileError);
     fail("the HIP compiler refused the module",
          compileError.empty() ? std::string() : ": " + compileError);
+  }
 
   write(directory / "bindings.json", bindings(captured.graph, *module),
         /*pretty=*/true);
