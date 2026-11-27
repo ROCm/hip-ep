@@ -61,9 +61,9 @@ struct SwishToHip : public mlir::RewritePattern {
 
     mlir::Location loc = op->getLoc();
     mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
-    auto swish = mlir::hip::SwishOp::create(rewriter, loc, resultType,
-                                            *ctxOrFailure, input, init,
-                                            rewriter.getF64FloatAttr(alpha));
+    auto swish = mlir::hip::SwishOp::create(
+        rewriter, loc, resultType, *ctxOrFailure, input, init,
+        rewriter.getF64FloatAttr(alpha), rewriter.getF64FloatAttr(1.0));
     rewriter.replaceOp(op, swish->getResult(0));
     return mlir::success();
   }
@@ -118,20 +118,19 @@ struct MicrosoftQuickGeluToHip : public mlir::RewritePattern {
 
     mlir::Location loc = op->getLoc();
     mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
-    auto swish = mlir::hip::SwishOp::create(rewriter, loc, resultType,
-                                            *ctxOrFailure, input, init,
-                                            rewriter.getF64FloatAttr(alpha));
+    auto swish = mlir::hip::SwishOp::create(
+        rewriter, loc, resultType, *ctxOrFailure, input, init,
+        rewriter.getF64FloatAttr(alpha), rewriter.getF64FloatAttr(1.0));
     rewriter.replaceOp(op, swish->getResult(0));
     return mlir::success();
   }
 };
 
-// onnx.Custom(com.microsoft.ScaledSiLU) -> hip.mul + hip.swish(alpha = 1).
+// onnx.Custom(com.microsoft.ScaledSiLU) -> hip.swish(alpha = 1).
 // ScaledSiLU is z * sigmoid(z) with z = s * x, rounding z, sigmoid(z) and the
-// product to T. hip.swish multiplies by its unscaled input, so the scale is a
-// separate hip.mul; swish with alpha = 1 then rounds exactly like the contract.
-// `s` is the optional rank-0 `scale` input, else the `alpha` attribute rounded
-// to T.
+// product to T. `s` is the optional rank-0 `scale` input, else the `alpha`
+// attribute rounded to T. A constant `s` is hip.swish's input_scale, which
+// rounds z the same way; a `scale` tensor is a separate hip.mul ahead of it.
 struct MicrosoftScaledSiLUToHip : public mlir::RewritePattern {
   MicrosoftScaledSiLUToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
@@ -197,31 +196,24 @@ struct MicrosoftScaledSiLUToHip : public mlir::RewritePattern {
     bool losesInfo = false;
     alpha.convert(elemType.getFloatSemantics(),
                   llvm::APFloat::rmNearestTiesToEven, &losesInfo);
-    bool needsScale = scaleInput || !alpha.isExactlyValue(1.0);
-    if (needsScale && inputType.getRank() > 4) {
+    if (scaleInput && inputType.getRank() > 4) {
       return rewriter.notifyMatchFailure(
           op, "ScaledSiLU rank > 4 unsupported by hip.mul");
     }
-    if (needsScale) {
-      mlir::Value scale = scaleInput;
-      if (!scale) {
-        auto scalarType = mlir::RankedTensorType::get({}, elemType);
-        mlir::OperationState state(loc, "onnx.Constant");
-        state.addTypes(scalarType);
-        state.addAttribute("value",
-                           mlir::DenseElementsAttr::get(scalarType, alpha));
-        scale = rewriter.create(state)->getResult(0);
-      }
+    double inputScale = 1.0;
+    if (scaleInput) {
       mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
-      scaled =
-          mlir::hip::MulOp::create(rewriter, loc, context, input, scale, init)
-              ->getResult(0);
+      scaled = mlir::hip::MulOp::create(rewriter, loc, context, input,
+                                        scaleInput, init)
+                   ->getResult(0);
+    } else {
+      inputScale = alpha.convertToDouble();
     }
 
     mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
-    auto swish =
-        mlir::hip::SwishOp::create(rewriter, loc, resultType, context, scaled,
-                                   init, rewriter.getF64FloatAttr(1.0));
+    auto swish = mlir::hip::SwishOp::create(
+        rewriter, loc, resultType, context, scaled, init,
+        rewriter.getF64FloatAttr(1.0), rewriter.getF64FloatAttr(inputScale));
     rewriter.replaceOp(op, swish->getResult(0));
     return mlir::success();
   }

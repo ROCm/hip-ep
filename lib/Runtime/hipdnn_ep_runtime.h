@@ -1470,8 +1470,11 @@ int wrap_trilu(RuntimeState *state, void *input, void *output,
 // Swish activation wrapper (uses custom HIP kernel).
 // data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF, BFLOAT16, DOUBLE)
 // alpha: sigmoid input scale (default 1.0 per ONNX spec)
+// input_scale: x is first replaced by input_scale * x rounded to the element
+// type (com.microsoft ScaledSiLU); 1.0 leaves it unchanged
 int wrap_swish(RuntimeState *state, void *input, void *output,
-               int64_t num_elements, int64_t data_type, double alpha);
+               int64_t num_elements, int64_t data_type, double alpha,
+               double input_scale);
 
 // Element-wise power with a compile-time scalar exponent: y = x^exponent.
 // data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF, BFLOAT16, DOUBLE).

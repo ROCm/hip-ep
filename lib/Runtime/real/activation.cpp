@@ -379,7 +379,8 @@ int wrap_lrn(RuntimeState *state, const void *input, void *output, int64_t n,
 }
 
 int wrap_swish(RuntimeState *state, void *input, void *output,
-               int64_t num_elements, int64_t data_type, double alpha) {
+               int64_t num_elements, int64_t data_type, double alpha,
+               double input_scale) {
   OP_PROFILE(
       "swish",
       [&] {
@@ -402,11 +403,12 @@ int wrap_swish(RuntimeState *state, void *input, void *output,
 
   void *stream = hipdnn_ep_state_get_stream(state);
   RUNTIME_DEBUG_LOG("[REAL] wrap_swish: num_elements=%lld, "
-                    "data_type=%s(%lld), alpha=%f\n",
+                    "data_type=%s(%lld), alpha=%f, input_scale=%f\n",
                     (long long)num_elements, hipdnn_ep_datatype_name(data_type),
-                    (long long)data_type, alpha);
+                    (long long)data_type, alpha, input_scale);
 
-  int result = hip_swish(stream, input, output, num_elements, hip_dtype, alpha);
+  int result = hip_swish(stream, input, output, num_elements, hip_dtype, alpha,
+                         input_scale);
   if (result != 0) {
     fprintf(stderr, "[REAL] wrap_swish: kernel launch failed (%d)\n", result);
     return -1;
