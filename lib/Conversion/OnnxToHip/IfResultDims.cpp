@@ -30,6 +30,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "hip/Conversion/OnnxToHip/Passes.h"
+#include "hip/Dialect/IR/HipConstantData.h"
 #include "hip/Dialect/IR/HipDialect.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -80,11 +81,16 @@ public:
     auto key = std::make_pair(t, d);
     if (auto it = dims.find(key); it != dims.end())
       return it->second;
+    if (failedBefore(failedDims, key, depth))
+      return failure();
     FailureOr<Value> v = computeDim(t, d, depth);
-    if (succeeded(v))
+    if (succeeded(v)) {
       dims[key] = *v;
-    else if (!blocker)
-      blocker = t.getDefiningOp();
+    } else {
+      failedDims[key] = depth;
+      if (!blocker)
+        blocker = t.getDefiningOp();
+    }
     return v;
   }
 
@@ -97,6 +103,17 @@ private:
   bool inBranch(Value v) {
     Region *region = v.getParentRegion();
     return region && branch->isAncestor(region->getParentOp());
+  }
+
+  /// Resolutions that failed are cached with the depth they failed at, so a
+  /// value shared by both operands of an op is not re-traversed per use. A
+  /// failure at depth d also holds deeper, where less budget remains; a
+  /// shallower visit retries in case the depth limit caused it.
+  template <typename Key>
+  static bool failedBefore(const llvm::DenseMap<Key, unsigned> &failed,
+                           const Key &key, unsigned depth) {
+    auto it = failed.find(key);
+    return it != failed.end() && it->second <= depth;
   }
 
   Value constant(int64_t v) {
@@ -162,11 +179,16 @@ private:
       return s;
     if (auto it = scalars.find(s); it != scalars.end())
       return it->second;
+    if (failedBefore(failedScalars, s, depth))
+      return failure();
     FailureOr<Value> v = computeScalar(s, depth);
-    if (succeeded(v))
+    if (succeeded(v)) {
       scalars[s] = *v;
-    else if (!blocker)
-      blocker = s.getDefiningOp();
+    } else {
+      failedScalars[s] = depth;
+      if (!blocker)
+        blocker = s.getDefiningOp();
+    }
     return v;
   }
 
@@ -378,11 +400,16 @@ private:
     auto key = std::make_pair(t, idx);
     if (auto it = elements.find(key); it != elements.end())
       return it->second;
+    if (failedBefore(failedElements, key, depth))
+      return failure();
     FailureOr<Value> v = computeElement(t, ty, idx, depth);
-    if (succeeded(v))
+    if (succeeded(v)) {
       elements[key] = *v;
-    else if (!blocker)
-      blocker = t.getDefiningOp();
+    } else {
+      failedElements[key] = depth;
+      if (!blocker)
+        blocker = t.getDefiningOp();
+    }
     return v;
   }
 
@@ -400,12 +427,17 @@ private:
     Location loc = branch.getLoc();
 
     DenseElementsAttr dense;
-    if (auto cst = dyn_cast<arith::ConstantOp>(def))
+    if (auto cst = dyn_cast<arith::ConstantOp>(def)) {
       dense = dyn_cast<DenseElementsAttr>(cst.getValue());
-    else if (isa<ConstantOp>(def))
-      dense = def->getAttrOfType<DenseElementsAttr>("value");
-    else if (auto toTensor = dyn_cast<bufferization::ToTensorOp>(def))
+    } else if (auto carrier = dyn_cast<ConstantOp>(def)) {
+      // Inline or file-backed; an external initializer keeps its file range.
+      FailureOr<DenseElementsAttr> data = readConstantData(carrier, ty);
+      if (failed(data))
+        return failure();
+      dense = *data;
+    } else if (auto toTensor = dyn_cast<bufferization::ToTensorOp>(def)) {
       dense = externalizedConstant(toTensor.getBuffer());
+    }
     if (dense) {
       auto intTy = dyn_cast<IntegerType>(dense.getElementType());
       if (!intTy)
@@ -630,6 +662,9 @@ private:
   llvm::DenseMap<std::pair<Value, int64_t>, Value> dims;
   llvm::DenseMap<Value, Value> scalars;
   llvm::DenseMap<std::pair<Value, int64_t>, Value> elements;
+  llvm::DenseMap<std::pair<Value, int64_t>, unsigned> failedDims;
+  llvm::DenseMap<Value, unsigned> failedScalars;
+  llvm::DenseMap<std::pair<Value, int64_t>, unsigned> failedElements;
   llvm::DenseMap<Value, APInt> folds;
 };
 
