@@ -528,6 +528,8 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->output_allocator.self = nullptr;
   state->output_allocator.allocate = nullptr;
   state->transient_arena = nullptr;
+  state->qmoe_expert_cache = nullptr;
+  state->qmoe_expert_cache_destroy = nullptr;
   state->qmoe_scratch = nullptr;
   state->qmoe_scratch_size = 0;
   state->qmoe_host_scratch = nullptr;
@@ -1247,6 +1249,9 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     free(state->buffer_offsets);
   }
 
+  if (state->qmoe_expert_cache_destroy) {
+    state->qmoe_expert_cache_destroy(state);
+  }
   destroy_transient_arena(state);
 
   // Free the single constants blob and the pointer array.

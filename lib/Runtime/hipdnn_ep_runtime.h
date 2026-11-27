@@ -1903,6 +1903,27 @@ int wrap_qmoe(
     int64_t routing_type,        // HIPDNN_EP_QMOE_ROUTING_*
     float routed_scaling_factor, float routing_norm_eps);
 
+// wrap_qmoe whose fc1/fc2 weights, scales, and bias are disk-resident
+// constant indices (-1 for an absent bias). Experts are served from a slot
+// cache shared by the num_nodes offloaded QMoE calls; `node` is this call's
+// position among them. HIPDNN_EP_QMOE_EXPERT_CACHE_MB caps the cache size.
+int wrap_qmoe_offload(RuntimeState *state, const void *input,
+                      const void *router_probs, const void *router_weights,
+                      int64_t fc1_weights, int64_t fc1_scales, int64_t fc1_bias,
+                      int64_t fc2_weights, int64_t fc2_scales, int64_t fc2_bias,
+                      const void *fc3_weights, const void *fc3_scales,
+                      const void *fc3_bias, const void *fc1_zero_points,
+                      const void *fc2_zero_points, const void *fc3_zero_points,
+                      void *output, int64_t num_tokens, int64_t hidden_size,
+                      int64_t inter_size, int64_t num_experts, int64_t k,
+                      int64_t expert_weight_bits, int64_t block_size,
+                      int64_t swiglu_fusion, int64_t activation_type,
+                      float activation_alpha, float activation_beta,
+                      float swiglu_limit, int64_t normalize_routing_weights,
+                      int64_t elem_size, const void *correction_bias,
+                      int64_t routing_type, float routed_scaling_factor,
+                      float routing_norm_eps, int64_t node, int64_t num_nodes);
+
 // com.amd QMoE operation wrapper (LatentMoE).
 //
 // Independent pipeline from wrap_qmoe above (com.microsoft QMoE): sigmoid +
