@@ -1622,6 +1622,69 @@ void SkipRmsNormOp::getEffects(
 LogicalResult SkipRmsNormOp::verify() { return success(); }
 
 //===----------------------------------------------------------------------===//
+// SkipLayerNormOp: ins(input, skip, gamma, [beta], [bias])
+//                  outs(output, [input_skip_bias_sum])
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SkipLayerNormOp::getDpsInitsMutable() {
+  return getOutputsMutable();
+}
+
+void SkipLayerNormOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult SkipLayerNormOp::verify() {
+  unsigned numOutputs = getOutputs().size();
+  if (numOutputs < 1 || numOutputs > 2)
+    return emitOpError("expected 1 or 2 output buffers (output, "
+                       "[input_skip_bias_sum]), got ")
+           << numOutputs;
+  SmallVector<Value> dataOperands{getInput(), getSkip(), getGamma()};
+  if (Value b = getBeta())
+    dataOperands.push_back(b);
+  if (Value b = getBias())
+    dataOperands.push_back(b);
+  for (Value out : getOutputs())
+    dataOperands.push_back(out);
+
+  // The runtime reads every operand as the input's element type, f16 or f32,
+  // and takes gamma's element count as the row length.
+  auto inputType = cast<ShapedType>(getInput().getType());
+  Type elemType = inputType.getElementType();
+  if (!elemType.isF16() && !elemType.isF32())
+    return emitOpError("expected f16 or f32 elements, got ") << elemType;
+  for (Value v : dataOperands)
+    if (cast<ShapedType>(v.getType()).getElementType() != elemType)
+      return emitOpError("expected all operands to have element type ")
+             << elemType;
+  // The kernel writes each output with the input's element count.
+  if (inputType.hasRank()) {
+    for (Value out : getOutputs()) {
+      auto type = cast<ShapedType>(out.getType());
+      if (!type.hasRank() ||
+          failed(verifyCompatibleShape(inputType.getShape(), type.getShape())))
+        return emitOpError("expected the outputs to have the input shape");
+    }
+  }
+  if (inputType.getRank() >= 1) {
+    int64_t hidden = inputType.getDimSize(inputType.getRank() - 1);
+    for (Value v : {getGamma(), getBeta(), getBias()}) {
+      if (!v)
+        continue;
+      auto type = cast<ShapedType>(v.getType());
+      if (!ShapedType::isDynamic(hidden) && type.hasStaticShape() &&
+          type.getNumElements() != hidden)
+        return emitOpError("expected gamma / beta / bias to hold ")
+               << hidden << " elements (the last input dimension)";
+    }
+  }
+  return verifyDpsComputeOp(*this, dataOperands, /*numInits=*/numOutputs);
+}
+
+//===----------------------------------------------------------------------===//
 // LayerNormOp: ins(input, scale, [bias]) outs(output, [mean, [inv_std]])
 //===----------------------------------------------------------------------===//
 

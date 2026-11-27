@@ -528,6 +528,33 @@ def FoldBatchNormPass
   }];
 }
 
+def FoldLayerNormPass
+    : Pass<"hip-fold-layer-norm", "mlir::func::FuncOp"> {
+  let summary = "Fold primitive last-axis LayerNorm chains and residual adds into one norm op";
+  let description = [{
+    A LayerNorm written as primitive HIP ops (ReduceMean, Sub, a square,
+    ReduceMean, an epsilon Add, Sqrt or a reciprocal square root, and an
+    optional per-channel Mul and Add) over the last axis is replaced by one
+    hip.layer_norm with that epsilon, which accumulates in fp32. The square may
+    be hip.mul(d, d) or hip.pow {2}; the normalization hip.div by hip.sqrt or
+    hip.pow {0.5}, or hip.mul by hip.reciprocal(hip.sqrt), hip.div(1, sqrt) or
+    hip.pow {-0.5}. Without a per-channel scale the norm gets a scale of ones.
+    A same-shape hip.add that produces the norm input (a residual) folds with
+    it into hip.skip_layer_norm, which also writes the sum for later users.
+
+    Only f16 and f32 chains with a static last dimension and a scalar constant
+    epsilon fold; the chain's intermediates must have no other users. It runs
+    in the shared ONNX->HIP head right after hip-fold-batchnorm, so any
+    frontend that emits these HIP ops gets the fold, and on the rocMLIR path
+    it runs before the fusion outlines the chain into elementwise kernels or
+    the residual add into the producing GEMM.
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::tensor::TensorDialect"
+  ];
+}
 def ForwardConcatSlotsPass : Pass<"hip-forward-concat-slots", "mlir::func::FuncOp"> {
   let summary = "Write a packed concat slot in place and share it with its readers";
   let description = [{

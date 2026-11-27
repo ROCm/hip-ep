@@ -1660,6 +1660,18 @@ int wrap_layer_normalization(RuntimeState *state, void *input, void *scale,
                              int64_t element_size_bytes, int64_t axis,
                              float epsilon, int64_t stash_type);
 
+// Residual add fused with LayerNormalization over the last axis
+// (hip.skip_layer_norm). beta, bias and input_skip_bias_sum may be nullptr.
+// A skip with fewer elements than input holds the trailing rows and repeats
+// over the input ([1, S, H] or [S, H] against [B, S, H]). A non-zero
+// round_sum rounds the sum to the element type before normalizing.
+int wrap_skip_layer_norm(RuntimeState *state, void *input, void *skip,
+                         void *gamma, void *beta, void *bias, void *output,
+                         void *input_skip_bias_sum, int64_t input_num_elements,
+                         int64_t skip_num_elements, int64_t gamma_num_elements,
+                         int64_t element_size_bytes, float epsilon,
+                         int32_t round_sum);
+
 // InstanceNormalization: y = scale * (x - mean) / sqrt(var + epsilon) + B
 // with mean/var over spatial axes of each (N, C) slice. Input is (N,C,D1..Dn).
 int wrap_instance_normalization(RuntimeState *state, void *input, void *scale,

@@ -119,6 +119,8 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     RmsNormOp::attachInterface<HipDstBufferizableModel<RmsNormOp>>(*ctx);
     SkipRmsNormOp::attachInterface<HipDstBufferizableModel<SkipRmsNormOp>>(
         *ctx);
+    SkipLayerNormOp::attachInterface<HipDstBufferizableModel<SkipLayerNormOp>>(
+        *ctx);
     RopeOp::attachInterface<HipDstBufferizableModel<RopeOp>>(*ctx);
     MRotaryEmbeddingOp::attachInterface<
         HipDstBufferizableModel<MRotaryEmbeddingOp>>(*ctx);

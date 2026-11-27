@@ -504,6 +504,23 @@ def _make_layer_norm_model(
     return make_model_from_nodes([node], [X], [Y], initializers=initializers)
 
 
+def _layer_norm_reference(model, x: np.ndarray, epsilon: float = 1e-5):
+    """Last-axis LayerNorm in float64 with the model's scale and bias.
+
+    ORT's CPU LayerNormalization takes the variance as E[x^2] - E[x]^2, which
+    cancels for rows whose mean is large next to their spread, so it cannot
+    referee those rows.
+    """
+    weights = {t.name: numpy_helper.to_array(t) for t in model.graph.initializer}
+    x64 = x.astype(np.float64)
+    mean = x64.mean(axis=-1, keepdims=True)
+    var = ((x64 - mean) ** 2).mean(axis=-1, keepdims=True)
+    y = (x64 - mean) / np.sqrt(var + epsilon) * weights["scale"].astype(np.float64)
+    if "bias" in weights:
+        y = y + weights["bias"].astype(np.float64)
+    return [y.astype(x.dtype)]
+
+
 class TestLayerNormalization:
     """Full LN: (x - mean) * rsqrt(var + eps) * scale [+ bias]."""
 
@@ -556,6 +573,70 @@ class TestLayerNormalization:
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1e-5, rtol=1e-5)
 
+    def test_layer_norm_fp32_large_offset(self, model_runner):
+        """Rows with variance far below mean^2 (e.g. [10000, 10001]) must use a
+        centered variance; E[x^2] - mean^2 cancels to 0 in fp32 and scales the
+        outputs by rsqrt(epsilon)."""
+        input_shape = [4, 2]
+        model = _make_layer_norm_model(input_shape, np.float32, with_bias=True)
+        x = np.array(
+            [[10000, 10001], [-10000, -10001], [4096, 4097], [1e5, 1e5 + 2]],
+            dtype=np.float32,
+        )
+        actual, _ = model_runner.run_sample(model, [x])
+        compare_outputs(actual, _layer_norm_reference(model, x), atol=1e-3, rtol=1e-3)
+
+    @pytest.mark.parametrize("hidden", [2, 64, 1152])
+    def test_layer_norm_large_mean_fp32(self, model_runner, hidden):
+        """Rows whose mean is large next to their spread.
+
+        A one-pass E[x^2] - E[x]^2 variance cancels here: x = [8192, 8193]
+        gives 0 instead of 0.25 in fp32 and outputs of about +-158 instead of
+        +-1. hidden=2 is exactly that row. One fp32 ulp at 8192 is ~1e-3, so
+        fp32 rounding of the row costs a few 1e-3 after dividing by the ~0.3
+        stddev.
+        """
+        input_shape = [3, hidden]
+        model = _make_layer_norm_model(input_shape, np.float32, with_bias=True)
+        rng = np.random.default_rng(1106)
+        x = (8192.0 + rng.uniform(-1, 1, input_shape)).astype(np.float32)
+        if hidden == 2:
+            x[0] = [8192.0, 8193.0]
+        actual, _ = model_runner.run_sample(model, [x])
+        compare_outputs(actual, _layer_norm_reference(model, x), atol=5e-3, rtol=1e-3)
+
+    def test_layer_norm_large_magnitude_fp32(self, model_runner):
+        """Rows whose plain sum of squares is finite but near the fp32 limit.
+
+        Deviations from a sample instead of the mean overflow when squared
+        for x = [1e19, -1e19] (x - x[0] is -2e19), which would zero both
+        outputs instead of giving about +-1 times scale.
+        """
+        input_shape = [2, 2]
+        model = _make_layer_norm_model(input_shape, np.float32, with_bias=True)
+        x = np.array([[1e19, -1e19], [-1e19, 1e19]], dtype=np.float32)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=1e-5, rtol=1e-5)
+
+    @pytest.mark.parametrize("hidden", [4, 5])
+    def test_layer_norm_large_constant_rows_fp32(self, model_runner, hidden):
+        """Rows of large finite values whose plain sum overflows fp32.
+
+        Four or five 1e38s sum past the fp32 maximum; an infinite mean turns
+        the row into NaNs. A constant row normalizes to the bias. hidden=4
+        runs the register row kernel, hidden=5 the block kernel (not a whole
+        number of 16-byte chunks), where 1/5 is inexact and a mean an ulp off
+        1e38 would square to infinity.
+        """
+        input_shape = [3, hidden]
+        model = _make_layer_norm_model(input_shape, np.float32, with_bias=True)
+        x = np.full(input_shape, 1e38, dtype=np.float32)
+        x[1] = -1e38
+        x[2] = 3e38
+        actual, _ = model_runner.run_sample(model, [x])
+        assert np.isfinite(actual[0]).all()
+        compare_outputs(actual, _layer_norm_reference(model, x), atol=1e-4, rtol=1e-4)
+
     @pytest.mark.parametrize("num_patches", [256, 1024])
     def test_layer_norm_qwen35b_vision_shape(self, model_runner, num_patches):
         """LN exactly as it appears 55x in Qwen3.5-35B vision.onnx:
@@ -607,10 +688,14 @@ class TestLayerNormalization:
         )
         compare_outputs(actual, expected, atol=2e-4, rtol=2e-4)
 
-    def test_layer_norm_first_element_outlier(self, model_runner):
-        input_shape = [1, 256]
+    # One large sample dominates the row. With the rest at 1, an fp32 first
+    # pass rounds the mean (1e8 + 1 is 1e8); the second pass recovers it.
+    # 4096 runs the row kernel, 65536 the block kernel.
+    @pytest.mark.parametrize("hidden,rest", [(256, 0.0), (4096, 1.0), (65536, 1.0)])
+    def test_layer_norm_first_element_outlier(self, model_runner, hidden, rest):
+        input_shape = [1, hidden]
         model = _make_layer_norm_model(input_shape, np.float32, with_bias=True)
-        x = np.zeros(input_shape, dtype=np.float32)
+        x = np.full(input_shape, rest, dtype=np.float32)
         x[0, 0] = 1e8
         actual, expected = model_runner.run_sample(
             model,
@@ -642,6 +727,441 @@ def _fp64_layer_norm_reference(model, input_shape: list[int]):
         [helper.make_tensor_value_info("X", TensorProto.FLOAT, input_shape)],
         [helper.make_tensor_value_info("Y", TensorProto.FLOAT, input_shape)],
         initializers=initializers,
+    )
+
+
+class TestLayerNormKernelSizes:
+    """Row-kernel dispatch: one wave per row up to 256 16-byte chunks, wider
+    groups above that, and the block-per-row fallback for ragged or too-wide
+    rows. Odd row counts leave the last block partly empty."""
+
+    @pytest.mark.parametrize(
+        "rows,hidden",
+        [(13, 768), (5, 1024), (7, 1280), (3, 2048), (2, 8192), (3, 1004)],
+    )
+    def test_layer_norm_sizes_fp16(self, model_runner, rows, hidden):
+        model = _make_layer_norm_model([rows, hidden], np.float16, with_bias=True)
+        rng = np.random.default_rng(1201)
+        x = rng.uniform(-2, 2, [rows, hidden]).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=4e-3, rtol=1e-3)
+
+    @pytest.mark.parametrize(
+        "rows,hidden",
+        [(9, 768), (5, 1280), (3, 4096), (2, 16384), (2, 16388), (3, 1001)],
+    )
+    def test_layer_norm_sizes_fp32(self, model_runner, rows, hidden):
+        model = _make_layer_norm_model([rows, hidden], np.float32, with_bias=True)
+        rng = np.random.default_rng(1202)
+        x = rng.uniform(-2, 2, [rows, hidden]).astype(np.float32)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=1e-5, rtol=1e-5)
+
+    @pytest.mark.parametrize(
+        "dtype,hidden", [(np.float32, 768), (np.float16, 1280), (np.float32, 33)]
+    )
+    def test_layer_norm_mean_inv_std(self, model_runner, dtype, hidden):
+        """Mean and InvStdDev outputs from the row kernel and the fallback."""
+        rows = 6
+        tp = _TENSOR_PROTO[dtype]
+        X = helper.make_tensor_value_info("X", tp, [rows, hidden])
+        Y = helper.make_tensor_value_info("Y", tp, [rows, hidden])
+        M = helper.make_tensor_value_info("M", TensorProto.FLOAT, [rows, 1])
+        R = helper.make_tensor_value_info("R", TensorProto.FLOAT, [rows, 1])
+        rng = np.random.default_rng(1203)
+        scale = numpy_helper.from_array(
+            rng.uniform(0.5, 1.5, [hidden]).astype(dtype), name="scale"
+        )
+        node = helper.make_node(
+            "LayerNormalization",
+            ["X", "scale"],
+            ["Y", "M", "R"],
+            axis=-1,
+            epsilon=1e-5,
+            stash_type=1,
+        )
+        model = make_model_from_nodes([node], [X], [Y, M, R], initializers=[scale])
+        x = (3.0 + rng.uniform(-2, 2, [rows, hidden])).astype(dtype)
+        actual, expected = model_runner.run_sample(model, [x])
+        atol = 1e-5 if dtype == np.float32 else 4e-3
+        compare_outputs(actual, expected, atol=atol, rtol=1e-3)
+
+
+def _make_decomposed_layer_norm_model(
+    input_shape: list[int],
+    dtype: np.dtype,
+    spelling: str,
+    *,
+    affine: str = "scale_bias",
+    residual: bool = False,
+):
+    """LayerNorm over the last axis written as primitives.
+
+    spelling picks the normalization step, with a = var + eps:
+      div_sqrt   d / Sqrt(a)
+      mul_recip  d * Reciprocal(Sqrt(a))
+      mul_pow    d * Pow(a, -0.5)
+      div_pow    d / Pow(a, 0.5)
+    affine is "scale_bias", "scale" or "none". With residual=True the norm
+    input is X + R and that sum is a second graph output.
+    """
+    hidden = input_shape[-1]
+    tp = _TENSOR_PROTO[dtype]
+    rng = np.random.default_rng(1301)
+    graph_inputs = [helper.make_tensor_value_info("X", tp, input_shape)]
+    outputs = [helper.make_tensor_value_info("Y", tp, input_shape)]
+    inits = [
+        numpy_helper.from_array(np.array(1e-5, dtype=dtype), name="eps"),
+        numpy_helper.from_array(np.array(2.0, dtype=dtype), name="two"),
+        numpy_helper.from_array(np.array(0.5, dtype=dtype), name="half"),
+        numpy_helper.from_array(np.array(-0.5, dtype=dtype), name="neg_half"),
+        numpy_helper.from_array(
+            rng.uniform(0.5, 1.5, [hidden]).astype(dtype), name="gamma"
+        ),
+        numpy_helper.from_array(
+            rng.uniform(-0.5, 0.5, [hidden]).astype(dtype), name="beta"
+        ),
+    ]
+    nodes = []
+    x = "X"
+    if residual:
+        graph_inputs.append(helper.make_tensor_value_info("R", tp, input_shape))
+        outputs.append(helper.make_tensor_value_info("S", tp, input_shape))
+        nodes.append(helper.make_node("Add", ["X", "R"], ["S"]))
+        x = "S"
+    nodes += [
+        helper.make_node("ReduceMean", [x], ["mean"], axes=[-1], keepdims=1),
+        helper.make_node("Sub", [x, "mean"], ["d"]),
+        helper.make_node("Pow", ["d", "two"], ["sq"]),
+        helper.make_node("ReduceMean", ["sq"], ["var"], axes=[-1], keepdims=1),
+        helper.make_node("Add", ["var", "eps"], ["a"]),
+    ]
+    if spelling == "div_sqrt":
+        nodes += [
+            helper.make_node("Sqrt", ["a"], ["s"]),
+            helper.make_node("Div", ["d", "s"], ["n"]),
+        ]
+    elif spelling == "mul_recip":
+        nodes += [
+            helper.make_node("Sqrt", ["a"], ["s"]),
+            helper.make_node("Reciprocal", ["s"], ["r"]),
+            helper.make_node("Mul", ["d", "r"], ["n"]),
+        ]
+    elif spelling == "mul_pow":
+        nodes += [
+            helper.make_node("Pow", ["a", "neg_half"], ["r"]),
+            helper.make_node("Mul", ["r", "d"], ["n"]),
+        ]
+    elif spelling == "div_pow":
+        nodes += [
+            helper.make_node("Pow", ["a", "half"], ["s"]),
+            helper.make_node("Div", ["d", "s"], ["n"]),
+        ]
+    else:
+        raise ValueError(spelling)
+    if affine == "none":
+        nodes.append(helper.make_node("Identity", ["n"], ["Y"]))
+    elif affine == "scale":
+        nodes.append(helper.make_node("Mul", ["n", "gamma"], ["Y"]))
+    else:
+        nodes += [
+            helper.make_node("Mul", ["n", "gamma"], ["m"]),
+            helper.make_node("Add", ["m", "beta"], ["Y"]),
+        ]
+    return make_model_from_nodes(nodes, graph_inputs, outputs, initializers=inits)
+
+
+class TestDecomposedLayerNorm:
+    """Primitive LayerNorm chains fold into one hip.layer_norm (or
+    hip.skip_layer_norm with a residual Add) in hip-fold-layer-norm. The CPU
+    reference runs the primitives op by op, so fp16 tolerances cover its
+    per-op rounding."""
+
+    @pytest.mark.parametrize(
+        "spelling", ["div_sqrt", "mul_recip", "mul_pow", "div_pow"]
+    )
+    @pytest.mark.parametrize("affine", ["scale_bias", "scale", "none"])
+    def test_spellings_fp32(self, model_runner, spelling, affine):
+        shape = [2, 8, 768]
+        model = _make_decomposed_layer_norm_model(
+            shape, np.float32, spelling, affine=affine
+        )
+        rng = np.random.default_rng(1302)
+        x = rng.uniform(-2, 2, shape).astype(np.float32)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=1e-4, rtol=1e-4)
+
+    @pytest.mark.parametrize("spelling", ["div_sqrt", "mul_recip", "mul_pow"])
+    def test_spellings_fp16(self, model_runner, spelling):
+        shape = [1, 16, 1280]
+        model = _make_decomposed_layer_norm_model(shape, np.float16, spelling)
+        rng = np.random.default_rng(1303)
+        x = rng.uniform(-2, 2, shape).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=1e-2, rtol=1e-2)
+
+    @pytest.mark.parametrize(
+        "dtype,hidden", [(np.float32, 768), (np.float16, 1024), (np.float32, 30)]
+    )
+    def test_residual_add(self, model_runner, dtype, hidden):
+        """Residual Add + LayerNorm: both the norm and the sum are outputs."""
+        shape = [1, 12, hidden]
+        model = _make_decomposed_layer_norm_model(
+            shape, dtype, "mul_recip", residual=True
+        )
+        rng = np.random.default_rng(1304)
+        x = rng.uniform(-2, 2, shape).astype(dtype)
+        r = rng.uniform(-2, 2, shape).astype(dtype)
+        actual, expected = model_runner.run_sample(model, [x, r])
+        atol = 1e-4 if dtype == np.float32 else 1e-2
+        compare_outputs(actual, expected, atol=atol, rtol=atol)
+
+    @pytest.mark.parametrize(
+        "shape", [[1, 77, 768], [1, 4096, 768], [1, 1500, 1280], [3, 5, 1030]]
+    )
+    def test_model_shapes_fp16(self, model_runner, shape):
+        """Text-encoder, image-encoder and speech-encoder rows, and a hidden
+        size that is not a multiple of the vector width."""
+        model = _make_decomposed_layer_norm_model(shape, np.float16, "div_sqrt")
+        rng = np.random.default_rng(1305)
+        x = rng.uniform(-2, 2, shape).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=1e-2, rtol=1e-2)
+
+
+def _make_residual_layer_norm_model(input_shape: list[int], dtype: np.dtype):
+    """Add(X, R) -> LayerNormalization, with the sum consumed afterwards."""
+    hidden = input_shape[-1]
+    tp = _TENSOR_PROTO[dtype]
+    rng = np.random.default_rng(1401)
+    nodes = [
+        helper.make_node("Add", ["X", "R"], ["S"]),
+        helper.make_node(
+            "LayerNormalization", ["S", "gamma", "beta"], ["Y"], axis=-1, epsilon=1e-5
+        ),
+        helper.make_node("Add", ["S", "Y"], ["Z"]),
+    ]
+    return make_model_from_nodes(
+        nodes,
+        [
+            helper.make_tensor_value_info("X", tp, input_shape),
+            helper.make_tensor_value_info("R", tp, input_shape),
+        ],
+        [helper.make_tensor_value_info("Z", tp, input_shape)],
+        initializers=[
+            numpy_helper.from_array(
+                rng.uniform(0.5, 1.5, [hidden]).astype(dtype), name="gamma"
+            ),
+            numpy_helper.from_array(
+                rng.uniform(-0.5, 0.5, [hidden]).astype(dtype), name="beta"
+            ),
+        ],
+    )
+
+
+class TestResidualLayerNorm:
+    """onnx.LayerNormalization fed by a residual Add -> hip.skip_layer_norm."""
+
+    @pytest.mark.parametrize(
+        "dtype,hidden",
+        [(np.float16, 768), (np.float32, 1280), (np.float16, 1001)],
+    )
+    def test_residual_layer_normalization(self, model_runner, dtype, hidden):
+        shape = [2, 7, hidden]
+        model = _make_residual_layer_norm_model(shape, dtype)
+        rng = np.random.default_rng(1402)
+        x = rng.uniform(-2, 2, shape).astype(dtype)
+        r = rng.uniform(-2, 2, shape).astype(dtype)
+        actual, expected = model_runner.run_sample(model, [x, r])
+        atol = 1e-5 if dtype == np.float32 else 4e-3
+        compare_outputs(actual, expected, atol=atol, rtol=1e-3)
+
+    def test_residual_f16_normalizes_rounded_sum(self, model_runner):
+        """The Add rounds 1000 + 0.1 .. 1000 + 0.8 to f16 (steps of 0.5)
+        before the norm reads it, so the fused op must too."""
+        shape = [1, 2, 8]
+        model = _make_residual_layer_norm_model(shape, np.float16)
+        x = np.full(shape, 1000, np.float16)
+        r = np.tile(np.linspace(0.1, 0.8, 8), (1, 2, 1)).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [x, r])
+        compare_outputs(actual, expected, atol=4e-3, rtol=1e-3)
+
+
+class TestSkipLayerNormSizes:
+    """Fused SkipLayerNormalization across the row kernel and the fallback."""
+
+    @pytest.mark.parametrize("input_shape", [[1, 64, 768], [2, 9, 1280], [1, 3, 1004]])
+    def test_skip_layer_norm_sizes(self, model_runner, input_shape):
+        model = _make_skip_layer_norm_model(input_shape)
+        rng = np.random.default_rng(1501)
+        x = rng.uniform(-2, 2, input_shape).astype(np.float16)
+        skip_input = rng.uniform(-2, 2, input_shape).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [x, skip_input])
+        compare_outputs(actual, expected, atol=4e-3, rtol=1e-3)
+
+    def test_skip_layer_norm_bias_order_fp32(self, model_runner):
+        """input + skip + bias in ORT's order: (1e8 + s) rounds to a multiple of
+        8 before the -1e8 bias cancels it, so the sum is not s."""
+        hidden = 16
+        shape = [1, 2, hidden]
+        tp = TensorProto.FLOAT
+        X = helper.make_tensor_value_info("X", tp, shape)
+        S = helper.make_tensor_value_info("S", tp, shape)
+        Y = helper.make_tensor_value_info("Y", tp, shape)
+        Y3 = helper.make_tensor_value_info("Y3", tp, shape)
+        rng = np.random.default_rng(1502)
+        inits = [
+            numpy_helper.from_array(
+                rng.uniform(0.5, 1.5, [hidden]).astype(np.float32), name="gamma"
+            ),
+            numpy_helper.from_array(
+                rng.uniform(-0.5, 0.5, [hidden]).astype(np.float32), name="beta"
+            ),
+            numpy_helper.from_array(np.full([hidden], -1e8, np.float32), name="bias"),
+        ]
+        node = helper.make_node(
+            "SkipLayerNormalization",
+            ["X", "S", "gamma", "beta", "bias"],
+            ["Y", "", "", "Y3"],
+            domain="com.microsoft",
+            epsilon=1e-5,
+        )
+        model = make_model_from_nodes(
+            [node],
+            [X, S],
+            [Y, Y3],
+            initializers=inits,
+            extra_opsets=[helper.make_opsetid("com.microsoft", 1)],
+        )
+        x = np.full(shape, 1e8, np.float32)
+        s = np.tile(np.arange(1, hidden + 1, dtype=np.float32), (1, 2, 1))
+        actual, expected = model_runner.run_sample(model, [x, s])
+        compare_outputs(actual, expected, atol=1e-5, rtol=1e-5)
+
+    @pytest.mark.parametrize("dtype", [np.float16, np.float32])
+    def test_skip_layer_norm_broadcast_skip_dynamic(self, model_runner, dtype):
+        """A [1, S, H] skip against a [B, S, H] input, both typed [?, ?, H]: the
+        fused op reads the skip once per batch."""
+        hidden = 768
+        tp = _TENSOR_PROTO[dtype]
+        X = helper.make_tensor_value_info("X", tp, ["batch", "seq", hidden])
+        S = helper.make_tensor_value_info("S", tp, ["skip_batch", "seq", hidden])
+        Y = helper.make_tensor_value_info("Y", tp, ["batch", "seq", hidden])
+        Y3 = helper.make_tensor_value_info("Y3", tp, ["batch", "seq", hidden])
+        rng = np.random.default_rng(1503)
+        inits = [
+            numpy_helper.from_array(
+                rng.uniform(0.5, 1.5, [hidden]).astype(dtype), name="gamma"
+            ),
+            numpy_helper.from_array(
+                rng.uniform(-0.5, 0.5, [hidden]).astype(dtype), name="beta"
+            ),
+        ]
+        node = helper.make_node(
+            "SkipLayerNormalization",
+            ["X", "S", "gamma", "beta"],
+            ["Y", "", "", "Y3"],
+            domain="com.microsoft",
+            epsilon=1e-5,
+        )
+        model = make_model_from_nodes(
+            [node],
+            [X, S],
+            [Y, Y3],
+            initializers=inits,
+            extra_opsets=[helper.make_opsetid("com.microsoft", 1)],
+        )
+        x = rng.uniform(-2, 2, [3, 5, hidden]).astype(dtype)
+        s = rng.uniform(-2, 2, [1, 5, hidden]).astype(dtype)
+        actual, expected = model_runner.run_sample(model, [x, s])
+        atol = 1e-5 if dtype == np.float32 else 4e-3
+        compare_outputs(actual, expected, atol=atol, rtol=1e-3)
+
+    @pytest.mark.parametrize("dtype", [np.float16, np.float32])
+    def test_skip_layer_norm_rank2_skip_bias(self, model_runner, dtype):
+        """A [S, H] skip with a bias against [B, S, H]: one fused launch reads
+        skip row r mod S for input row r."""
+        shape, hidden = [4, 6, 768], 768
+        rng = np.random.default_rng(1504)
+        model = _make_skip_layer_norm_shapes_model(
+            shape, shape[1:], dtype, rng.uniform(-0.5, 0.5, [hidden]).astype(dtype)
+        )
+        x = rng.uniform(-2, 2, shape).astype(dtype)
+        s = rng.uniform(-2, 2, shape[1:]).astype(dtype)
+        actual, expected = model_runner.run_sample(model, [x, s])
+        atol = 1e-5 if dtype == np.float32 else 4e-3
+        compare_outputs(actual, expected, atol=atol, rtol=1e-3)
+
+    @pytest.mark.parametrize("dynamic_hidden", [False, True])
+    def test_skip_layer_norm_f16_sum_rounds_once(self, model_runner, dynamic_hidden):
+        """input + skip overflows f16 (60000 + 60032) while the whole sum,
+        after the -60000 bias, does not. ORT adds in fp32 and rounds once; so
+        do the fused kernel and, for a dynamic hidden size, the fallback."""
+        hidden = 8
+        bias = np.full([hidden], -60000, np.float16)
+        model = _make_skip_layer_norm_shapes_model(
+            [1, 2, "hidden" if dynamic_hidden else hidden],
+            [1, 2, "hidden" if dynamic_hidden else hidden],
+            np.float16,
+            bias,
+        )
+        x = np.full([1, 2, hidden], 60000, np.float16)
+        s = np.tile(np.linspace(60000, 60032, hidden), (1, 2, 1)).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [x, s])
+        assert np.isfinite(actual[0]).all() and np.isfinite(actual[1]).all()
+        compare_outputs(actual, expected, atol=4e-3, rtol=1e-3)
+
+    @pytest.mark.parametrize("dynamic_hidden", [False, True])
+    def test_skip_layer_norm_f16_normalizes_unrounded_sum(
+        self, model_runner, dynamic_hidden
+    ):
+        """1000 + 0.1 .. 1000 + 0.8 rounds to steps of 0.5 in f16. ORT
+        normalizes the fp32 sum and rounds only the outputs; so do the fused
+        kernel and, for a dynamic hidden size, the fallback."""
+        hidden = 8
+        dim = "hidden" if dynamic_hidden else hidden
+        model = _make_skip_layer_norm_shapes_model(
+            [1, 2, dim], [1, 2, dim], np.float16, np.zeros([hidden], np.float16)
+        )
+        x = np.full([1, 2, hidden], 1000, np.float16)
+        s = np.tile(np.linspace(0.1, 0.8, hidden), (1, 2, 1)).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [x, s])
+        compare_outputs(actual, expected, atol=4e-3, rtol=1e-3)
+
+
+def _make_skip_layer_norm_shapes_model(input_shape, skip_shape, dtype, bias):
+    """5-input SkipLayerNormalization with output[0] and output[3]; string dims
+    are symbolic. gamma / beta are random, bias as given."""
+    hidden = len(bias)
+    tp = _TENSOR_PROTO[dtype]
+    rng = np.random.default_rng(1505)
+    node = helper.make_node(
+        "SkipLayerNormalization",
+        ["X", "S", "gamma", "beta", "bias"],
+        ["Y", "", "", "Y3"],
+        domain="com.microsoft",
+        epsilon=1e-5,
+    )
+    return make_model_from_nodes(
+        [node],
+        [
+            helper.make_tensor_value_info("X", tp, input_shape),
+            helper.make_tensor_value_info("S", tp, skip_shape),
+        ],
+        [
+            helper.make_tensor_value_info("Y", tp, input_shape),
+            helper.make_tensor_value_info("Y3", tp, input_shape),
+        ],
+        initializers=[
+            numpy_helper.from_array(
+                rng.uniform(0.5, 1.5, [hidden]).astype(dtype), name="gamma"
+            ),
+            numpy_helper.from_array(
+                rng.uniform(-0.5, 0.5, [hidden]).astype(dtype), name="beta"
+            ),
+            numpy_helper.from_array(bias, name="bias"),
+        ],
+        extra_opsets=[helper.make_opsetid("com.microsoft", 1)],
     )
 
 

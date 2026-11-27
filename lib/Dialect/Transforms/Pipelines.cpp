@@ -459,6 +459,9 @@ void mlir::hip::buildOnnxToHipPipelineHead(OpPassManager &pm,
   // shared with the rocMLIR flow, so it runs before any conv rewrite or kernel
   // outlining there.
   pm.addNestedPass<func::FuncOp>(createFoldBatchNormPass());
+  // Fold primitive LayerNorm chains here too: in the tail, the rocMLIR flow
+  // has already outlined their elementwise ops into kernels.
+  pm.addNestedPass<func::FuncOp>(createFoldLayerNormPass());
 
   // Plugin slot: AfterConvertOnnxToHip. The most common slot for
   // vendor lowerings of `onnx.Custom` ops or vendor-specific hip.*
