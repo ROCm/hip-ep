@@ -621,3 +621,82 @@ func.func @main_graph(%ctx: !hip.context, %q: tensor<1x2x64x32xf16>,
       outs(%e3 : tensor<1x2x32xf16>) : tensor<1x2x32xf16>
   return %y : tensor<1x2x32xf16>
 }
+
+// -----
+
+// A K shared by every batch folds Q's batch into the first gemm's rows when
+// lowered to tosa.matmul, while the batched V keeps it as the second gemm's
+// batch, so the two gemms disagree on batch and m.
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: hip.rocmlir
+// CHECK: hip.miopen.softmax
+// CHECK: hip.rocmlir
+func.func @main_graph(%ctx: !hip.context, %q: tensor<2x64x32xf16>,
+                      %k: tensor<32x64xf16>, %v: tensor<2x64x32xf16>)
+    -> tensor<2x64x32xf16> {
+  %e0 = tensor.empty() : tensor<2x64x64xf16>
+  %s = hip.matmul(%ctx) ins(%q, %k : tensor<2x64x32xf16>, tensor<32x64xf16>)
+      outs(%e0 : tensor<2x64x64xf16>) : tensor<2x64x64xf16>
+  %e2 = tensor.empty() : tensor<2x64x64xf16>
+  %p = hip.miopen.softmax(%ctx) ins(%s : tensor<2x64x64xf16>)
+      outs(%e2 : tensor<2x64x64xf16>) -> tensor<2x64x64xf16>
+  %e3 = tensor.empty() : tensor<2x64x32xf16>
+  %y = hip.matmul(%ctx) ins(%p, %v : tensor<2x64x64xf16>, tensor<2x64x32xf16>)
+      outs(%e3 : tensor<2x64x32xf16>) : tensor<2x64x32xf16>
+  return %y : tensor<2x64x32xf16>
+}
+
+// -----
+
+// With K and V both shared, each gemm folds the batch into its rows, so the
+// two agree and merge.
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK-NOT: hip.miopen.softmax
+// CHECK: hip.rocmlir
+// CHECK-SAME: ins(%{{.*}}, %{{.*}}, %{{.*}} : tensor<2x64x32xf16>, tensor<32x64xf16>, tensor<64x32xf16>)
+// CHECK-NOT: hip.rocmlir
+// CHECK-NOT: hip.miopen.softmax
+// CHECK: return
+func.func @main_graph(%ctx: !hip.context, %q: tensor<2x64x32xf16>,
+                      %k: tensor<32x64xf16>, %v: tensor<64x32xf16>)
+    -> tensor<2x64x32xf16> {
+  %e0 = tensor.empty() : tensor<2x64x64xf16>
+  %s = hip.matmul(%ctx) ins(%q, %k : tensor<2x64x32xf16>, tensor<32x64xf16>)
+      outs(%e0 : tensor<2x64x64xf16>) : tensor<2x64x64xf16>
+  %e2 = tensor.empty() : tensor<2x64x64xf16>
+  %p = hip.miopen.softmax(%ctx) ins(%s : tensor<2x64x64xf16>)
+      outs(%e2 : tensor<2x64x64xf16>) -> tensor<2x64x64xf16>
+  %e3 = tensor.empty() : tensor<2x64x32xf16>
+  %y = hip.matmul(%ctx) ins(%p, %v : tensor<2x64x64xf16>, tensor<64x32xf16>)
+      outs(%e3 : tensor<2x64x32xf16>) : tensor<2x64x32xf16>
+  return %y : tensor<2x64x32xf16>
+}
+
+// -----
+
+// A reshape before the softmax that folds the heads into the score rows
+// leaves the first gemm with two batches of 64 rows and the second with one
+// batch of 128.
+
+// CHECK-LABEL: func.func @main_graph
+// CHECK: hip.rocmlir
+// CHECK: hip.miopen.softmax
+// CHECK: hip.rocmlir
+func.func @main_graph(%ctx: !hip.context, %q: tensor<1x2x64x32xf16>,
+                      %k: tensor<1x2x32x64xf16>, %v: tensor<1x64x32xf16>)
+    -> tensor<1x128x32xf16> {
+  %e0 = tensor.empty() : tensor<1x2x64x64xf16>
+  %s = hip.matmul(%ctx) ins(%q, %k : tensor<1x2x64x32xf16>, tensor<1x2x32x64xf16>)
+      outs(%e0 : tensor<1x2x64x64xf16>) : tensor<1x2x64x64xf16>
+  %r = tensor.collapse_shape %s [[0], [1, 2], [3]]
+      : tensor<1x2x64x64xf16> into tensor<1x128x64xf16>
+  %e2 = tensor.empty() : tensor<1x128x64xf16>
+  %p = hip.miopen.softmax(%ctx) ins(%r : tensor<1x128x64xf16>)
+      outs(%e2 : tensor<1x128x64xf16>) -> tensor<1x128x64xf16>
+  %e3 = tensor.empty() : tensor<1x128x32xf16>
+  %y = hip.matmul(%ctx) ins(%p, %v : tensor<1x128x64xf16>, tensor<1x64x32xf16>)
+      outs(%e3 : tensor<1x128x32xf16>) : tensor<1x128x32xf16>
+  return %y : tensor<1x128x32xf16>
+}

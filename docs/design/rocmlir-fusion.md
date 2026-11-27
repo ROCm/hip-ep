@@ -425,6 +425,11 @@ lowers to `rock.attention`. The gates are:
 - Both head dims (k of Q·Kᵀ and g of P·V) are static and at most 256.
   rocMLIR tiles larger head dims, but none are tested, so they keep the
   three kernels.
+- Lowered to rank-3 `tosa.matmul` the way HipToTosa does (a B with only
+  unit batch dims folds A's batch dims into m), both gemms have the same
+  batch and m and the second reduces over the first's n. A K shared across
+  batches with a batched V, or a reshape before the softmax that regroups
+  the score rows, keeps the three kernels.
 - The scores and the probabilities have no other reader, and the second gemm
   does not transpose the probabilities.
 - Between the softmax and the second gemm sit only reshapes that regroup the

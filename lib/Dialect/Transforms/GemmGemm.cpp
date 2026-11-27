@@ -79,6 +79,35 @@ static std::optional<std::array<int64_t, 3>> getGemmDims(Operation *anchor) {
                                 transA ? aRows : aCols};
 }
 
+// (batch, m, n, k) of the rank-3 tosa.matmul that HipToTosa lowers the gemm
+// to. A B with only unit batch dims is shared by every batch, so A's batch
+// dims fold into m; otherwise A and B must agree on them and they form the
+// batch.
+static std::optional<std::array<int64_t, 4>>
+getTosaGemmDims(Operation *anchor) {
+  std::optional<std::array<int64_t, 3>> dims = getGemmDims(anchor);
+  if (!dims)
+    return std::nullopt;
+  auto aType = cast<RankedTensorType>(getGemmAOperand(anchor).get().getType());
+  auto bType = cast<RankedTensorType>(getGemmB(anchor).getType());
+  if (!aType.hasStaticShape() || !bType.hasStaticShape())
+    return std::nullopt;
+  auto [m, n, k] = *dims;
+  ArrayRef<int64_t> aBatch = aType.getShape().drop_back(2);
+  ArrayRef<int64_t> bBatch = bType.getShape().drop_back(2);
+  int64_t batch = 1;
+  if (llvm::all_of(bBatch, [](int64_t d) { return d == 1; })) {
+    for (int64_t d : aBatch)
+      m *= d;
+  } else {
+    if (aBatch != bBatch)
+      return std::nullopt;
+    for (int64_t d : aBatch)
+      batch *= d;
+  }
+  return std::array<int64_t, 4>{batch, m, n, k};
+}
+
 // A gemm-gemm kernel without matrix acceleration for its element types falls
 // back to a slow lowering, so both gemms must read types the target
 // accelerates. `accelTypes` holds them as printed (f16, bf16, ...).
@@ -487,13 +516,21 @@ static bool fuseAttentionTriple(RocMlirOp second, int &counter,
     if (*probsCast &&
         !castsResultTo(firstKernel, firstAnchor, scoresType.getElementType()))
       continue;
-    std::optional<std::array<int64_t, 3>> firstDims = getGemmDims(firstAnchor);
-    std::optional<std::array<int64_t, 3>> secondDims =
-        getGemmDims(secondAnchor);
-    // (m, n, k) of Q @ K^T and (m, g, n) of P @ V: k and g are head dims.
+    std::optional<std::array<int64_t, 4>> firstDims =
+        getTosaGemmDims(firstAnchor);
+    std::optional<std::array<int64_t, 4>> secondDims =
+        getTosaGemmDims(secondAnchor);
+    // (batch, m, n, k) of Q @ K^T and (batch, m, g, n) of P @ V as tosa.matmul
+    // sees them: k and g are head dims. rock.attention needs both gemms to
+    // share batch and m and the second to reduce over the first's n. A K
+    // shared across batches folds Q's batch into m where a batched V does
+    // not, and a reshape before the softmax may regroup the score rows.
     if (!firstDims || !secondDims)
       continue;
-    int64_t qkHeadDim = (*firstDims)[2], vHeadDim = (*secondDims)[1];
+    auto [qkBatch, qkRows, qkCols, qkHeadDim] = *firstDims;
+    auto [pvBatch, pvRows, vHeadDim, pvReduction] = *secondDims;
+    if (pvBatch != qkBatch || pvRows != qkRows || pvReduction != qkCols)
+      continue;
     if (qkHeadDim <= 0 || qkHeadDim > kMaxAttentionHeadDim || vHeadDim <= 0 ||
         vHeadDim > kMaxAttentionHeadDim)
       continue;
