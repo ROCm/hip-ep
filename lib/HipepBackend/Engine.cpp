@@ -426,12 +426,40 @@ hipep_backend_code *Engine::readyLocked(SignatureEntry &entry,
   return handle.get();
 }
 
+hipep_backend_status Engine::statusLocked(SignatureEntry &entry,
+                                          const DynamicCode &dynamic,
+                                          std::string &error) {
+  if (entry.state == SignatureEntry::State::Failed) {
+    error = entry.error;
+    return HIPEP_BACKEND_STATUS_REFUSED;
+  }
+  if (entry.state == SignatureEntry::State::Compiling) {
+    error = "being compiled";
+    return HIPEP_BACKEND_STATUS_COMPILING;
+  }
+  if (!dynamic.failure.empty()) {
+    entry.state = SignatureEntry::State::Failed;
+    entry.error =
+        "a split of its structure was not compiled: " + dynamic.failure;
+    error = entry.error;
+    return HIPEP_BACKEND_STATUS_REFUSED;
+  }
+  if (environment("HIPEP_BACKEND_COMPILE", "1") == "0") {
+    error = "compiling is off (HIPEP_BACKEND_COMPILE=0)";
+    return HIPEP_BACKEND_STATUS_REFUSED;
+  }
+  error = "not compiled";
+  return HIPEP_BACKEND_STATUS_NOT_COMPILED;
+}
+
 hipep_backend_code *Engine::find(const hipep_backend_split_desc &desc,
+                                 hipep_backend_status &status,
                                  std::string &error) {
   std::unique_ptr<Graph> graph;
   try {
     graph = std::make_unique<Graph>(desc);
   } catch (const std::exception &e) {
+    status = HIPEP_BACKEND_STATUS_INVALID;
     error = e.what();
     return nullptr;
   }
@@ -440,19 +468,23 @@ hipep_backend_code *Engine::find(const hipep_backend_split_desc &desc,
   std::shared_ptr<DynamicCode> dynamic =
       dynamicCodeOf(capture::dynamicSignature(graph->description));
   std::lock_guard<std::mutex> lock(mutex_);
-  hipep_backend_code *code = readyLocked(*entry, *dynamic, signature, *graph);
-  if (!code)
-    error = entry->state == SignatureEntry::State::Failed ? entry->error
-                                                          : "not compiled";
-  return code;
+  if (hipep_backend_code *code =
+          readyLocked(*entry, *dynamic, signature, *graph)) {
+    status = HIPEP_BACKEND_STATUS_READY;
+    return code;
+  }
+  status = statusLocked(*entry, *dynamic, error);
+  return nullptr;
 }
 
 hipep_backend_code *Engine::compile(const hipep_backend_split_desc &desc,
-                                    bool wait, std::string &error) {
+                                    bool wait, hipep_backend_status &status,
+                                    std::string &error) {
   std::unique_ptr<Graph> graph;
   try {
     graph = std::make_unique<Graph>(desc);
   } catch (const std::exception &e) {
+    status = HIPEP_BACKEND_STATUS_INVALID;
     error = e.what();
     return nullptr;
   }
@@ -464,27 +496,13 @@ hipep_backend_code *Engine::compile(const hipep_backend_split_desc &desc,
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (hipep_backend_code *code =
-            readyLocked(*entry, *dynamic, signature, *graph))
+            readyLocked(*entry, *dynamic, signature, *graph)) {
+      status = HIPEP_BACKEND_STATUS_READY;
       return code;
-    if (entry->state == SignatureEntry::State::Failed) {
-      error = entry->error;
-      return nullptr;
     }
-    if (entry->state == SignatureEntry::State::Compiling) {
-      error = "being compiled";
+    status = statusLocked(*entry, *dynamic, error);
+    if (status != HIPEP_BACKEND_STATUS_NOT_COMPILED)
       return nullptr;
-    }
-    if (!dynamic->failure.empty()) {
-      entry->state = SignatureEntry::State::Failed;
-      entry->error =
-          "a split of its structure was not compiled: " + dynamic->failure;
-      error = entry->error;
-      return nullptr;
-    }
-    if (environment("HIPEP_BACKEND_COMPILE", "1") == "0") {
-      error = "compiling is off (HIPEP_BACKEND_COMPILE=0)";
-      return nullptr;
-    }
     // Compiled with the symbols the compiler derives from it - dynamic-shape
     // code, or static-shape code of its own -, unless dynamic-shape code
     // compiled meanwhile fits it.
@@ -503,15 +521,19 @@ hipep_backend_code *Engine::compile(const hipep_backend_split_desc &desc,
     if (!thread_.joinable())
       thread_ = std::thread([this] { worker(); });
     wake_.notify_one();
+    status = HIPEP_BACKEND_STATUS_COMPILING;
     error = "being compiled";
     return nullptr;
   }
   process(std::move(job));
   std::lock_guard<std::mutex> lock(mutex_);
-  hipep_backend_code *code = readyLocked(*entry, *dynamic, signature, *graph);
-  if (!code)
-    error = entry->error.empty() ? "not compiled" : entry->error;
-  return code;
+  if (hipep_backend_code *code =
+          readyLocked(*entry, *dynamic, signature, *graph)) {
+    status = HIPEP_BACKEND_STATUS_READY;
+    return code;
+  }
+  status = statusLocked(*entry, *dynamic, error);
+  return nullptr;
 }
 
 void Engine::process(Job job) {
@@ -646,6 +668,13 @@ void Engine::process(Job job) {
   job.dynamic = false;
   job.symbols.clear();
   refused = false;
+  {
+    // finish() made the split that asked unknown again: it is being compiled.
+    std::shared_ptr<SignatureEntry> entry = signatureEntryOf(job.key);
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (entry->state == SignatureEntry::State::Unknown)
+      entry->state = SignatureEntry::State::Compiling;
+  }
   try {
     captured = nullptr;
     graph = std::make_unique<Graph>(job.desc->get());

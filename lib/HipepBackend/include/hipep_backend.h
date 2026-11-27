@@ -18,7 +18,9 @@
  * (hipep_backend_open). It asks hipep_backend_supports about each node of a
  * split; its graph_compute describes the split, takes hipep_backend_find's code
  * or has it made (hipep_backend_compile), runs it (hipep_backend_run), and
- * otherwise runs the split another way. hipep_backend_close at the end.
+ * otherwise runs the split another way - for good once find or compile says
+ * it is refused or invalid (HIPEP_BACKEND_STATUS_REFUSED, _INVALID).
+ * hipep_backend_close at the end.
  *
  * A description is the caller's, valid during the call only: what the
  * library keeps of it, it copies (a compile in the background works on its
@@ -41,7 +43,7 @@
 extern "C" {
 #endif
 
-#define HIPEP_BACKEND_ABI_VERSION 5
+#define HIPEP_BACKEND_ABI_VERSION 6
 
 #if defined(_WIN32) && defined(HIPEP_BACKEND_BUILD)
 #define HIPEP_BACKEND_API __declspec(dllexport)
@@ -94,6 +96,26 @@ typedef struct hipep_backend_split_desc {
   size_t n_tensors;
 } hipep_backend_split_desc;
 
+/* Whether a split has code (hipep_backend_find, hipep_backend_compile), and
+   when it has none, whether it will. */
+enum hipep_backend_status {
+  /* the code returned */
+  HIPEP_BACKEND_STATUS_READY = 0,
+  /* none yet: it is being compiled - find it again */
+  HIPEP_BACKEND_STATUS_COMPILING = 1,
+  /* none: it is neither compiled nor being compiled - compile it */
+  HIPEP_BACKEND_STATUS_NOT_COMPILED = 2,
+  /* none from this context: the compiler refused it or a split of its
+     structure (in this process or an earlier one), its code could not be made
+     or loaded in this process (the disk, the device's memory), or compiling
+     is off */
+  HIPEP_BACKEND_STATUS_REFUSED = 3,
+  /* none: no context or split, or a description the library does not read
+     (another ABI or ggml, a tensor it does not know, an index out of range,
+     tensors not numbered sources first) */
+  HIPEP_BACKEND_STATUS_INVALID = 4,
+};
+
 HIPEP_BACKEND_API int hipep_backend_abi_version(void);
 
 /* The library for HIP device `device`, its code cached in `cache_dir` (NULL:
@@ -110,19 +132,22 @@ hipep_backend_supports(hipep_backend_ctx *ctx,
 
 /* Code for the split, compiled already (in this process or an earlier one,
    for its sizes or with dynamic shapes that fit it): null when there is none.
-   The code is the context's until it closes. */
+   `*status` (unless `status` is NULL): enum hipep_backend_status. The code is
+   the context's until it closes. */
 HIPEP_BACKEND_API hipep_backend_code *
 hipep_backend_find(hipep_backend_ctx *ctx,
-                   const hipep_backend_split_desc *split);
+                   const hipep_backend_split_desc *split, int *status);
 
 /* Compiles the split. With `wait`, on this thread: its code, or null when it
-   cannot be compiled. Without, in the background: null now, the code from
-   `find` once it is ready. A split the compiler refused is not tried again,
-   in this process or a later one; one whose code could not be made or loaded
-   otherwise, not in this process. */
+   cannot be compiled (or another call is compiling it). Without, in the
+   background: null now, the code from `find` once it is ready. A split the
+   compiler refused is not tried again, in this process or a later one; one
+   whose code could not be made or loaded otherwise, not in this process:
+   find and compile say HIPEP_BACKEND_STATUS_REFUSED. `status` as find's. */
 HIPEP_BACKEND_API hipep_backend_code *
 hipep_backend_compile(hipep_backend_ctx *ctx,
-                      const hipep_backend_split_desc *split, int wait);
+                      const hipep_backend_split_desc *split, int wait,
+                      int *status);
 
 /* Runs the code on the split's tensors: tensor_data[i] is tensor i's memory,
    numbered as described. The code reads its inputs and writes its outputs and

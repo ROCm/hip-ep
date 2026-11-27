@@ -8,7 +8,9 @@ llama.cpp stays the host: model loading, KV cache, batching, sampling and the
 server are its own. Its ROCm backend, ggml-hip, built with `GGML_HIP_HIPEP`,
 cuts each split the ggml scheduler hands it into runs: what hip-ep compiles
 runs as code hip-ep compiled for it, the rest - and a run whose code is not
-ready or fails - by ggml-hip's own kernels. The device is still ROCm0.
+ready or fails - by ggml-hip's own kernels. A run the library refuses to
+compile is ggml-hip's for good, and a split left with no run to compile runs
+as ggml-hip alone runs it, HIP graphs and all. The device is still ROCm0.
 Everything of hip-ep ggml-hip needs is one library, `libhipep_backend.so`,
 behind one C header, `hipep_backend.h`.
 
@@ -82,8 +84,8 @@ Whatever it does not compile, ggml-hip runs
 | `hipep_backend_abi_version()` | the header's `HIPEP_BACKEND_ABI_VERSION`, or the backend registers no device |
 | `hipep_backend_open(device, cache_dir)` | a context per HIP device; the cache: `cache_dir`, else `HIPEP_BACKEND_CACHE`, else `~/.cache/hipep` |
 | `hipep_backend_supports(ctx, node)` | whether it compiles an operation, its sources and what it views |
-| `hipep_backend_find(ctx, split)` | code compiled already, here or in the cache, for the split's sizes or with dynamic shapes that fit it; null otherwise |
-| `hipep_backend_compile(ctx, split, wait)` | the split compiled on this thread (`wait`) or in the background; a split the compiler refused is not tried again, here or in a later process; one whose code could not be made or loaded (the disk, the device's memory) not in this process |
+| `hipep_backend_find(ctx, split, status)` | code compiled already, here or in the cache, for the split's sizes or with dynamic shapes that fit it; null otherwise, `status` saying why: being compiled (`HIPEP_BACKEND_STATUS_COMPILING`), not compiled (`_NOT_COMPILED`), never from this context (`_REFUSED`), or a description it does not read (`_INVALID`) |
+| `hipep_backend_compile(ctx, split, wait, status)` | the split compiled on this thread (`wait`) or in the background; a split the compiler refused is not tried again, here or in a later process; one whose code could not be made or loaded (the disk, the device's memory) not in this process; find and compile say so (`status`) |
 | `hipep_backend_run(code, data, NULL)` | the code on the split's tensors' memory, `data[i]` tensor `i`'s |
 | `hipep_backend_close(ctx)` | waits for a compile under way |
 | `hipep_backend_last_error(ctx)` | why the last call on this thread returned nothing |
@@ -93,7 +95,7 @@ A split is described in plain C (`hipep_backend_split_desc`, an array of
 name, type, extents, strides, sources, view and `op_params`, and what ggml's
 tensor does not say of itself - its role (a weight, a cache, an input),
 whether the split computes it, whether it is read after the split
-(`HIPEP_BACKEND_ABI_VERSION` 5). The library rebuilds the description as ggml tensors of its own
+(`HIPEP_BACKEND_ABI_VERSION` 6). The library rebuilds the description as ggml tensors of its own
 (`lib/HipepBackend/Graph.cpp`, metadata only). A description is the
 caller's, valid during the call: a compile in the background works on a copy.
 

@@ -74,9 +74,9 @@ public:
   Engine &operator=(const Engine &) = delete;
 
   hipep_backend_code *find(const hipep_backend_split_desc &desc,
-                           std::string &error);
+                           hipep_backend_status &status, std::string &error);
   hipep_backend_code *compile(const hipep_backend_split_desc &desc, bool wait,
-                              std::string &error);
+                              hipep_backend_status &status, std::string &error);
   bool run(const hipep_backend_code &code, void *const *data,
            std::string &error);
 
@@ -113,6 +113,11 @@ private:
   hipep_backend_code *readyLocked(SignatureEntry &entry, DynamicCode &dynamic,
                                   const std::string &signature,
                                   const Graph &graph);
+  /// What find and compile say of `entry` when it has no code: refused,
+  /// being compiled or not compiled, and why (`error`). Under mutex_.
+  hipep_backend_status statusLocked(SignatureEntry &entry,
+                                    const DynamicCode &dynamic,
+                                    std::string &error);
   void process(Job job);
   /// `refused`: no `code` because the compiler refused the split, which the
   /// cache then keeps.
