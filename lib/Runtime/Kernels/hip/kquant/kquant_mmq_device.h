@@ -40,10 +40,12 @@
 #include <cstdint>
 #include <type_traits>
 
-// Device code is generated for RDNA 3.5 only, whose WMMA layout and tile
-// configurations it uses; the launcher runs it on gfx1151 only.
-#if defined(__gfx1150__) || defined(__gfx1151__) || defined(__gfx1152__) ||    \
-    defined(__gfx1153__)
+// The tiles use RDNA 3.5's WMMA layout and tile configurations, and the
+// launcher runs them on gfx1151 only. Device code is generated in the slices
+// CMake builds with HIP_KQUANT_MMQ_DEVICE_ENABLED (gfx1151 and gfx11-generic,
+// the two a gfx1151 loads), and the launcher checks the same flag: the target
+// macros cannot decide it, as gfx11-generic defines none of RDNA 3.5's.
+#if defined(__HIP_DEVICE_COMPILE__) && HIP_KQUANT_MMQ_DEVICE_ENABLED
 #define HIP_KQUANT_MMQ_DEVICE 1
 #endif
 
@@ -84,14 +86,14 @@ constexpr int kBlockValues = HIP_KQUANT_BLOCK_ELEMENTS;
 
 /// Whether the format's activations carry partial sums (DS4): those whose
 /// blocks have a minimum.
-constexpr bool readsSums(int format) {
+__host__ __device__ constexpr bool readsSums(int format) {
   return format == HIP_KQUANT_FORMAT_Q4_K ||
          format == HIP_KQUANT_FORMAT_Q5_K;
 }
 
 /// 32-bit words per weight row in the shared tile: 64 of 8-bit values, the
 /// scales, and padding against bank conflicts (ggml_cuda_mmq_get_sram_stride).
-constexpr int tileStride(int format) {
+__host__ __device__ constexpr int tileStride(int format) {
   if (format == HIP_KQUANT_FORMAT_Q6_K)
     return 2 * kTileWords + 1 + kTileWords / 8 + 7; // d and 16 8-bit scales
   return 2 * kTileWords + 2 * kTileWords / 8 + 4;   // a scale per 32 values
@@ -101,7 +103,7 @@ constexpr int tileStride(int format) {
 /// `J` activation rows, 0 if there is none: llama.cpp's RDNA 3.5
 /// configurations (all at occupancy 2). The narrow 64-row tiles are taken
 /// where they leave room for a second workgroup per compute unit.
-constexpr int tileThreads(int format, int J) {
+__host__ __device__ constexpr int tileThreads(int format, int J) {
   if (J != 16 && J != 32 && J != 48 && J != 64 && J != 80 && J != 96 &&
       J != 112 && J != 128)
     return 0;
@@ -120,15 +122,17 @@ constexpr int tileThreads(int format, int J) {
 }
 
 /// Weight rows per tile.
-constexpr int tileRows(int format, int J) { return tileThreads(format, J) / 2; }
+__host__ __device__ constexpr int tileRows(int format, int J) {
+  return tileThreads(format, J) / 2;
+}
 
-constexpr size_t padTo(size_t value, size_t multiple) {
+__host__ __device__ constexpr size_t padTo(size_t value, size_t multiple) {
   return (value + multiple - 1) / multiple * multiple;
 }
 
 /// Shared memory of one workgroup: its activation rows (padded to whole
 /// passes of the workgroup's copy) and weight rows.
-constexpr size_t sharedBytes(int format, int J) {
+__host__ __device__ constexpr size_t sharedBytes(int format, int J) {
   return padTo(J * sizeof(ActivationBlock),
                tileThreads(format, J) * sizeof(int)) +
          tileRows(format, J) * tileStride(format) * sizeof(int);
@@ -385,7 +389,7 @@ enum class Scales {
   Q6K,          // a float per row and an 8-bit scale per 16 values
 };
 
-constexpr Scales scalesOf(int format) {
+__host__ __device__ constexpr Scales scalesOf(int format) {
   return readsSums(format) ? Scales::Per32WithMin : Scales::Q6K;
 }
 
