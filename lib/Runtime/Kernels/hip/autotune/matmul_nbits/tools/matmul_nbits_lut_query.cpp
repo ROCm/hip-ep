@@ -79,13 +79,53 @@ static std::vector<Row> load(const char* path) {
   return out;
 }
 
+// Exact requests for categorical/interval replay, including widths other than
+// B4. The production caller still owns live-catalog validation; this GPU-free
+// tool reports the real reader's full answer without inferring a route from M.
+static int reportRequests(const char* path) {
+  std::ifstream in(path);
+  std::string line;
+  std::getline(in, line);
+  if (!line.empty() && line.back() == '\r') line.pop_back();
+  if (line != "phase,bits,m,n,k,group_size,has_zp,b_row_bytes") {
+    std::fprintf(stderr, "requests CSV needs phase,bits,m,n,k,group_size,has_zp,b_row_bytes\n");
+    return 1;
+  }
+  std::printf("phase,bits,m,n,k,group_size,has_zp,b_row_bytes,source,distance,bm,bn,swizzle,wt_m,wt_n,bk,fused,ext,variant,threads,tile_n\n");
+  while (std::getline(in, line)) {
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    if (line.empty()) continue;
+    Request r;
+    int phase, zp;
+    if (std::sscanf(line.c_str(), "%d,%d,%d,%d,%d,%d,%d,%d", &phase, &r.bits,
+                    &r.m, &r.n, &r.k, &r.group_size, &zp, &r.b_row_bytes) != 8 ||
+        phase < 1 || phase > 3 || r.m <= 0 || r.n <= 0 || r.k <= 0 ||
+        (zp != 0 && zp != 1)) {
+      std::fprintf(stderr, "malformed request: %s\n", line.c_str()); return 1;
+    }
+    r.phase = static_cast<Phase>(phase); r.has_zp = zp != 0;
+    const auto answer = resolve(r, acceptWmma, acceptGemv, nullptr);
+    const auto& w = answer.wmma; const auto& g = answer.gemv;
+    std::printf("%s,%s,%.9g,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n", line.c_str(),
+                name(answer.source), answer.distance, w.bm, w.bn, w.swizzle_n,
+                w.wt_m, w.wt_n, w.bk, int(w.fused), int(w.ext), w.variant,
+                g.threads, g.tile_n);
+  }
+  const auto st = stats();
+  std::fprintf(stderr, "table_loaded=%d points=%u invalid=%u intervals=%u invalid_intervals=%u\n",
+               int(st.table_loaded), st.points, st.invalid_points, st.intervals, st.invalid_intervals);
+  return 0;
+}
+
 int main(int argc, char** argv) {
   const char* csv = nullptr;
+  const char* requests = nullptr;
   std::vector<int> ms = {1, 128, 512, 2048};
   bool verbose = false, per_model = false, dump = false;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--shapes" && i + 1 < argc) csv = argv[++i];
+    else if (a == "--requests" && i + 1 < argc) requests = argv[++i];
     else if (a == "--m" && i + 1 < argc) {
       ms.clear(); std::stringstream ss(argv[++i]); std::string t;
       while (std::getline(ss, t, ',')) ms.push_back(std::atoi(t.c_str()));
@@ -97,8 +137,9 @@ int main(int argc, char** argv) {
     else if (a == "--dump") dump = true;
     else { std::fprintf(stderr,
         "usage: %s --shapes f.csv [--m 1,128] [--verbose] [--per-model] "
-        "[--dump]\n", argv[0]); return 1; }
+        "[--dump]\n       %s --requests full-requests.csv\n", argv[0], argv[0]); return 1; }
   }
+  if (requests) return reportRequests(requests);
   if (!csv) { std::fprintf(stderr, "--shapes required\n"); return 1; }
 
   const Stats st = stats();

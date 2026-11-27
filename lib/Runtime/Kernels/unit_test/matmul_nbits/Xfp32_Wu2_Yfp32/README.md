@@ -4,7 +4,7 @@ Standalone `hipcc`-only test for `hip_matmul_nbits()` (bits=2, packed 4
 values/byte LSB-first -- a plain continuous 2-bit stream, no group_size
 padding). No CMake, no EP build. Entirely self-contained: inputs (uint2
 packing, scales, zero-points) and the CPU fp32 dequant+matmul reference are
-all generated in-process, no python, no data files, no `unit_test/common/`.
+all generated in-process, no python, no data files, the shared `unit_test/common/` timer and ranking APIs.
 
 Activations (`A`) and the output (`C`) are fp32; otherwise this is
 `matmul_nbits/Xfp16_Wu2_Yfp16`.
@@ -33,22 +33,32 @@ is multithreaded over `N` so the wider grid stays affordable.
 prints `coverage=N -> running <n> matmul_nbits_u2 cases`. No human edits a
 shape list -- there is no `shapes.csv` or `gen_data.py` in this leaf.
 
-`make test`'s sweep exercises bits=2 only, with zero-points passed as a raw
-per-group uint8 buffer (`zp_elem_size=1`, direct convention, default zero
-point 2 when absent) -- the packed-zero-points round-trip
-(`hip_matmul_nbits_unpack_zp_u8_2bit`) and the fractional-fp16-zero-point
-path this op also supports are lower-level kernel behaviors, not exercised
-by this small correctness UT.
+`make test` uses raw per-group uint8 zero points. `test_custom` additionally
+accepts `ZP_FORMAT=raw|packed|fp16` (executable `--zp-format`): packed runs the
+production 2-bit unpack once, verifies every group and reuses the unpacked
+buffer like the runtime wrapper; fp16 uses fractional 1.5 zero points. Both
+integer formats and fp16 share the existing asymmetric LUT key; the native
+memo still distinguishes the zero-point element type.
 
 `MODE=lookup` (default) resolves from `hip/autotune/matmul_nbits/lut/<arch>.fb`
 if it exists, else falls back to `autotune` with a warning. `MODE=lookup`
 needs `flatc` plus its `include/` (a build tool outside this
 repo): `FLATC=<path to flatc(.exe)> FLATBUFFERS_INC=<its include dir>`.
 
-The bits=2 WMMA/GEMV dispatch has no lookup wired yet, so `MODE=lookup` here only
-satisfies the resolver's data symbols and every shape is autotuned.
-`out/results.csv`'s `config` column records the config actually launched
-(`autotune:best config[...]`), read back from the op's own
-`HIPDNN_MATMUL_AUTOTUNE_LOG` output.
+The B2 GEMV and WMMA paths consult the in-process memo, then the table,
+then the existing online tuner on a miss. GEMV queries Decode below M=16;
+WMMA queries Prefill/Arrival from M=16 for supported K/group sizes. u2 has
+no dp4a or padded-row route. Config geometry is checked against the real u2
+catalog, including unfused dequant grid limits. `out/results.csv` records
+actual lookup source and config, including intervals.
+
+`RANK=1` exposes the real u2 candidates to the native rank APIs. Rank shape
+suffixes are `_noz`, `_zp16`, and `_zppacked` (raw asymmetric has no suffix).
+Primary table import uses one measured activation/zero-point representation;
+other representations qualify the shared key separately. The optional
+`HIPDNN_UT_GPU_ADMISSION` handshake brackets each case's device allocation,
+work, synchronization and cleanup after CPU reference preparation.
 
 CI passes `OFFLOAD`/`HIP_SDK` explicitly; there is no personal default.
+
+`--cases <CSV>` runs ordinary actual lookup over a native `leaf,shape,priority,config` workload CSV. The config field is ignored; no rank selection adapter is invoked. It is mutually exclusive with `HIPDNN_UT_RANK`.

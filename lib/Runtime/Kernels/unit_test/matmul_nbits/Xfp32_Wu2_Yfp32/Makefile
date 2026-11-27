@@ -114,6 +114,7 @@ endif
 
 SIZE     ?= 128x2880x5120
 GS       ?= 128
+ZP_FORMAT ?= raw
 NO_ZEROS ?=
 
 ifeq ($(NO_ZEROS),1)
@@ -253,7 +254,7 @@ test_custom: direct
 ifeq ($(CSV_FRESH),1)
 	@$(RESET_RESULTS_CSV)
 endif
-	$(call RUN_CMD,$(TARGET_DIRECT)) $(SIZE) --group-size $(GS) $(CXX_NZ_FLAG)
+	$(call RUN_CMD,$(TARGET_DIRECT)) $(SIZE) --group-size $(GS) $(CXX_NZ_FLAG) --zp-format $(ZP_FORMAT)
 
 # Build only. The unit_test/ aggregator passes PKG_DIR and PKG_NAME to collect the
 # exe into its hipdnn-kernel-ut package layout.

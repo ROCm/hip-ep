@@ -27,13 +27,12 @@
  * A:      FP16 row-major [M, K]
  * B:      uint8 packed [N, K/4], 4 values/byte LSB-first
  * scales: FP16 [N, num_groups_k], per-column per-group
- * zeros:  uint8 [N, num_groups_k], per-column per-group zero point in [0,3]
- *         (optional; default zero point is 2 when absent), passed to the
- *         kernel raw (zp_elem_size=1, direct convention -- no packed/
- *         pre-unpack step; that path is exercised by the kernel's own tests,
- *         not this small correctness UT).
+ * zeros:  per-group uint8 (default), packed 2-bit uint8 unpacked once through
+ *         the production entry, or fractional fp16 (1.5), selected with
+ *         --zp-format raw|packed|fp16; default zero point 2 when absent.
  * C:      FP16 row-major [M, N]
  */
+#include "../../common/ut_gpu_execution_scope.h"
 #include <hip/hip_runtime.h>
 #include "../../common/hip_adaptive_timing.h"
 #include "../../common/ut_matmul_nbits_rank_input.h"
@@ -328,11 +327,12 @@ static std::string capture_selected_config(const char* tune_key, Fn&& launch) {
 
   std::string lut, tuned;
   for (const std::string& line : capture_stderr(launch)) {
+    std::printf("U2_SELECTION %s\n", line.c_str());
     if (line.find("LUT hit") != std::string::npos) {
       // The op prints the table's Source as a number; name it the way
       // matmul_nbits_autotune.h does.
       static const char* const kSources[] = {"none", "exact", "nearest",
-                                             "fallback"};
+                                             "fallback", "interval"};
       int src = -1;
       double distance = 0.0;
       const size_t tier = line.find("(src=");
@@ -340,7 +340,7 @@ static std::string capture_selected_config(const char* tune_key, Fn&& launch) {
         std::sscanf(line.c_str() + tier, "(src=%d d=%lf)", &src, &distance);
       char source[48];
       std::snprintf(source, sizeof(source), " (%s d=%.3f)",
-                    src >= 0 && src < 4 ? kSources[src] : "unknown", distance);
+                    src >= 0 && src < 5 ? kSources[src] : "unknown", distance);
       lut = "lookup:" + line.substr(line.find("config[")) + source;
     } else if (line.find("best config[") != std::string::npos) {
       tuned = "autotune:" + line.substr(line.find("best config["));
@@ -419,7 +419,8 @@ static __half float_to_half(float x) {
 // In-process data generation + CPU fp32 reference (no python, no disk I/O).
 // B is randint(0,4) per element, packed 4-per-byte LSB-first (byte =
 // v0|v1<<2|v2<<4|v3<<6); scales are uniform(0.01,0.05); zeros (when present)
-// are integers in [1,2] (uint8, direct/unpacked convention); dequant is
+// are integers in [1,2] or fractional fp16 1.5; packed integers are roundtripped
+// through the production unpacker. Dequant is
 // (B - zp) * scale, default zp = 2 when zeros are absent.
 // ============================================================
 struct CaseData {
@@ -428,12 +429,14 @@ struct CaseData {
   std::vector<uint8_t> Bpacked;
   std::vector<__half> scales;
   std::vector<uint8_t> zeros;
+  std::vector<__half> zeros16;
+  std::vector<uint8_t> zerosPacked;
   std::vector<__half> Cref16;
   std::vector<float> Cref32;
 };
 
 static void genCase(int M, int K, int N, int gs, bool zero, bool fp32,
-                    unsigned seed, CaseData& out) {
+                    unsigned seed, CaseData& out, int zp_bytes, bool packed) {
   const int num_groups_k = (K + gs - 1) / gs;
 
   std::mt19937 rng(seed);
@@ -454,7 +457,7 @@ static void genCase(int M, int K, int N, int gs, bool zero, bool fp32,
   std::vector<float> zerosF;
   if (zero) {
     zerosF.resize(static_cast<size_t>(N) * num_groups_k);
-    for (auto& v : zerosF) v = static_cast<float>(zdist(rng));
+    for (auto& v : zerosF) v = zp_bytes == 2 ? 1.5f : static_cast<float>(zdist(rng));
   }
 
   // Pack 4 values/byte, LSB-first: byte = v0 | v1<<2 | v2<<4 | v3<<6.
@@ -475,6 +478,18 @@ static void genCase(int M, int K, int N, int gs, bool zero, bool fp32,
   if (zero) {
     out.zeros.resize(zerosF.size());
     for (size_t i = 0; i < zerosF.size(); ++i) out.zeros[i] = static_cast<uint8_t>(zerosF[i]);
+    if (zp_bytes == 2) {
+      out.zeros16.resize(zerosF.size());
+      for (size_t i = 0; i < zerosF.size(); ++i) out.zeros16[i] = float_to_half(zerosF[i]);
+    }
+    if (packed) {
+      const int zrow = (num_groups_k + 3) / 4;
+      out.zerosPacked.assign(static_cast<size_t>(N) * zrow, 0);
+      for (int n = 0; n < N; ++n)
+        for (int g = 0; g < num_groups_k; ++g)
+          out.zerosPacked[static_cast<size_t>(n) * zrow + g / 4] |=
+              out.zeros[static_cast<size_t>(n) * num_groups_k + g] << (2 * (g % 4));
+    }
   }
 
   // Threaded over N (each output column is independent) so the wider M/K/N
@@ -573,6 +588,8 @@ static constexpr bool kFp32 = false;
 struct Case {
   int M, K, N, gs;
   bool zero, fp32;
+  int zp_bytes = 1;
+  bool packed = false;
 };
 
 static std::vector<Case> buildCases(int tier) {
@@ -591,9 +608,9 @@ static std::vector<Case> buildCases(int tier) {
 static bool runOne(const Case& c, int idx, const hipdnn_ep_test::timing::RankRow* rank_row = nullptr) {
   char timing_shape[96];
   std::snprintf(timing_shape, sizeof(timing_shape), "M%d_N%d_K%d_gs%d%s",
-                c.M, c.N, c.K, c.gs, c.zero ? "" : "_noz");
+                c.M, c.N, c.K, c.gs, !c.zero ? "_noz" : c.zp_bytes == 2 ? "_zp16" : c.packed ? "_zppacked" : "");
   hipdnn_ep_test::timing::CaseScope timing_case("matmul_nbits/Xfp16_Wu2_Yfp16", timing_shape, "hip_matmul_nbits");
-  const UtNbitsShape rank_shape{c.M, c.N, c.K, 2, c.gs, c.zero ? 1 : 0, 1};
+  const UtNbitsShape rank_shape{c.M, c.N, c.K, 2, c.gs, c.zero ? 1 : 0, c.zp_bytes};
   if (rank_row && std::getenv("HIPDNN_UT_RANK_CATALOG")) {
 #ifdef HIPDNN_UT_RANK_NBITS_ADAPTER
     hipdnn_ep_test::timing::printNbitsCatalog(rank_shape);
@@ -603,43 +620,76 @@ static bool runOne(const Case& c, int idx, const hipdnn_ep_test::timing::RankRow
 #endif
   }
   CaseData d;
-  genCase(c.M, c.K, c.N, c.gs, c.zero, c.fp32, /*seed=*/1000u + idx, d);
+  genCase(c.M, c.K, c.N, c.gs, c.zero, c.fp32, /*seed=*/1000u + idx, d, c.zp_bytes, c.packed);
 
   const size_t countA = static_cast<size_t>(c.M) * c.K;
   const size_t countC = static_cast<size_t>(c.M) * c.N;
   const size_t elem = c.fp32 ? 4 : 2;
 
+  hipdnn_ep_test::GpuExecutionScope gpu_execution([] { HIP_CHECK(hipDeviceSynchronize()); });
   void *dA = nullptr, *dC = nullptr;
   __half* dS = nullptr;
-  uint8_t* dZ = nullptr;
+  void* dZ = nullptr;
+  uint8_t* dZPacked = nullptr;
   uint8_t* dB = nullptr;
+  hipStream_t stream = nullptr;
+  // This guard is destroyed before gpu_execution on ordinary return and C++
+  // rank exceptions. Cold rotation objects, declared later, are freed first.
+  struct DeviceCleanup {
+    void *&a, *&c, *&z;
+    __half*& scales;
+    uint8_t *&b, *&packed_z;
+    hipStream_t& stream;
+    ~DeviceCleanup() {
+      if (stream) (void)hipStreamSynchronize(stream);
+      if (a) (void)hipFree(a);
+      if (b) (void)hipFree(b);
+      if (scales) (void)hipFree(scales);
+      if (z) (void)hipFree(z);
+      if (packed_z) (void)hipFree(packed_z);
+      if (c) (void)hipFree(c);
+      if (stream) (void)hipStreamDestroy(stream);
+    }
+  } cleanup{dA, dC, dZ, dS, dB, dZPacked, stream};
   HIP_CHECK(hipMalloc(&dA, countA * elem));
   HIP_CHECK(hipMalloc(&dB, d.Bpacked.size()));
   HIP_CHECK(hipMalloc(&dS, d.scales.size() * sizeof(__half)));
-  if (c.zero) HIP_CHECK(hipMalloc(&dZ, d.zeros.size()));
+  const size_t zero_bytes = c.zero ? d.zeros.size() * c.zp_bytes : 0;
+  if (c.zero) HIP_CHECK(hipMalloc(&dZ, zero_bytes));
   HIP_CHECK(hipMalloc(&dC, countC * elem));
   HIP_CHECK(hipMemcpy(dA, c.fp32 ? (void*)d.A32.data() : (void*)d.A16.data(),
                       countA * elem, hipMemcpyHostToDevice));
   HIP_CHECK(hipMemcpy(dB, d.Bpacked.data(), d.Bpacked.size(), hipMemcpyHostToDevice));
   HIP_CHECK(hipMemcpy(dS, d.scales.data(), d.scales.size() * sizeof(__half), hipMemcpyHostToDevice));
-  if (c.zero) HIP_CHECK(hipMemcpy(dZ, d.zeros.data(), d.zeros.size(), hipMemcpyHostToDevice));
+  if (c.zero && !c.packed)
+    HIP_CHECK(hipMemcpy(dZ, c.zp_bytes == 2 ? static_cast<void*>(d.zeros16.data())
+                                         : static_cast<void*>(d.zeros.data()), zero_bytes, hipMemcpyHostToDevice));
+  if (c.zero && c.packed) {
+    HIP_CHECK(hipMalloc(&dZPacked, d.zerosPacked.size()));
+    HIP_CHECK(hipMemcpy(dZPacked, d.zerosPacked.data(), d.zerosPacked.size(), hipMemcpyHostToDevice));
+    hip_matmul_nbits_unpack_zp_u8_2bit(nullptr, dZPacked, dZ, c.N, (c.K + c.gs - 1) / c.gs);
+    HIP_CHECK(hipDeviceSynchronize());
+    std::vector<uint8_t> unpacked(d.zeros.size());
+    HIP_CHECK(hipMemcpy(unpacked.data(), dZ, unpacked.size(), hipMemcpyDeviceToHost));
+    if (unpacked != d.zeros) throw std::runtime_error("u2 packed zero-point roundtrip FAIL");
+    std::printf("U2_ZP_UNPACK PASS bytes=%zu\n", unpacked.size());
+  }
   HIP_CHECK(hipMemset(dC, 0, countC * elem));
 
-  hipStream_t stream;
   HIP_CHECK(hipStreamCreate(&stream));
   auto launch = [&]() {
-    // bits=2, zp_elem_size=1 (raw per-group uint8 zero_points, direct
-    // convention -- no pre_unpacked_zp_u8/fp16 buffer).
-    return hip_matmul_nbits(stream, dA, dB, dS, c.zero ? dZ : nullptr,
+    // Match the runtime wrapper: packed integer ZP is unpacked once; fp16
+    // fractional ZP is passed directly without integer rounding.
+    return hip_matmul_nbits(stream, dA, dB, dS, c.zero ? (c.packed ? dZPacked : dZ) : nullptr,
                             nullptr, dC, c.M, c.N, c.K, /*batch_count=*/1,
                             /*bits=*/2, c.gs, static_cast<int>(elem),
-                            /*zp_elem_size=*/1, nullptr, nullptr);
+                            /*zp_elem_size=*/c.zp_bytes, c.packed ? dZ : nullptr, nullptr);
   };
 
   int status = 0;
   char tune_key[64];
   std::snprintf(tune_key, sizeof(tune_key), "%dx%dx%d_gs%d_%s", c.M, c.N, c.K,
-                c.gs, c.zero ? "z" : "noz");
+                c.gs, !c.zero ? "noz" : c.zp_bytes == 2 ? "zp16" : c.packed ? "zppacked" : "z");
   const std::string selected_config = capture_selected_config(tune_key, [&] {
     for (int w = 0; w < 3; ++w) status = launch();
     HIP_CHECK(hipStreamSynchronize(stream));
@@ -652,7 +702,7 @@ static bool runOne(const Case& c, int idx, const hipdnn_ep_test::timing::RankRow
     if (status != 0) throw std::runtime_error("UT rank: no-LUT default launch failed");
     const hipdnn_ep_test::ColdCopies weights(
         {{dB, d.Bpacked.size()}, {dS, d.scales.size() * sizeof(__half)},
-         {dZ, c.zero ? d.zeros.size() * sizeof(d.zeros[0]) : 0}});
+         {dZ, zero_bytes}});
     auto validate = [&]() {
       HIP_CHECK(hipMemset(dC, 0, countC * elem));
       if (launch() != 0) throw std::runtime_error("UT rank: candidate launch failed");
@@ -674,13 +724,11 @@ static bool runOne(const Case& c, int idx, const hipdnn_ep_test::timing::RankRow
     const auto options = hipdnn_ep_test::timing::nbitsRankOptions(rank_shape, *rank_row, validate);
     hipdnn_ep_test::rotatedMeanMs(stream, 0, weights, [&](int i) {
       return hip_matmul_nbits(stream, dA, weights.part(i, 0), weights.part(i, 1),
-                       c.zero ? weights.part(i, 2) : nullptr, nullptr, dC, c.M,
+                       c.zero ? (c.packed ? dZPacked : weights.part(i, 2)) : nullptr, nullptr, dC, c.M,
                        c.N, c.K, /*batch_count=*/1, /*bits=*/2, c.gs,
-                       static_cast<int>(elem), /*zp_elem_size=*/1, nullptr,
-                       nullptr);
+                       static_cast<int>(elem), /*zp_elem_size=*/c.zp_bytes,
+                       c.packed ? weights.part(i, 2) : nullptr, nullptr);
     }, &options);
-    hipFree(dA); hipFree(dB); hipFree(dS); if (dZ) hipFree(dZ); hipFree(dC);
-    HIP_CHECK(hipStreamDestroy(stream));
     return true;
 #endif
   }
@@ -693,13 +741,13 @@ static bool runOne(const Case& c, int idx, const hipdnn_ep_test::timing::RankRow
     const hipdnn_ep_test::ColdCopies weights(
         {{dB, d.Bpacked.size()},
          {dS, d.scales.size() * sizeof(__half)},
-         {dZ, c.zero ? d.zeros.size() : 0}});
+         {dZ, zero_bytes}});
     avg_ms = hipdnn_ep_test::rotatedMeanMs(stream, kIters, weights, [&](int i) {
       return hip_matmul_nbits(stream, dA, weights.part(i, 0), weights.part(i, 1),
-                       c.zero ? weights.part(i, 2) : nullptr, nullptr, dC, c.M,
+                       c.zero ? (c.packed ? dZPacked : weights.part(i, 2)) : nullptr, nullptr, dC, c.M,
                        c.N, c.K, /*batch_count=*/1, /*bits=*/2, c.gs,
-                       static_cast<int>(elem), /*zp_elem_size=*/1, nullptr,
-                       nullptr);
+                       static_cast<int>(elem), /*zp_elem_size=*/c.zp_bytes,
+                       c.packed ? weights.part(i, 2) : nullptr, nullptr);
     });
   }
 
@@ -708,6 +756,10 @@ static bool runOne(const Case& c, int idx, const hipdnn_ep_test::timing::RankRow
   if (status == 0) {
     std::vector<uint8_t> raw(countC * elem);
     HIP_CHECK(hipMemcpy(raw.data(), dC, countC * elem, hipMemcpyDeviceToHost));
+    uint64_t fingerprint = 14695981039346656037ull;
+    for (uint8_t byte : raw) { fingerprint ^= byte; fingerprint *= 1099511628211ull; }
+    std::printf("U2_OUTPUT {\"shape\":\"%s\",\"fnv1a64\":\"%016llx\",\"bytes\":%zu}\n",
+                timing_shape, static_cast<unsigned long long>(fingerprint), raw.size());
     double ssd = 0.0, ssr = 0.0;
     int errors = 0;
     for (size_t i = 0; i < countC; ++i) {
@@ -716,7 +768,7 @@ static bool runOne(const Case& c, int idx, const hipdnn_ep_test::timing::RankRow
       const float ref_val = c.fp32 ? d.Cref32[i] : half_to_float(d.Cref16[i]);
       const float diff = std::fabs(gpu_val - ref_val);
       const float tol = std::fabs(ref_val) * 0.05f + 0.1f;
-      if (diff > tol) ++errors;
+      if (!(diff <= tol)) ++errors;
       ssd += (double)diff * diff;
       ssr += (double)ref_val * ref_val;
     }
@@ -733,7 +785,7 @@ static bool runOne(const Case& c, int idx, const hipdnn_ep_test::timing::RankRow
     CsvWriter csv;
     char shape_buf[96];
     std::snprintf(shape_buf, sizeof(shape_buf), "M%d_N%d_K%d_gs%d%s", c.M, c.N,
-                 c.K, c.gs, c.zero ? "" : "_noz");
+                 c.K, c.gs, !c.zero ? "_noz" : c.zp_bytes == 2 ? "_zp16" : c.packed ? "_zppacked" : "");
     CsvRow row;
     row.shape = shape_buf;
     row.config = selected_config;
@@ -743,12 +795,6 @@ static bool runOne(const Case& c, int idx, const hipdnn_ep_test::timing::RankRow
     csv.write(row);
   }
 
-  hipFree(dA);
-  hipFree(dB);
-  hipFree(dS);
-  if (dZ) hipFree(dZ);
-  hipFree(dC);
-  hipStreamDestroy(stream);
   return pass;
 }
 
@@ -767,22 +813,32 @@ static int run(int coverage_tier) {
 
 }  // namespace sweep
 
-static int runCustom(int M, int N, int K, int gs, bool zero) {
-  return sweep::runOne({M, K, N, gs, zero, sweep::kFp32}, /*idx=*/0) ? 0 : 1;
+static int runCustom(int M, int N, int K, int gs, bool zero, int zp_bytes, bool packed) {
+  return sweep::runOne({M, K, N, gs, zero, sweep::kFp32, zp_bytes, packed}, /*idx=*/0) ? 0 : 1;
 }
 
 int main(int argc, char* argv[]) {
-  if (hipdnn_ep_test::timing::rankRequested()) {
+  const char* cases_path = nullptr;
+  for (int i = 1; i + 1 < argc; ++i)
+    if (std::strcmp(argv[i], "--cases") == 0) cases_path = argv[++i];
+  const bool ranking = hipdnn_ep_test::timing::rankRequested();
+  if (cases_path && ranking) {
+    std::fprintf(stderr, "--cases and HIPDNN_UT_RANK are mutually exclusive\n"); return 2;
+  }
+  if (ranking || cases_path) {
     try {
-      const auto rows = hipdnn_ep_test::timing::readRankRows("matmul_nbits/Xfp16_Wu2_Yfp16");
+      const auto rows = hipdnn_ep_test::timing::readRankRows("matmul_nbits/Xfp16_Wu2_Yfp16", cases_path);
       for (size_t i = 0; i < rows.size(); ++i) {
         int m = 0, n = 0, k = 0, gs = 0, end = 0;
         if (std::sscanf(rows[i].shape.c_str(), "M%d_N%d_K%d_gs%d%n", &m, &n, &k, &gs, &end) != 4 ||
             m <= 0 || n <= 0 || k <= 0 || gs <= 0 ||
-            (rows[i].shape.substr(end) != "" && rows[i].shape.substr(end) != "_noz"))
+            (rows[i].shape.substr(end) != "" && rows[i].shape.substr(end) != "_noz" &&
+             rows[i].shape.substr(end) != "_zp16" && rows[i].shape.substr(end) != "_zppacked"))
           throw std::invalid_argument("UT rank: malformed MatMulNBits shape");
-        if (!sweep::runOne({m, k, n, gs, rows[i].shape.substr(end).empty(), sweep::kFp32},
-                           static_cast<int>(i), &rows[i])) return 1;
+        if (!sweep::runOne({m, k, n, gs, rows[i].shape.substr(end) != "_noz", sweep::kFp32,
+                            rows[i].shape.substr(end) == "_zp16" ? 2 : 1,
+                            rows[i].shape.substr(end) == "_zppacked"},
+                           static_cast<int>(i), ranking ? &rows[i] : nullptr)) return 1;
       }
       HIP_CHECK(hipDeviceSynchronize());
       return 0;
@@ -801,16 +857,25 @@ int main(int argc, char* argv[]) {
   int M = 0, N = 0, K = 0;
   int gs = 128;
   bool no_zeros = false;
+  int zp_bytes = 1;
+  bool packed = false;
   bool have_custom = false;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--no-zeros") no_zeros = true;
+    else if (a == "--zp-format" && i + 1 < argc) {
+      const std::string format = argv[++i];
+      if (format != "raw" && format != "packed" && format != "fp16") {
+        std::fprintf(stderr, "--zp-format must be raw, packed or fp16\n"); return 2;
+      }
+      zp_bytes = format == "fp16" ? 2 : 1; packed = format == "packed";
+    }
     else if (a == "--group-size" && i + 1 < argc) gs = std::atoi(argv[++i]);
     else if (sscanf(argv[i], "%dx%dx%d", &M, &K, &N) == 3) have_custom = true;
   }
 
   if (have_custom)
-    return runCustom(M, N, K, gs, !no_zeros);
+    return runCustom(M, N, K, gs, !no_zeros, zp_bytes, packed);
 
   const int tier = hipdnn_ep_test::resolveCoverageTier(argc, argv);
   return sweep::run(tier);

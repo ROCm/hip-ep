@@ -35,8 +35,8 @@ inline std::vector<std::string> rankCsvFields(const std::string& line) {
   if (quoted) throw std::invalid_argument("UT rank: unterminated CSV quote");
   out.push_back(value); return out;
 }
-inline std::vector<RankRow> readRankRows(const std::string& leaf) {
-  std::ifstream in(std::getenv("HIPDNN_UT_RANK"));
+inline std::vector<RankRow> readRankRows(const std::string& leaf, const char* path = nullptr) {
+  std::ifstream in(path ? path : std::getenv("HIPDNN_UT_RANK"));
   if (!in) throw std::invalid_argument("UT rank: cannot open candidate CSV");
   std::string line;
   if (!std::getline(in, line) || rankCsvFields(line) !=
