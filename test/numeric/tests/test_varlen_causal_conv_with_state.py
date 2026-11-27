@@ -93,6 +93,22 @@ def _make_reference_model(seq_lens, dilation, activation, weight, bias, tp):
     start = 0
     for b, n in enumerate(seq_lens):
         s = f"s{b}"
+        if n == 0:
+            # An empty sequence emits no tokens and keeps its carry state.
+            nodes.append(
+                helper.make_node(
+                    "Slice",
+                    [
+                        "state32",
+                        const(f"{s}_ss", [b]),
+                        const(f"{s}_se", [b + 1]),
+                        const(f"{s}_sax", [0]),
+                    ],
+                    [f"{s}_final"],
+                )
+            )
+            finals.append(f"{s}_final")
+            continue
         nodes += [
             helper.make_node(
                 "Slice",
@@ -181,6 +197,12 @@ class TestVarlenCausalConvWithState:
             ([2, 9], 3, False, "silu", np.float16),
             ([7], 3, True, "none", np.float32),
             ([1, 12, 4], 2, True, "silu", np.float32),
+            # Empty requests, including leading and trailing ones. final_state
+            # is a separate buffer, so it must be written with the carried
+            # state rather than left untouched. Shape inference requires
+            # total_tokens >= batch, so some request must be longer than one.
+            ([0, 2, 1], 1, True, "silu", np.float16),
+            ([3, 0, 5, 0], 2, False, "none", np.float32),
         ],
     )
     def test_varlen_causal_conv(

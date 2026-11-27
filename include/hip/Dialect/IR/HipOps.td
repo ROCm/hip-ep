@@ -4201,7 +4201,8 @@ def Hip_VarlenCausalConvWithStateOp :
     half-open token range
     [cumulative_sequence_length[b], cumulative_sequence_length[b + 1]), with
     cumulative_sequence_length[0] = 0, cumulative_sequence_length[batch] =
-    total_tokens and at least one token per sequence. `weight` is
+    total_tokens and non-decreasing entries. An empty sequence produces no
+    output and its `final_state` equals its `initial_state`. `weight` is
     [channels, 1, kernel_size] and `bias`, when present, is [channels]. The
     convolution never reads across a sequence boundary.
 

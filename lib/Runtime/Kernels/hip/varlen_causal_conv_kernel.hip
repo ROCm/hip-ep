@@ -34,7 +34,7 @@ __global__ void varlen_causal_conv_kernel(
 
   int start = cumulative[b];
   int end = cumulative[b + 1];
-  if (start < 0 || end < start || end > total_tokens || end == start)
+  if (start < 0 || end < start || end > total_tokens)
     return;
 
   const T *past =
