@@ -3234,6 +3234,33 @@ int wrap_layer_normalization(RuntimeState *state, void *input, void *scale,
   return 0;
 }
 
+int wrap_skip_layer_norm(RuntimeState *state, void *input, void *skip,
+                         void *gamma, void *beta, void *bias, void *output,
+                         void *input_skip_bias_sum, int64_t input_num_elements,
+                         int64_t skip_num_elements, int64_t gamma_num_elements,
+                         int64_t element_size_bytes, float epsilon,
+                         int32_t round_sum) {
+  (void)input;
+  (void)skip;
+  (void)round_sum;
+  (void)gamma;
+  (void)output;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_skip_layer_norm\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_skip_layer_norm(input_num_elements=%lld, "
+             "skip_num_elements=%lld, gamma_num_elements=%lld, "
+             "element_size_bytes=%lld, epsilon=%f, beta=%s, bias=%s, sum=%s)\n",
+             (long long)input_num_elements, (long long)skip_num_elements,
+             (long long)gamma_num_elements, (long long)element_size_bytes,
+             epsilon, beta ? "yes" : "null", bias ? "yes" : "null",
+             input_skip_bias_sum ? "yes" : "null");
+
+  return 0;
+}
+
 int wrap_instance_normalization(RuntimeState *state, void *input, void *scale,
                                 void *bias, void *output, int64_t n, int64_t c,
                                 int64_t spatial, int64_t data_type,

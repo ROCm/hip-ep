@@ -361,6 +361,82 @@ struct LayerNormOpLowering : public ConvertOpToLLVMPattern<LayerNormOp> {
   }
 };
 
+// hip.skip_layer_norm(%ctx) ins(%input, %skip, %gamma, [beta], [bias])
+//                           outs(%output, [%sum])
+//   -> wrap_skip_layer_norm(state, input, skip, gamma, beta_or_null,
+//        bias_or_null, output, sum_or_null, input_num_elements,
+//        skip_num_elements, gamma_num_elements, element_size_bytes, epsilon,
+//        round_sum)
+struct SkipLayerNormOpLowering
+    : public ConvertOpToLLVMPattern<SkipLayerNormOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(SkipLayerNormOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i64Type = rewriter.getI64Type();
+    Type f32Type = rewriter.getF32Type();
+    Type i32Type = rewriter.getI32Type();
+
+    auto outputs = adaptor.getOutputs();
+    Value sumPtr = outputs.size() > 1
+                       ? extractContiguousMemRefPtr(outputs[1], rewriter, loc)
+                       : LLVM::ZeroOp::create(rewriter, loc, ptrType);
+
+    auto inputType = cast<MemRefType>(op.getInput().getType());
+    auto skipType = cast<MemRefType>(op.getSkip().getType());
+    auto gammaType = cast<MemRefType>(op.getGamma().getType());
+    unsigned elementSizeBytes = inputType.getElementTypeBitWidth() / 8;
+
+    SmallVector<Type> paramTypes = {
+        ptrType, // state
+        ptrType, // input
+        ptrType, // skip
+        ptrType, // gamma
+        ptrType, // beta (may be null)
+        ptrType, // bias (may be null)
+        ptrType, // output
+        ptrType, // input_skip_bias_sum (may be null)
+        i64Type, // input_num_elements
+        i64Type, // skip_num_elements
+        i64Type, // gamma_num_elements
+        i64Type, // element_size_bytes
+        f32Type, // epsilon
+        i32Type  // round_sum
+    };
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapSkipLayerNorm, paramTypes, i32Type);
+    if (failed(funcOp))
+      return failure();
+
+    SmallVector<Value> args = {
+        adaptor.getCtx(),
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getSkip(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getGamma(), rewriter, loc),
+        getNullableMemRefPtr(adaptor.getBeta(), rewriter, loc),
+        getNullableMemRefPtr(adaptor.getBias(), rewriter, loc),
+        extractContiguousMemRefPtr(outputs[0], rewriter, loc),
+        sumPtr,
+        computeNumElements(inputType, adaptor.getInput(), rewriter, loc),
+        computeNumElements(skipType, adaptor.getSkip(), rewriter, loc),
+        computeNumElements(gammaType, adaptor.getGamma(), rewriter, loc),
+        LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                 rewriter.getI64IntegerAttr(elementSizeBytes)),
+        LLVM::ConstantOp::create(rewriter, loc, f32Type, op.getEpsilonAttr()),
+        LLVM::ConstantOp::create(
+            rewriter, loc, i32Type,
+            rewriter.getI32IntegerAttr(op.getRoundSum() ? 1 : 0))};
+
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 // hip.instance_norm(%ctx) ins(%input, %scale, %bias) outs(%output)
 //   -> wrap_instance_normalization(state, input, scale, bias, output,
 //        n, c, spatial, data_type, epsilon)
@@ -899,8 +975,8 @@ void populateNormLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns) {
   patterns
       .add<RmsNormOpLowering, SkipRmsNormOpLowering, LayerNormOpLowering,
-           InstanceNormOpLowering, BatchNormOpLowering, GroupNormOpLowering,
-           GatedRmsNormOpLowering, EngramGateOpLowering,
+           SkipLayerNormOpLowering, InstanceNormOpLowering, BatchNormOpLowering,
+           GroupNormOpLowering, GatedRmsNormOpLowering, EngramGateOpLowering,
            HyperConnectionPreMixOpLowering, HyperConnectionPostMixOpLowering,
            HyperConnectionPostMixNormOpLowering>(converter);
 }
