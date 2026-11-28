@@ -385,6 +385,23 @@ std::string resolveRocMlirArch() {
 #endif
 }
 
+int64_t resolveRocMlirNumCU() {
+  // The device the kernels will run on, as for resolveRocMlirArch. Offline
+  // compiles pass an explicit count instead (hip-rocmlir-compiler --num-cu).
+#if defined(HIPDNN_EP_LINK_HIP_HOST) && defined(HIPDNN_HIP_RUNTIME_LIB)
+  static HipGetDevicePropsFn getProps = loadHipGetDeviceProperties();
+  hipDeviceProp_t prop{};
+  if (getProps && getProps(&prop, 0) == hipSuccess &&
+      prop.multiProcessorCount > 0)
+    return prop.multiProcessorCount;
+#endif
+  return 0;
+}
+
+bool rocMlirSplitKTuningEnabled() {
+  return hip_env_is_on("HIPDNN_EP_ROCMLIR_SPLITK");
+}
+
 std::vector<std::string> getRocMlirGemmAccelTypes(MLIRContext &context,
                                                   StringRef arch) {
   Builder b(&context);
@@ -426,8 +443,9 @@ OwningOpRef<ModuleOp> buildRocMlirTosaClone(ModuleOp module) {
   return tosaModule;
 }
 
-OwningOpRef<ModuleOp> takeRocMlirKernelsAsTosaModule(ModuleOp module,
-                                                     StringRef arch) {
+OwningOpRef<ModuleOp>
+takeRocMlirKernelsAsTosaModule(ModuleOp module, StringRef arch, int64_t numCU) {
+  const bool splitKTuning = rocMlirSplitKTuningEnabled();
   OpBuilder builder(module.getContext());
   OwningOpRef<ModuleOp> kernels = ModuleOp::create(builder.getUnknownLoc());
 
@@ -446,6 +464,16 @@ OwningOpRef<ModuleOp> takeRocMlirKernelsAsTosaModule(ModuleOp module,
     // chosen for a different chip than the backend emits code for.
     if (!arch.empty())
       func->setAttr("rock.arch", builder.getStringAttr(arch));
+    // The full and exhaustive spaces always contain the quick list (some of
+    // its entries are split-K), but rocMLIR adds split-K variants of the other
+    // tiles only with rock.enable_splitk_for_tuning, and only where the tile
+    // grid leaves rock.num_cu unbalanced (work imbalance >= 1.2). Without
+    // rock.num_cu rocMLIR assumes the arch minimum (2 on RDNA), where only
+    // grids of 1, 3 or 5 workgroups qualify.
+    if (numCU > 0)
+      func->setAttr("rock.num_cu", builder.getI64IntegerAttr(numCU));
+    if (splitKTuning)
+      func->setAttr("rock.enable_splitk_for_tuning", builder.getUnitAttr());
     func->remove();
     kernels->getBody()->push_back(func);
   }
@@ -657,7 +685,7 @@ compileAndEmbedRocMlirKernels(ModuleOp module,
   // dlopen boundary; it is built in-tree now, so the kernels can simply be
   // re-parented.
   OwningOpRef<ModuleOp> kernels =
-      takeRocMlirKernelsAsTosaModule(module, options.arch);
+      takeRocMlirKernelsAsTosaModule(module, options.arch, options.numCU);
   if (!kernels)
     return module.emitError() << "hip->tosa conversion failed";
 

@@ -150,6 +150,7 @@ int main(int argc, char **argv) {
   std::string dumpHipPath;
   std::string dumpTosaPath;
   bool dumpHighLevel = false;
+  int64_t numCUFlag = 0;
   bool autotuneFlagSeen = false;
   // On unless HIP_ROCMLIR_SKIP_BENCHMARKING says otherwise: benchmarking is
   // the reason this tool exists, unlike the EP, which opts in.
@@ -199,6 +200,12 @@ int main(int argc, char **argv) {
       }
     } else if (arg == "--problem-cache" && i + 1 < argc) {
       autotune.problemCachePath = argv[++i];
+    } else if (arg == "--num-cu" && i + 1 < argc) {
+      if (llvm::StringRef(argv[++i]).getAsInteger(10, numCUFlag) ||
+          numCUFlag <= 0) {
+        llvm::errs() << "error: --num-cu must be a positive integer\n";
+        return 1;
+      }
     } else if (arg == "--dump-problem-cache" && i + 1 < argc) {
       autotune.problemCacheDumpPath = argv[++i];
     } else if (arg == "--autotune-runs" && i + 1 < argc) {
@@ -287,6 +294,10 @@ int main(int argc, char **argv) {
         << "                       M/N/K tile (weights 1) that fits. A tile\n"
         << "                       that fails to compile is skipped for the\n"
         << "                       next nearest; otherwise the search runs.\n"
+        << "  --num-cu <n>         Compute-unit count stamped as rock.num_cu\n"
+        << "                       (default: the device's "
+           "multiProcessorCount;\n"
+        << "                       needed when compiling without a device).\n"
         << "  --dump-problem-cache <file.json>\n"
         << "                       After autotune, write the LUT JSON\n"
         << "                       (configs, points, fallbacks). Compile it\n"
@@ -307,6 +318,9 @@ int main(int argc, char **argv) {
         << "                       the compiled bitcode.\n"
         << "  Set ROCK_ARCH to override the target GPU arch (default: "
         << mlir::hip::resolveRocMlirArch() << ").\n"
+        << "  Set HIPDNN_EP_ROCMLIR_SPLITK=1 to add split-K variants to full "
+           "and\n"
+        << "  exhaustive tuning.\n"
         << "  Set HIP_ROCMLIR_SKIP_BENCHMARKING=1 to skip autotune and affix "
            "the\n"
         << "  first enumerated perfConfig (same role as "
@@ -393,6 +407,8 @@ int main(int argc, char **argv) {
   // The same arch and gemm accelerated types as CompilerDriver, so an offline
   // compile forms the same kernels (gemm-elementwise-gemm needs the types).
   const std::string arch = mlir::hip::resolveRocMlirArch();
+  const int64_t numCU =
+      numCUFlag > 0 ? numCUFlag : mlir::hip::resolveRocMlirNumCU();
   mlir::hip::FuseRocMlirAnchorPassOptions fuseOpts;
   fuseOpts.arch = arch;
   std::vector<std::string> accelTypes =
@@ -440,7 +456,7 @@ int main(int argc, char **argv) {
     llvm::SmallVector<std::string> kernelNames =
         mlir::hip::collectRocMlirKernelNames(*module);
     mlir::OwningOpRef<mlir::ModuleOp> tosaKernels =
-        mlir::hip::takeRocMlirKernelsAsTosaModule(*module, arch);
+        mlir::hip::takeRocMlirKernelsAsTosaModule(*module, arch, numCU);
     if (!tosaKernels) {
       llvm::errs() << "error: hip->tosa conversion failed\n";
       return 1;
@@ -483,6 +499,7 @@ int main(int argc, char **argv) {
   // carrying the GPU binary inline -- what hip-compiler consumes.
   mlir::hip::RocMlirEmbedOptions embedOpts;
   embedOpts.arch = arch;
+  embedOpts.numCU = numCU;
   embedOpts.log = &llvm::errs();
   embedOpts.logPrefix = "[hip-rocmlir-compiler]";
   // Autotune replaces the default perfConfig choice -- position 0 of the
